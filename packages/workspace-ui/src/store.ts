@@ -20,6 +20,12 @@ const UNKNOWN_OUTCOME = "The result of this action is not known. It was not sent
 /** The same command, whenever it was pressed. Its clock reading is not part of what it asks for. */
 const commandKey = (command: WorkspaceCommand) => JSON.stringify({ ...command, now: undefined });
 const RETRY_MS = 3000;
+/** How long the first screen waits for the machine's settings (models, efforts) before it shows the interface and says they are missing. */
+export const MACHINE_WAIT_MS = 15_000;
+/** How long the first screen waits for the machine to fetch the engines' model lists when it has none saved, and how often it asks. */
+export const MODELS_WAIT_MS = 90_000, MODELS_POLL_MS = 1500;
+/** While an engine's model list has failed, the settings are read again after this, doubling up to the bound. */
+export const CATALOGUE_RETRY_MS = 10_000, CATALOGUE_RETRY_MAX_MS = 300_000;
 /** The shortest gap between refreshes a stream of machine events can cause. A hidden window needs them even less often. */
 export const PUSH_GAP_MS = 2000, HIDDEN_PUSH_GAP_MS = 15_000;
 const sameConnection = (a: PortConnection, b: PortConnection) => a.state === b.state && a.reason === b.reason;
@@ -48,10 +54,17 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
   const [projected, setHeld] = createSignal(options.initial?.state ?? emptyWorkspace());
   // Only what really changed reaches the screens: an unchanged read leaves every record the same object.
   const deletions = new Map<string, Set<string>>();
+  const projectIssues = new Map<string, string | null>(), projectCauses = new Map<string, string | null>();
   const setProjected = (change: (current: WorkspaceState) => WorkspaceState) => setHeld(current => {
     let next = change(current);
     // An older in-flight read cannot resurrect an acknowledged deletion.
     for (const [sprintId, taskIds] of deletions) next = applySprintDeletion(next, sprintId, taskIds);
+    next = { ...next, projects: next.projects.map(p => {
+      if (!projectIssues.has(p.id)) return p;
+      // The precise cause stays beside the owner's words while the port's read issue stands, and goes with it.
+      const { issueCause: _old, ...rest } = p, cause = projectIssues.get(p.id) ? projectCauses.get(p.id) : null;
+      return {...rest, issue: projectIssues.get(p.id) ?? p.issue ?? null, ...(cause ? {issueCause: cause} : {})};
+    }) };
     return share(current, next);
   });
   const track = options.track ?? (<T,>(work: Promise<T>) => work);
@@ -60,6 +73,19 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
   const [connection, setConnection] = createSignal<PortConnection>({ state: options.initial ? "connected" : "connecting", reason: null, at: null }, { equals: sameConnection });
   const [capabilities, setCapabilities] = createSignal(options.initial?.capabilities ?? noCapabilities(), { equals: (a, b) => JSON.stringify(a) === JSON.stringify(b) });
   const [ready, setReady] = createSignal(!!options.initial);
+  // The machine's own settings (the models and efforts a composer offers) arrive in a read of their own. Until they have, an empty
+  // list means "not yet", never "none"; `settled` ends the wait for them, whether they came, failed, or ran out of time.
+  const [machineLoaded, setMachineLoaded] = createSignal(!!options.initial);
+  const [machineSettled, setMachineSettled] = createSignal(!!options.initial);
+  const [machineIssue, setMachineIssue] = createSignal<string | null>(null);
+  // The machine fetches the model lists no connection has saved yet, on its own. While it does and no model is offered, the composer's
+  // pickers say they are loading and the first screen waits (a bounded time). `modelsIssue` is the honest end of that wait.
+  const [modelsPending, setModelsPending] = createSignal(false);
+  const [modelsIssue, setModelsIssue] = createSignal<"failed" | "slow" | null>(null);
+  // Storage, retention, worktrees, the version and GitHub CLI are read only once a screen that shows them asks (`wantOverview`).
+  // They never gate the first screen; until they arrive, the screens that show them say so instead of a stand-in value.
+  const [overviewLoaded, setOverviewLoaded] = createSignal(!!options.initial);
+  const [overviewIssue, setOverviewIssue] = createSignal<string | null>(null);
   const [readIssue, setReadIssue] = createSignal<string | null>(null);
   const [syncing, setSyncing] = createSignal(false);
   const [rejected, setRejected] = createSignal(0);
@@ -94,8 +120,84 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
   const withSources = (held: ProjectFacts): ProjectFacts => !held.repo ? held : { ...held, repo: { ...held.repo, checkouts: held.repo.checkouts.map(c => ({ ...c, draft: checkoutDrafts.get(c.id) ?? c.draft, sources: Object.fromEntries([...sources].flatMap(([key, text]) => key.startsWith(`${c.id}|`) ? [[key.slice(c.id.length + 1), text]] : [])) })) } };
   const installFacts = (update: ProjectFacts) => { if (registered && !registered.has(update.projectId)) return; const held = withSources(update); facts.set(update.projectId, held); setProjected(current => applyFacts(current, held)); };
   const installMachine = (update: MachineFacts) => setProjected(current => applyMachineFacts(current, update));
+  let machineTimer: ReturnType<typeof setTimeout> | undefined, machineRetry: ReturnType<typeof setTimeout> | undefined;
+  let modelsTimer: ReturnType<typeof setTimeout> | undefined, modelsPoll: ReturnType<typeof setTimeout> | undefined, modelsGaveUp = false;
+  let overviewWanted = false, overviewReading: Promise<void> | undefined, overviewAgain = false, overviewRetry: ReturnType<typeof setTimeout> | undefined, machineAsked = false;
+  const readOverview = () => {
+    // A read already under way may predate the command that asked for this one: read once more after it.
+    if (overviewReading) { overviewAgain = true; return; }
+    clearTimeout(overviewRetry);
+    overviewReading = port.query("machine.overview", {}).then(updates => {
+      if (!active) return;
+      batch(() => { for (const update of updates ?? []) installMachine(update); setOverviewIssue(null); setOverviewLoaded(true); });
+    }).catch(error => {
+      if (!active) return;
+      setOverviewIssue(reasonOf(error));
+      // Like the machine's settings: nothing else would ask again soon. The rest of the interface never waits for it.
+      clearTimeout(overviewRetry);
+      overviewRetry = setTimeout(readOverview, RETRY_MS);
+    }).finally(() => {
+      overviewReading = undefined;
+      if (overviewAgain && active) { overviewAgain = false; readOverview(); }
+    });
+  };
+  /** A screen shows the machine's overview fields. The first call reads them, once the service has said what it offers; later calls change nothing. */
+  const wantOverview = () => {
+    if (overviewWanted) return;
+    overviewWanted = true;
+    if (machineAsked) readOverview();
+  };
+  const giveUpOnModels = () => {
+    modelsGaveUp = true;
+    batch(() => { setModelsPending(false); setModelsIssue("slow"); setMachineSettled(true); });
+  };
+  let failedReads = 0;
+  /**
+   * What any settings read (the store's own or the port's machine poll) said about the engines' model lists: whether the
+   * first screen waits, what the composer says, and when to read again. The options themselves were installed with the read.
+   */
+  const followCatalogue = (updates: readonly MachineFacts[]) => {
+    const catalogue = updates.map(u => u.catalogue).find(Boolean);
+    const withOptions = updates.filter(u => u.options), offered = withOptions.length ? withOptions.some(u => u.options!.models.length > 0) : state().options.models.length > 0, running = catalogue?.running === true;
+    const waiting = running && !offered && !modelsGaveUp;
+    setModelsPending(waiting);
+    setModelsIssue(offered ? null : running ? (modelsGaveUp ? "slow" : null) : catalogue?.failed.length ? "failed" : null);
+    if (waiting && modelsTimer === undefined) modelsTimer = setTimeout(giveUpOnModels, MODELS_WAIT_MS);
+    if (!waiting) { clearTimeout(modelsTimer); modelsTimer = undefined; setMachineSettled(true); }
+    clearTimeout(modelsPoll); modelsPoll = undefined;
+    // Still fetching: ask again soon, so the lists appear as soon as they are saved, without anyone pressing anything.
+    if (running) { failedReads = 0; modelsPoll = setTimeout(() => readMachine(), modelsGaveUp ? RETRY_MS : MODELS_POLL_MS); return; }
+    // An engine's list failed (other engines' may be offered). The machine tries it again soon after a later read, so keep
+    // reading, less and less often: its models then reach the composer without a relaunch.
+    if (catalogue?.failed.length) { modelsPoll = setTimeout(() => readMachine(), Math.min(CATALOGUE_RETRY_MS * 2 ** failedReads, CATALOGUE_RETRY_MAX_MS)); failedReads++; }
+    else if (catalogue) failedReads = 0;
+  };
+  /** `overview`: this is a refresh after the service answered or a command, so an overview a screen asked for is read again too. */
+  const readMachine = (overview = false) => {
+    machineAsked = true;
+    if (overview && overviewWanted) readOverview();
+    if (machineReading) return;
+    machineReading = port.query("machine.facts", {}).then(updates => {
+      if (!active) return;
+      batch(() => {
+        for (const update of updates ?? []) installMachine(update);
+        setMachineIssue(null); setMachineLoaded(true);
+        followCatalogue(updates ?? []);
+      });
+      clearTimeout(machineTimer);
+    }).catch(error => {
+      if (!active) return;
+      setMachineIssue(reasonOf(error));
+      // Busy or a lost read is worth the wait; a refusal is an answer: open the interface now and say so, still retrying.
+      if (!transientRead(error)) { clearTimeout(machineTimer); setMachineSettled(true); }
+      // Nothing else would ask again soon: the composer must not stay without its models until some later refresh.
+      clearTimeout(machineRetry);
+      machineRetry = setTimeout(() => readMachine(), RETRY_MS);
+    }).finally(() => { machineReading = undefined; });
+  };
   let refreshing: Promise<void> | undefined, transientFailures = 0;
   const queuedReads = new Set<string | undefined>();
+  const queuedDeltas = new Map<string, ProjectionUpdate>();
   let actionEpoch = 0, fullReadQueued = false;
   const requeueRead = (projectId?: string) => {
     queuedReads.add(projectId);
@@ -109,6 +211,8 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
     if (!projectId) fullReadQueued = false;
     refreshing = readCoherent(projectId, full).finally(() => {
       refreshing = undefined;
+      for (const update of queuedDeltas.values()) install(update);
+      queuedDeltas.clear();
       if (queuedReads.size && active) {
         // Always read again after a command reply, even when an older poll is in flight.
         const next = queuedReads.has(undefined) ? undefined : queuedReads.values().next().value;
@@ -127,9 +231,12 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
     let serviceAnswered = false;
     try {
       const offered = projectId ? capabilities() : await port.query("capabilities.get", {});
+      serviceAnswered = true;
+      // The machine's settings are asked for as soon as the service has said what it offers, beside the task reads and not after
+      // them: the first screen needs both, and neither should wait for the other.
+      if (!projectId) { if (!machineSettled() && machineTimer === undefined) machineTimer = setTimeout(() => { if (!modelsPending()) setMachineSettled(true); }, MACHINE_WAIT_MS); readMachine(true); }
       const parameters = projectId ? { projectId } : {};
       const snapshots = await port.query("project.snapshot", full ? { full: true } : parameters);
-      serviceAnswered = true;
       // Facts own sprint membership, hidden planning/purged rows and owner decisions.
       const product = await port.query("project.facts", parameters) ?? [];
       if (!active) return;
@@ -162,9 +269,7 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
     }
     // Machine settings do not determine task placement.
     // Discovery/disk accounting must not keep ordinary actions spinning after task facts arrived.
-    if (!projectId && !machineReading) machineReading = port.query("machine.facts", {}).then(updates => {
-      for (const update of updates ?? []) if (active) installMachine(update);
-    }).catch(() => {}).finally(() => { machineReading = undefined; });
+
   };
   let active = true, again: ReturnType<typeof setTimeout> | undefined, lastRead: number | null = null;
   // Coalesces a burst of machine events: the first refreshes at once, the rest arrive together after the gap.
@@ -176,9 +281,36 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
     if (wait <= 0) { pushAt = Date.now(); void refresh(); return; }
     pushTimer = setTimeout(() => { pushTimer = undefined; pushAt = Date.now(); if (active) void refresh(); }, wait);
   };
-  onCleanup(() => { active = false; clearTimeout(again); clearTimeout(pushTimer); });
+  onCleanup(() => { active = false; clearTimeout(again); clearTimeout(pushTimer); clearTimeout(machineTimer); clearTimeout(machineRetry); clearTimeout(modelsTimer); clearTimeout(modelsPoll); clearTimeout(overviewRetry); });
   const reload = () => { if (!ready()) setConnection({ state: "connecting", reason: null, at: null }); return refresh(); };
   const onUpdate = (update: PortUpdate) => {
+    if (update.kind === "preview") {
+      // Cached data paints the first frame but cannot seed command versions,
+      // capabilities or a native event generation.
+      if (!registered && !versions.size) batch(() => {
+        setProjected(current => applyFacts(applyProjection(current,{kind:"projection",scope:"project",version:"0",slice:update.slice}),update.facts));
+        setReady(true);
+      });
+      return;
+    }
+    if (update.kind === "project_state") {
+      if (registered && !registered.has(update.project.id)) return;
+      projectIssues.set(update.project.id, update.issue);
+      projectCauses.set(update.project.id, update.cause ?? null);
+      setProjected(current => ({...current, projects: current.projects.some(p => p.id === update.project.id)
+        ? current.projects.map(p => p.id === update.project.id ? {...p, name:update.project.name, repository:update.project.repository, issue:update.issue} : p)
+        : [...current.projects, {...update.project, issue:update.issue}]}));
+      return;
+    }
+    if (update.kind === "enrichment") {
+      if (refreshing) { requeueRead(update.update.scope === "project" ? update.update.slice.project.id : undefined); return; }
+      batch(() => {
+        if (!install(update.update, true) || update.update.scope !== "project") return;
+        const held = facts.get(update.update.slice.project.id);
+        if (held) installFacts(held);
+      });
+      return;
+    }
     if (update.kind === "registry") {
       const keep = new Set(update.projectIds);
       registered = keep;
@@ -196,14 +328,20 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
       return;
     }
     // Discard polls begun before this coherent read; they must not overwrite its newer facts.
-    if (update.kind === "projection") { if (!refreshing) install(update); return; }
+    if (update.kind === "delta") {
+      if (refreshing) queuedDeltas.set(projectionKey(update.update), update.update);
+      else install(update.update);
+      return;
+    }
+    if (update.kind === "projection") { if (refreshing) queuedDeltas.set(projectionKey(update), update); else install(update); return; }
     if (update.kind === "facts") {
       // The port remembers this notification, so unchanged polls will not send it again.
       // Reread rather than replaying potentially older facts over the coherent commit.
       if (refreshing) requeueRead(update.facts.projectId); else installFacts(update.facts);
       return;
     }
-    if (update.kind === "machine") { installMachine(update.facts); return; }
+    // The port's own machine poll carries the same settings read: what it says about the model lists is followed too.
+    if (update.kind === "machine") { batch(() => { installMachine(update.facts); if (update.facts.catalogue) followCatalogue([update.facts]); }); return; }
     if (update.kind === "refresh") { pushRefresh(); return; }
     const back = update.connection.state === "connected" && connection().state !== "connected";
     setConnection(update.connection);
@@ -220,7 +358,14 @@ export function createWorkspaceStore(port: WorkspacePort, options: StoreOptions 
     if (held) installFacts(held);
   };
   return {
-    mode: port.mode, state, index, ready, readIssue, syncing, now, receipt, acceptanceIssue, connection, rejected, can, reload: () => track(reload()),
+    mode: port.mode, state, index, ready, readIssue, machineLoaded, machineIssue, modelsPending, modelsIssue,
+    /** The composer's lists are known: the machine answered and is not still fetching the models. Until then an empty list means "not yet". */
+    optionsKnown: () => machineLoaded() && !modelsPending(),
+    /** Storage, retention, worktrees, the version and GitHub CLI have arrived. Until then a screen that shows them says they are loading. */
+    overviewLoaded, overviewIssue, wantOverview,
+    /** The first screen's gate: the machine has answered and its settings are in, or waiting for them has run out. */
+    loaded: () => ready() && machineSettled(),
+    syncing, now, receipt, acceptanceIssue, connection, rejected, can, reload: () => track(reload()),
     /** Opening Git keeps the confirmed display and asks only for this project's moving facts. */
     refreshProjectFacts: async (projectId: string) => {
       if (port.mode !== "real") return;

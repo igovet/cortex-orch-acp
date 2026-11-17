@@ -1,5 +1,5 @@
 import { createMemo, createSignal, onCleanup, Show } from "solid-js";
-import { taskEditable } from "@cortex/workspace-domain";
+import { FEATURES, taskEditable } from "@cortex/workspace-domain";
 import { createAttachments, createDictation, MessageComposer, RouteBar } from "./composer";
 import { useWs } from "./ctx";
 import { I } from "./kit";
@@ -51,8 +51,9 @@ export function EditTask(props: { taskId: string; onClose: () => void }) {
         sendKey="mod-enter" send={{label:"Save changes",needs:"edit_task",why:why(),go:() => { void save(); }}} />
       <Show when={current()?.project.hasGit !== false}>
         <label class="fld"><span class="lab">Checkout</span><select class="inp" aria-label="Task checkout" disabled={!!off()} value={checkout()} onChange={e => setCheckout(e.currentTarget.value as "main" | "worktree")}>
-          <option value="main">Project folder</option><option value="worktree">Separate worktree</option>
+          <option value="main">Project folder</option><option value="worktree" disabled={!ws.can(FEATURES.taskWorktrees)}>Separate worktree</option>
         </select></label>
+        <Show when={!ws.can(FEATURES.taskWorktrees)}><div class="cap muted">{ws.t("noTaskWorktrees")}</div></Show>
       </Show>
       <Show when={error()}><div class="err" role="alert">{error()} Your changes stay here. For a stale edit, copy your changes, then close and reopen the editor to review the current task before reapplying them.</div></Show>
     </div>

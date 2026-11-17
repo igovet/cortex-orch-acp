@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import {
   CONFIG_API_VERSION,
@@ -32,15 +32,25 @@ import {
   type PresetResetInput,
 } from "../shared/config.js";
 import { cortexLaunchTarget } from "./provider.js";
-import { runProcess } from "./python-runner.js";
+import { runProcess } from "./process-runner.js";
+import { isRustLaunch, RUST_TOOLS_BINARY } from "./store-reader.js";
 import { resolveProjectRoot } from "./worker-history.js";
 
 /**
- * Plugin RPC handlers over Cortex's owner configuration API
- * (``cortex_runtime.configuration.management``). Each call runs that API's
- * stdin entry point once, with the exact runtime and environment this
- * plugin launches Cortex with, so a setting written here is the setting the
- * next Cortex session reads.
+ * Plugin RPC handlers over Cortex's owner configuration API. Each call runs
+ * `cortex-paseo-tools config` (beside the Rust `cortex-acp` this plugin
+ * launches) once, with the exact runtime and environment the plugin launches
+ * Cortex with, so a setting written here is the setting the next Cortex
+ * session reads. The tool answers the whole protocol natively: reads, every
+ * change (defaults, routing, profiles, MCP servers, connections, project
+ * ceiling, default preset), catalog refresh, discovery, onboarding and engine
+ * downloads run with the API's revision checks, owner lock, files and refusal
+ * payloads. A shape the native tool cannot answer (an OS keyring backend, the
+ * OpenCode namespace jail, an engine with no qualified native catalog
+ * producer) refuses with `config_api_unavailable` and says why, before any
+ * effect. Automatic setup runs `cortex-paseo-tools setup` (cortex-acp's own
+ * native first-run pass). A missing tool or a launch that is not the Rust
+ * `cortex-acp` entry refuses every call; there is no other route.
  *
  * Boundaries:
  * - Authentication: Paseo 0.10.0 (installed) dispatches
@@ -63,51 +73,53 @@ import { resolveProjectRoot } from "./worker-history.js";
 type LaunchTarget = { argv: string[]; env?: Record<string, string> };
 
 type ConfigRuntime = {
+  /** The `cortex-paseo-tools` binary beside `cortex-acp`. */
   interpreter: string;
-  srcDir: string;
   env: NodeJS.ProcessEnv;
+  /** The complete launch environment automatic setup runs with (npm/node need PATH). */
+  setupEnv: NodeJS.ProcessEnv;
   home: string;
   configHome: string;
 };
+
+/** The only variables the Rust settings tool reads: the roots the settings API
+ * resolves, PATH for engine discovery and pinned installation, the payload
+ * holding the pinned manifest, and the OpenCode binary the owner named. */
+const RUST_SETTINGS_ENV = [
+  "HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "CORTEX_ROUTING", "CORTEX_WORKSPACE_CHANNEL",
+  "PATH", "CORTEX_ACP_RUNTIME_ROOT", "CORTEX_OPENCODE_BINARY",
+] as const;
+
+export const RUST_SETTINGS_TOOLS_MISSING = "Cortex runs from the Rust cortex-acp entry, but the cortex-paseo-tools binary "
+  + "its settings are read with is missing beside it. Build or install cortex-paseo-tools next to cortex-acp; nothing was read or changed.";
 
 type Scope = { home: string; projectRoot: string | null };
 
 type Failure = { failure: ConfigError };
 
-const PYTHON_INTERPRETER = /^python3(?:\.\d{1,2})?$/;
 const READ_TIMEOUT_MS = 15000;
 // Below Paseo's 30 s plugin request timeout, so a slow write still returns a
 // structured error instead of a host timeout.
 const WRITE_TIMEOUT_MS = 25000;
 // Every connection's engine is started in parallel, each bounded at 20 s.
 const REFRESH_TIMEOUT_MS = 60000;
-// The API bounds one pinned npm install at 60 s; this leaves room for Python
+// The API bounds one pinned npm install at 60 s; this leaves room for process
 // start-up and the discovery that follows. The host may stop waiting for the
 // answer earlier: the download still finishes, and the client re-checks.
 const INSTALL_TIMEOUT_MS = 90000;
 const MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
 /** Called once by plugin activation, not by Settings reads. Fire-and-forget:
- * the owned Python worker holds a cross-process lock and reports safe progress. */
+ * the native worker holds a cross-process lock and reports safe progress. */
 export async function startAutomaticSetup(): Promise<void> {
   const runtime = configRuntime();
   if (isFailure(runtime)) return;
-  const script = [
-    "import sys", "sys.path.insert(0, sys.argv[1])",
-    "from cortex_runtime.connections.automatic import run", "run()",
-  ].join("\n");
-  await runProcess(runtime.interpreter, ["-B", "-c", script, runtime.srcDir], {
+  // cortex-acp's own native first-run pass.
+  await runProcess(runtime.interpreter, ["setup"], {
     timeoutMs: 30 * 60 * 1000, maxBuffer: MAX_OUTPUT_BYTES,
-    env: runtime.env, cwd: "/",
+    env: runtime.setupEnv, cwd: "/",
   });
 }
-
-const BOOT = [
-  "import sys",
-  "sys.path.insert(0, sys.argv[1])",
-  "from cortex_runtime.configuration.management import main",
-  "raise SystemExit(main())",
-].join("\n");
 
 function failure(code: string, message: string, field: string | null = null): Failure {
   return { failure: { code, message, field } };
@@ -122,22 +134,19 @@ export function configRuntime(target: LaunchTarget | undefined = cortexLaunchTar
   if (target === undefined) {
     return failure("config_api_unavailable", "No Cortex launch is configured for this Paseo daemon; run the Cortex Paseo setup first.");
   }
-  const [interpreter, ...rest] = target.argv;
-  if (!interpreter || !PYTHON_INTERPRETER.test(basename(interpreter)) || (interpreter.includes("/") && !isAbsolute(interpreter))) {
-    return failure("config_api_unavailable", "The configured Cortex launch is not a Python entry point this settings API can use.");
-  }
-  const entry = rest.find((part) => isAbsolute(part) && basename(part) === "cortex_acp.py" && !part.includes("\0"));
-  if (entry === undefined) {
-    return failure("config_api_unavailable", "The configured Cortex launch names no Cortex entry point.");
-  }
-  const srcDir = dirname(entry);
-  if (!existsSync(join(srcDir, "cortex_runtime", "configuration", "management.py"))) {
-    return failure("config_api_unavailable", "The installed Cortex runtime predates the configuration API; update Cortex.");
-  }
   const env: NodeJS.ProcessEnv = { ...process.env, ...(target.env ?? {}) };
   const home = env.HOME && isAbsolute(env.HOME) ? env.HOME : homedir();
   const configBase = env.XDG_CONFIG_HOME && isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : join(home, ".config");
-  return { interpreter, srcDir, env, home, configHome: join(configBase, "cortex") };
+  const configHome = join(configBase, "cortex");
+  // Only the settings roots reach the tool.
+  if (!isRustLaunch(target)) {
+    return failure("config_api_unavailable", "The configured Cortex launch is not the Rust cortex-acp entry; settings are unavailable. Run the Cortex Paseo setup.");
+  }
+  const binary = join(dirname(target.argv[0]), RUST_TOOLS_BINARY);
+  if (!existsSync(binary)) return failure("config_api_unavailable", RUST_SETTINGS_TOOLS_MISSING);
+  const rustEnv: NodeJS.ProcessEnv = {};
+  for (const key of RUST_SETTINGS_ENV) if (env[key] !== undefined) rustEnv[key] = env[key];
+  return { interpreter: binary, env: rustEnv, setupEnv: env, home, configHome };
 }
 
 // --- display and redaction ------------------------------------------------------
@@ -352,12 +361,12 @@ export function sanitizePreset(raw: unknown, scope: Scope): Record<string, unkno
 type ApiOutcome = { ok: true; result: unknown } | { ok: false; error: unknown };
 
 async function callApi(runtime: ConfigRuntime, request: Record<string, unknown>, timeoutMs: number): Promise<ApiOutcome | Failure> {
-  const run = await runProcess(runtime.interpreter, ["-B", "-c", BOOT, runtime.srcDir], {
+  const run = await runProcess(runtime.interpreter, ["config"], {
     timeoutMs,
     maxBuffer: MAX_OUTPUT_BYTES,
     input: JSON.stringify({ api_version: CONFIG_API_VERSION, ...request }),
     env: runtime.env,
-    cwd: runtime.srcDir,
+    cwd: "/",
   });
   let response: unknown;
   try {
@@ -415,6 +424,16 @@ type Prepared = { runtime: ConfigRuntime; scope: Scope; bound: ConfigBinding };
 async function prepare(workspaceId: string | undefined, context: PluginHandlerContext): Promise<Prepared | { refusal: ConfigError; bound: ConfigBinding | null }> {
   const runtime = configRuntime();
   if (isFailure(runtime)) return { refusal: runtime.failure, bound: null };
+  // The compiled binary owns its channel; never infer it from process.env.
+  const host = await runProcess(runtime.interpreter, ["config", "--host"], {
+    timeoutMs: READ_TIMEOUT_MS, maxBuffer: MAX_OUTPUT_BYTES, env: runtime.env, cwd: "/",
+  });
+  let configHome: unknown;
+  try { configHome = record(JSON.parse(host.stdout)).config_home; } catch { /* refuse below */ }
+  if (host.status !== 0 || typeof configHome !== "string" || !isAbsolute(configHome) || configHome.includes("\0")) {
+    return { refusal: { code: "config_api_unavailable", message: "The Rust configuration host could not be resolved; nothing was read or changed.", field: null }, bound: null };
+  }
+  runtime.configHome = configHome;
   let projectRoot: string | null = null;
   if (workspaceId !== undefined) {
     const resolved = await resolveWorkspaceProject(workspaceId, context);

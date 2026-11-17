@@ -1,4 +1,4 @@
-# CW-C01: Versioned schemas, capabilities and generated TS/Python contract fixtures
+# CW-C01: Versioned schemas, capabilities and generated TS/Rust contract fixtures
 
 **Status:** planned · **Phase:** 3+ · **Size:** L
 
@@ -15,14 +15,14 @@ CW-R04 (versioned, idempotent, server-authorized commands), CW-R07 (structured v
 - [protocol](../protocol.md): planned adapter, command identity and version checks, and error semantics.
 - [domain-model](../domain-model.md): distinct task, execution, decision, result, artifact and device identities.
 - [ADR 0005](../adr/0005-public-contract.md): a versioned typed adapter, not SQLite access and not Markdown parsing.
-- Existing runtime vocabularies that the contract must map explicitly, not silently: `runtime_tasks.state`, `runtime_nodes.status` and `stage` (`src/cortex_runtime/orchestration/state.py`); `task_orchestration.state`, `wait_reason` and `task_events.event_type` (`src/cortex_runtime/delegation/events_store.py`).
+- Existing runtime vocabularies that the contract must map explicitly, not silently: `runtime_tasks.state`, `runtime_nodes.status` and `stage` (the former `orchestration/state` module); `task_orchestration.state`, `wait_reason` and `task_events.event_type` (the former `delegation/events_store` module).
 - [CW-F04](CW-F04.md): the verified path and lifecycle mapping that identities must refer to.
 
 ## Deliverables
 
 - One schema source (the format is chosen and recorded in this item) with the protocol version rule.
 - Capability list: each name corresponds to one implemented operation. Generic ACP features and Cortex extensions are listed separately.
-- Generated or checked fixtures for TypeScript, Python and the Rust service types, with one valid and several invalid samples per message.
+- Generated or checked fixtures for TypeScript and the Rust service types, with one valid and several invalid samples per message.
 - Documented rule: any runtime enum value the contract does not recognize is surfaced as `unknown` with a warning.
 - Management operations for orchestration settings ([CW-U07](CW-U07.md), [CW-R41](../requirements.md)): each settings surface (`user_defaults`, `connections`, `routing`, `project_ceiling`, `mcp_servers`, routing profiles) carries its own `sha256:` revision and is written as one request; an `mcp_servers` write carries up to 64 operations. Typed conflict and unknown-outcome responses.
 - New capability names, each advertised only when implemented: tool listing from an unsaved server draft (sandboxed start, `initialize` and `tools/list` only, bounded, fixed failure codes, no stored secrets); a read-only route preview that accepts draft rules and writes no audit record; built-in routing facts (role tiers, access classes, fallback order); observed quota window labels with their percentages; machine defaults for access mode and checkout.
@@ -31,7 +31,7 @@ CW-R04 (versioned, idempotent, server-authorized commands), CW-R07 (structured v
 
 Positive:
 
-- A TypeScript fixture and the Python fixture both accept every valid sample for every message.
+- The TypeScript and Rust fixtures both accept every valid sample for every message.
 - `capabilities.get` lists only operations the build implements.
 - A client on the same major version and a higher minor version negotiates successfully; a different major version gets an explicit version error.
 

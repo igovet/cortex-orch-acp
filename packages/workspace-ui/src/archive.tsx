@@ -2,7 +2,7 @@ import { createMemo, createSignal, For, Show } from "solid-js";
 import { previewPurge } from "@cortex/workspace-domain";
 import { archiveRow, archiveView, daysLeft, nextCleanup, NO_FILTER, OUTCOME_FILTERS, sizeText, type ArchiveFilter, type ArchiveRow } from "./archive-model";
 import { useWs } from "./ctx";
-import { A, I, MenuItem, Modal, Pop } from "./kit";
+import { A, I, Loading, MenuItem, Modal, OverviewShown, Pop, useOverviewWait, useWantOverview } from "./kit";
 import { ActionBar, SectionHead, Toolbar } from "./layout";
 import { sprintTitle, type TaskView } from "./selectors";
 
@@ -36,6 +36,7 @@ export function UnmergedDialog(props: { taskId: string; onClose: () => void }) {
   const view = createMemo(() => ws.store.index().byId.get(props.taskId)!);
   const t = () => view().task, f = () => t().workFacts ?? null;
   const days = () => view().machine.autoArchiveDays;
+  useWantOverview();
   const what = () => f() ? `${f()!.commits} commits and ${f()!.files} files` : "the work";
   const answer = (discard: boolean) => { ws.ok({ type: "answer_archive", taskId: props.taskId, discard, now: ws.store.clock() }, () => { props.onClose(); }); };
   return <>
@@ -48,7 +49,7 @@ export function UnmergedDialog(props: { taskId: string; onClose: () => void }) {
         <div class="chk"><I n="drive" s={14} class="faint" /><span>Worktree size</span><span class="src">{sizeText(x().sizeMb)}</span></div>
       </div>}</Show>
       <div class="ws-fields">
-        <label class="rc"><input type="radio" name="unmerged" checked={choice() === "keep"} onChange={() => setChoice("keep")} /><span><span class="t">Keep the work, do not archive</span><span class="d">The task stays in Done with its worktree. Ask again in {days()} days.</span></span></label>
+        <label class="rc"><input type="radio" name="unmerged" checked={choice() === "keep"} onChange={() => setChoice("keep")} /><span><span class="t">Keep the work, do not archive</span><span class="d">The task stays in Done with its worktree. <OverviewShown inline><>Ask again in {days()} days.</></OverviewShown></span></span></label>
         <label class="rc danger"><input type="radio" name="unmerged" checked={choice() === "drop"} onChange={() => setChoice("drop")} /><span><span class="t">Delete the work and archive</span><span class="d">Discards {what()} at cleanup. This cannot be undone after that.</span></span></label>
       </div>
     </div>
@@ -113,10 +114,13 @@ export function Archive() {
   const [asking, setAsking] = createSignal<string | null>(null);
   const [more, setMore] = createSignal(false);
   let menuEl: HTMLDivElement | undefined;
+  // Days left, and so which section a task is in, come from the machine's retention: read when the Archive opens.
+  useWantOverview();
+  const wait = useOverviewWait();
   const view = createMemo(() => archiveView(ws.store.index(), filter()));
   const closedSprints = createMemo(() => ws.store.state().sprints.filter(s => {
     const project = ws.store.state().projects.find(p => p.id === s.projectId), f = filter();
-    return s.archivedAt && project && (!f.machine || project.machineId === f.machine) && (!f.project || s.projectId === f.project)
+    return s.archivedAt && !s.deletion && project && (!f.machine || project.machineId === f.machine) && (!f.project || s.projectId === f.project)
       && !f.outcome && (!f.text.trim() || sprintTitle(s).toLowerCase().includes(f.text.trim().toLowerCase()));
   }));
   const later = () => more() ? view().later : view().later.slice(0, LATER_LIMIT);
@@ -148,7 +152,7 @@ export function Archive() {
   </Show>;
   const asked = (v: TaskView) => { const f = v.task.workFacts; return `${v.project.name}, unmerged work${f ? `: ${f.commits} commits and ${f.files} uncommitted files on ` : " on "}`; };
   return <div class="page"><div class="page-in">
-    <div class="page-h"><div><p>Kept for {ws.machine().retentionDays} days after archiving by default. <A class="lnk" to={{ name: "settings", section: "storage", machine: ws.machine().id }}>Change it for each machine.</A> Merged commits stay in Git.</p></div></div>
+    <div class="page-h"><div><p><OverviewShown inline><>Kept for {ws.machine().retentionDays} days after archiving by default. </></OverviewShown><A class="lnk" to={{ name: "settings", section: "storage", machine: ws.machine().id }}>Change it for each machine.</A> Merged commits stay in Git.</p></div></div>
     <Show when={ids().length > 0} fallback={<Toolbar class="tbar" label="Filter the Archive" start={<>
       <input class="inp ws-filter-wide" placeholder="Filter archived tasks" aria-label="Filter archived tasks" value={filter().text} onInput={e => setFilter({ ...filter(), text: e.currentTarget.value })} />
       <Picker id="m-ar-machine" label="Machine" value={machines().find(m => m.id === filter().machine)?.label ?? "All"} options={machines()} onPick={machine => setFilter({ ...filter(), machine })} />
@@ -176,11 +180,13 @@ export function Archive() {
         <A class="btn btn-line btn-sm" to={{name:"sprint",machine:ws.store.state().projects.find(p => p.id === s.projectId)!.machineId,project:s.projectId,sprint:s.id,tab:"summary"}}>Open summary</A>
       </div>}</For></div>
     </section></Show>
+    <Show when={!wait() || view().rows.length === 0} fallback={<Loading text={wait()!} />}>
     {section("ar-soon", "Cleanup within 3 days", view().soon)}
     {section("ar-later", "Later", view().later, () => <Show when={view().later.length > LATER_LIMIT && !more()}><button class="gr ws-more" onClick={() => setMore(true)}><span class="cap muted">Show {view().later.length - LATER_LIMIT} more</span></button></Show>)}
     {section("ar-block", "Cleanup blocked", view().blocked)}
+    </Show>
     <Show when={view().rows.length === 0 && view().waiting.length === 0 && closedSprints().length === 0}>
-      <div class="surface ws-empty">{filtered() ? "No archived task matches this filter." : `Nothing archived. Tasks move here after ${ws.machine().autoArchiveDays} days in Done.`}</div>
+      <div class="surface ws-empty">{filtered() ? "No archived task matches this filter." : wait() ? "Nothing archived." : `Nothing archived. Tasks move here after ${ws.machine().autoArchiveDays} days in Done.`}</div>
     </Show>
     <Pop id="m-arrow" class="pop-right" label="Archived task" ref={el => { menuEl = el; }}>
       <Show when={menuRow()}>{r => <>
@@ -201,9 +207,10 @@ export function Archive() {
 export function ArchiveFacts() {
   const ws = useWs();
   const view = createMemo(() => archiveView(ws.store.index(), NO_FILTER));
+  useWantOverview();
   return <div class="row sec muted ws-facts">
     <span class="trunc">{view().total} task{view().total === 1 ? "" : "s"}</span>
-    <Show when={view().soonTotal > 0}><span class="trunc st-warn">{view().soonTotal} soon</span></Show>
+    <Show when={ws.store.overviewLoaded() && view().soonTotal > 0}><span class="trunc st-warn">{view().soonTotal} soon</span></Show>
     <Show when={view().waiting.length > 0}><span class="trunc">{view().waiting.length} wait{view().waiting.length === 1 ? "s" : ""} for you</span></Show>
   </div>;
 }

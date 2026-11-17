@@ -43,7 +43,10 @@ pub fn parse(method: &str, value: Value) -> Result<Request, String> {
         Request::Cancel(p) => &p.session,
     };
     crate::validate("Identity", &Value::String(session.clone()))?;
-    if !session.bytes().all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c)) {
+    if !session
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
+    {
         return Err("invalid_directory_search".into());
     }
     Ok(request)
@@ -54,8 +57,16 @@ mod tests {
     use serde_json::json;
     #[test]
     fn requests_are_closed() {
-        assert!(parse("directories.search", json!({"session":"pick-1","query":"~/code"})).is_ok());
-        assert!(parse("directories.search", json!({"session":"pick-1","query":"","limit":30})).is_ok());
+        assert!(parse(
+            "directories.search",
+            json!({"session":"pick-1","query":"~/code"})
+        )
+        .is_ok());
+        assert!(parse(
+            "directories.search",
+            json!({"session":"pick-1","query":"","limit":30})
+        )
+        .is_ok());
         assert!(parse("directories.cancel", json!({"session":"pick-1"})).is_ok());
         for value in [
             json!({"query":"x"}),
@@ -71,7 +82,11 @@ mod tests {
         ] {
             assert!(parse("directories.search", value).is_err());
         }
-        assert!(parse("directories.cancel", json!({"session":"pick-1","query":"x"})).is_err());
+        assert!(parse(
+            "directories.cancel",
+            json!({"session":"pick-1","query":"x"})
+        )
+        .is_err());
         assert!(parse("directories.read", json!({"session":"pick-1"})).is_err());
     }
 }

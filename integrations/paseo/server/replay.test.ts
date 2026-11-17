@@ -55,74 +55,80 @@ for (const newline of ["", "\n"]) {
 await assert.rejects(async () => collect(readFrames(Readable.from([Buffer.from('{"text":')]))), /truncated/);
 
 const dir = mkdtempSync(join(tmpdir(), "cortex-replay-test-"));
-const fixture = join(dir, "agent.py");
+const fixture = join(dir, "agent.mjs");
 writeFileSync(fixture, `
-import json, sys, os
-config_calls = os.path.join(os.path.dirname(__file__), "config-calls.jsonl")
-methods = os.path.join(os.path.dirname(__file__), "methods.log")
-def send(frame): print(json.dumps(frame, ensure_ascii=False), flush=True)
-for line in sys.stdin:
-    req = json.loads(line)
-    with open(methods, "a") as log: log.write(str(req.get("method")) + "\\n")
-    if req.get("method") == "initialize":
-        send({"jsonrpc":"2.0","id":req["id"],"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":True}}})
-    elif req.get("method") in ("session/set_config_option", "session/set_mode"):
-        with open(config_calls, "a") as log: log.write(json.dumps(req) + "\\n")
-        send({"jsonrpc":"2.0","id":req["id"],"error":{"code":-32602,
-              "message":"'gpt-6-sol' is not a valid value for configId 'model'."}})
-    elif req.get("method") == "session/new":
-        send({"jsonrpc":"2.0","id":req["id"],"result":{"sessionId":"new-session","configOptions":[
-            {"id":"model","name":"Model","category":"model","type":"select","currentValue":"available-model",
-             "options":[{"value":"available-model","name":"Available"}]}]}})
-    elif req.get("method") == "session/load":
-        sid = req["params"]["sessionId"]
-        if sid == "crash-before": os._exit(7)
-
-        if sid == "reasoning":
-            send({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{
-                "sessionUpdate":"agent_thought_chunk","messageId":"thought:1",
-                "content":{"type":"text","text":"thinking"}}}})
-            send({"jsonrpc":"2.0","id":req["id"],"result":{}})
-            continue
-
-        if sid == "code-mode":
-            for cid, tool, args, inner_status, result in [
-                ("raw-read", "cortex.read_report", {"report_id": "r_abc"}, "error", None),
-                ("raw-shell", "cortex.command_run", {"argv": ["pwd"]}, "completed", None),
-                ("raw-result", "cortex.command_run", {"argv": ["pwd"]}, "completed", "/project"),
-            ]:
-                updates = [
-                    {"sessionUpdate":"tool_call","toolCallId":cid,"title":"execute","kind":"other","status":"pending","rawInput":{}},
-                    {"sessionUpdate":"tool_call_update","toolCallId":cid,"status":"in_progress",
-                     "rawInput":{"code":"return await tools.cortex.command_run({})"}},
-                    {"sessionUpdate":"tool_call_update","toolCallId":cid,"status":"completed",
-                     "rawOutput":{"metadata":{"toolCalls":[{"tool":tool,"input":args,"status":inner_status}]}},
-                     "content":[{"type":"content","content":{"type":"text","text":"content discarded by installed ACP bridge"}}]},
-                ]
-                if result is not None:
-                    updates[-1]["rawOutput"]["result"] = {"content":[{"type":"text","text":result}]}
-                for update in updates:
-                    send({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})
-            send({"jsonrpc":"2.0","id":req["id"],"result":{}})
-            continue
-        for i in range(4097):
-            update = ({"sessionUpdate":"tool_call","toolCallId":f"card:{i}","title":f"Card {i}","status":"completed","kind":"other"} if i % 3 == 0 else
-                      {"sessionUpdate":"user_message_chunk" if i % 3 == 1 else "agent_message_chunk",
-                       "messageId":f"message:{i}","content":{"type":"text","text":f"🙂я {i}"}})
-            if sid == "invalid-card" and i == 99: update["status"] = "impossible"
-            send({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})
-            if i == 2:
-                send({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{
-                    "sessionUpdate":"agent_message_chunk","messageId":"__cortex_message_boundary__:replay",
-                    "content":{"type":"text","text":""}}}})
-            if sid == "crash-mid" and i == 100: os._exit(8)
-        send({"jsonrpc":"2.0","id":req["id"],"result":{"configOptions":[
-            {"id":"model","name":"Model","category":"model","type":"select","currentValue":"available-model",
-             "options":[{"value":"available-model","name":"Available"}]}]}})
-        if sid == "crash-after": os._exit(9)
+import { appendFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { createInterface } from "node:readline";
+const here = dirname(fileURLToPath(import.meta.url));
+const configCalls = join(here, "config-calls.jsonl");
+const methods = join(here, "methods.log");
+const send = (frame) => process.stdout.write(JSON.stringify(frame) + "\\n");
+for await (const line of createInterface({ input: process.stdin })) {
+  const req = JSON.parse(line);
+  appendFileSync(methods, String(req.method) + "\\n");
+  if (req.method === "initialize") {
+    send({ jsonrpc: "2.0", id: req.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true } } });
+  } else if (req.method === "session/set_config_option" || req.method === "session/set_mode") {
+    appendFileSync(configCalls, JSON.stringify(req) + "\\n");
+    send({ jsonrpc: "2.0", id: req.id, error: { code: -32602, message: "'gpt-6-sol' is not a valid value for configId 'model'." } });
+  } else if (req.method === "session/new") {
+    send({ jsonrpc: "2.0", id: req.id, result: { sessionId: "new-session", configOptions: [
+      { id: "model", name: "Model", category: "model", type: "select", currentValue: "available-model",
+        options: [{ value: "available-model", name: "Available" }] }] } });
+  } else if (req.method === "session/load") {
+    const sid = req.params.sessionId;
+    if (sid === "crash-before") process.exit(7);
+    if (sid === "reasoning") {
+      send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: sid, update: {
+        sessionUpdate: "agent_thought_chunk", messageId: "thought:1", content: { type: "text", text: "thinking" } } } });
+      send({ jsonrpc: "2.0", id: req.id, result: {} });
+      continue;
+    }
+    if (sid === "code-mode") {
+      for (const [cid, tool, args, innerStatus, result] of [
+        ["raw-read", "cortex.read_report", { report_id: "r_abc" }, "error", null],
+        ["raw-shell", "cortex.command_run", { argv: ["pwd"] }, "completed", null],
+        ["raw-result", "cortex.command_run", { argv: ["pwd"] }, "completed", "/project"],
+      ]) {
+        const updates = [
+          { sessionUpdate: "tool_call", toolCallId: cid, title: "execute", kind: "other", status: "pending", rawInput: {} },
+          { sessionUpdate: "tool_call_update", toolCallId: cid, status: "in_progress",
+            rawInput: { code: "return await tools.cortex.command_run({})" } },
+          { sessionUpdate: "tool_call_update", toolCallId: cid, status: "completed",
+            rawOutput: { metadata: { toolCalls: [{ tool, input: args, status: innerStatus }] } },
+            content: [{ type: "content", content: { type: "text", text: "content discarded by installed ACP bridge" } }] },
+        ];
+        if (result !== null) updates[updates.length - 1].rawOutput.result = { content: [{ type: "text", text: result }] };
+        for (const update of updates) send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: sid, update } });
+      }
+      send({ jsonrpc: "2.0", id: req.id, result: {} });
+      continue;
+    }
+    for (let i = 0; i < 4097; i++) {
+      const update = i % 3 === 0
+        ? { sessionUpdate: "tool_call", toolCallId: "card:" + i, title: "Card " + i, status: "completed", kind: "other" }
+        : { sessionUpdate: i % 3 === 1 ? "user_message_chunk" : "agent_message_chunk",
+            messageId: "message:" + i, content: { type: "text", text: "🙂я " + i } };
+      if (sid === "invalid-card" && i === 99) update.status = "impossible";
+      send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: sid, update } });
+      if (i === 2) {
+        send({ jsonrpc: "2.0", method: "session/update", params: { sessionId: sid, update: {
+          sessionUpdate: "agent_message_chunk", messageId: "__cortex_message_boundary__:replay",
+          content: { type: "text", text: "" } } } });
+      }
+      if (sid === "crash-mid" && i === 100) process.exit(8);
+    }
+    send({ jsonrpc: "2.0", id: req.id, result: { configOptions: [
+      { id: "model", name: "Model", category: "model", type: "select", currentValue: "available-model",
+        options: [{ value: "available-model", name: "Available" }] }] } });
+    if (sid === "crash-after") process.exit(9);
+  }
+}
 `);
 async function load(nativeId: string | null, staleConfig = false, configureAfter = false, closeAfter = false) {
-  const command = ["env", "CORTEX_ACP_TARGET=" + JSON.stringify({ argv: ["python3", "-B", fixture] }),
+  const command = ["env", "CORTEX_ACP_TARGET=" + JSON.stringify({ argv: [process.execPath, fixture] }),
     process.execPath, fileURLToPath(new URL("./acp-load-shim.mjs", import.meta.url))] as [string, ...string[]];
   const replay = new ReplayController(command);
   const base = runAcpProvider({ id: "cortex", label: "Cortex", connector: replay.connect });

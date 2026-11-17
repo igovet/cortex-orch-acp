@@ -1,0 +1,276 @@
+//! Owner presentation actions, not scheduler transitions or result certification.
+use super::{context, git::Git, native::*, retention, task_facts_git};
+use cortex_core::{CoreError, CoreResult, OpenMode};
+use rusqlite::{Connection, OptionalExtension};
+use serde_json::{json, Value};
+use std::path::Path;
+
+pub fn supported(action: &str) -> bool {
+    matches!(
+        action,
+        "auto_ready" | "merged" | "close" | "archive" | "resolution_started"
+    )
+}
+pub(super) fn unsettled() -> Refused {
+    refuse(
+        "stop_required",
+        "Stop the task and wait for every worker to stop first.",
+    )
+}
+/// Match the retained _facts/require_settled boundary, including stopped launches.
+/// The caller can hold its immediate transaction through the overlay replacement.
+pub(super) fn settled(db: &Connection, root: &Path, project: &str, task: &str) -> CoreResult<()> {
+    let row = db
+        .query_row(
+            "SELECT e.runtime_task_id,e.acp_session_id,e.execution_id,e.owner_epoch
+         FROM workspace_executions e JOIN workspace_tasks t USING(task_id)
+         WHERE t.task_id=? AND t.project_id=?",
+            (task, project),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((runtime, session, execution, epoch)) = row else {
+        return Ok(());
+    };
+    let owner: Option<i64> = db
+        .query_row(
+            "SELECT epoch FROM task_owners WHERE task_id=?",
+            [&runtime],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let session: Option<(String, Option<String>)> = db
+        .query_row(
+            "SELECT project_root,task_id FROM acp_host_sessions WHERE session_id=?",
+            [session],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let base: Option<String> = db
+        .query_row(
+            "SELECT project_root FROM tasks WHERE id=?",
+            [&runtime],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let start: Option<String> = db
+        .query_row(
+            "SELECT state FROM workspace_starts WHERE execution_id=?",
+            [execution],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let state: Option<(String,i64,Option<String>)> = db.query_row(
+        "SELECT r.state,r.revision,r.blocker FROM runtime_tasks r JOIN tasks t ON t.id=r.task_id WHERE r.task_id=?",
+        [&runtime], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+    let bound = base.as_deref() == root.to_str()
+        && session.as_ref().is_some_and(|(p, t)| {
+            Some(p.as_str()) == root.to_str() && t.as_deref() == Some(runtime.as_str())
+        });
+    let quiet = match state {
+        Some((state, revision, blocker)) => {
+            bound
+                && owner == Some(epoch)
+                && revision >= 0
+                && !(state == "COMPLETED" && blocker.is_some_and(|s| !s.is_empty()))
+                && start.as_deref() != Some("unknown")
+                && matches!(
+                    state.as_str(),
+                    "PAUSED" | "CANCELLED" | "COMPLETED" | "FAILED"
+                )
+        }
+        None => {
+            bound
+                && owner.is_some_and(|n| n >= epoch)
+                && matches!(start.as_deref(), Some("claimed" | "dispatched"))
+                && db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM task_stopped WHERE task_id=?)",
+                    [&runtime],
+                    |r| r.get::<_, bool>(0),
+                )?
+        }
+    };
+    let live: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=? AND status='running')",
+        [&runtime],
+        |r| r.get(0),
+    )?;
+    if !quiet || live {
+        return Err(CoreError::Refused("stop_required"));
+    }
+    Ok(())
+}
+pub(super) fn settle_error(e: CoreError) -> Refused {
+    if e.code() == "stop_required" {
+        unsettled()
+    } else {
+        context::core(e)
+    }
+}
+pub(super) fn external(p: &Value) -> bool {
+    p["action"] == "close" && matches!(p["choice"].as_str(), Some("external" | "already_in_target"))
+}
+pub(super) fn close_precondition(record: &Value, p: &Value) -> Result<()> {
+    if !matches!(
+        p["choice"].as_str(),
+        Some("as_is" | "cancel" | "external" | "already_in_target")
+    ) || p["confirmed"] != true
+    {
+        return Err(refuse(
+            "confirmation_required",
+            "Choose how to close the task and confirm.",
+        ));
+    }
+    if external(p) {
+        if record["status"] == "done" {
+            return Err(refuse(
+                "already_closed",
+                "This task is already closed. Refresh its state.",
+            ));
+        }
+        if record.get("conflict").is_some_and(|v| v != "none") {
+            return Err(refuse(
+                "merge_in_progress",
+                "Abort the active merge before closing the task.",
+            ));
+        }
+    }
+    Ok(())
+}
+fn truth(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::String(s) => !s.is_empty(),
+        Value::Number(n) => n.as_f64() != Some(0.0),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(m) => !m.is_empty(),
+    }
+}
+pub async fn apply(
+    root: &Path,
+    project: &str,
+    task: &str,
+    record: &mut Value,
+    p: &Value,
+    git: &mut Git,
+) -> Result<()> {
+    let at = now_ms();
+    match p["action"].as_str().unwrap_or("") {
+        "auto_ready" => {
+            record["status"] = json!("ready_to_merge");
+            record["automaticReady"] = json!(true);
+        }
+        "merged" => {
+            record["status"] = json!("done");
+            record["work"] = json!("merged");
+            record["doneAt"] = json!(at);
+            record["integration"] = p["integration"].clone();
+        }
+        "close" => {
+            let choice = p["choice"].as_str().unwrap_or("");
+            close_precondition(record, p)?;
+            if external(p) {
+                if let Some(store) = context::open(root, OpenMode::LiveReadOnly)? {
+                    store
+                        .read(|db| settled(db, root, project, task))
+                        .map_err(settle_error)?;
+                }
+                if choice == "already_in_target"
+                    && task_facts_git::read(root, record, task, git).await?["alreadyInTarget"]
+                        != true
+                {
+                    return Err(refuse(
+                        "containment_changed",
+                        "The target changed. Refresh before closing; nothing was merged.",
+                    ));
+                }
+                for (k, v) in [
+                    ("notVerifiedByCortex", json!(true)),
+                    ("acceptance", Value::Null),
+                    ("integration", Value::Null),
+                    ("automaticReady", json!(false)),
+                    ("work", json!("unmerged")),
+                ] {
+                    record[k] = v;
+                }
+                record["closedAs"] = json!("external");
+            } else {
+                let checked = record["status"] == "ready_to_merge"
+                    && (truth(&record["acceptance"]) || truth(&record["automaticReady"]));
+                record["notVerifiedByCortex"] = json!(choice == "as_is" && !checked);
+                record["closedAs"] = json!(choice);
+            }
+            record["status"] = json!("done");
+            record["doneAt"] = json!(at);
+        }
+        "archive" => {
+            if record["status"] != "done" {
+                return Err(refuse(
+                    "not_done",
+                    "Only a finished task can go to the Archive.",
+                ));
+            }
+            if unmerged(root, record, git).await? {
+                record["archiveQuestion"] = json!(true);
+            } else {
+                record["archive"] = json!({"at":at,"previousStatus":"done"});
+                record["archiveQuestion"] = json!(false);
+            }
+        }
+        "resolution_started" => {
+            // Retained ordering validates the checkout even when no merge exists.
+            retention::task_path(root, record, git).await?;
+            if !truth(&record["merge"]) {
+                return Err(refuse(
+                    "no_conflict",
+                    "There is no retained merge conflict for this task.",
+                ));
+            }
+            let merge = record["merge"]
+                .as_object_mut()
+                .ok_or_else(|| refuse("machine_tool_failed", "AttributeError"))?;
+            merge.insert("handedAt".into(), json!(at));
+            merge.insert("guidance".into(), p["guidance"].clone());
+            record["conflict"] = json!("resolving");
+            record["acceptance"] = Value::Null;
+        }
+        _ => {
+            return Err(refuse(
+                "unsupported_action",
+                "This machine does not support that yet.",
+            ))
+        }
+    }
+    Ok(())
+}
+async fn unmerged(root: &Path, record: &Value, git: &mut Git) -> Result<bool> {
+    if record["integration"]["worktreeCleanup"] == "removed"
+        && record["checkout"]["path"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty() && !Path::new(s).exists())
+    {
+        return Ok(false);
+    }
+    let path = retention::task_path(root, record, git).await?;
+    if git.is_repo(&path).await? {
+        let head = &record["integration"]["sourceHead"];
+        if truth(head) && json!(git.out(&path, &["rev-parse", "HEAD"]).await?.trim()) != *head {
+            return Ok(true);
+        }
+        if !git.clean(&path).await? {
+            return Ok(true);
+        }
+    }
+    Ok(!matches!(
+        record["work"].as_str(),
+        Some("merged" | "discard_confirmed")
+    ))
+}

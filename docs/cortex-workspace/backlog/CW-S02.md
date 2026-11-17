@@ -19,8 +19,8 @@ CW-R04 (versioned, idempotent, server-authorized commands), CW-R07 (structured v
 
 ## Deliverables
 
-- `src/cortex_runtime/workspace_contract/schema.json`, committed with a fingerprint and included in the Python payload.
-- `scripts/generate_workspace_contract.py` with `check` and `write` actions. It uses no model call and no host tool.
+- `crates/workspace-protocol/schema/workspace.json`, committed with a fingerprint (the schema moved there from the former Python payload).
+- `scripts/cortex-xtask.sh generate-contract` with `check` and `write` actions. It uses no model call and no host tool.
 - `packages/workspace-contract/`: generated TypeScript types, constants and valid and invalid fixtures.
 - `crates/workspace-protocol/`: Rust codecs with no Tauri or WebKit dependency. Commands deny unknown fields; responses accept additive fields.
 - `capabilities.get` response: wire version, build identity, schema fingerprint, mapping version, implemented operation names, limits and session or connection generation. A major-version mismatch is rejected; same-major peers use the intersection of operations and known fields.
@@ -31,12 +31,12 @@ CW-R04 (versioned, idempotent, server-authorized commands), CW-R07 (structured v
 
 Positive:
 
-- Every valid vector is accepted by the Python validator, the TypeScript fixtures and the Rust codecs.
+- Every valid vector is accepted by the TypeScript fixtures and the Rust codecs.
 - Capability negotiation returns exactly the intersection of operations implemented by both peers.
 
 Negative:
 
-- An extra command key is rejected by Rust and by Python.
+- An extra command key is rejected by Rust and by the TypeScript fixtures.
 - A major-version mismatch returns an explicit version error, not a partial result.
 - An unrecognized enum value reaches the client as `unknown` with a warning, not as a success state.
 - A schema change without a fingerprint and version change fails the drift check.
@@ -48,8 +48,8 @@ Negative:
 
 ## Validation
 
-- `python3 -B scripts/generate_workspace_contract.py check`: regenerated files equal the committed files.
-- `tests/test_workspace_contract.py`: targeted pytest for valid, invalid, negotiation and drift cases.
+- `scripts/cortex-xtask.sh generate-contract check`: regenerated files equal the committed files.
+- `crates/workspace-protocol/tests/contract.rs` and `packages/workspace-contract/test.mjs`: valid, invalid, negotiation and drift cases.
 - `cargo test -p workspace-protocol`. No WebKit is needed.
 
 ## Documentation impact

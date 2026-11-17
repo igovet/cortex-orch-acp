@@ -1,0 +1,38 @@
+[package]
+name = "cortex-paseo-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Cortex readers for the Paseo plugin's Rust launch target.
+# Every store reader opens the project store through cortex-core's
+# non-initializing live read-only mode; nothing here writes, migrates or
+# repairs a store. The `config` command answers the plugin's settings API
+# with workspace-service's native configuration readers and management-API
+# writers; `setup` runs cortex-acp's native automatic first-run pass.
+
+[[bin]]
+name = "cortex-paseo-tools"
+path = "src/main.rs"
+
+[[test]]
+# Byte parity with the recorded Python reader outcomes on fixture format-12 stores.
+name = "parity"
+harness = false
+
+[[test]]
+# Byte parity of the settings API on fixture homes with the frozen outcomes of the retired Python entry.
+name = "config_parity"
+harness = false
+
+[dependencies]
+cortex-acp = { path = "../cortex-acp" }
+cortex-core = { path = "../cortex-core" }
+workspace-protocol = { path = "../workspace-protocol" }
+workspace-service = { path = "../workspace-service" }
+rusqlite = { version = "=0.42.0", default-features = false, features = ["bundled"] }
+regex = "=1.13.1"
+serde_json = "=1.0.154"
+sha2 = "=0.10.9"
+libc = "=0.2.191"

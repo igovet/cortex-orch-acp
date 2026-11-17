@@ -8,7 +8,7 @@ import { shellCommand } from "../shared/shell-command.ts";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { homedir } from "node:os";
 import { runAcpProvider, type AcpTransformer } from "@getpaseo/plugin/server/acp";
@@ -631,25 +631,27 @@ function bundledShimPath(): string {
   throw new Error("Cortex ACP Paseo load shim is unavailable; configure a launch record or CORTEX_PASEO_SOURCE_ROOT");
 }
 
-function sourceTreeLaunch(): { entry: string; shim: string } | undefined {
+function sourceTreeLaunch(): { root: string; shim: string } | undefined {
   const root = process.env.CORTEX_PASEO_SOURCE_ROOT?.trim();
   if (!root) return undefined;
   if (!isAbsolute(root)) {
     throw new Error("CORTEX_PASEO_SOURCE_ROOT must be an absolute path");
   }
-  const entry = resolve(root, "src", "cortex_acp.py");
   const shim = resolve(root, "integrations", "paseo", "server", "acp-load-shim.mjs");
-  if (!existsSync(entry) || !existsSync(shim)) {
-    throw new Error(`CORTEX_PASEO_SOURCE_ROOT has no Cortex entry point or Paseo shim: ${root}`);
+  if (!existsSync(shim)) {
+    throw new Error(`CORTEX_PASEO_SOURCE_ROOT has no Paseo shim: ${root}`);
   }
-  return { entry, shim };
+  return { root, shim };
 }
+
+/** The default Rust entry of a source checkout (cargo's debug target). */
+const SOURCE_RUST_BINARY = ["target", "debug", "cortex-acp"] as const;
 
 function cortexCommand(): CommandArgv {
   const command = process.env.CORTEX_ACP_COMMAND?.trim();
   // An explicit command is useful for packaged deployments. The installer
-  // does not need to inject it: the source tree contains a deterministic
-  // Python entry point next to this plugin.
+  // does not need to inject it: setup writes a launch record, and a source
+  // tree selects its own deterministic entry below.
   const parseArgv = (raw: string): string[] | undefined => {
     const parsed: unknown = JSON.parse(raw);
     if (
@@ -667,7 +669,30 @@ function cortexCommand(): CommandArgv {
   // it must win over any inherited launch record or command from another
   // Cortex installation. Production launches leave it unset.
   const source = sourceTreeLaunch();
-  if (source) return shimmedCommand(source.shim, ["python3", "-B", source.entry]);
+  // Explicit native binary selection; never infer another binary when this
+  // target is invalid. Source-root isolation still selects the shim.
+  const rustBinary = process.env.CORTEX_ACP_RUST_BINARY?.trim();
+  if (rustBinary) {
+    if (!isAbsolute(rustBinary) || !existsSync(rustBinary)) {
+      throw new Error("CORTEX_ACP_RUST_BINARY must name an existing absolute cortex-acp binary");
+    }
+    const runtimeRoot = source ? source.root : process.env.CORTEX_ACP_RUNTIME_ROOT;
+    if (runtimeRoot && !isAbsolute(runtimeRoot)) {
+      throw new Error("CORTEX_ACP_RUNTIME_ROOT must be an absolute path");
+    }
+    return shimmedCommand(source?.shim ?? bundledShimPath(), [rustBinary],
+      runtimeRoot ? { CORTEX_ACP_RUNTIME_ROOT: runtimeRoot } : undefined);
+  }
+  if (source) {
+    // An unbuilt binary refuses; there is no other entry.
+    const runtimeRoot = source.root;
+    const binary = join(runtimeRoot, ...SOURCE_RUST_BINARY);
+    if (!existsSync(binary)) {
+      throw new Error(`The default Rust Cortex entry is not built at ${binary}; `
+        + "build cortex-acp and cortex-paseo-tools");
+    }
+    return shimmedCommand(source.shim, [binary], { CORTEX_ACP_RUNTIME_ROOT: runtimeRoot });
+  }
 
   if (command?.startsWith("[")) {
     const parsed = parseArgv(command);
@@ -694,9 +719,12 @@ function cortexCommand(): CommandArgv {
       "argv" in configured &&
       Array.isArray(configured.argv) &&
       configured.argv.length > 0 &&
+      configured.argv.length === 1 &&
       configured.argv.every(
         (part): part is string => typeof part === "string" && part.length > 0,
       ) &&
+      isAbsolute(configured.argv[0]) &&
+      basename(configured.argv[0]) === "cortex-acp" &&
       (!("shim" in configured) ||
         (typeof configured.shim === "string" && configured.shim.startsWith("/") && existsSync(configured.shim))) &&
       (!("env" in configured) || (
@@ -705,7 +733,7 @@ function cortexCommand(): CommandArgv {
         !Array.isArray(configured.env) &&
         Object.entries(configured.env).every(
           ([key, value]) =>
-            /^(HOME|XDG_CONFIG_HOME|XDG_STATE_HOME)$/.test(key) &&
+            /^(HOME|XDG_CONFIG_HOME|XDG_STATE_HOME|CORTEX_ACP_RUNTIME_ROOT)$/.test(key) &&
             typeof value === "string" &&
             value.length > 0 &&
             value.startsWith("/"),
@@ -863,7 +891,7 @@ function launchTarget(command: readonly string[]): LaunchConfig | undefined {
 }
 
 /** Each model's own efforts, from Cortex (CORTEX_MODEL_EFFORTS=1). */
-function modelEfforts(command: readonly string[]): Promise<Record<string, string[]>> {
+export function modelEfforts(command: readonly string[]): Promise<Record<string, string[]>> {
   const target = launchTarget(command);
   if (target === undefined) return Promise.resolve({});
   return new Promise((resolve, reject) => {

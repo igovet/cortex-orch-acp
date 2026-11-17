@@ -196,3 +196,23 @@ it("unmount closes the native dialog; a removed trigger falls back to the page",
   dispose(); dispose = undefined;
   expect(dialog.open).toBe(false);
 });
+
+it("names every dialog by its visible title, following it as it changes, and by its label only without one", async () => {
+  const [who, setWho] = createSignal("backend-dev");
+  const [headed, setHeaded] = createSignal(true);
+  const root = document.createElement("div"); document.body.append(root);
+  dispose = render(() => <Modal open onClose={() => {}} label="Stop this worker?">
+    {headed() ? <div class="dlg-h"><h2>Stop {who()}?</h2></div> : <p>No title</p>}<button data-autofocus>Keep working</button>
+  </Modal>, root);
+  await settle();
+  const dialog = active()!;
+  const name = () => { const by = dialog.getAttribute("aria-labelledby"); return by ? document.getElementById(by)?.textContent : dialog.getAttribute("aria-label"); };
+  expect(name()).toBe("Stop backend-dev?");
+  expect(dialog.hasAttribute("aria-label")).toBe(false);
+  expect(dialog.getAttribute("data-dialog")).toBe("Stop this worker?");
+  setWho("frontend-dev"); await settle();
+  expect(name()).toBe("Stop frontend-dev?");
+  setHeaded(false); await settle();
+  expect(dialog.hasAttribute("aria-labelledby")).toBe(false);
+  expect(name()).toBe("Stop this worker?");
+});

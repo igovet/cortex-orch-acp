@@ -5,8 +5,8 @@ import { Counts, Diff, GitLetter, type HunkActions } from "./diff";
 import { A, I, MenuItem, Pop } from "./kit";
 import { ActionBar, Page, Region, Row, SectionHead, Strip, Toolbar, Whole } from "./layout";
 import type { Route } from "./router";
-import { checkCounts, clock, sameBranch } from "./selectors";
-import { acceptBlocked, checksLine, firstChanged, mergeBlocked, openChecks, reviewFor, stale, taskCheckout } from "./review-model";
+import { checkCounts, clock, readyStep, sameBranch } from "./selectors";
+import { acceptBlocked, acceptOffered, changesOffered, checksLine, firstChanged, mergeBlocked, openChecks, reviewFor, sentence, stale, taskCheckout } from "./review-model";
 import type { SessionModel } from "./session-model";
 import { CHECK_ICON } from "./worker";
 import { ResultText } from "./result-text";
@@ -105,7 +105,7 @@ export function AcceptBlocker(props: { m: SessionModel; id?: string }) {
       </Match>
       <Match when={t().reviewActions?.unblockAction === "request_changes" || t().result?.acceptanceAvailable === false}><button class="btn btn-line btn-sm" {...ws.needs("request_changes")} onClick={() => ws.open({ kind: "changes", taskId: t().id, text: "Please complete the missing review and checks, then publish a fresh result." })}>Request a new result…</button></Match>
       <Match when={t().reviewActions?.unblockAction === "refresh"}><button class="btn btn-line btn-sm" onClick={() => void ws.store.reload()}>Refresh result</button></Match>
-    </Switch>}>{why()}.</Strip>}</Show></>;
+    </Switch>}>{sentence(why())}</Strip>}</Show></>;
 }
 
 /** The decision on a result, at the top of Changes: the version, its checks, Request changes and Accept, in one row. */
@@ -117,15 +117,17 @@ export function ReviewBar(props: { m: SessionModel }) {
   const failed = () => r().checks.some(c => c.outcome === "failed");
   const allPassed = () => r().checks.length > 0 && r().checks.every(c => c.outcome === "passed");
   const ready = (): Route => ({ name: "task", machine: props.m.view.machine.id, task: t().id, tab: "changes" });
-  const reviewing = () => ["review", "ready_to_merge", "done"].includes(t().status) && !t().integration;
-  const hint = () => t().status === "ready_to_merge" ? `${t().acceptance ? `You accepted v${t().acceptance!.version}.` : "Checks passed."} ${sameBranch(t(), props.m.view.target) ? "The task waits for your confirmation." : "The task waits in Ready to merge."}`
-    : t().status === "done" ? "This task is closed." : "Accept moves the task to Ready to merge. Request changes reopens it.";
+  const reviewing = () => changesOffered(t());
+  // The same step the header names: a project-folder task (or one without Git) is finished in place, never merged.
+  const step = () => readyStep(t(), props.m.view.target, props.m.view.project.hasGit);
+  const hint = () => t().status === "ready_to_merge" ? `${t().acceptance ? `You accepted v${t().acceptance!.version}.` : "Checks passed."} ${step() === "Ready to finish" ? "The task waits for your confirmation." : "The task waits in Ready to merge."}`
+    : t().status === "done" ? "This task is closed." : `Accept moves the task to ${step()}. Request changes reopens it.`;
   const describedBy = () => acceptStripShown(props.m) ? why : undefined;
   return <section class="rv-bar" aria-label="Review this result">
     <ActionBar start={<><I n={t().status === "done" ? "check-circle" : "eye"} s={14} class="faint" /><span class="w500">Result v{r().version}</span>
       <span class={`st ${failed() ? "st-bad" : allPassed() ? "st-ok" : "st-idle"}`}><I n={failed() ? "x-circle" : allPassed() ? "check-circle" : "circle"} s={12} />{checksLine(r().checks)}</span></>} hint={hint()}>
       <Show when={reviewing()}><button class="btn btn-line" {...ws.needs("request_changes")} onClick={() => ws.open({ kind: "changes", taskId: t().id })}>Request changes…</button></Show>
-      <Show when={t().status === "ready_to_merge"} fallback={<Show when={t().status !== "done"}><AcceptButton m={props.m} describedBy={describedBy()} /></Show>}><Show when={!t().acceptance}><AcceptButton m={props.m} line describedBy={describedBy()} /></Show><A class="btn btn-primary" to={ready()}>{sameBranch(t(), props.m.view.target) ? "Finish task" : "Open Ready to merge"}</A></Show>
+      <Show when={t().status === "ready_to_merge"} fallback={<Show when={acceptOffered(t())}><AcceptButton m={props.m} describedBy={describedBy()} /></Show>}><Show when={!t().acceptance}><AcceptButton m={props.m} line describedBy={describedBy()} /></Show><A class="btn btn-primary" to={ready()}>{sameBranch(t(), props.m.view.target) ? "Finish task" : "Open Ready to merge"}</A></Show>
     </ActionBar>
     <AcceptBlocker m={props.m} id={why} />
   </section>;
@@ -171,8 +173,8 @@ export function ResultCard(props: { m: SessionModel }) {
     <Show when={props.m.view.project.hasGit === false}><div class="rcard-note cap muted">{ws.t("changesWithoutGit")}</div></Show>
     <AcceptBlocker m={props.m} id={why} />
     <ActionBar place="card" class="rv-card-f" label="Result actions" start={<><A class="lnk" to={changes()}>Review changes</A><Show when={c()}>{x => <span class="cap muted tnum">{x().files} files, <Counts add={x().add} del={x().del} /></span>}</Show></>}>
-      <Show when={["review", "ready_to_merge", "done"].includes(t().status) && !t().integration}><button class="btn btn-sm" {...ws.needs("request_changes")} onClick={() => ws.open({ kind: "changes", taskId: t().id })}>Request changes…</button></Show>
-      <Show when={t().status === "ready_to_merge"} fallback={<Show when={t().status !== "done"}><AcceptButton m={props.m} small describedBy={describedBy()} /></Show>}><Show when={!t().acceptance}><AcceptButton m={props.m} small line describedBy={describedBy()} /></Show><A class="btn btn-primary btn-sm" to={ready()}>{sameBranch(t(), props.m.view.target) ? "Finish task" : "Open Ready to merge"}</A></Show>
+      <Show when={changesOffered(t())}><button class="btn btn-sm" {...ws.needs("request_changes")} onClick={() => ws.open({ kind: "changes", taskId: t().id })}>Request changes…</button></Show>
+      <Show when={t().status === "ready_to_merge"} fallback={<Show when={acceptOffered(t())}><AcceptButton m={props.m} small describedBy={describedBy()} /></Show>}><Show when={!t().acceptance}><AcceptButton m={props.m} small line describedBy={describedBy()} /></Show><A class="btn btn-primary btn-sm" to={ready()}>{sameBranch(t(), props.m.view.target) ? "Finish task" : "Open Ready to merge"}</A></Show>
     </ActionBar>
   </div>;
 }
@@ -268,7 +270,8 @@ export function ChangesPanel(props: { m: SessionModel; route: TaskRoute }) {
         <span class="cap muted">{drafts() ? `${drafts()} comment${drafts() === 1 ? "" : "s"}` : "No comments"}</span>
         <button class="btn btn-line" aria-disabled={drafts() ? undefined : "true"} data-why={drafts() ? undefined : "Add a comment on a line first"} {...ws.needs("send_comments")} onClick={send}>Send<span class="key">Ctrl+Enter</span></button>
       </>}>
-        <Show when={checkout()} fallback={<button class="btn btn-line" aria-disabled="true" data-why={ws.t("noCheckoutRecord")}>Commit…</button>}><A class="btn btn-line" to={commitTo()}>Commit…</A></Show>
+        {/* A closed task has nothing left to commit from its review. */}
+        <Show when={t().status !== "done"}><Show when={checkout()} fallback={<button class="btn btn-line" aria-disabled="true" data-why={ws.t("noCheckoutRecord")}>Commit…</button>}><A class="btn btn-line" to={commitTo()}>Commit…</A></Show></Show>
         <Show when={!sameBranch(t(), props.m.view.target)}><span class="vr"></span><button class="btn btn-line" aria-disabled={blockedMerge() ? "true" : undefined} data-why={blockedMerge()} {...ws.needs("integrate")} onClick={() => { if (!blockedMerge()) ws.open({ kind: "merge", taskId: t().id, how: "squash" }); }}>Merge…</button></Show>
       </ActionBar></Show>}>
       <Show when={bounded()} fallback={<>

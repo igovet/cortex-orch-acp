@@ -1,6 +1,8 @@
 # Security boundary audit
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Historical record. Module, test and script paths in this page that name `.py` files, `src/`, `tests/test_*.py` or the former Python scripts refer to the former Python runtime, which was removed on 2026-11-16; they are kept as dated history, no longer exist in the checkout and are not current commands. The behavior statements are unverified against the Rust runtime unless a Rust source path is given.
+
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 This retained audit describes the earlier implementation. Its old delegation and

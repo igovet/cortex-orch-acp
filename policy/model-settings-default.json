@@ -9,7 +9,7 @@
       "claude-agent-acp/claude-opus-4-6",
       "claude-agent-acp/claude-opus-4-7",
       "claude-agent-acp/claude-opus-4-8",
-      "claude-agent-acp/claude-opus-5[1m]",
+      "claude-agent-acp/claude-opus-5",
       "claude-agent-acp/claude-fable-5",
       "codex-acp/gpt-5.6-luna",
       "codex-acp/gpt-5.6-sol",
@@ -20,8 +20,8 @@
     "enabled": {
       "claude-agent-acp": [
         "default",
-        "opus[1m]",
-        "claude-fable-5-1[1m]",
+        "opus",
+        "fable",
         "claude-sonnet-5",
         "haiku"
       ],
@@ -42,13 +42,13 @@
       "claude-agent-acp": {
         "auto": [
           "default",
-          "opus[1m]",
-          "claude-fable-5-1[1m]",
+          "opus",
+          "fable",
           "claude-sonnet-5",
           "haiku"
         ],
         "tiers": {
-          "claude-fable-5-1[1m]": [
+          "fable": [
             "flagship"
           ],
           "claude-sonnet-5": [
@@ -61,13 +61,13 @@
           "haiku": [
             "light"
           ],
-          "opus[1m]": [
+          "opus": [
             "flagship",
             "deep"
           ]
         },
         "policy": {
-          "claude-fable-5-1[1m]": {
+          "fable": {
             "also_standard_for": null,
             "effort_floor": "low",
             "effort_ladder": null,
@@ -126,7 +126,7 @@
             ],
             "request_names": null
           },
-          "opus[1m]": {
+          "opus": {
             "also_standard_for": null,
             "effort_floor": "medium",
             "effort_ladder": null,
@@ -246,7 +246,7 @@
         {
           "window": "seven_day_opus",
           "models": [
-            "opus[1m]"
+            "opus"
           ]
         },
         {
@@ -258,7 +258,7 @@
         {
           "window": "seven_day_fable",
           "models": [
-            "claude-fable-5-1[1m]"
+            "fable"
           ]
         },
         {
@@ -272,7 +272,7 @@
   },
   "coordinator": {
     "engine": "claude-agent-acp",
-    "model": "opus[1m]",
+    "model": "fable",
     "parameters": {
       "thought_level": "medium"
     }

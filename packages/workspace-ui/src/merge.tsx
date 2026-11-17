@@ -3,13 +3,13 @@ import type { BlockChoice, CodeSide, ConflictBlock, ConflictFile, MergeState } f
 import { useWs } from "./ctx";
 import { Code, GitLetter } from "./diff";
 import { createTicker } from "./freshness";
-import { A, Count, I } from "./kit";
+import { A, Count, I, useWantOverview } from "./kit";
 import { ActionBar, Row, Strip, Whole } from "./layout";
 import { AcceptBlocker, AcceptButton, OpenChecks, Outcomes } from "./review";
 import { ResultText } from "./result-text";
-import { acceptBlocked, behindTarget, conflictFacts, repoOf, cxOf, blockWord, fileName, fileResolved, finishBlocked, RESOLVE_STEPS, taskCheckout, type Cx } from "./review-model";
+import { acceptBlocked, behindTarget, conflictFacts, repoOf, cxOf, blockWord, fileName, fileResolved, finishBlocked, noCommitReason, RESOLVE_STEPS, taskCheckout, type Cx } from "./review-model";
 import type { Route } from "./router";
-import { clock, sameBranch } from "./selectors";
+import { clock, nothingToCommit, readyLabel, sameBranch } from "./selectors";
 import { closeBlocked, duration, type SessionModel } from "./session-model";
 
 type TaskRoute = Extract<Route, { name: "task" }>;
@@ -40,6 +40,14 @@ function Steps(props: { merge: MergeState; line?: boolean }) {
 }
 
 /** Ready to merge: nothing reaches a branch from here until the owner confirms it in the dialog. */
+/** Whether GitHub CLI is there comes with the machine's overview, read when this button is first shown. Not known yet is not "missing". */
+function PrButton(props: { m: SessionModel }) {
+  const ws = useWs();
+  const view = () => props.m.view, t = () => view().task;
+  useWantOverview();
+  return <button class="btn btn-sm" aria-disabled={view().machine.ghAvailable === false || t().integration?.method === "pr" ? "true" : undefined} data-why={view().machine.ghAvailable === false ? "Install and sign in to GitHub CLI (gh) to create a pull request" : t().integration?.method === "pr" ? "A pull request is already open for this version" : undefined} {...ws.needs("integrate")} onClick={() => { if (view().machine.ghAvailable !== false && t().integration?.method !== "pr") ws.open({ kind: "merge", taskId: t().id, how: "pr" }); }}>Create PR…</button>;
+}
+
 export function ReadyPanel(props: { m: SessionModel; route: TaskRoute }) {
   const ws = useWs();
   const t = () => props.m.view.task;
@@ -60,7 +68,7 @@ export function ReadyPanel(props: { m: SessionModel; route: TaskRoute }) {
   const finish = () => finishBlocked(t());
   const closeWhy = () => closeBlocked(props.m);
   const gitPage = (): Route => ({ name: "project", machine: view().machine.id, project: t().projectId, view: "git", scope: { kind: "all" } });
-  const CloseAsIs = () => <button class="btn btn-primary btn-sm" aria-disabled={closeWhy() ? "true" : undefined} data-why={closeWhy()} {...ws.needs("close_task")} onClick={() => { if (!closeWhy()) ws.closeTask(t().id); }}>Close as is…</button>;
+  const CloseAsIs = () => <button class="btn btn-primary btn-sm" aria-disabled={closeWhy() ? "true" : undefined} data-why={closeWhy()} {...ws.needs("close_task")} onClick={() => { if (!closeWhy()) ws.closeTask(t().id); }}>{nothingToCommit(t()) ? "Close task…" : "Close as is…"}</button>;
   const SetUpGit = () => <A class="btn btn-line btn-sm" to={gitPage()}>Set up Git…</A>;
   // Accept points at the strip that says why it is off, so its bar keeps its own words for the other controls.
   const why = createUniqueId();
@@ -94,8 +102,8 @@ export function ReadyPanel(props: { m: SessionModel; route: TaskRoute }) {
     </div>}</Show>
     </Show>
     <Show when={t().status === "ready_to_merge" && same() && !contained()}>
-      <div class="rcard"><div class="rcard-h"><I n="check" s={14} />{t().integrationFacts?.commitAvailable ? `Commit to ${view().target}` : "Review task"}</div>
-        <div class="rcard-b">{t().integrationFacts?.reason ?? (t().integrationFacts?.commitAvailable ? "This task works directly on its target branch. Only its recorded files can be committed here." : "Task-owned file evidence is unavailable. Close as is, or use Done outside the app after finishing in Git.")}
+      <div class="rcard"><div class="rcard-h"><I n="check" s={14} />{t().integrationFacts?.commitAvailable ? `Commit to ${view().target}` : readyLabel(t(), view().target)}</div>
+        <div class="rcard-b">{t().integrationFacts?.reason ?? (t().integrationFacts?.commitAvailable ? "This task works directly on its target branch. Only its recorded files can be committed here." : noCommitReason(t()))}
           <Show when={t().integrationFacts?.otherUncommitted}> Other tasks have uncommitted files in this shared checkout. They will not be included.</Show></div>
         <Outcomes checks={t().result?.checks ?? []} />
         <Show when={t().integrationFacts?.commitAvailable}><OpenChecks checks={t().result?.checks ?? []} taskId={t().id} /><AcceptBlocker m={props.m} id={why} /></Show>
@@ -137,7 +145,7 @@ export function ReadyPanel(props: { m: SessionModel; route: TaskRoute }) {
       <Show when={t().integration?.method === "pr"}><Row class="rv-stale" lead={<I n="merge" s={14} class="faint" />} title={<>Pull request created into <span class="mono">{t().integration!.targetBranch}</span></>} detail={<>{t().integration!.draft ? "Draft. " : ""}{ws.t("prNote")}</>} end={<span>{ws.store.mode === "demo" ? "Mock" : "GitHub CLI"}</span>} /></Show>
       <Show when={!noGit()} fallback={<ActionBar place="card" class="rv-card-f"><SetUpGit /><CloseAsIs /></ActionBar>}>
       <ActionBar place="card" class="rv-card-f" start={<Flow from={t().checkout.branch} to={view().target} behind={behind()} />}>
-        <Show when={remote()}><button class="btn btn-sm" aria-disabled={view().machine.ghAvailable === false || t().integration?.method === "pr" ? "true" : undefined} data-why={view().machine.ghAvailable === false ? "Install and sign in to GitHub CLI (gh) to create a pull request" : t().integration?.method === "pr" ? "A pull request is already open for this version" : undefined} {...ws.needs("integrate")} onClick={() => { if (view().machine.ghAvailable !== false && t().integration?.method !== "pr") ws.open({ kind: "merge", taskId: t().id, how: "pr" }); }}>Create PR…</button></Show>
+        <Show when={remote()}><PrButton m={props.m} /></Show>
         <button class="btn btn-primary btn-sm" {...ws.needs("integrate")} onClick={() => ws.open({ kind: "merge", taskId: t().id, how: "squash" })}>Merge…</button></ActionBar>
       </Show>
     </div>}</Show>

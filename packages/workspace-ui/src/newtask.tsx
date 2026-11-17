@@ -1,13 +1,14 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
-import { capabilityOf, FEATURES, machineDefaults, type TaskSettings } from "@cortex/workspace-domain";
+import { capabilityOf, FEATURES, machineDefaults, type CommandReceipt, type TaskSettings } from "@cortex/workspace-domain";
 import { createAttachments, createDictation, MessageComposer, RouteBar } from "./composer";
 import { useWs } from "./ctx";
+import { FieldEdit } from "./field-edit";
 import { createUnsent } from "./freshness";
 import { Tile } from "./frame";
 import { I, MenuItem, Pop } from "./kit";
 import { ActionBar, Toolbar } from "./layout";
 import type { Route } from "./router";
-import { projectsOn, sprintTitle } from "./selectors";
+import { projectsOn, readyStep, sprintTitle } from "./selectors";
 
 /** A branch-safe name, cut at a word so a long title never ends mid-word. */
 function slug(text: string) {
@@ -54,7 +55,6 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
   const [otherBranch, setOtherBranch] = createSignal<string | null>(null);
   const [titleState, setTitleState] = createSignal<TitleState>("empty");
   const [renamed, setRenamed] = createSignal<string | null>(null);
-  const [renaming, setRenaming] = createSignal<string | null>(null);
   const projects = createMemo(() => projectsOn(ws.store.index(), ws.machine().id).filter(s => s.project.activated !== false));
   const [picked, setPicked] = createSignal<string | null>(props.route.project);
   const summary = () => projects().find(p => p.project.id === picked()) ?? projects().find(p => !p.offline) ?? projects()[0];
@@ -68,6 +68,8 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
   const openBranch = () => summary()?.project.openBranch ?? "";
   const branches = () => summary() ? [...new Set([summary()!.project.defaultBranch, summary()!.project.openBranch])].filter(Boolean) : [];
   const mergeInto = () => target() ?? defaultBranch();
+  // The step the task header will name: a project-folder task on the branch it would merge into is finished in place.
+  const step = () => readyStep({ checkout: checkout() === "main" ? { kind: "main", branch: openBranch() } : { kind: "worktree", branch: branch(), path: "" } }, mergeInto(), summary()?.project.hasGit);
   const sprints = () => summary()?.sprints.filter(s => s.planning === "created") ?? [];
   const pickedSprint = () => sprints().find(s => s.id === sprintId()) ?? null;
   const swap = (next: "task" | "sprint") => ws.go({ ...props.route, kind: next }, { replace: true });
@@ -88,7 +90,8 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
   const projectId = createMemo(() => summary()?.project.id);
   // Only a real switch of project clears them, not the first projection arriving under a deep link.
   createEffect(on(projectId, (_id, previous) => { if (previous === undefined) return; setSprintId(null); setTarget(null); }, { defer: true }));
-  const saveTitle = () => { const v = renaming(); if (v?.trim()) { clearTimeout(naming); setRenamed(v.trim()); setTitleState("named"); } setRenaming(null); };
+  /** The title is kept here until the draft is saved, so Save on it writes nothing to the machine yet. */
+  const saveTitle = (title: string): Promise<CommandReceipt> => { clearTimeout(naming); setRenamed(title); setTitleState("named"); return Promise.resolve({ requestId: "new-task-title", ok: true, outcome: "local", message: "" }); };
 
   const create = async (start: boolean) => {
     setTried(true);
@@ -203,20 +206,17 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
         <Show when={!ws.demo}><div class="note-box plain">The task gets its title after saving. Until then, its description is shown. Click the title to change it.</div></Show>
         <Show when={ws.demo}><dl class="title-prev">
           <dt>Title</dt>
-          <Show when={renaming() === null} fallback={<dd><input class="inp" aria-label="Task title" value={renaming()!} onInput={e => setRenaming(e.currentTarget.value)} ref={el => queueMicrotask(() => { el.focus(); el.select(); })}
-            onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); saveTitle(); } else if (e.key === "Escape") { e.stopPropagation(); setRenaming(null); } }} onBlur={saveTitle} /></dd>}>
-            <Show when={titleState() === "empty"}><dd><span class="muted">Written from your description. Click the title to change it.</span></dd></Show>
-            <Show when={titleState() === "naming"}><dd><span class="shimmer">{draftTitle()}</span> <span class="faint">Naming…</span></dd></Show>
-            <Show when={titleState() === "named"}><dd><button class="tt ws-edit" onClick={() => setRenaming(title())}>{title()}</button></dd></Show>
-            <Show when={titleState() === "failed"}><dd><button class="tt muted ws-edit" onClick={() => setRenaming(draftTitle())}>{draftTitle()}</button></dd><dd class="row"><span class="cap st-warn">Title not generated</span><button class="btn btn-sm" onClick={generate}>Retry</button></dd></Show>
-          </Show>
+          <Show when={titleState() === "empty"}><dd><span class="muted">Written from your description. Click the title to change it.</span></dd></Show>
+          <Show when={titleState() === "naming"}><dd><span class="shimmer">{draftTitle()}</span> <span class="faint">Naming…</span></dd></Show>
+          <Show when={titleState() === "named"}><dd><FieldEdit label="Task title" value={title()} save={saveTitle} closed={{ class: "tt ws-edit", text: saved => saved }} /></dd></Show>
+          <Show when={titleState() === "failed"}><dd><FieldEdit label="Task title" value={draftTitle()} save={saveTitle} closed={{ class: "tt muted ws-edit", text: saved => saved }} /></dd><dd class="row"><span class="cap st-warn">Title not generated</span><button class="btn btn-sm" onClick={generate}>Retry</button></dd></Show>
         </dl></Show>
         <Show when={!pickedSprint()?.checkout} fallback={<div class="cap muted">Checkout follows this sprint: {checkout() === "worktree" ? "Separate worktree per task" : "Project folder"}.</div>}><Checkout /></Show>
-        <Target hint="Git default branch. The task stops at Ready to merge for your confirmation." />
+        <Target hint={`Git default branch. The task stops at ${step()} for your confirmation.`} />
       </div>
     </Show>
 
-    <ActionBar class="create-foot" hint={kind() === "task" ? (ws.store.mode === "real" ? "The plane saves a draft. Saving does not start the task." : ws.t("newTaskNote")) : "The plane starts planning on the chosen model."}>
+    <ActionBar class="create-foot" hint={kind() === "task" ? (ws.store.mode === "real" ? "Save draft saves the task without starting it." : ws.t("newTaskNote")) : "Start planning plans the sprint on the chosen model."}>
       <Show when={kind() === "task"}>
         <button class="btn btn-line btn-lg" {...ws.needs("start_task")} onClick={e => { if (!ws.gate("start_task")) submit(true, e.currentTarget); }}><I n="play" />Start now</button>
       </Show>

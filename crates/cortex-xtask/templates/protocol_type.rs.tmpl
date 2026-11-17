@@ -1,0 +1,26 @@
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "serde_json::Value", into = "serde_json::Value")]
+pub struct NAME {
+    value: serde_json::Value,
+    warnings: Vec<String>,
+}
+impl TryFrom<serde_json::Value> for NAME {
+    type Error = String;
+    fn try_from(value: serde_json::Value) -> Result<Self, Self::Error> {
+        let (value, warnings) = crate::decode_response("NAME", &value)?;
+        Ok(Self { value, warnings })
+    }
+}
+impl From<NAME> for serde_json::Value {
+    fn from(value: NAME) -> Self {
+        value.value
+    }
+}
+impl NAME {
+    pub fn as_value(&self) -> &serde_json::Value {
+        &self.value
+    }
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+}

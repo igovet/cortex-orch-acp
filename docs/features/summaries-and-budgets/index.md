@@ -1,6 +1,6 @@
 # Summaries, weak models, and budgets
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 This page covers how recovery guards against a trusted-sounding but wrong summary,
@@ -12,11 +12,9 @@ derived, provenance-preserving view of authoritative state.
 ## 1. Summarizer independence and adapter findings
 
 The working model (the route actually executing the assignment) and any
-separate summarizer are independent choices (`configuration.resolution`
-already lists `"summarizer"` as a recognized dependent-setting name, so an
-explicit value round-trips validation, but `configuration/config_options.py`
-never surfaces it as a selectable UI option). `recovery.summarizer_policy`
-is the single source of truth for why: static dist evidence for both
+separate summarizer are independent choices (`"summarizer"` is a recognized dependent-setting name, so an
+explicit value round-trips validation, but it is never surfaced as a
+selectable UI option). The reason: static dist evidence for both
 pinned adapters shows **no separate summarizer configuration path**:
 
 - **codex-acp 1.12.0** — `codex_option_mapping` maps only
@@ -27,7 +25,7 @@ pinned adapters shows **no separate summarizer configuration path**:
   entirely internal to `dist/context-compaction.js`'s
   `ContextCompactionLifecycle`, with no summarizer-selection surface.
 
-`portable.engine_contract.EngineCapability.SUMMARIZER_SELECTION` exists as
+The `SUMMARIZER_SELECTION` engine capability exists as
 a portable concept for a future adapter but is wired to neither pinned
 engine today — `summarizer_capability(engine)` always reports
 `supported=False` with a cited reason, never fabricated availability.
@@ -37,7 +35,7 @@ configures or trusts *how*.
 
 ## 2. Semantic-summary trust boundary
 
-`recovery.summary_validation.validate_summary` is the only path a
+`validate_summary` is the only path a
 model-authored summary can take before anything relies on it. Valid JSON
 is not semantic correctness: every candidate is checked, in order, for
 structure (a fixed schema), a literal `provenance: "derived_summary"`
@@ -52,7 +50,7 @@ knows from authoritative state.
 
 ## 3. Bounded retries and deterministic fallback
 
-`recovery.summarizer_policy.resolve_summary` retries an unavailable/invalid
+`resolve_summary` retries an unavailable/invalid
 summarizer up to a bounded attempt count **and** a cumulative estimated
 token spend (whichever is hit first), then returns the deterministic,
 prose-free capsule fallback (`used_deterministic_fallback=True`). It never
@@ -61,17 +59,17 @@ decides that, out of band, if it wants to (`escalated` is always `False`).
 
 ## 4. Context budgeting
 
-`recovery.token_budget` provides the one shared, conservative token
+`token_budget` provides the one shared, conservative token
 estimator (`estimate_tokens`, always rounded up, documented as
-`"estimated"`) used by both this module and `recovery.capsule`'s
+`"estimated"`) used by both this module and the runtime's
 `size_estimate` — never two independently tuned constants. `plan_budget`
 accounts for role instructions, tool schemas, chat/continuation history,
 the capsule, an expected-tool-output reserve, and a response reserve
 together — never only the capsule text — against a route's context window
-(`catalog.model.CatalogEntry.context_window_tokens` when a real evidenced
+(`context_window_tokens` when a real evidenced
 value exists, otherwise the window the engine itself reported as
 `usage_update.size` for this session or, earlier, for the same connection
-and route model — kept by `connections.context_window` under
+and route model — kept by `context_window` under
 `<state_root>/context_windows/<connection_id>.json` — otherwise a labeled
 32 000-token default). A real `usage_update` exact figure always supersedes
 the chat-history estimate. Four decisions: `"fits"`,
@@ -91,9 +89,9 @@ cached and used for subsequent retries.
 
 ## 5. Compaction-loop guard
 
-`recovery.compaction_guard.evaluate_compaction` builds on the
+`evaluate_compaction` builds on the
 `context_generations` ledger with a narrower `compaction_recovery_events`
-table (new, additive schema group — see `recovery.budget_store`) recording
+table (new, additive schema group — see `budget_store`) recording
 whether each compaction attempt actually helped. It blocks (never loops)
 on any of:
 
@@ -122,14 +120,14 @@ such report exists (none arrived, or the Cortex process restarted), the
 attempt is recorded with `before_basis` `unmeasured`: it has no ratio, never
 counts as low recovery and never joins a streak, so only the frequency and
 immediate-refill checks apply to it. A blocked result is
-localized via `acp.messages` (`compaction_blocked`) — the same mechanism
+localized via the runtime (`compaction_blocked`) — the same mechanism
 `budget_overflow`/`summarizer_fallback` use for the other two explicit,
 never-silent runtime lines that the runtime adds.
 
 ## 6. Persisted large outputs
 
-`recovery.large_output_store` persists oversized tool/terminal output
-(bytes already captured by e.g. `engine.terminal_bridge`) to one
+`large_output_store` persists oversized tool/terminal output
+(bytes already captured by e.g. `terminal_bridge`) to one
 owner-private file (mode 0600) under the task's storage directory, with a
 `large_outputs` metadata row. `read_output` is scoped: a caller must supply
 the exact `owner_scope` (`"coordinator"` or a specific `assignment_ref`)
@@ -140,7 +138,7 @@ never only on the first/last chunk.
 
 ## 7. Limited-model presentation
 
-`recovery.presentation.select_presentation` preserves the full role,
+`select_presentation` preserves the full role,
 brief and acceptance text. The former line-based compact mode could
 silently remove an unmarked constraint, so budget overflow must be handled
 explicitly by the caller without shortening the assignment on its own.
@@ -153,14 +151,12 @@ The original task goal and git review evidence are optional context fitted into 
 
 ## New schema
 
-`recovery.budget_store.LARGE_OUTPUT_SCHEMA` adds `large_outputs` and
+The large-output schema group adds `large_outputs` and
 `compaction_recovery_events` as a fifteenth, additive optional table group
-(no `user_version` bump — still v11), wired into `store.py`'s schema
-composition, `cleanup.py`'s per-task deletion order, and `split.py`'s
-presence-detection/copy/FK-coverage machinery, in its own module to avoid
-conflicting with any other task's concurrent schema addition.
+(no `user_version` bump; the format is now 12), installed by the Rust store schema
+(`crates/cortex-core/src/store/schema.sql`).
 
-`catalog.model.CatalogEntry` gains an optional, backward-compatible
+A catalog entry gains an optional, backward-compatible
 `context_window_tokens: int | None = None` field (validated positive
 integer when present); a cached snapshot created before this field existed, with no such key
 deserializes to `None`, falling back to `token_budget`'s conservative
@@ -168,9 +164,7 @@ default.
 
 ## Tests
 
-`tests/test_token_budget.py`, `tests/test_summary_validation.py`,
-`tests/test_summarizer_policy.py`, `tests/test_compaction_guard.py`,
-`tests/test_compaction_guard_runtime.py`,
-`tests/test_large_output_store.py`, `tests/test_presentation.py`, plus
-`context_window_tokens` coverage in `tests/test_catalog_model.py` and
-`tests/test_catalog_store.py`.
+This page was carried over from the former reference, and its statements about
+the budget, summary and compaction guards have not been re-verified against the
+Rust runtime. Regression coverage that exists today is in the Rust test suites
+(`cargo test`; see the [test matrix](../../project/test-matrix.md)).

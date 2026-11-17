@@ -1,6 +1,6 @@
 # User input, questions and cancellation
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 The runtime retains the original goal separately from coordinator messages and
@@ -42,7 +42,7 @@ counter previously caused immediate reblocking without any new engine prompt.
 Dismissal, absent answers and unconfirmed worker termination do not grant a new
 planning turn. The limit is unchanged, and a renewed cycle without a proposal
 still blocks; successful answer mapping alone is not successful orchestration.
-The no-paid regression is `tests/test_question_recovery_continuation.py`; it
+The no-paid regression is in the Rust lifecycle suites; it
 covers option/custom recovery answers, actual plan continuation, exactly-once
 answer consumption and the unchanged no-proposal/decline bound. Earlier live
 evidence must be read in two parts: the original scalar answer was followed by
@@ -118,17 +118,15 @@ not been live-qualified for this change.
 
 For a local owner CLI, inspect or stop commands without launching a model:
 
-```bash
-python3 -B scripts/cortex_commands.py list --project-root <project-path> --task-id <task-id>
-python3 -B scripts/cortex_commands.py stop --project-root <project-path> --task-id <task-id> --tool-call-ref <gateway-command-ref> --reason "<reason>"
-```
-
-The list includes only live or unresolved brokered worker commands and a
+The former owner CLI (`cortex_commands`) was removed. In an ACP chat
+send `/cortex-kill <command-ref> <reason>`; for a read-only listing use the
+`cortex-paseo-tools running-commands <project-root> <task-id> <assignment-ref>`
+reader (an empty assignment ref lists every assignment). The list includes only live or unresolved brokered worker commands and a
 scrubbed, bounded argument summary. A stop request must identify one command and
-include non-whitespace reason text (up to 2000 Unicode characters). The CLI
-prints JSON and returns a nonzero exit for refusals. These controls cover
+include non-whitespace reason text (up to 2000 Unicode characters). A refusal
+is reported with its code. These controls cover
 Cortex gateway commands, not native Codex `apply_patch` or OpenCode `execute`
-actions. The Paseo UI and both CLI routes have automated coverage, but live
+actions. The Paseo UI and the ACP command have automated coverage, but live
 Paseo Desktop/CLI qualification was not run.
 
 `/cortex-finish` (with no argument) is the explicit owner command to close the
@@ -141,24 +139,36 @@ exact `/cortex-finish` during an active turn immediately after durable capture,
 instead of waiting for the current worker and review to finish. A replay of
 the same queued message identity cannot create a second closure event.
 
-When a saved question about closing the **task** receives an exact owner answer
-such as `Закрыть как есть`, `Завершить задачу`, `close as is`, or a bare
-`Завершить`/`Finish` to a question that explicitly asks to finish the task,
-the runtime force-finishes from that recorded answer. This includes a Paseo
-question-card choice or typed answer and works after process recovery. Similar
-but non-closure requests (for example, asking for one more check or a release
-build) continue through ordinary planning. The match is deliberately narrow;
-use `/cortex-finish` if wording is uncertain. Model text alone cannot trigger
-this transition.
+Force-finish keywords (`Stop`, `Закрыть как есть`, `close as is`, `finish now` and
+the like) apply **only** to the runtime's own stop question, recognised by its structured
+marker. On a coordinator or worker question they are ordinary answer text: an option labelled
+`Stop` (for example "Stop the daemon first or keep it?") answers that question and never
+cancels the task. Use `/cortex-finish` to close a task at any time. Model text alone cannot
+trigger this transition.
 
-The runtime's own stop question (asked when the runtime stops a task on a blocker) is different. The runtime recognises it by a structured marker on the question, not by its wording, so a
+The runtime's own stop question (asked when the runtime stops a task on a blocker) is different. It is asked in the task's language (the task's `ru`/`en` setting; for `auto`, the language of the task's own text) and names the reason in plain words (for example "a worker session could not start" / "не удалось запустить сессию воркера"); an unrecognised reason is named as an internal stop with its code in parentheses. The runtime recognises it by a structured marker on the question, not by its wording, so a
 coordinator question with the same text never force-finishes the task. Its Finish option (by number,
 stored or rendered English or Russian text, or label) ends the task `CANCELLED` with
 `USER_FORCE_FINISHED`. Continue resumes the runtime flow and never releases the stop. Only an answer
 in the user's own words releases the question. See
 [the decisions log](../../project/decisions.md#runtime-stop-question-finish-and-continue).
 
-The question text itself (`acp.messages`'s `stop_question`/`stop_reason.<code>` catalog
+A stop for a work blocker that is not a completion gap (a lost worker whose retries gave up, a failed
+check) asks this question at once; only a completion gap first returns to the coordinator. Earlier
+builds left such a stop waiting in recovery with no question; the next start asks it, once, when
+nothing followed the stop. A worker's refused `result_submit` returns its refusal code and what to
+correct to the worker (for content refusals such as `open_failed_check` or `omitted_failed_check`),
+and every refusal is retained as a `WORKER_RESULT_REFUSED` event carrying only the code and the
+attempt binding, so the worker's card can say why it has no result.
+
+On the native desktop host the stopped driver has already exited, so a committed Continue relaunches
+the coordinator from the retained state, and a service restart resumes a Continue whose relaunch it
+interrupted. If the relaunch fails again, the task asks a new stop question with that reason instead
+of waiting in recovery. A native recovery with a recorded reason, or whose owned processes all
+settled, is shown to the owner as waiting for them, with Stop and Close task available. A
+recovery without that evidence stays unconfirmed.
+
+The question text itself (the runtime's `stop_question`/`stop_reason.<code>` catalog
 entries) never shows a bare internal code as the whole reason. Each recognised stop
 code (worker failure, verification failure, review limits, an interrupted result
 delivery the runtime could not reconcile against the worker's actual publication,
@@ -207,13 +217,12 @@ newly provisioned worker removes the answer option. Previously such a message,
 even one that needed no decision, left the coordinator only refused synthesis
 attempts until `structured_proposal_missing` asked the user. The runtime still
 does not judge a message harmless: the coordinator decides, and a model can still
-choose wrongly. The no-paid controller regressions are
-`tests/test_steering_after_verification.py`.
+choose wrongly. The no-paid controller regressions are in the Rust lifecycle suites.
 
 When the queued message carries an image or uploaded-file attachment (its
 bytes/base64 never forwarded to the already-running turn), the retained
 steering carries the same `source_ref`/`name`/`uri`/`kind`/`availability`
-descriptor `acp.agent` already records for durable capture, plus a derived
+descriptor the runtime already records for durable capture, plus a derived
 short English `attachment_hint` such as `Attachments: image r_xxx:1
 (screenshot.png) - open with read_source`, so the coordinator is never left
 with only the plain `[image: ...]` text marker and has to guess an attachment
@@ -377,7 +386,7 @@ keeps its identity and stays running until Cortex reports the outcome. Limits:
 - Other tool calls, and cards Cortex never reported in this connection, keep the
   bridge's behavior.
 
-The runtime half is covered by `tests/test_cancel_prompt_pairing.py` (the
+The runtime half is covered by the Rust incoming-ACP suite (the
 runtime never settles the steered worker's card; the same card later reports
 its result). `integrations/paseo/server/provider-worker-steer.test.ts` (in
 `npm --prefix integrations/paseo run test:steer`) drives the real installed

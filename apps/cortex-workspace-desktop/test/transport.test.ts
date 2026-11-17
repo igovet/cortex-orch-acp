@@ -6,6 +6,32 @@ import { bundleViolations } from "../../../packages/workspace-ui/test/boundary";
 import { readFileSync } from "node:fs";
 
 describe("native port", () => {
+  it("retains the native startup state instead of inventing an offline transition", async () => {
+    let event: (e: unknown) => void = () => {};
+    const native = createDesktopTransport({invoke:vi.fn(),listen:async f => {event=f;return () => {};}});
+    const updates: unknown[] = [];
+    native.transport.subscribe(e => updates.push(e));
+    event({type:"connection",state:"connecting"});
+    event({type:"connection",state:"connected"});
+    expect(updates).toEqual([{type:"connection",state:"connecting"},{type:"connection",state:"connected"}]);
+    native.dispose();
+  });
+  it("forwards checked native deltas and queries, requesting resync for malformed patches", async () => {
+    let event: (e: unknown) => void = () => {};
+    const invoke = vi.fn(async () => ({native:true}));
+    const native = createDesktopTransport({invoke, listen: async f => {event=f; return () => {};}});
+    const updates: unknown[] = [];
+    native.transport.subscribe(e => updates.push(e));
+    const batch = {generation:"g",streamKey:{scope:"project",project_id:"p"},fromSequence:"1",throughSequence:"1",
+      changes:[{kind:"task",id:"t",baseVersion:"1",newVersion:"2",operation:{type:"remove"}}]};
+    event({type:"native_delta",projectId:"p",batch});
+    event({type:"native_delta",projectId:"foreign",batch});
+    expect(updates).toHaveLength(2);
+    expect(updates[1]).toEqual({type:"native_resync",projectId:"foreign"});
+    await native.transport.request("native.query", {operation:"tasks.state"});
+    expect(invoke).toHaveBeenCalledWith({operation:"native.query",message:{operation:"tasks.state"}});
+    native.dispose();
+  });
   it("fences new writes and waits for outstanding acknowledgements before closing", async () => {
     let answer!: (value: unknown) => void;
     const invoke = vi.fn(() => new Promise(resolve => { answer = resolve; }));
@@ -19,6 +45,16 @@ describe("native port", () => {
     await write; await closing;
     expect(finish).toHaveBeenCalledOnce();
     expect(invoke).toHaveBeenCalledOnce();
+  });
+  it("closes without waiting for slow reads; only writes are a barrier", async () => {
+    const invoke = vi.fn(() => new Promise(() => {}));
+    const native = createDesktopTransport({ invoke, listen: async () => () => {} });
+    void native.transport.request("native.query", { operation: "history.page" }).catch(() => {});
+    void native.transport.request("machine.call", { op: "product.facts" }).catch(() => {});
+    void native.transport.request("workspace", { operation: "decisions.list" }).catch(() => {});
+    const finish = vi.fn(async () => {});
+    await native.close(finish);
+    expect(finish).toHaveBeenCalledOnce();
   });
   it("does not terminate on an unacknowledged request; retry never resends it", async () => {
     let fail!: (error: Error) => void;
@@ -65,6 +101,23 @@ describe("native port", () => {
     await native.transport.request("service.status", {});
     await native.transport.request("service.status", {});
     expect(updates).toEqual([{type:"connection",state:"disconnected",reason:"Machine service disconnected"},{type:"connection",state:"connected"}]);
+    native.dispose();
+  });
+  it("one lost status answer while live is not a lost machine; a second one in a row is", async () => {
+    let event: (e: unknown) => void = () => {};
+    const invoke = vi.fn().mockRejectedValueOnce("service_disconnected").mockResolvedValueOnce({channel:"dev"})
+      .mockRejectedValueOnce("service_disconnected").mockRejectedValueOnce("service_disconnected");
+    const native = createDesktopTransport({invoke, listen: async f => { event=f; return () => {}; }});
+    const updates: unknown[] = [];
+    native.transport.subscribe(e => updates.push(e));
+    await Promise.resolve();
+    event({type:"connection",state:"connected"});
+    await expect(native.transport.request("service.status", {})).rejects.toThrow("service_disconnected");
+    await native.transport.request("service.status", {});
+    await expect(native.transport.request("service.status", {})).rejects.toThrow("service_disconnected");
+    expect(updates).toEqual([{type:"connection",state:"connected"}]);
+    await expect(native.transport.request("service.status", {})).rejects.toThrow("service_disconnected");
+    expect(updates).toEqual([{type:"connection",state:"connected"},{type:"connection",state:"disconnected",reason:"Machine service disconnected"}]);
     native.dispose();
   });
   it("passes the service's project change through as a refresh", async () => {

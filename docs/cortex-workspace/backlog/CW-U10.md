@@ -21,12 +21,12 @@ See [requirements](../requirements.md).
 ## Inputs
 
 - Current source, verified 2026-11-04:
-  - Session configuration options: `provider`, `model`, `thought_level` (effort), `language` and `access_mode` (category `mode`), built in `src/cortex_runtime/acp/config_options.py`.
-  - Changing the provider or model always resets `thought_level` (`src/cortex_runtime/acp/agent.py`, configuration-change path).
-  - Access modes Development, Guarded and Auto, with their descriptions, in `src/cortex_runtime/configuration/access_mode.py`. An unknown stored value is shown as Guarded.
-  - Language `auto`, `en` or `ru` for Cortex's own status, question and stop lines (`src/cortex_runtime/acp/config_options.py`, `src/cortex_runtime/acp/messages.py`).
-  - Configuration is a per-task, append-only numbered sequence of `configuration_revisions` with states (`src/cortex_runtime/configuration/store.py`).
-  - Context occupancy is the `usage_update` used/size pair and is not a token total. Usage basis values are `observed`, `engine_reported`, `estimated` and `unknown` (`src/cortex_runtime/portable/engine_contract.py`, [observability](../../features/observability/index.md) section 2).
+  - Session configuration options: `provider`, `model`, `thought_level` (effort), `language` and `access_mode` (category `mode`), built in the former `acp/config_options` module.
+  - Changing the provider or model always resets `thought_level` (the former `acp/agent` module, configuration-change path).
+  - Access modes Development, Guarded and Auto, with their descriptions, in the former `configuration/access_mode` module. An unknown stored value is shown as Guarded.
+  - Language `auto`, `en` or `ru` for Cortex's own status, question and stop lines (the former `acp/config_options` module, the former `acp/messages` module).
+  - Configuration is a per-task, append-only numbered sequence of `configuration_revisions` with states (the former `configuration/store` module).
+  - Context occupancy is the `usage_update` used/size pair and is not a token total. Usage basis values are `observed`, `engine_reported`, `estimated` and `unknown` (the former `portable/engine_contract` module, [observability](../../features/observability/index.md) section 2).
   - Plan usage shown on worker cards is the retained route-selection value, and a missing context snapshot is shown as unavailable, never as zero ([token and plan usage](../../features/token-and-plan-usage/index.md)).
   - Route refusals are visible and never substitute another model ([routing and fallback](../../features/routing-and-fallback/index.md)).
 - [CW-U02](CW-U02.md) (task header and discussion), [CW-C01](CW-C01.md) (versioned contract) and [CW-C04](CW-C04.md) (typed read projections).

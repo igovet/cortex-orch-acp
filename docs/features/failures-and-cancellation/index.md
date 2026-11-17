@@ -1,6 +1,6 @@
 # Failures, cancellation, and disconnects
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 Scope: crash/uncertain-outcome handling without duplicate mutation, hidden
@@ -18,12 +18,12 @@ short, already-captured string — never a scan of raw engine stdout/stderr,
 never a regex with backtracking risk. Unknown/ambiguous input is always
 `indeterminate`, never guessed as `engine_failure`.
 
-`acp.orchestrating_runtime.OrchestratingRuntime._process_new_events`'s
+`_process_new_events`'s
 worker-prompt-failure path calls `classify()` before considering a
 fallback attempt; only `engine_failure` is
-`is_fallback_eligible()`. `routing.authorization.authorize_fallback`
+`is_fallback_eligible()`. `authorize_fallback`
 independently refuses any class outside
-`configuration.policy.KNOWN_FALLBACK_ELIGIBLE_CLASSES` (only
+`KNOWN_FALLBACK_ELIGIBLE_CLASSES` (only
 `engine_failure`/`capacity_unavailable`), so a rate-limit/auth-loss/
 provider-restriction reading of the same failure never reaches route/
 consent evaluation at all — two independent gates, not one.
@@ -39,14 +39,14 @@ host-connection-level markers (`broken_pipe`, `connection_reset`,
 
 A worker's Cortex MCP channel is separate from its engine process. When the
 brokered Cortex MCP server has already answered `tools/list` and then exits
-nonzero on its own, `engine.broker.McpBroker.readiness` reports
+nonzero on its own, the runtime reports
 `mcp_server_crashed`. The running prompt turn is cancelled and fails as
 `cortex_mcp_connection_failed:mcp_server_crashed`. That kind classifies as
 `indeterminate`, so it is never fallback-eligible. It is recorded as
 `assignment_failed` only when the assignment has no `worker_result` or
 `worker_question`, and it never gets the same-session completion follow-up,
 which could only ask for publication through the lost tools. The runtime's
-bounded retry (`orchestration.recovery.retry_lost`) then opens a fresh attempt,
+bounded retry then opens a fresh attempt,
 with a fresh server, only after it confirms the old attempt is absent. An
 uncertain action receipt or the retry limit returns the node to the coordinator
 instead. A clean exit (the engine closed its own client) and the runtime's own
@@ -104,7 +104,7 @@ returns conservative `storage_error`; that label alone does not prove a disk
 outage or a commit outcome. Its public cause uses the exception class and a
 standard errno reason, never the exception-owned reason or filename.
 
-The no-paid scenario `tests/test_plan_error_classification.py` exercises real
+The former Python no-paid scenario exercised real
 policy validation through dispatch and stdio, controlled precommit/commit/reply
 faults, rollback, exact replay, key conflicts and concurrent identical requests.
 It observes transaction state in disposable stores. It neither diagnoses an
@@ -125,11 +125,11 @@ Without reconciliation, `decide` always refuses retry
 This formalizes patterns already present in the codebase:
 `OrchestratingRuntime._attempt_worker_route_fallback` reconciles the old
 attempt (`lookup_owned`/`terminate_owned`, channel revocation) *before*
-opening a replacement session; `recovery.worker_reconciliation.reconcile`
+opening a replacement session; the runtime
 checks for an already-published `worker_result` before writing
 `recovery_worker_lost`, re-checked inside the same transaction as that
 write so a concurrently-published result always wins;
-`delegation.deliveries`/`delegation.provisioning` use idempotency keys for
+the runtime/the runtime use idempotency keys for
 every durable publication. No blanket exactly-once guarantee is made
 anywhere for an external mutation whose fate cannot be observed.
 
@@ -137,7 +137,7 @@ anywhere for an external mutation whose fate cannot be observed.
 
 An engine that fails for an infrastructure reason is retried automatically,
 and the chat shows each retry as it happens.
-`engine.retry_policy.windowed_retry` sets the timing. The first retry waits
+`windowed_retry` sets the timing. The first retry waits
 5 s, and each later wait doubles, up to 60 s. The work stops only after
 failures have kept repeating for 10 minutes (`RETRY_WINDOW_SECONDS`). A
 failure more than 10 minutes after the previous one starts a new streak.
@@ -162,7 +162,7 @@ failure more than 10 minutes after the previous one starts a new streak.
   reopening the session if it died, and the chat shows `⟳ The coordinator's
   engine failed before answering …`. A turn that already streamed or called
   a tool may have acted, so it is not resent. It blocks as before.
-- **Workers.** In `orchestration.recovery.retry_lost`, an assignment that
+- **Workers.** In `retry_lost`, an assignment that
   failed with class `engine_failure`, `transport_failure` or `worker_lost`
   is retried within the same window. This includes a worker engine that
   would not start and recorded no route failure. These retries do not use
@@ -212,43 +212,21 @@ retry window also stop visibly. There is no automatic alternate route or
 escalation for this blocker. Restarting can repair stale in-memory account state;
 it does not guarantee renewal of an expired or revoked native login.
 
-### Opt-in native CLI login keepalive (outside the runtime)
+### Native CLI login keepalive (removed)
 
-`scripts/cortex_auth_keepalive.py` is a standalone operational script, not
-runtime behavior: the Cortex runtime never invokes it, and installing its
-optional `systemd --user` timer (`scripts/systemd/`) is a manual owner
-choice this repository never performs automatically. Run manually or on a
-timer, it checks, per engine, at most one zero-cost refresh-forcing command
-a prior investigation proved does not make a paid call; if no such command
-is proven for an engine it reports that engine `unsupported` rather than
-guessing one or falling back to a real model prompt. As of this writing no
-zero-cost refresh-forcing command is proven for either the installed
-Claude Code CLI or the installed Codex CLI (installed-CLI `--help` text
-describes status/login display only, never a proven refresh or
-persistence), so both engines currently report `unsupported`.
-
-It never reads, copies or prints a credential/token value, and never logs
-or persists a command's stdout/stderr (only the bare exit code is
-observed): a sanitized `engine`/`status` (`ok`/`needs-login`/`unsupported`/
-`error`)/`exit_code`/`detail` JSON line is all it prints. The process exits
-non-zero exactly when a configured engine reports `needs-login` or `error`,
-so a `systemd` timer surfaces a real re-login need in `journalctl` without
-ever attempting one itself. See `scripts/systemd/README.md` for the manual
-install/uninstall steps and `tests/test_auth_keepalive.py` for its
-mocked-subprocess coverage.
+The standalone login keepalive script and its optional `systemd --user` timer were Python-era tooling and were removed on 2026-11-16 without replacement. The runtime never performed a re-login on its own; a needed re-login is reported by the engine, and the owner re-authenticates the native CLI.
 
 ### Project scans outside the store's write lock
 
-Some write transactions decide on an observed project revision
-(`delegation.revision.capture_revision`): a review result binding, completion
+Some write transactions decide on an observed project revision: a review result binding, completion
 and answer checks, verification credit, synthesis, the execution baseline and
 the review waiver. Each one used to scan the project inside `BEGIN IMMEDIATE`;
 synthesis scanned at least four times. SQLite's write lock covers the whole
 database, so every other writer, including another chat's runtime on the same
 project, failed with `database is locked` once its 15 s busy timeout ran out.
 `TaskMachine` and `synthesis.complete` now scan once before the transaction
-(`orchestration.state.observed_project`,
-`delegation.revision.observation_snapshot`), and every capture of that root
+(`observed_project`,
+`observation_snapshot`), and every capture of that root
 inside the transaction returns that observation. The scan holds the
 project-change lock (`.cortex/.project-mutation.lock`, shared) until the
 transaction ends. A gateway file effect (`project_write`, `project_edit`,
@@ -262,7 +240,7 @@ Scheduler and lifecycle writes run through `Store.immediate_write`: event append
 
 The controller treats a storage-contention error (`database is locked` or `storage_busy`) raised during a turn as a transient failed pass. It waits from 0.5 s, doubling up to 10 s, on the turn's cancellation event, then resumes from durable state. The turn is not unwound, so running workers are not torn down for it. The controller re-raises the error after 900 s of contention, when the turn is cancelled, or when the host transport is lost. Contention met while reconciling results, completing the task or retrying a lost worker is re-raised as well, instead of becoming a `BLOCKED` stop or a coordinator return that cancels the siblings.
 
-A coordinator prompt that returned normally is not a failed engine call, even when recording its turn end is contended. Its bookkeeping writes (the `COORDINATOR_TURN_ENDED` event, the authorization-recovered mark, the delivered mark for the claimed events and the context-delivery confirmation) sit outside the prompt's failure handler. On contention they retry in place with the same backoff and one shared 900 s allowance (`orchestration.controller._StorageContention`), and the failure handler's own release, turn-end and delivery writes do too. Re-entering the pass instead would prompt the coordinator again. When the allowance is spent, the turn is cancelled or the transport is lost, the error ends the turn without a re-entry; it never becomes `coordinator_prompt_failed`, a `BLOCKED` stop or a sibling cancellation.
+A coordinator prompt that returned normally is not a failed engine call, even when recording its turn end is contended. Its bookkeeping writes (the `COORDINATOR_TURN_ENDED` event, the authorization-recovered mark, the delivered mark for the claimed events and the context-delivery confirmation) sit outside the prompt's failure handler. On contention they retry in place with the same backoff and one shared 900 s allowance, and the failure handler's own release, turn-end and delivery writes do too. Re-entering the pass instead would prompt the coordinator again. When the allowance is spent, the turn is cancelled or the transport is lost, the error ends the turn without a re-entry; it never becomes `coordinator_prompt_failed`, a `BLOCKED` stop or a sibling cancellation.
 
 ## 3. Cancellation (`session/cancel`)
 
@@ -299,8 +277,8 @@ attempt that is already failed with its first reason and records no
 
 `/cortex-stop` permanently marks the task CANCELLED before cleanup. It closes
 pending questions, fences late publications and cancels capacity-queued opens.
-A captured `/cortex-finish` command or explicit owner answer to close the task
-as-is uses the same cancellation cleanup, but also records `USER_FORCE_FINISHED`
+A captured `/cortex-finish` command or the Finish answer to the runtime's own stop question
+uses the same cancellation cleanup, but also records `USER_FORCE_FINISHED`
 with unfinished work. It is terminal `CANCELLED`, never verified `COMPLETED`.
 A worker opened concurrently with cancellation is closed before its first prompt.
 Reservations release only on observed process absence. Unknown engine liveness
@@ -309,7 +287,7 @@ updates are retained and replayed if the client disconnected before seeing them.
 
 ### Recovery cancels only live assignments
 
-Every path that stops or replans live work records the live set in the same transaction that cancels the pending and running nodes: `session/cancel` interruption, `propose_replan`, `return_to_coordinator` and both stop-question branches. Each writes a `LIVE_ASSIGNMENTS_CANCELLED` event naming the assignment references it cancelled. The RECOVERING step (`orchestration/controller.py`, `_recover`) reads the captures not yet settled, cancels and terminates exactly those assignments, and sweeps only the owned provisioning attempts whose idempotency keys match them. Completed and failed assignments, and any assignment an earlier recovery already settled, are not touched. A completed worker still settling its result is left to its own settlement.
+Every path that stops or replans live work records the live set in the same transaction that cancels the pending and running nodes: `session/cancel` interruption, `propose_replan`, `return_to_coordinator` and both stop-question branches. Each writes a `LIVE_ASSIGNMENTS_CANCELLED` event naming the assignment references it cancelled. The RECOVERING step reads the captures not yet settled, cancels and terminates exactly those assignments, and sweeps only the owned provisioning attempts whose idempotency keys match them. Completed and failed assignments, and any assignment an earlier recovery already settled, are not touched. A completed worker still settling its result is left to its own settlement.
 
 The captures survive a restart in RECOVERING. The RECOVERING-to-PLANNING transaction writes `LIVE_CANCELLATIONS_SETTLED` for the captures it covered. If a live worker's termination is not confirmed, the task moves to BLOCKED with `replanning_worker_termination_unconfirmed`, and a later recovery rechecks the same captured attempts. A node cancelled by a stop recorded before captures existed is captured on its first recovery with reason `unrecorded` and handled the same way.
 
@@ -327,6 +305,24 @@ acknowledgement is not proof of termination: confirmed termination is recorded
 only after kill and wait, while a command that exited first is recorded as a
 missed stop. An unresolved started-command record after a runtime crash is not
 proof that its operating-system process is still alive.
+
+### Close and Continue on a task with an unknown outcome
+
+**Close task** commits the owner's cancellation at admission. If an earlier
+attempt's process is still unconfirmed when the close finishes, the close is
+reported done anyway (receipt `processesUnconfirmed: true`, and
+`OWNER_TASK_RESOLVED` records `processes_unconfirmed`): the task is closed
+whatever that process did, so the window closes the card. Nothing claims the
+process exited; Delete keeps refusing `active_execution` until restart recovery
+settles it (see [recovery](../recovery-and-replacement/index.md#native-attempts-left-unconfirmed-by-an-earlier-host)).
+
+A paused task that a restart held with an unknown outcome (for example
+`native_session_outcome_unknown`) refuses a desktop message as `task_paused`.
+**Continue** resumes it as RECOVERING with that reason; when every owned
+process is confirmed gone (Resume refuses `native_shutdown_unconfirmed`
+otherwise) it then continues like an owner message: the coordinator is
+relaunched to replan from the retained state, instead of the task silently
+staying in RECOVERING with no driver.
 
 ## Terminal resource cleanup
 
@@ -374,7 +370,7 @@ and writer reuse, not paid engine or rendered client behavior.
 ## 4. Disconnect
 
 The transport's reader EOF event signals that input ended, not that its
-disconnect callback finished. On the stdin-EOF path, `acp.agent.main` joins
+disconnect callback finished. On the stdin-EOF path, the runtime joins
 the reader before joining prompt workers and shutting down the runtime.
 This preserves recording/cancellation before process exit even when the EOF
 callback is still running. The writer-closed event likewise precedes its
@@ -383,7 +379,7 @@ prompt workers and shutting down the runtime. SIGTERM runs its disconnect
 callback synchronously on the main thread. SIGTERM and writer-close must not
 join a reader blocked on still-open stdin.
 
-`acp.agent.Agent._handle_eof`/`handle_writer_closed` (host transport EOF or
+`_handle_eof`/`handle_writer_closed` (host transport EOF or
 writer-closed) already invalidate every session's `cancel_event` and close
 the connection's `HostRequester` (resolving every pending host round trip —
 permission, elicitation, fs — as closed). The runtime adds
@@ -391,7 +387,7 @@ permission, elicitation, fs — as closed). The runtime adds
 `ProductionOrchestratingRuntime.disconnect`): invalidates the coordinator's
 own permission binding the same way `cancel` does, records a durable
 `progress` event naming what was paused/cancelled/unconfirmed, then runs
-the bounded owned-resource reaper (`engine.reaper.sweep`). No adapter
+the bounded owned-resource reaper. No adapter
 currently supports a confirmed pause, so cancel is the correct default per
 the task's own "confirmed pause, else cancel" rule — never hidden
 continuing paid work.
@@ -413,7 +409,7 @@ host-owned and cannot be suppressed from inside the plugin. Inside Cortex:
   routed to fallback and is not re-dispatched during teardown.
 - A coordinator turn that ends with an unhandled error tears down its workers the same way. The task is marked host-disconnected before its cancellation, so a worker that teardown kills is recorded as transport loss, never `engine_failure`, and gets no fallback. Its work stays as persisted for recovery.
 - The durable record is a `progress` event of kind `host_disconnected`
-  (`recovery.worker_reconciliation.record_host_disconnect`) with the exact `session_id`,
+ with the exact `session_id`,
   `task_id`, `coordinator_attempt_id`, each interrupted worker's
   `node_id`/`assignment_ref`/`attempt_id`, each gateway action whose
   receipt is still open (`unknown_outcome_actions`: operation,
@@ -431,8 +427,7 @@ host-owned and cannot be suppressed from inside the plugin. Inside Cortex:
   When no signal reached the old process (SIGKILL, OOM), there is no
   `host_disconnected` record; a later reader treats a worker with no
   terminal event whose owning process is provably gone as interrupted. A
-  live or unidentifiable owner never qualifies, and the read writes nothing
-  (`recovery.worker_reconciliation.interrupted_attempts`).
+  live or unidentifiable owner never qualifies, and the read writes nothing.
 - Paseo 0.9.2 does not reload the session after a plugin reload and sends
   nothing until the next prompt, so a worker card would otherwise keep its
   last `running` status through a page reload. The plugin's card polls the
@@ -531,21 +526,7 @@ env-var-gated `os._exit(137)` mechanism):
 
 ## Tests
 
-`tests/test_t028_failures_cancellation_disconnects.py` covers
-classification (including the rate-limit/auth-loss/provider-restriction
-non-eligibility assertions), retry policy, reaper capacity/workspace
-sweeps (confirmed-only release, bounded/idempotent, user-file
-non-interference), and cancellation binding-invalidation forwarding.
-Existing fallback regression tests
-(`tests/test_orchestrating_runtime_routing_fallback.py`) continue to pass
-unchanged, confirming classification did not alter existing fallback
-eligibility for `transport_eof`/`timeout_alive`/`poisoned`.
-`tests/test_engine_retry_window.py` covers the transient-failure retry
-window: the policy itself, coordinator launch and turn retries with their
-chat lines, and the worker retry delay with its wait card.
-`tests/test_observation_outside_write_lock.py` covers scans outside the write
-lock and the project-change lock; `tests/test_sandbox_scan_visibility.py`
-covers the sandbox scan card and the home-directory refusal.
+The former Python suites covered classification (including the rate-limit/auth-loss/provider-restriction non-eligibility assertions), retry policy, reaper capacity/workspace sweeps (confirmed-only release, bounded/idempotent, user-file non-interference), cancellation binding-invalidation forwarding, the transient-failure retry window (the policy itself, coordinator launch and turn retries with their chat lines, and the worker retry delay with its wait card), scans outside the write lock and the project-change lock, and the sandbox scan card and home-directory refusal. Those suites were removed on 2026-11-16 and their coverage was not re-verified in the Rust suites (`cortex-core` scheduler/retry tests and `workspace-service` tests); treat these statements as carried over.
 
 ## Known limitations
 

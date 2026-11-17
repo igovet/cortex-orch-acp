@@ -2,7 +2,7 @@
 
 Source: `skills/requirements-intake/` (`SKILL.md`, `references/question-banks.md`,
 `references/agreed-spec.md`), the coordinator routing in `skills/orchestrator/SKILL.md`,
-and the coordinator-only registration in `src/cortex_runtime/portable/roles.py`.
+and the coordinator-only role registration (`profiles.json`, `agent-sources/`).
 
 Requirements intake is situational coordinator guidance. It is not a runtime gate:
 the runtime does not check whether a sufficiency review happened, how many questions
@@ -99,7 +99,7 @@ acceptance.
 ## Worker-side questions
 
 Workers do not run intake and cannot read the coordinator-only skill. The coordinator
-registration in `roles.py` excludes it from worker and consultant channels.
+registration excludes it from worker and consultant channels.
 
 When a worker finds a material gap in its delegated brief, it uses its advertised
 `ask_question` route. The specialist sources for UX design and frontend work say so
@@ -115,8 +115,8 @@ checks declared scope and writer conflicts.
 ## Verification and limits
 
 - Registration, role visibility and the presence of the intake rules are covered by
-  `tests/test_portable_roles.py` (coordinator design intake is situational and not
-  worker-readable) and `tests/test_prompt_drift.py` (intake and design sources keep their
+  the `cortex-xtask` generation checks (`profiles check`, `generate-instructions check`) and `crates/cortex-xtask/tests/repo.rs` (coordinator design intake is situational and not
+  worker-readable; intake and design sources keep their
   evidence and ownership rules). They check source text and delivery, not the quality of
   a model's sufficiency judgment.
 - Whether the coordinator asked the right questions, or stayed within the bounds, is

@@ -9,7 +9,7 @@ import { A, Count, FactLine, I, MenuItem, Pop, RowList } from "./kit";
 import { Page, StatusLane, Toolbar, type StripItem } from "./layout";
 import { defaultCheckout, repoOf, taskCheckout } from "./review-model";
 import type { ProjectView, Route, Scope } from "./router";
-import { age, awaitsOwner, bySprint, cardFact, clock, columnsOf, COLUMNS, decisionRoute, inScope, rowIcon, sameBranch, sprintRoute, sprintTitle, sprintView, type ColumnId, type GroupedRow, type ProjectSummary, type TaskView } from "./selectors";
+import { age, awaitsOwner, bySprint, cardFact, clock, columnsOf, COLUMNS, decisionRoute, inScope, nothingToCommit, rowIcon, sameBranch, sprintRoute, sprintTitle, sprintView, type ColumnId, type GroupedRow, type ProjectSummary, type TaskView } from "./selectors";
 import { closeBlocked, sessionModel } from "./session-model";
 import { KnowledgePage, ProjectSettingsPage } from "./project-pages";
 import { createQueueStrip, QueueButton, QueueHelp, RunMode, SprintTarget, TargetChoices } from "./sprint";
@@ -30,11 +30,11 @@ export const taskRoute = (v: TaskView): Route => ({ name: "task", machine: v.mac
 function primaryAction(v: TaskView, startable: boolean): { label: string; kind: "go" | "start" | "resume"; line?: boolean } | null {
   if (v.unknown) return null;
   switch (v.column) {
-    case "needs": return { label: v.task.conflict !== "none" ? "Resolve" : /permission/i.test(v.task.issue ?? "") ? "Review" : "Answer", kind: "go" };
+    case "needs": return v.task.status === "paused" ? { label: "Resume", kind: "resume" } : { label: v.task.conflict !== "none" ? "Resolve" : /permission/i.test(v.task.issue ?? "") ? "Review" : v.task.status === "failed" || v.task.status === "cancelled" ? "Open" : "Answer", kind: "go" };
     case "todo": return startable ? { label: "Start", kind: "start" } : null;
     case "work": return v.task.status === "paused" ? { label: "Resume", kind: "resume" } : v.task.status === "working" ? { label: "Open", kind: "go", line: true } : null;
     case "review": return { label: "Review", kind: "go" };
-    case "merge": return { label: v.task.integrationFacts?.alreadyInTarget ? "Close task…" : sameBranch(v.task, v.target) ? v.task.integrationFacts?.commitAvailable ? `Commit to ${v.target}…` : "Review task" : "Merge…", kind: "go" };
+    case "merge": return { label: v.task.integrationFacts?.alreadyInTarget || nothingToCommit(v.task) ? "Close task…" : sameBranch(v.task, v.target) ? v.task.integrationFacts?.commitAvailable ? `Commit to ${v.target}…` : "Review task" : "Merge…", kind: "go" };
     default: return null;
   }
 }
@@ -273,16 +273,23 @@ export function ProjectPage(props: { summary: ProjectSummary; route: Extract<Rou
   const activate = () => ws.run({ type: "activate_project", projectId: props.summary.project.id });
   // Each strip is one item for the life of the page, so a change of words never redraws the rest of the lane.
   const notActivated: StripItem = { id: "activate", tone: "info", text: "This project is not activated. Activating lets tasks run in this folder; it starts no task and keeps everything already here.", action: <button class="btn btn-primary btn-sm" {...ws.needs("activate_project")} onClick={activate}>Activate</button> };
-  const issue: StripItem = { id: "issue", tone: "fail", role: "alert", icon: <I n="help" s={14} class="faint" />, get text() { return props.summary.project.issue; }, action: <button class="btn btn-sm" {...ws.needs("activate_project")} onClick={activate}>Try again</button> };
+  const issue: StripItem = { id: "issue", tone: "fail", role: "alert", icon: <I n="help" s={14} class="faint" />, get text() { const cause = props.summary.project.issueCause; return <>{props.summary.project.issue}{cause ? <span class="cap muted ws-block">Cause: {cause}</span> : null}</>; }, action: <button class="btn btn-sm" {...ws.needs("activate_project")} onClick={activate}>Try again</button> };
   const offline: StripItem = { id: "offline", tone: "info", icon: <I n="help" s={14} />, get text() { return `Last known state. ${props.summary.machine.name} is offline, last confirmed ${clock(props.summary.machine.lastConfirmedAt)}. Actions are unavailable until it reconnects.`; } };
   const planning = mapArray(() => isWork() && props.route.scope.kind === "all" ? props.summary.sprints.filter(s => s.planning !== "created" && s.planning !== "cancelled") : [], (s): StripItem => ({
     id: `planning:${s.id}`, tone: "info", icon: <I n="layers" s={14} />,
     text: `Sprint: ${sprintTitle(s)} · ${s.planning === "question" ? "Question waiting" : s.planning === "ready" ? "Plan ready" : "Planning"} · No tasks created yet`,
     action: <A class="lnk" to={sprintRoute(props.summary.machine.id, s)}>Open planning</A>,
   }));
+  // A sprint deletion that stopped part-way is said where its tasks are, with the way to its retry.
+  const deleting = mapArray(() => isWork() && props.route.scope.kind === "all" ? props.summary.sprints.filter(s => s.deletion) : [], (s): StripItem => ({
+    id: `deleting:${s.id}`, tone: "warn", role: "status", icon: <I n="hourglass" s={14} class="st-warn" />,
+    get text() { return `Sprint: ${sprintTitle(s)} · ${sprintView(ws.store.index(), s).state}`; },
+    action: <A class="lnk" to={sprintRoute(props.summary.machine.id, s)}>Open sprint</A>,
+  }));
   const status = createMemo<StripItem[]>(() => [
     ...(ws.store.mode === "real" && props.summary.project.activated === false ? [notActivated] : []),
     ...(props.summary.project.issue ? [issue] : []),
+    ...deleting(),
     ...planning(),
     ...(props.summary.offline && isWork() ? [offline] : []),
     ...(queueStrip() ? [queueStrip()!] : []),
@@ -324,8 +331,8 @@ export function ProjectPage(props: { summary: ProjectSummary; route: Extract<Rou
       </Show>
     </Show>}>
       <Show when={knownSprint()} fallback={<div class="note-panel"><span class="w500">Sprint not found</span><A class="lnk" to={{ ...props.route, scope: { kind: "all" } }}>Show all work</A></div>}>
-        <Show when={missing() > 0}><div class="note-panel" role="status"><span class="w500">Task details unavailable</span><span>{missing()} sprint task{missing() === 1 ? "" : "s"} could not be loaded. The sprint membership is retained.</span><button class="btn btn-line btn-sm" onClick={() => ws.store.reload()}>Retry</button></div></Show>
-        <Show when={scoped().length > 0} fallback={<div class="note-panel"><span class="w500">{sprintId() ? missing() ? "Waiting for sprint task details" : "No active tasks in this sprint" : props.route.scope.kind === "standalone" ? "No standalone tasks" : "No tasks in this project yet"}</span>
+        <Show when={missing() > 0 && !!props.summary.project.issue}><div class="note-panel" role="status"><span class="w500">Task details unavailable</span><span>{missing()} sprint task{missing() === 1 ? "" : "s"} could not be loaded. The sprint membership is retained.</span><button class="btn btn-line btn-sm" onClick={() => ws.store.reload()}>Retry</button></div></Show>
+        <Show when={scoped().length > 0} fallback={<div class="note-panel"><span class="w500">{sprintId() ? missing() ? "" : "No active tasks in this sprint" : props.route.scope.kind === "standalone" ? "No standalone tasks" : "No tasks in this project yet"}</span>
           <Show when={!props.summary.offline && (!sprintId() || (addSprint() && !missing()))}><button class="btn btn-line btn-sm" onClick={onQuick}><I n="plus" s={14} />New task</button></Show></div>}>
           <Show when={views().length > 0} fallback={<div class="note-panel"><span class="w500">No tasks match this filter</span><button class="btn btn-sm" onClick={() => setFilter("")}>Clear filter</button></div>}>
             <div class="main-body">

@@ -1,0 +1,1232 @@
+//! Restart from durable checkpoints, never from an inferred process outcome.
+use crate::native_runtime::Runtime;
+use cortex_core::{
+    lifecycle::{self, domain, waits},
+    ownership::{self, OwnerEpoch},
+    CoreError, CoreResult, TaskState,
+};
+use serde_json::{json, Value};
+use std::{collections::BTreeMap, sync::Arc};
+
+/// Runs one task's recovery writes inside a savepoint. A failure rolls back only
+/// that task's writes and is returned to the caller, so one damaged or legacy task
+/// can never fail the recovery (and the opening) of the whole project.
+fn isolated<T>(db: &rusqlite::Transaction<'_>, body: impl FnOnce() -> CoreResult<T>) -> CoreResult<T> {
+    db.execute_batch("SAVEPOINT native_recovery_task")?;
+    match body() {
+        Ok(value) => {
+            db.execute_batch("RELEASE native_recovery_task")?;
+            Ok(value)
+        }
+        Err(error) => {
+            db.execute_batch("ROLLBACK TO native_recovery_task; RELEASE native_recovery_task")?;
+            Err(error)
+        }
+    }
+}
+
+/// Whether the task has a runtime record. Runtime events reference it, so a task the
+/// retired Python host ran before runtime records existed can never carry one.
+fn runtime_record(db: &rusqlite::Transaction<'_>, task: &str) -> CoreResult<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_tasks WHERE task_id=?)",
+        [task],
+        |r| r.get(0),
+    )?)
+}
+
+/// Records a settlement on the task's history when it has one. A task without a
+/// runtime record keeps the evidence on the settled rows themselves (the terminated
+/// provisioning status and the reservation's release observation).
+fn settled_event_tx(db: &rusqlite::Transaction<'_>, task: &str, payload: Value) -> CoreResult<()> {
+    if runtime_record(db, task)? {
+        lifecycle::event_tx(db, task, "NATIVE_PROCESS_SETTLED", payload)?;
+    }
+    Ok(())
+}
+
+/// The process group and start time (`/proc/<pid>/stat` fields 5 and 22).
+fn process_stat(pid: i64) -> Option<(i64, String)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields: Vec<&str> = stat.get(stat.rfind(')')? + 1..)?.split_whitespace().collect();
+    Some((fields.get(2)?.parse().ok()?, (*fields.get(19)?).to_owned()))
+}
+
+/// Whether a process recorded in this boot may still run: its exact process (pid with
+/// the recorded start time) or any member of its process group. Anything that cannot
+/// be observed counts as running.
+fn recorded_process_alive(pid: i64, pgid: i64, start: &str) -> bool {
+    if pid <= 0 {
+        return true;
+    }
+    if process_stat(pid).is_some_and(|(_, started)| started == start) {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    pgid > 0
+        && entries.flatten().any(|e| {
+            e.file_name()
+                .to_str()
+                .and_then(|n| n.parse::<i64>().ok())
+                .and_then(process_stat)
+                .is_some_and(|(group, _)| group == pgid)
+        })
+}
+
+/// Process records of the retired Python host never received an end time when its
+/// boot ended, so they kept old tasks "running" forever (Delete refused them). A
+/// record from an earlier boot cannot name a live process; a record from this boot is
+/// ended only when neither its exact process nor any member of its process group
+/// still exists. The row itself keeps the evidence (`termination_reason`).
+fn settle_registry_tx(
+    db: &rusqlite::Transaction<'_>,
+    boot: &str,
+    failures: &mut Vec<(String, String)>,
+) -> CoreResult<()> {
+    let rows = db
+        .prepare(
+            "SELECT task_id,attempt_id,pid,pgid,start_ticks,boot_id FROM attempt_process_registry
+             WHERE terminated_at IS NULL ORDER BY task_id,rowid",
+        )?
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut per_task: BTreeMap<String, Vec<(String, &'static str)>> = BTreeMap::new();
+    for (task, attempt, pid, pgid, start, recorded_boot) in rows {
+        let reason = if recorded_boot != boot {
+            "previous_boot"
+        } else if !recorded_process_alive(pid, pgid, &start) {
+            "process_gone"
+        } else {
+            continue;
+        };
+        per_task.entry(task).or_default().push((attempt, reason));
+    }
+    for (task, ended) in per_task {
+        let done = isolated(db, || {
+            for (attempt, reason) in &ended {
+                db.execute(
+                    "UPDATE attempt_process_registry SET terminated_at=?,termination_reason=?
+                     WHERE attempt_id=? AND task_id=? AND terminated_at IS NULL",
+                    (cortex_core::now(), reason, attempt, &task),
+                )?;
+            }
+            Ok(())
+        });
+        if let Err(error) = done {
+            failures.push((task, error.code().to_owned()));
+        }
+    }
+    Ok(())
+}
+
+/// The retired Python host left `failed`/`in_progress` worker rows whose session was
+/// never created: no engine session, no process record, and either every capacity
+/// reservation of the attempt already released by that host's own process
+/// observation, or (`failed`) no capacity at all. No process of such an attempt can
+/// run. This host never leaves a row like that: it releases a reservation and
+/// terminates its provisioning row in one transaction, and never writes `failed`.
+fn settle_released_unstarted_tx(
+    db: &rusqlite::Transaction<'_>,
+    failures: &mut Vec<(String, String)>,
+) -> CoreResult<()> {
+    let rows = db
+        .prepare(
+            "SELECT p.task_id,p.idempotency_key,p.status,p.attempt_id FROM delegation_provisioning p
+             WHERE p.status!='terminated' AND p.engine_session_ref IS NULL
+             AND NOT EXISTS(SELECT 1 FROM attempt_process_registry a WHERE a.attempt_id=p.attempt_id)
+             AND NOT EXISTS(SELECT 1 FROM capacity_reservations r WHERE r.attempt_id=p.attempt_id AND r.state!='released')
+             AND (EXISTS(SELECT 1 FROM capacity_reservations r WHERE r.attempt_id=p.attempt_id)
+                OR p.status='failed')
+             ORDER BY p.task_id,p.rowid",
+        )?
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut per_task: BTreeMap<String, Vec<(String, String, Option<String>)>> = BTreeMap::new();
+    for (task, key, status, attempt) in rows {
+        per_task.entry(task).or_default().push((key, status, attempt));
+    }
+    for (task, rows) in per_task {
+        let done = isolated(db, || {
+            for (key, _, _) in &rows {
+                db.execute(
+                    "UPDATE delegation_provisioning SET status='terminated',updated_at=?
+                     WHERE task_id=? AND idempotency_key=? AND status!='terminated'",
+                    (cortex_core::now(), &task, key),
+                )?;
+            }
+            let settled: Vec<Value> = rows
+                .iter()
+                .map(|(key, status, attempt)| {
+                    json!({"delegation":key,"attempt":attempt,"previous_status":status})
+                })
+                .collect();
+            settled_event_tx(
+                db,
+                &task,
+                json!({"count":settled.len(),"delegations":settled,
+                    "evidence":"no_engine_session_or_process_and_capacity_released"}),
+            )
+        });
+        if let Err(error) = done {
+            failures.push((task, error.code().to_owned()));
+        }
+    }
+    Ok(())
+}
+
+/// A delegation left non-terminated (e.g. `ambiguous` by the retired Python host)
+/// whose every registered process has terminated or belongs to an earlier boot
+/// cannot have a live process: settle it with that evidence. A delegation with no
+/// registered process is left to the other rules (fail-closed).
+fn settle_registered_tx(
+    db: &rusqlite::Transaction<'_>,
+    boot: &str,
+    failures: &mut Vec<(String, String)>,
+) -> CoreResult<()> {
+    let gone = db
+        .prepare(
+            "SELECT p.task_id,p.idempotency_key,p.status FROM delegation_provisioning p
+             WHERE p.status!='terminated' AND p.attempt_id IS NOT NULL
+             AND EXISTS(SELECT 1 FROM attempt_process_registry r WHERE r.attempt_id=p.attempt_id)
+             AND NOT EXISTS(SELECT 1 FROM attempt_process_registry r WHERE r.attempt_id=p.attempt_id
+                 AND r.terminated_at IS NULL AND r.boot_id=?)
+             ORDER BY p.task_id,p.rowid",
+        )?
+        .query_map([boot], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut per_task: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for (task, key, status) in gone {
+        per_task.entry(task).or_default().push((key, status));
+    }
+    for (task, rows) in per_task {
+        let done = isolated(db, || {
+            for (key, _) in &rows {
+                db.execute(
+                    "UPDATE delegation_provisioning SET status='terminated',updated_at=? WHERE idempotency_key=? AND task_id=?",
+                    (cortex_core::now(), key, &task),
+                )?;
+            }
+            let settled: Vec<Value> = rows
+                .iter()
+                .map(|(key, status)| json!({"delegation":key,"previous_status":status}))
+                .collect();
+            settled_event_tx(
+                db,
+                &task,
+                json!({"count":settled.len(),"delegations":settled,
+                    "evidence":"registered_processes_terminated_or_previous_boot"}),
+            )
+        });
+        if let Err(error) = done {
+            failures.push((task, error.code().to_owned()));
+        }
+    }
+    Ok(())
+}
+
+/// A finished desktop task the retired Python host ran was never adopted (adoption
+/// only ever took unfinished tasks), so every owner action on it (Request changes,
+/// a message, Continue, Retry, Close) was refused as an invalid binding. Adopt it the
+/// same way, without replaying anything: a new owner epoch fences the old host and the
+/// execution follows it. Only a task whose execution binding is otherwise valid (same
+/// owner epoch, session and project root) is adopted.
+fn adopt_finished_tx(
+    db: &rusqlite::Transaction<'_>,
+    failures: &mut Vec<(String, String)>,
+) -> CoreResult<()> {
+    let rows = db
+        .prepare(
+            "SELECT r.task_id,r.state,o.owner_ref,o.epoch FROM runtime_tasks r
+             JOIN task_owners o ON o.task_id=r.task_id
+             JOIN tasks base ON base.id=r.task_id
+             JOIN workspace_executions e ON e.runtime_task_id=r.task_id AND e.owner_epoch=o.epoch
+             JOIN acp_host_sessions h ON h.session_id=e.acp_session_id AND h.task_id=r.task_id
+                AND h.project_root=base.project_root
+             WHERE r.state IN ('COMPLETED','CANCELLED','FAILED')
+             AND NOT EXISTS(SELECT 1 FROM runtime_events v WHERE v.task_id=r.task_id
+                AND v.type IN ('TASK_CREATED','NATIVE_TASK_ADOPTED')
+                AND json_extract(v.payload_json,'$.execution_host')='rust')
+             ORDER BY r.rowid",
+        )?
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (task, state, owner, epoch) in rows {
+        let done = isolated(db, || {
+            let adopted = ownership::acquire_tx(db, &task, "native-recovery", Some(epoch))?;
+            lifecycle::event_tx(
+                db,
+                &task,
+                "NATIVE_TASK_ADOPTED",
+                json!({"execution_host":"rust","previous_host":"python","previous_owner":owner,
+                    "previous_epoch":epoch,"owner_epoch":adopted.epoch,"replayed":false,
+                    "finished":true,"state":state}),
+            )?;
+            db.execute(
+                "UPDATE workspace_executions SET owner_epoch=?,version=version+1
+                 WHERE runtime_task_id=? AND owner_epoch=?",
+                (adopted.epoch, &task, epoch),
+            )?;
+            Ok(())
+        });
+        if let Err(error) = done {
+            failures.push((task, error.code().to_owned()));
+        }
+    }
+    Ok(())
+}
+
+/// Releases one attempt's delegation rows and capacity reservations with an
+/// explicit observation. Only called with positive evidence that no process of
+/// the attempt can still run.
+fn release_attempt_tx(
+    db: &rusqlite::Transaction<'_>,
+    task: &str,
+    attempt: &str,
+    observation: &str,
+) -> CoreResult<()> {
+    db.execute(
+        "UPDATE delegation_provisioning SET status='terminated',updated_at=?
+         WHERE task_id=? AND attempt_id=? AND status!='terminated'",
+        (cortex_core::now(), task, attempt),
+    )?;
+    db.execute(
+        "UPDATE capacity_reservations SET state='released',release_observation=?,updated_at=?
+         WHERE task_id=? AND attempt_id=? AND state!='released'",
+        (observation, cortex_core::now(), task, attempt),
+    )?;
+    Ok(())
+}
+
+/// A session start that failed before its engine was launched never had an engine
+/// process. Earlier builds recorded such a failure as an unknown observation, so the
+/// attempt stayed `ambiguous` forever and every later control, continuation and
+/// deletion of the task was refused. The durable evidence is the session's own
+/// `NATIVE_SESSION_START_FAILED` event, bound to the exact channel:
+///
+/// - phase `broker`: nothing was started at all;
+/// - phase `launch` or `external_mcp` with `authority_refused`/`invalid_arguments`:
+///   a policy refusal before the engine launch. `Engine::launch` refuses that way
+///   only before it spawns; the current host attaches external servers without
+///   failing (a server is withheld instead), so an `external_mcp` refusal is the
+///   earlier hosts' pre-launch attachment refusal, after which that host had
+///   already stopped any external server it started (process-group kill).
+///
+/// The session must never have been bound (`engine_session_ref` absent) and the
+/// channel must have no other activity. Any other start failure (for example an
+/// `io_error`, or any phase after the launch) keeps the attempt fail-closed.
+fn settle_unlaunched_tx(
+    db: &rusqlite::Transaction<'_>,
+    failures: &mut Vec<(String, String)>,
+) -> CoreResult<()> {
+    let rows = db
+        .prepare(
+            "SELECT p.task_id,p.idempotency_key,p.status,p.attempt_id,
+                json_extract(e.payload_json,'$.phase'),json_extract(e.payload_json,'$.error')
+             FROM delegation_provisioning p
+             JOIN runtime_events e ON e.task_id=p.task_id AND e.type='NATIVE_SESSION_START_FAILED'
+                AND json_extract(e.payload_json,'$.channel_id')=p.channel_id
+             WHERE p.status!='terminated' AND p.channel_id IS NOT NULL AND p.attempt_id IS NOT NULL
+             AND p.engine_session_ref IS NULL
+             AND (json_extract(e.payload_json,'$.phase')='broker'
+                OR (json_extract(e.payload_json,'$.phase') IN ('launch','external_mcp')
+                    AND json_extract(e.payload_json,'$.error') IN ('authority_refused','invalid_arguments')))
+             AND (SELECT count(*) FROM runtime_events f WHERE f.task_id=p.task_id
+                AND f.type='NATIVE_SESSION_START_FAILED'
+                AND json_extract(f.payload_json,'$.channel_id')=p.channel_id)=1
+             AND NOT EXISTS(SELECT 1 FROM runtime_events x WHERE x.task_id=p.task_id
+                AND json_extract(x.payload_json,'$.channel_id')=p.channel_id
+                AND x.type NOT IN ('NATIVE_SESSION_START_FAILED','NATIVE_EXTERNAL_MCP_WITHHELD'))
+             ORDER BY p.rowid",
+        )?
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, Option<String>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut per_task: BTreeMap<String, Vec<(String, String, String, Option<String>, Option<String>)>> =
+        BTreeMap::new();
+    for (task, key, status, attempt, phase, error) in rows {
+        per_task.entry(task).or_default().push((key, status, attempt, phase, error));
+    }
+    for (task, rows) in per_task {
+        let done = isolated(db, || {
+            let mut settled = Vec::new();
+            for (key, status, attempt, phase, error) in &rows {
+                release_attempt_tx(db, &task, attempt, "never_launched")?;
+                settled.push(json!({"delegation":key,"attempt":attempt,
+                    "previous_status":status,"phase":phase,"error":error}));
+            }
+            settled_event_tx(
+                db,
+                &task,
+                json!({"count":settled.len(),"delegations":settled,
+                    "evidence":"session_start_failed_before_engine_launch"}),
+            )
+        });
+        if let Err(error) = done {
+            failures.push((task, error.code().to_owned()));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `cmdline` (NUL-separated) is an ACP engine adapter Cortex launches, a
+/// process of its session (the Codex App Server Cortex runs, or anything handed a
+/// session's MCP relay endpoint, which names a `cortex-mcp-` broker directory), or
+/// OpenCode.
+fn engine_command(cmdline: &[u8]) -> bool {
+    cmdline.split(|b| *b == 0).filter(|a| !a.is_empty()).any(|arg| {
+        let arg = String::from_utf8_lossy(arg);
+        arg.contains("codex-acp")
+            || arg.contains("claude-agent-acp")
+            || arg.contains("--native-codex-runtime")
+            || arg.contains("/cortex-mcp-")
+            || std::path::Path::new(arg.as_ref()).file_name().is_some_and(|n| n == "opencode")
+    })
+}
+
+/// Whether any process of this user other than this service could be an engine
+/// session (or one of its processes) working in one of `roots`. Every engine session
+/// is launched with the project root as its working directory (`dispatch` refuses any
+/// other), and its relays and App Server inherit it. A process whose command line or
+/// working directory cannot be read is counted (fail-closed); a process that exited
+/// or is a zombie cannot act and is not. An unreadable process table counts.
+fn engine_process_in(roots: &[std::path::PathBuf]) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return true;
+    };
+    let me = std::process::id();
+    let uid = unsafe { libc::geteuid() };
+    let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ESRCH);
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == me {
+            continue;
+        }
+        match entry.metadata() {
+            Ok(m) if m.uid() != uid => continue,
+            Ok(_) => {}
+            Err(e) if gone(&e) => continue,
+            Err(_) => return true,
+        }
+        let cmdline = match std::fs::read(format!("/proc/{pid}/cmdline")) {
+            Ok(c) => c,
+            Err(e) if gone(&e) => continue,
+            Err(_) => return true,
+        };
+        // Empty: a zombie or a kernel thread.
+        if cmdline.is_empty() || !engine_command(&cmdline) {
+            continue;
+        }
+        match std::fs::read_link(format!("/proc/{pid}/cwd")) {
+            Ok(cwd) if !roots.iter().any(|r| cwd.starts_with(r)) => continue,
+            Err(e) if gone(&e) => continue,
+            _ => return true,
+        }
+    }
+    false
+}
+
+/// The roots an engine of these tasks could work in: the project and every task's
+/// own project root and workspace, each as recorded and canonical.
+fn engine_roots_tx(db: &rusqlite::Transaction<'_>, root: &std::path::Path) -> CoreResult<Vec<std::path::PathBuf>> {
+    let mut roots: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+    let recorded = db
+        .prepare("SELECT project_root FROM tasks UNION SELECT workspace_root FROM task_workspaces")?
+        .query_map([], |r| r.get::<_, Option<String>>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    roots.extend(recorded.into_iter().flatten().filter(|r| !r.is_empty()).map(Into::into));
+    let canonical: Vec<_> = roots.iter().filter_map(|r| r.canonicalize().ok()).collect();
+    roots.extend(canonical);
+    roots.sort();
+    roots.dedup();
+    Ok(roots)
+}
+
+/// A service that dies (for example by SIGKILL) leaves its running attempts open:
+/// delegation `ready`/`ambiguous`, reservation `reserved`/`ambiguous`, and no process
+/// record (this host records engine processes only through these rows), so their
+/// exit could never be confirmed in the same boot and every later message, Stop,
+/// Resume and Delete of the task was refused. Recovery runs only under this
+/// project's exclusive scheduler lease, before any session of the project starts, so
+/// the service that drove these attempts is gone. When no engine process can be
+/// observed working in the project ([`engine_process_in`]), none of those attempts
+/// can still run: each is settled as terminated with that evidence and its task is
+/// returned so recovery holds it as interrupted instead of driving it on its own.
+/// While a candidate process exists, the rows stay fail-closed (the boot rule below
+/// still applies). Attempts with a process record are left to the registry rules,
+/// and tasks without a runtime record are left as they were.
+fn settle_without_engine_tx(
+    db: &rusqlite::Transaction<'_>,
+    root: &std::path::Path,
+    failures: &mut Vec<(String, String)>,
+) -> CoreResult<std::collections::BTreeSet<String>> {
+    let mut settled_tasks = std::collections::BTreeSet::new();
+    let open = db
+        .prepare(
+            "SELECT task_id,attempt_id FROM (
+                SELECT task_id,attempt_id FROM delegation_provisioning
+                    WHERE status!='terminated' AND attempt_id IS NOT NULL
+                UNION SELECT task_id,attempt_id FROM capacity_reservations WHERE state!='released') o
+             WHERE EXISTS(SELECT 1 FROM runtime_tasks t WHERE t.task_id=o.task_id)
+             AND NOT EXISTS(SELECT 1 FROM attempt_process_registry a WHERE a.attempt_id=o.attempt_id)
+             ORDER BY 1,2",
+        )?
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if open.is_empty() || engine_process_in(&engine_roots_tx(db, root)?) {
+        return Ok(settled_tasks);
+    }
+    let mut per_task: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (task, attempt) in open {
+        per_task.entry(task).or_default().push(attempt);
+    }
+    for (task, attempts) in per_task {
+        let done = isolated(db, || {
+            let mut settled = Vec::new();
+            for attempt in &attempts {
+                release_attempt_tx(db, &task, attempt, "no_engine_process")?;
+                settled.push(json!({"attempt":attempt}));
+            }
+            lifecycle::event_tx(
+                db,
+                &task,
+                "NATIVE_PROCESS_SETTLED",
+                json!({"count":settled.len(),"delegations":settled,
+                    "evidence":"service_gone_and_no_engine_process_in_project"}),
+            )?;
+            Ok(())
+        });
+        match done {
+            Ok(()) => {
+                settled_tasks.insert(task);
+            }
+            Err(error) => failures.push((task, error.code().to_owned())),
+        }
+    }
+    Ok(settled_tasks)
+}
+
+/// A broker directory (`cortex-mcp-` and 24 hex digits) of a service that died is
+/// never removed by that service. One no socket of this system is bound in (as
+/// `/proc/net/unix` lists) and that has not changed for a minute belongs to no live
+/// broker: it is removed. Nothing is removed when the socket table is unreadable.
+fn remove_stale_brokers(directory: &std::path::Path) {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(sockets) = std::fs::read_to_string("/proc/net/unix") else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    let uid = unsafe { libc::geteuid() };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(token) = name.strip_prefix("cortex-mcp-") else { continue };
+        if token.len() != 24 || !token.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+            continue;
+        }
+        let Ok(meta) = entry.path().symlink_metadata() else { continue };
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|m| now.duration_since(m).ok())
+            .is_some_and(|age| age >= std::time::Duration::from_secs(60));
+        if !meta.is_dir() || meta.uid() != uid || !old || sockets.contains(&format!("/{name}/")) {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+            eprintln!("workspace-service: a stale broker directory was kept ({})", error.kind());
+        }
+    }
+}
+
+/// An attempt that recovery could not confirm is stamped once per boot with this
+/// boot's identity (`NATIVE_PROCESS_UNCONFIRMED`). An attempt is only ever driven by
+/// the service that provisioned it and is never relaunched, so any process it had
+/// existed during the stamped boot at the latest. When a later recovery runs in a
+/// different boot, no such process can still run: the attempt is settled with that
+/// evidence. Within the same boot it stays fail-closed unless no engine process works
+/// in the project any more ([`settle_without_engine_tx`]). The stamp is a runtime event,
+/// so a task without a runtime record is never stamped and its rows stay unsettled.
+fn settle_previous_boot_tx(
+    db: &rusqlite::Transaction<'_>,
+    boot: &str,
+    failures: &mut Vec<(String, String)>,
+) -> CoreResult<()> {
+    let open = db
+        .prepare(
+            "SELECT task_id,attempt_id FROM delegation_provisioning
+                WHERE status!='terminated' AND attempt_id IS NOT NULL
+             UNION SELECT task_id,attempt_id FROM capacity_reservations WHERE state!='released'
+             ORDER BY 1,2",
+        )?
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let stamped = |task: &str, attempt: &str, same_boot: bool| -> CoreResult<bool> {
+        Ok(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_events e, json_each(json_extract(e.payload_json,'$.attempts')) a
+                WHERE e.task_id=? AND e.type='NATIVE_PROCESS_UNCONFIRMED' AND a.value=?
+                AND (json_extract(e.payload_json,'$.boot_id')=?)=?)",
+            (task, attempt, boot, same_boot),
+            |r| r.get(0),
+        )?)
+    };
+    let mut per_task: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (task, attempt) in open {
+        per_task.entry(task).or_default().push(attempt);
+    }
+    for (task, attempts) in per_task {
+        let done = isolated(db, || {
+            if !runtime_record(db, &task)? {
+                return Ok(());
+            }
+            let mut settled = Vec::new();
+            let mut stamp = Vec::new();
+            for attempt in attempts {
+                if stamped(&task, &attempt, false)? {
+                    release_attempt_tx(db, &task, &attempt, "previous_boot")?;
+                    settled.push(json!({"attempt":attempt}));
+                } else if !stamped(&task, &attempt, true)? {
+                    stamp.push(attempt);
+                }
+            }
+            if !settled.is_empty() {
+                lifecycle::event_tx(
+                    db,
+                    &task,
+                    "NATIVE_PROCESS_SETTLED",
+                    json!({"count":settled.len(),"delegations":settled,
+                        "evidence":"unconfirmed_attempt_from_previous_boot"}),
+                )?;
+            }
+            if !stamp.is_empty() {
+                lifecycle::event_tx(
+                    db,
+                    &task,
+                    "NATIVE_PROCESS_UNCONFIRMED",
+                    json!({"boot_id":boot,"attempts":stamp}),
+                )?;
+            }
+            Ok(())
+        });
+        if let Err(error) = done {
+            failures.push((task, error.code().to_owned()));
+        }
+    }
+    Ok(())
+}
+
+/// Recovers one unfinished task from its durable checkpoints. Returns the task to
+/// drive when nothing about it is unknown. A held task is recorded once: a restart
+/// that finds it already held for the same reason adds no new event. `interrupted`:
+/// this recovery settled the task's attempts because the service that ran them died
+/// ([`settle_without_engine_tx`]); the task is held for the owner, never driven on.
+fn recover_task_tx(
+    db: &rusqlite::Transaction<'_>,
+    task: &str,
+    state: &str,
+    owner: String,
+    epoch: i64,
+    legacy: bool,
+    interrupted: bool,
+) -> CoreResult<Option<(String, OwnerEpoch, TaskState)>> {
+        let state: TaskState = state.parse().map_err(CoreError::Refused)?;
+        let owner = if legacy {
+            let adopted = ownership::acquire_tx(db,&task,"native-recovery",Some(epoch))?;
+            // Preserve creation provenance; ownership transfer is a separate event.
+            lifecycle::event_tx(db,&task,"NATIVE_TASK_ADOPTED",json!({
+                "execution_host":"rust","previous_host":"python","previous_owner":owner,
+                "previous_epoch":epoch,"owner_epoch":adopted.epoch,"replayed":false}))?;
+            db.execute("UPDATE workspace_executions SET owner_epoch=?,version=version+1
+                WHERE runtime_task_id=? AND owner_epoch=?",
+                (adopted.epoch,&task,epoch))?;
+            for mut w in waits::projection_tx(db,&task)? {
+                if matches!(w["status"].as_str(),Some("open"|"ready"|"resuming"))
+                    && w["owner_epoch"]==epoch {
+                    w["owner_epoch"]=json!(adopted.epoch);
+                    waits::change_tx(db,&mut w)?;
+                }
+            }
+            adopted
+        } else {OwnerEpoch{owner,epoch}};
+        // Even a committed result does not establish that its process exited.
+        // Keep reservations occupied until a real process observation settles them.
+        let unknown: bool = db.query_row("SELECT
+            EXISTS(SELECT 1 FROM delegation_provisioning WHERE task_id=? AND status!='terminated')
+            OR EXISTS(SELECT 1 FROM capacity_reservations WHERE task_id=? AND state!='released')",
+            (&task,&task), |r|r.get(0))?;
+        let legacy_effect_unknown: bool = db.query_row("SELECT EXISTS(
+            SELECT 1 FROM runtime_events i WHERE i.task_id=?
+            AND ((i.type='CHECK_EXECUTION_STARTED' AND NOT EXISTS(
+                SELECT 1 FROM runtime_events f WHERE f.task_id=i.task_id AND f.id>i.id
+                AND f.type IN ('CHECK_EXECUTION_FINISHED','CHECK_EXECUTION_ABORTED')
+                AND json_extract(f.payload_json,'$.command_ref')=json_extract(i.payload_json,'$.command_ref')))
+            OR (i.type='COMMAND_PROCESS_STARTED' AND NOT EXISTS(
+                SELECT 1 FROM runtime_events f WHERE f.task_id=i.task_id AND f.id>i.id
+                AND f.type='COMMAND_PROCESS_EXITED'
+                AND json_extract(f.payload_json,'$.tool_call_ref')=json_extract(i.payload_json,'$.tool_call_ref')))))",
+            [&task], |r|r.get(0))?;
+        let verification_unknown: bool = db.query_row("SELECT EXISTS(
+            SELECT 1 FROM runtime_requests i JOIN runtime_tasks t USING(task_id)
+            WHERE i.task_id=? AND i.operation='native_verification_intent'
+            AND json_extract(i.result_json,'$.revision')=t.revision
+            AND NOT EXISTS(SELECT 1 FROM runtime_requests f WHERE f.task_id=i.task_id
+                AND f.actor='native-verifier-finish' AND f.request_key=i.request_key))",
+            [&task], |r|r.get(0))?;
+        db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND revoked_at IS NULL",
+            (cortex_core::now(),&task))?;
+        db.execute("UPDATE delegation_provisioning SET status='ambiguous',updated_at=?
+            WHERE task_id=? AND status!='terminated'", (cortex_core::now(),&task))?;
+        db.execute("UPDATE capacity_reservations SET state='ambiguous',
+            release_observation='termination_unconfirmed',updated_at=? WHERE task_id=? AND state!='released'",
+            (cortex_core::now(),&task))?;
+        let delivery_unknown = waits::projection_tx(db,&task)?.iter().any(|w|
+            w["status"]=="resuming" || w["reason"]=="answer_continuation_unconfirmed");
+        waits::recover_deliveries_tx(db,&task)?;
+        for mut w in waits::projection_tx(db,&task)? {
+            // A wait an earlier restart already marked lost is not re-recorded.
+            if matches!(w["status"].as_str(),Some("open"|"ready"))
+                && !(w["continuation_required"]==true && w["reason"]=="native_session_lost") {
+                w["continuation_required"]=json!(true);
+                w["reason"]=json!("native_session_lost");
+                waits::change_tx(db,&mut w)?;
+            }
+        }
+        // Guidance can no longer reach the exact old session. Never replay it.
+        let guidance=db.prepare("SELECT json_extract(q.payload_json,'$.request') FROM runtime_events q
+            WHERE q.task_id=? AND q.type='NATIVE_GUIDANCE_QUEUED'
+            AND NOT EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=q.task_id
+                AND e.type='NATIVE_GUIDANCE_SETTLED'
+                AND json_extract(e.payload_json,'$.request')=json_extract(q.payload_json,'$.request'))")?
+            .query_map([&task], |r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+        for request in guidance {
+            lifecycle::event_tx(db,&task,"NATIVE_GUIDANCE_SETTLED",
+                json!({"request":request,"delivered":false,"reason":"service_restarted"}))?;
+        }
+        let control_unknown: bool = db.query_row("SELECT EXISTS(
+            SELECT 1 FROM runtime_requests i WHERE i.task_id=? AND i.operation='native_desktop_control'
+            AND NOT EXISTS(SELECT 1 FROM runtime_requests f WHERE f.task_id=i.task_id
+                AND f.actor='native-desktop-finish' AND f.request_key=i.request_key))",
+            [&task], |r|r.get(0))?;
+        if control_unknown {
+            // Surface each unfinished admission once. Its finish slot closes as an
+            // explicit unknown outcome bound to the current revision, so it cannot
+            // force RECOVERING again on every later restart. The same request keeps
+            // replaying as `native_control_outcome_unknown`; Retry clears the hold.
+            let (_, revision) = domain::task_tx(db, &task)?;
+            let pending = db.prepare("SELECT i.request_key,i.digest FROM runtime_requests i
+                WHERE i.task_id=? AND i.operation='native_desktop_control'
+                AND NOT EXISTS(SELECT 1 FROM runtime_requests f WHERE f.task_id=i.task_id
+                    AND f.actor='native-desktop-finish' AND f.request_key=i.request_key)")?
+                .query_map([&task], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?)))?
+                .collect::<Result<Vec<_>,_>>()?;
+            for (request, digest) in pending {
+                lifecycle::event_tx(db,&task,"NATIVE_CONTROL_OUTCOME_UNKNOWN",
+                    json!({"request":request,"reason":"service_restarted","revision":revision}))?;
+                db.execute("INSERT INTO runtime_requests VALUES (?,?,'native-desktop-finish','native_desktop_finished',?,?)",
+                    (&task,&request,&digest,json!({"outcome":"unknown","native":true,
+                        "reason":"service_restarted","revision":revision,
+                        "settledAt":cortex_core::now()}).to_string()))?;
+            }
+        }
+        let outside_unknown:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=?
+            AND operation IN ('outside_command','outside_write','command_run','project_write','project_edit','project_mkdir','project_delete','project_skill_link','draft_write','external_call') AND json_extract(result_json,'$.complete') IS NOT 1 AND json_extract(result_json,'$.status') IS NOT 'complete' AND json_extract(result_json,'$.settled') IS NOT 1)",
+            [&task],|r|r.get(0))?;
+        let reason = if delivery_unknown {Some("native_answer_delivery_outcome_unknown")}
+            else if legacy_effect_unknown {Some("legacy_effect_outcome_unknown")}
+            else if outside_unknown {Some("native_outside_outcome_unknown")}
+            else if verification_unknown {Some("native_verification_outcome_unknown")}
+            else if control_unknown {Some("native_control_outcome_unknown")}
+            else if unknown || interrupted {
+                Some("native_session_outcome_unknown")
+            } else {None};
+        if let Some(reason)=reason {
+            // Already held for exactly this (the effective) reason in the state it
+            // would be held in: an earlier restart recorded it; record nothing again.
+            let held: Option<String> = db.query_row(
+                "SELECT blocker FROM runtime_tasks WHERE task_id=?", [task], |r| r.get(0))?;
+            let effective = match held.as_deref() {
+                Some(existing) if existing.ends_with("outcome_unknown") => existing,
+                _ => reason,
+            };
+            let target = if matches!(state, TaskState::Paused | TaskState::WaitingUser) {
+                state
+            } else {
+                TaskState::Recovering
+            };
+            if !(state == target && held.as_deref() == Some(effective)) {
+                lifecycle::event_tx(db,&task,"NATIVE_RECOVERY_REQUIRED",
+                    json!({"reason":reason,"previous":state,"replayed":false}))?;
+                domain::native_recovery_required_tx(db,&task,reason)?;
+            }
+        } else if matches!(state,TaskState::Planning|TaskState::PlanReady|TaskState::Executing|TaskState::Reviewing|
+            TaskState::Verifying|TaskState::Reconciling|TaskState::WaitingUser|TaskState::AnswerReady) {
+            lifecycle::event_tx(db,&task,"NATIVE_RECOVERY_RESUMED",json!({"state":state}))?;
+            return Ok(Some((task.to_owned(),owner,state)));
+        } else if state == TaskState::Recovering && descriptive_command_hold_tx(db, task)? {
+            // Earlier builds held a verified, synthesized result as interrupted when a
+            // worker's descriptive check command differed from its receipt. Completion
+            // no longer refuses that, so the held result is checked again with every
+            // evidence gate; a real gap takes the coordinator's stop path. A refused
+            // settle (an unconfirmed worker) leaves the hold exactly as it was.
+            if isolated(db, || domain::settle_recovery_tx(db, task, TaskState::Reconciling)).is_ok() {
+                lifecycle::event_tx(db,&task,"NATIVE_RECOVERY_RESUMED",
+                    json!({"state":TaskState::Reconciling,"reason":"completion_rechecked"}))?;
+                return Ok(Some((task.to_owned(),owner,TaskState::Reconciling)));
+            }
+        } else if state == TaskState::Recovering {
+            // Earlier builds stopped a task for a work blocker (a lost worker whose retry
+            // gave up, a failed check) into RECOVERING to wait for a Retry that no screen
+            // offers, and nothing ever asked the owner. Ask now, with the runtime's own
+            // stop question and its concrete answers, in the task's language.
+            if let Some(blocker) = unasked_stop_tx(db, task)? {
+                domain::stop_tx(db, task, &blocker)?;
+            }
+        }
+    Ok(None)
+}
+
+/// The blocker of a work stop that returned the task to RECOVERING for the owner
+/// (`ASK_USER_REQUIRED`) when nothing followed it: no coordinator turn, question,
+/// answer, message, interruption or continuation, no open question and no held reason.
+fn unasked_stop_tx(db: &rusqlite::Transaction<'_>, task: &str) -> CoreResult<Option<String>> {
+    use rusqlite::OptionalExtension;
+    Ok(db.query_row(
+        "SELECT json_extract(a.payload_json,'$.blocker') FROM runtime_events a JOIN runtime_tasks t ON t.task_id=a.task_id
+         WHERE a.task_id=?1 AND a.type='ASK_USER_REQUIRED' AND t.state='RECOVERING' AND coalesce(t.blocker,'')=''
+         AND json_type(a.payload_json,'$.blocker')='text' AND trim(json_extract(a.payload_json,'$.blocker'))!=''
+         AND a.id=(SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='ASK_USER_REQUIRED')
+         AND NOT EXISTS(SELECT 1 FROM runtime_events x WHERE x.task_id=?1 AND x.id>a.id AND x.type IN
+            ('USER_QUESTION_REQUESTED','USER_ANSWER_RECEIVED','USER_STEERING','TURN_INTERRUPTED','NATIVE_COORDINATOR_CONTINUED',
+             'NATIVE_TASK_CONTINUED','NATIVE_RECOVERY_RESUMED','PLAN_ACCEPTED','OWNER_TASK_PAUSED','OWNER_TASK_RESUMED'))
+         AND NOT EXISTS(SELECT 1 FROM pending_questions WHERE task_id=?1 AND status='open')",
+        [task],
+        |r| r.get::<_, String>(0),
+    ).optional()?)
+}
+
+/// A recovery hold that only the retired descriptive-command completion gate set:
+/// a synthesized result whose latest verification passed, held by exactly that code.
+fn descriptive_command_hold_tx(db: &rusqlite::Transaction<'_>, task: &str) -> CoreResult<bool> {
+    Ok(db.query_row(
+        "SELECT t.blocker='completion_worker_check_unverified' AND coalesce(trim(t.synthesis),'')!=''
+            AND (SELECT type FROM runtime_events WHERE task_id=t.task_id
+                AND type IN ('VERIFICATION_PASSED','VERIFICATION_FAILED') ORDER BY id DESC LIMIT 1)='VERIFICATION_PASSED'
+         FROM runtime_tasks t WHERE t.task_id=?",
+        [task],
+        |r| r.get::<_, Option<bool>>(0),
+    )?
+    .unwrap_or(false))
+}
+
+impl Runtime {
+    /// Called once after acquiring the project scheduler lease, before publication.
+    pub(crate) async fn recover(self: &Arc<Self>) -> CoreResult<()> {
+        self.host
+            .executor
+            .publication(|store| {
+                crate::native_project::recover_files(store)?;
+                crate::native_commands::recover_commands(store)
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        crate::native_command_handles::recover(self).await?;
+        if let Ok(key) = crate::native_runtime::key(&self.host.root) {
+            remove_stale_brokers(&key.directory());
+        }
+        let root = self.host.root.clone();
+        // The retired Python host could leave a desktop start as `unknown` after its runtime
+        // task had been created. Native starts are written atomically as `claimed` and never
+        // `unknown`. When the execution is validly bound to an existing runtime task (same
+        // owner epoch, session and project root), the start provably happened: record it.
+        let (mut failures, interrupted) = self
+            .host
+            .executor
+            .write(move |db| {
+                let settled = db
+                    .prepare(
+                        "SELECT s.execution_id,e.runtime_task_id FROM workspace_starts s
+                     JOIN workspace_executions e USING(execution_id)
+                     JOIN runtime_tasks r ON r.task_id=e.runtime_task_id
+                     JOIN tasks base ON base.id=r.task_id
+                     JOIN task_owners o ON o.task_id=r.task_id
+                     JOIN acp_host_sessions h ON h.session_id=e.acp_session_id
+                     WHERE s.state='unknown' AND e.owner_epoch=o.epoch AND h.task_id=r.task_id
+                     AND h.project_root=base.project_root AND r.revision>=0",
+                    )?
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                    .map(|b| b.trim().to_owned())
+                    .unwrap_or_default();
+                // Each rule settles per task; a task whose writes fail is rolled back
+                // alone and reported, and the project still opens.
+                let mut failures = Vec::new();
+                if !boot.is_empty() {
+                    settle_registry_tx(db, &boot, &mut failures)?;
+                    settle_registered_tx(db, &boot, &mut failures)?;
+                }
+                settle_released_unstarted_tx(db, &mut failures)?;
+                settle_unlaunched_tx(db, &mut failures)?;
+                let interrupted = settle_without_engine_tx(db, &root, &mut failures)?;
+                if !boot.is_empty() {
+                    settle_previous_boot_tx(db, &boot, &mut failures)?;
+                }
+                for (execution, task) in settled {
+                    let done = isolated(db, || {
+                        db.execute(
+                            "UPDATE workspace_starts SET state='dispatched' WHERE execution_id=? AND state='unknown'",
+                            [&execution],
+                        )?;
+                        lifecycle::event_tx(
+                            db,
+                            &task,
+                            "NATIVE_START_RECONCILED",
+                            json!({"execution_id":execution,"previous_state":"unknown",
+                                "evidence":"bound_runtime_task","previous_host":"python"}),
+                        )
+                    });
+                    if let Err(error) = done {
+                        failures.push((task, error.code().to_owned()));
+                    }
+                }
+                adopt_finished_tx(db, &mut failures)?;
+                Ok((failures, interrupted))
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        let (tasks, failures) = self.host.executor.write(move |db| {
+            let rows = db.prepare("SELECT t.task_id,t.state,o.owner_ref,o.epoch,
+                NOT EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=t.task_id
+                    AND e.type IN ('TASK_CREATED','NATIVE_TASK_ADOPTED')
+                    AND json_extract(e.payload_json,'$.execution_host')='rust')
+                FROM runtime_tasks t JOIN task_owners o USING(task_id)
+                WHERE t.state NOT IN ('COMPLETED','CANCELLED','FAILED')
+                ORDER BY t.rowid")?
+                .query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+                    r.get::<_,String>(2)?,r.get::<_,i64>(3)?,r.get::<_,bool>(4)?)))?
+                .collect::<Result<Vec<_>,_>>()?;
+            let mut ready = Vec::new();
+            let mut unrecovered = Vec::new();
+            for (task,state,owner,epoch,legacy) in rows {
+                // One task's recovery never fails the project: its writes roll back alone.
+                let held = interrupted.contains(&task);
+                match isolated(db, || recover_task_tx(db, &task, &state, owner, epoch, legacy, held)) {
+                    Ok(Some(driven)) => ready.push(driven),
+                    Ok(None) => {}
+                    Err(error) => unrecovered.push((task, error.code().to_owned())),
+                }
+            }
+            // A task whose recovery failed is held (never driven) with that reason, once.
+            for (task, code) in &unrecovered {
+                let _ = isolated(db, || {
+                    let held: Option<String> = db.query_row(
+                        "SELECT blocker FROM runtime_tasks WHERE task_id=?", [task], |r| r.get(0))?;
+                    if held.as_deref() == Some("native_recovery_failed") {
+                        return Ok(());
+                    }
+                    lifecycle::event_tx(db,task,"NATIVE_RECOVERY_REQUIRED",
+                        json!({"reason":"native_recovery_failed","code":code,"replayed":false}))?;
+                    domain::native_recovery_required_tx(db,task,"native_recovery_failed")
+                });
+            }
+            failures.extend(unrecovered);
+            Ok((ready, failures))
+        })?.await.map_err(|_|CoreError::Refused("native_host_closed"))??;
+        for (task, code) in failures {
+            eprintln!("workspace-service: recovery left task {task} unsettled ({code})");
+        }
+        for (task, owner, state) in tasks {
+            let (cancel, cancelled) = tokio::sync::watch::channel(false);
+            let (done, finished) = tokio::sync::watch::channel(false);
+            self.install_pump(task.clone(), cancel, finished).await;
+            let runtime = self.clone();
+            self.spawn_recovery(async move {
+                let result = if state == TaskState::Planning {
+                    runtime
+                        .recover_planning(&task, &owner, cancelled.clone())
+                        .await
+                } else {
+                    runtime.progress(&task, &owner, cancelled.clone()).await
+                };
+                if let Err(error) = result {
+                    // A completion gap is not an unknown outcome: nothing was lost and
+                    // nothing is running. It takes the same path as on a live driver, so
+                    // the coordinator (then the owner) decides, never an "interrupted" hold.
+                    if !*cancelled.borrow() && !*runtime.stop.borrow() && error.code().starts_with("completion_") {
+                        runtime.stop_after_error(&task, &owner, error, cancelled.clone()).await;
+                    } else if !*cancelled.borrow() && !*runtime.stop.borrow() {
+                        let reason = error.code().to_owned();
+                        if let Ok(reply) = runtime.host.executor.write(move |db| {
+                            lifecycle::event_tx(
+                                db,
+                                &task,
+                                "NATIVE_RECOVERY_REQUIRED",
+                                json!({"reason":reason,"replayed":false}),
+                            )?;
+                            domain::native_recovery_required_tx(db, &task, &reason)
+                        }) {
+                            let _ = reply.await;
+                        }
+                    }
+                }
+                done.send_replace(true);
+            })
+            .await;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "native_recovery_legacy_tests.rs"]
+mod legacy_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{native_runtime::UnqualifiedRoutes, Config, LaunchSpec, Service};
+    use std::{
+        future::Future,
+        os::unix::fs::PermissionsExt,
+        task::{Context, Poll, Waker},
+        time::Duration,
+    };
+
+    #[tokio::test]
+    async fn legacy_adoption_is_fenced_and_never_replays_unknown_effects() {
+        use cortex_core::{lifecycle::TaskMachine, ownership::SchedulerOwner, OpenMode, Store};
+        let root =
+            std::env::temp_dir().join(format!("legacy-adoption-{}", crate::identity().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        crate::project_guard::reserve(&project).unwrap();
+        let key = crate::native_runtime::key(&project).unwrap();
+        let store = Store::open(key.clone(), OpenMode::Initialize).unwrap();
+        for (task, state) in [
+            ("planning", "PLANNING"),
+            ("worker", "EXECUTING"),
+            ("review", "REVIEWING"),
+            ("verification", "VERIFYING"),
+            ("command", "PLANNING"),
+            ("claimed", "EXECUTING"),
+            ("outside", "EXECUTING"),
+            ("paused", "PAUSED"),
+            ("terminal", "COMPLETED"),
+        ] {
+            TaskMachine::new(&store)
+                .create(task, "Fixture", "python-owner")
+                .unwrap();
+            store.write(|db| {
+                db.execute("UPDATE runtime_tasks SET state=? WHERE task_id=?",(state,task))?;
+                if ["planning","worker","review"].contains(&task) {
+                    db.execute("INSERT INTO delegation_provisioning
+                        (idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at)
+                        VALUES (?,?,?,'worker-backend-dev','ready','ready',1,'fixture','fixture')",
+                        (task,task,task))?;
+                    db.execute("INSERT INTO capacity_reservations VALUES (?,?,?,NULL,?,'worker','reserved','fixture','fixture',NULL)",
+                        (task,"fake",task,task))?;
+                }
+                if task=="verification" {
+                    lifecycle::event_tx(db,task,"CHECK_EXECUTION_STARTED",json!({"command_ref":"lost-check","revision":0}))?;
+                }
+                if task=="command" {
+                    lifecycle::event_tx(db,task,"COMMAND_PROCESS_STARTED",json!({"tool_call_ref":"lost-command"}))?;
+                }
+                if task=="claimed" {
+                    let mut wait=json!({"wait_id":"lost-delivery","task_id":task,"assignment_ref":"a",
+                        "status":"resuming","owner_epoch":1,"delivery_id":"delivery"});
+                    waits::change_tx(db,&mut wait)?;
+                }
+                if task=="outside" {
+                    db.execute("INSERT INTO runtime_requests VALUES (?,'lost','channel','outside_write','fixture','{}')",[task])?;
+                }
+                Ok(())
+            }).unwrap();
+        }
+        let service = Service::bind_native(
+            Config {
+                runtime_dir: root.join("runtime"),
+                state_dir: root.join("state"),
+                allowed_root: root.clone(),
+                launch: LaunchSpec::bare(),
+                request_timeout: Duration::from_secs(2),
+                shutdown_timeout: Duration::from_secs(1),
+                event_capacity: 32,
+            },
+            Arc::new(UnqualifiedRoutes),
+        )
+        .await
+        .unwrap();
+        let registered = service.register(&project, "Legacy").await.unwrap();
+        let id = registered["projectId"].as_str().unwrap();
+        let lease = SchedulerOwner::acquire(&key).unwrap();
+        assert_eq!(
+            service.activate(id).await.unwrap_err().to_string(),
+            "scheduler_owner_busy"
+        );
+        store
+            .read(|db| {
+                assert_eq!(
+                    db.query_row(
+                        "SELECT count(*) FROM runtime_events WHERE type='NATIVE_TASK_ADOPTED'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )?,
+                    0
+                );
+                Ok(())
+            })
+            .unwrap();
+        drop(lease);
+        assert_eq!(service.activate(id).await.unwrap()["executionHost"], "rust");
+        service.stop().await.unwrap();
+        store.read(|db| {
+            for (task,reason) in [("planning","native_session_outcome_unknown"),("worker","native_session_outcome_unknown"),
+                ("review","native_session_outcome_unknown"),("verification","legacy_effect_outcome_unknown"),
+                ("command","legacy_effect_outcome_unknown"),("claimed","native_answer_delivery_outcome_unknown"),
+                ("outside","native_outside_outcome_unknown")] {
+                let (state,blocker,epoch):(String,String,i64)=db.query_row(
+                    "SELECT t.state,t.blocker,o.epoch FROM runtime_tasks t JOIN task_owners o USING(task_id) WHERE t.task_id=?",
+                    [task],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+                assert_eq!(state,"RECOVERING");
+                assert_eq!(blocker,reason);
+                assert_eq!(epoch,2);
+            }
+            assert_eq!(db.query_row("SELECT count(*) FROM delegation_provisioning",[],|r|r.get::<_,i64>(0))?,3);
+            // The host that ran them is gone and no engine works in the project: the
+            // attempts are settled, and their tasks are held as interrupted, not driven.
+            assert_eq!(db.query_row("SELECT count(*) FROM delegation_provisioning WHERE status='terminated'",[],|r|r.get::<_,i64>(0))?,3);
+            assert_eq!(db.query_row("SELECT count(*) FROM capacity_reservations WHERE state='released' AND release_observation='no_engine_process'",[],|r|r.get::<_,i64>(0))?,3);
+            assert_eq!(db.query_row("SELECT count(*) FROM runtime_events WHERE type='NATIVE_RECOVERY_RESUMED'",[],|r|r.get::<_,i64>(0))?,0);
+            assert_eq!(db.query_row("SELECT state FROM runtime_tasks WHERE task_id='paused'",[],|r|r.get::<_,String>(0))?,"PAUSED");
+            assert_eq!(db.query_row("SELECT epoch FROM task_owners WHERE task_id='terminal'",[],|r|r.get::<_,i64>(0))?,1);
+            Ok(())
+        }).unwrap();
+        // A second recovery records neither another adoption nor a new epoch.
+        service
+            .state
+            .lock()
+            .await
+            .native
+            .get(id)
+            .unwrap()
+            .recover()
+            .await
+            .unwrap();
+        store.read(|db| {
+            assert_eq!(db.query_row("SELECT count(*) FROM runtime_events WHERE type='NATIVE_TASK_ADOPTED'",[],|r|r.get::<_,i64>(0))?,8);
+            assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='WORKER_WAIT_CHANGED' AND json_extract(payload_json,'$.status')='orphaned')",[],|r|r.get::<_,bool>(0))?);
+            Ok(())
+        }).unwrap();
+        drop(service);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_fences_a_native_activation_waiting_to_open_its_owner() {
+        let root =
+            std::env::temp_dir().join(format!("native-activation-stop-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        let service = Service::bind_native(
+            Config {
+                runtime_dir: root.join("runtime"),
+                state_dir: root.join("state"),
+                allowed_root: root.clone(),
+                launch: LaunchSpec::bare(),
+                request_timeout: Duration::from_secs(2),
+                shutdown_timeout: Duration::from_secs(1),
+                event_capacity: 32,
+            },
+            Arc::new(UnqualifiedRoutes),
+        )
+        .await
+        .unwrap();
+        let registered = service.register(&project, "Late activation").await.unwrap();
+        let id = registered["projectId"].as_str().unwrap();
+        {
+            // Hold the actual owner-opening boundary, then queue both public actions.
+            // Polling gives deterministic order; elapsed sleep is not the evidence.
+            let gate = service.native_activation.write().await;
+            let activation = service.activate(id);
+            tokio::pin!(activation);
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(matches!(activation.as_mut().poll(&mut cx), Poll::Pending));
+            let stop = service.stop();
+            tokio::pin!(stop);
+            assert!(
+                matches!(stop.as_mut().poll(&mut cx), Poll::Pending),
+                "Stop returned while a native activation could still open an owner"
+            );
+            drop(gate);
+            tokio::time::timeout(Duration::from_secs(2), async {
+                let (activation, stop) = tokio::join!(&mut activation, &mut stop);
+                assert_eq!(activation.unwrap_err().to_string(), "service_stopping");
+                stop.unwrap();
+            })
+            .await
+            .unwrap();
+            assert!(service.state.lock().await.native.is_empty());
+            assert!(
+                !project
+                    .join(if workspace_protocol::channel::current().is_dev() {
+                        ".cortex-dev"
+                    } else {
+                        ".cortex"
+                    })
+                    .join("cortex.sqlite3")
+                    .exists(),
+                "late activation opened a database after Stop"
+            );
+            drop(activation);
+            drop(stop);
+        }
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

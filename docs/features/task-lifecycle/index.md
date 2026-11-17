@@ -1,9 +1,9 @@
 # Runtime completion and lifecycle
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
-Workspace's owner-only `orchestration/task_pause.py` additionally records a durable
+Workspace's owner-only pause control additionally records a durable
 `PAUSED` hold outside the model transition route. It saves the previous lifecycle
 and pending question/worker-wait identities transactionally with public invalidation. Only
 explicit owner Resume restores that state, checking the displayed version and owner
@@ -11,10 +11,14 @@ epoch; normal model transitions cannot leave the hold. Turn cancellation alone d
 not create or remove it. Pending worker questions and runtime access decisions survive
 service restart. The runtime fences the old worker and records a replacement continuation
 with the saved decision; it does not revive the engine or transfer access grants.
-Resume never invents a user message or answer. Stopping an individual worker still
+Resume continues from the saved state: open and ready worker waits and pending
+coordinator or worker questions stay answerable, and work that Pause interrupted
+resumes through lost-worker retry or coordinator recovery. It never interrupts,
+cancels or replans, and never invents a user message or answer. Only explicit Retry
+and owner steering replan. Stopping an individual worker still
 cancels its wait. See [Workspace Stop and Resume](../../cortex-workspace/local-task-execution.md#task-stop-and-resume).
 
-The task state machine is defined in `orchestration/state.py`:
+The task state machine (`crates/cortex-core/src/lifecycle`) is:
 
 `CREATED → PLANNING → PLAN_READY → EXECUTING → REVIEWING → VERIFYING → RECONCILING → COMPLETED`.
 
@@ -46,6 +50,13 @@ blocker refuses the proposal without changing state. Accepted disclosures are
 stored and shown in the answer's "Not verified" section; exact retries preserve
 that content.
 
+The additive Rust host now serves coordinator reconciliation, synthesis and
+certified released answers, verification-command repair, and budgeted
+replan/scope/escalation proposals. Its exact supported checks and remaining
+evidence boundaries are in [native incoming ACP](../../project/native-incoming-acp.md#context-rollover-and-reconciliation);
+the Python-specific check-assessment and runtime-composition details below are
+not a claim that every native domain is complete.
+
 ## Omitted worker checks
 
 Plan submission and verification repair probe check-program availability in the real read-only verification sandbox before recording commands. Workers and coordinators can declare a check early through the availability preflight; this lookup never executes the proposed check and cannot count as passing evidence. It uses verification's final launch preparation and working directory; an incomplete sandbox/launch probe reports `check_preflight_unavailable`, not a missing executable. A wrapper without an inner program is refused as an incomplete command. Missing programs require isolated project-private tools or another executable approach, never sudo or system changes. If neither is possible, the responsible model must ask the owner immediately through its existing question route, not defer that decision to publication. New executable gap declarations with absent programs are refused while the worker channel remains active. Human-only judgements have no command and appear separately as **Check manually**, never as a pass or failure or an owner-acceptance blocker. Policy-prohibited checks stay explicitly not run and are not automatically executed.
@@ -60,7 +71,7 @@ runner for identified owner reruns; see [local task execution](../../cortex-work
 
 ## Runtime-composed synthesis
 
-On a fully closed first-review path, `orchestration/synthesis.py` composes the
+On a fully closed first-review path, the runtime composes the
 final text in RECONCILING without another coordinator model turn. All current
 plan nodes must be completed, independent review must be APPROVE on the current
 digest, and the latest final verification must pass on that digest with exact,
@@ -89,6 +100,18 @@ content or caveats. Filenames containing backticks, control/format characters or
 Unicode line/paragraph separators also keep coordinator synthesis, so they cannot
 escape the inline-code spans. Missing baseline metadata or final text over 48 KiB
 falls back rather than truncating.
+
+In the native runtime the changed-file list comes from a per-file content manifest
+that the runtime retains with the first `EXECUTION_BASELINE` since the task was
+created or last reopened (`attempt_revisions`, attempt `baseline:<task>`, phase
+`execution_baseline`; the manifest belongs to that baseline's digest). The files whose
+content differs from it at composition time are listed. A project too large for the
+manifest (more than 20,000 files), a missing manifest or a baseline whose digest
+differs keeps the coordinator, and so does a changed or unobserved ignored-files digest, because the list covers only files Git would track or show. Only execution-stage results are quoted; review
+summaries never are. Open owner questions, a repeated review (`review_cycle` other
+than 1) and any `REVIEW_NOT_REQUIRED`, `VERIFICATION_REVISED`, `VERIFICATION_FAILED`,
+`REVIEW_CHANGES_REQUESTED`, `REPLAN_REQUEST_ACCEPTED`, `RETURNED_TO_COORDINATOR` or
+`TASK_REOPENED` event keep the coordinator too.
 
 Synthesis, `SYNTHESIS_RUNTIME_COMPOSED` and COMPLETED commit in one transaction,
 under the unchanged report-integrity/project-digest completion gates and confirmed
@@ -142,7 +165,7 @@ for paths or commands -- never one unbroken block; this is model guidance, not a
 runtime-enforced format.
 Automated tests cover emission and recovery, not rendered Desktop qualification.
 
-For declines covered by its fixed vocabulary, `orchestration/synthesis.py`
+For declines covered by its fixed vocabulary, the runtime
 records a durable, metadata-only `SYNTHESIS_RUNTIME_DECLINED` event in the same
 transaction, at most once per plan revision (idempotent across recovery and
 replay; a repeat attempt that finds one already recorded writes nothing more).
@@ -159,7 +182,7 @@ interruption rolls back without one too. A previously recorded event is not
 updated by later attempts, even if conditions change or composition later succeeds.
 Eligibility itself is unchanged. The event is never written when the
 coordinator has already supplied its own synthesis text, since the gate was then
-never attempted. `scripts/cortex_timeline.py --aggregate` reports, per
+never attempted. The former aggregate timeline reader (removed) reported, per
 engine/route/effort cohort, the share of reconciled tasks the runtime actually
 composed and a tally of fallback reasons; a completed task with neither a
 `SYNTHESIS_RUNTIME_COMPOSED` nor a `SYNTHESIS_RUNTIME_DECLINED` event (for
@@ -180,8 +203,7 @@ COMPLETED/FAILED/CANCELLED. See
 
 An explicit owner force-finish is **not** verified completion. `/cortex-finish`,
 the **Finish** option of the runtime's own stop question (by number, label, or its
-stored or rendered English or Russian text), or an unambiguous answer to a
-task-closure question stops task-owned work and
+stored or rendered English or Russian text) stops task-owned work and
 leaves the task terminal `CANCELLED`, with a `USER_FORCE_FINISHED` event recording
 the captured owner source, prior state, current revision, unfinished nodes, and
 the fact that review, verification, and synthesis were not certified by this
@@ -250,7 +272,7 @@ For coordinator-submitted synthesis and direct answers, structured `not_verified
 is the sole source of the runtime's disclosure section. Items with the same blocker
 render as one line (`check one; check two — Blocker: …`); the structured list keeps
 every item (one device limit was listed about ten times in one answer, 2026-10-22). When that list is nonempty,
-`orchestration/state.py:disclosed_synthesis` refuses an authored disclosure heading
+the runtime refuses an authored disclosure heading
 in `text` with `synthesis_disclosure_in_text`, before storing or delivering the
 answer. The caller must move gap disclosures into the structured list and keep
 unrelated context elsewhere in the text; the runtime does not silently delete a
@@ -273,6 +295,38 @@ that passed (a later failure supersedes an earlier pass) with its exact
 verification revision matching that review's or record's project digest, report content digests, synthesis and absence of live worker
 sessions. A report removed or changed after publication, or a project changed during
 synthesis, blocks completion. Chat text is never parsed as an acceptance signal.
+
+The project observation behind those digests never follows a link and never fails
+because of what the project contains. A symlink is recorded by its target string (a
+symlinked directory is one entry; nothing behind it is read). A submodule or nested
+repository is recorded with the commit its checkout is at (`uninitialised` when it is not
+checked out). Every regular file of the deliverable content (tracked and untracked
+non-ignored files, nested checkouts included) is hashed in full by streaming, together
+with its mode, so restoring an mtime cannot hide an edit. Generous safety bounds (4 GiB per
+file, 8 GiB in total, five minutes) apply; a file past a bound is recorded by size, mtime
+and mode with a marker, sets `metadata_only`, `cap_reached` and `incomplete`, and denies
+the waiver. A fifo, socket or device cannot be hashed and does the same. Only genuinely
+unreadable content (permission denied, a file that changes while it is read, an unlisted
+or private path) refuses, with an explicit `project_unobservable_*` reason, never a silent
+pass. Git-ignored files are not part of the delivered result: they are covered by a second,
+metadata-only digest (type, mode, size, mtime, link target; no content), including the ignored
+files of nested checkouts. The waivers require that digest to equal the baseline's, so an
+unchanged `target/` or `node_modules/` still gets the waiver, while a changed, added or
+removed ignored file, or an ignored set that could not be listed completely (200,000
+entries), denies it and the review runs. The observation also covers the dirty state of
+every submodule and nested repository (tracked changes, untracked files; recursively to four
+levels) and empty directories, which Git does not track. A nested checkout that cannot be
+observed sets `incomplete`. The `EXECUTION_BASELINE` receipt records `metadata_only`,
+`cap_reached` and `incomplete`; a metadata-only or incomplete observation never supports
+either `REVIEW_NOT_REQUIRED` waiver.
+
+A task never has two drivers: installing a driver for a task cancels and awaits any
+prior one, and every exit path of a worker turn in a concurrent batch signals the
+siblings. A worker question normally leaves the task Executing (only the asking worker
+waits); the task moves to WAITING_USER only for a worker without an engine session
+reference, and then sibling workers are stopped because worker channels are authorised
+only while EXECUTING or REVIEWING. An incoming prompt on a paused task is refused
+without any commit while an owned process is unconfirmed, exactly as Resume is.
 
 State, graph and events survive process loss. Retry requires observed engine
 absence and no uncertain action receipt. Review binds the project digest from

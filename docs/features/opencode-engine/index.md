@@ -1,6 +1,6 @@
 # OpenCode v2 outgoing adapter (optional)
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 Cortex can run [OpenCode v2](https://opencode.ai/v2/docs/cli/acp/) (`opencode acp`) as a third outgoing ACP engine, next to Codex and Claude. It is **optional and fail-closed**:
@@ -10,7 +10,12 @@ Cortex can run [OpenCode v2](https://opencode.ai/v2/docs/cli/acp/) (`opencode ac
 - automatic worker routing never picks it unless `routing.json` opts in (a `models` selection list or an exact `auto_allow` entry);
 - only OpenCode **2.x.x** is accepted (1.x and 3.x are refused), and it runs only inside the engine jail with process isolation.
 
-Source: `engine/opencode_install.py` (binary trust and version), `engine/opencode_adapter_acp.py` (configuration, prompt, option mapping), `engine/opencode_tool_calls.py` (Code Mode tool cards), plus OpenCode branches in `engine/process.py`, `engine/session_manager.py`, `orchestration/sandbox.py`, `delegation/live_adapters.py`, `catalog/refresh.py`, `routing/auto_route.py` and `scripts/cortex_acp_setup.py`.
+The binary trust and version check, configuration, prompt and option mapping, Code Mode tool cards and the OpenCode branches of the engine, routing and catalogue code were implemented in the former Python runtime. The Rust host has an OpenCode engine kind, but the behavior described on this page was not re-verified against it; the Settings paths that need the version probe refuse (below). The setup commands are in `cortex-paseo-tools` (`add-opencode-connection`, `refresh-catalog`).
+
+Workspace Settings refresh currently handles only
+[metadata-only OpenCode install rejections](../../configuration.md#opencode-pre-probe-rejection)
+natively. For a potentially usable install the version probe must run in the OpenCode network-less namespace jail, which the Rust host does not provide: `discover_opencode`, `onboard_opencode` and `onboard_connection` refuse with `config_api_unavailable`, and `discover_connections` reports `discovery_unavailable` (see [native Settings limits](../../project/native-incoming-acp.md#paseo-settings-under-the-rust-launch)). Provider import and prompt-free catalog observation for OpenCode are likewise unavailable.
+This is not a native successful OpenCode producer or isolation qualification.
 
 ## Onboarding
 
@@ -19,12 +24,12 @@ Source: `engine/opencode_install.py` (binary trust and version), `engine/opencod
 3. Register the connection only after explicitly choosing to enable this optional engine. The plugin implements a [Paseo Cortex Settings screen](../../configuration.md#manage-settings-in-paseo) for discovery and onboarding, but a live Paseo 0.10.0 check did not find that screen in Settings or the command palette. If it is not available in your host, use the setup CLI below. Onboarding requires an explicit opt-in, never copies the existing owner login, and does not change routing. When the Settings panel is reachable, a successful “Enable OpenCode v2” shows a banner naming the connection’s exact next step (for example, making the login directory private) directly from the onboard response; it never shows the credential directory’s path, since Cortex never surfaces credential paths to the plugin layer. The Engines group under Connections also lists OpenCode's status, but offers no Add connection for it; “Enable OpenCode v2” is its only Settings onboarding. Cortex never downloads OpenCode.
 
 ```bash
-python3 -B scripts/cortex_acp_setup.py add-opencode-connection
-# or, for a specific binary:
-python3 -B scripts/cortex_acp_setup.py add-opencode-connection --binary /absolute/path/to/opencode
+scripts/cortex-paseo-tools.sh add-opencode-connection
+# or, for a specific binary (and an optional display name):
+scripts/cortex-paseo-tools.sh add-opencode-connection --binary /absolute/path/to/opencode --name <name>
 ```
 
-The CLI step looks at `--binary`, `$CORTEX_OPENCODE_BINARY`, `~/.opencode/bin/opencode` and `opencode` on `PATH`, in that order. The Paseo API deliberately does not accept an arbitrary binary path. Each candidate is resolved to its real file, then checked:
+The setup step looks at `--binary`, `$CORTEX_OPENCODE_BINARY`, `~/.opencode/bin/opencode` and `opencode` on `PATH`, in that order. The Paseo API deliberately does not accept an arbitrary binary path. Each candidate is resolved to its real file, then checked:
 
 - the path must be absolute and have no symlink component;
 - the file must be owned by you or root and writable by nobody else;
@@ -34,9 +39,9 @@ The connection references your own OpenCode login in place: it is never copied, 
 
 - `opencode auth login` when the login is missing;
 - the `chmod` when the directory is not private;
-- `refresh-catalog --connection <id>` when the connection is ready.
+- `refresh-catalog` (`scripts/cortex-paseo-tools.sh refresh-catalog [--workspace PROJECT]`) when the connection is ready.
 
-`python3 -B scripts/cortex_acp_setup.py status` also reports a found OpenCode binary under `discovered_engines.opencode`, marked `optional` and `qualified`.
+`scripts/cortex-paseo-tools.sh status` also reports a found OpenCode binary under `discovered_engines.opencode`, marked `optional` and `qualified`.
 
 The catalog fills the way it does for the other engines:
 
@@ -51,7 +56,7 @@ either refresh or session capture saves a snapshot. Otherwise refresh reports
 session capture likewise keeps the prior catalog. An advertised model list alone
 does not establish usable Cortex routes.
 
-Registering the connection is not enough by itself: OpenCode contributes no models to the selector until its catalog holds at least one successful refresh (there is no seed for it, unlike the built-in engines). A `configured` connection with no catalog snapshot yet is exactly as invisible in the model selector as an `invalid` one. After a `configured` state, run `refresh-catalog` (above), press **Refresh model lists** under Settings > Models, or open a new Cortex session, which also triggers a background refresh. That refresh runs in its own process session (`catalog/detached_refresh.py`), so it still finishes and saves its snapshot when a short-lived host discovery process (Paseo stops it about a second after `session/new`) has already ended. Even with a catalog, every OpenCode model stays off until the owner switches it on under Settings > Models (routing `enabled`, see [configuration](../../configuration.md#routing-rules)); only switched-on models reach the selector, pins and automatic routing.
+Registering the connection is not enough by itself: OpenCode contributes no models to the selector until its catalog holds at least one successful refresh (there is no seed for it, unlike the built-in engines). A `configured` connection with no catalog snapshot yet is exactly as invisible in the model selector as an `invalid` one. After a `configured` state, run `refresh-catalog` (above), press **Refresh model lists** under Settings > Models, or open a new Cortex session, which also triggers a background refresh. That refresh runs in its own process session, so it still finishes and saves its snapshot when a short-lived host discovery process (Paseo stops it about a second after `session/new`) has already ended. Even with a catalog, every OpenCode model stays off until the owner switches it on under Settings > Models (routing `enabled`, see [configuration](../../configuration.md#routing-rules)); only switched-on models reach the selector, pins and automatic routing.
 
 ## What Cortex configures
 
@@ -141,7 +146,7 @@ In the tested 2.0.19 build, a session's MCP servers are **not** separate model t
 - **Permission requests.** One `execute` call raises one permission request (kind `other`, title `execute`, `rawInput.code`). The calls inside it are not asked one by one. Every Cortex MCP call is still re-checked by the channel-bound gateway.
 - **Catalog.** Code Mode's catalog holds the session's MCP servers, `opencode` (session move/rename, model search, MCP resources) and `browser` (fails without OpenCode's desktop app). It has no shell or file tools, and `fetch` is available.
 - **Timing.** OpenCode connects MCP servers as `session/new` returns and fixes the session's tool catalog at its first prompt. A prompt sent within about 0.1 s of the servers' `tools/list` never sees them, in that turn or any later one. So after `session/new` Cortex waits until the broker observes OpenCode's own `tools/list` on the Cortex gateway, then another 1.0 s (`OPENCODE_MCP_SETTLE_SECONDS`). A gateway that never becomes ready fails the session (`opencode_mcp_not_ready`) instead of running without it. No ACP signal marks the registration, so this margin is a measured heuristic, not a guarantee.
-- **Tool cards.** OpenCode reports each Code Mode call as the wrapper itself: title `execute`, kind `other`, `rawInput.code`, and at completion `rawOutput.metadata.toolCalls` plus the returned text only in ACP `content`. Before any presenter sees it, Cortex rewrites it into the MCP card format Codex uses (`engine/opencode_tool_calls.py`, applied in `EngineSessionManager._translate_update` for OpenCode only):
+- **Tool cards.** OpenCode reports each Code Mode call as the wrapper itself: title `execute`, kind `other`, `rawInput.code`, and at completion `rawOutput.metadata.toolCalls` plus the returned text only in ACP `content`. Before any presenter sees it, Cortex rewrites it into the MCP card format Codex uses:
   - The title becomes `mcp.<server>.<tool>` (for example `mcp.cortex.read_report`). While the call runs, the name comes from the first `tools.<server>.<tool>(` in the code; that is a hint only, and the completed call list replaces it. A top-level helper such as `search` keeps its own name. A call whose inner tool is not known yet is titled `Code Mode`, never `execute`, which presenters would take for a shell. With several inner calls, the card is named after the first MCP call; all calls stay in `rawOutput.metadata.toolCalls`.
   - `rawInput` becomes `{server, tool, arguments, code}`. The original JavaScript is kept in `code`.
   - The returned text is also placed in `rawOutput.result.content`, next to OpenCode's own `metadata`.
@@ -201,7 +206,7 @@ Native tool requests reach the same permission bridge as the other engines:
 ## Options, routing and access mode
 
 - **Options.** `model` is always set, since OpenCode's own default is a free OpenCode Zen model. `effort` is set when the route carries one; it is pre-checked only when the route's model is already current, otherwise `configure()` re-checks it after the model switch. `mode` is always `cortex`.
-- **Routing.** By default every `opencode` route is excluded from automatic selection (`routing.model_policy.BUILTIN_AUTO_DENY_ENGINES`). A `routing.json` `models.opencode.auto` list makes exactly the listed models eligible (with `models.opencode.tiers` and `policy` placing them; unlisted OpenCode models get a tier by list position), and an exact `auto_allow` entry lifts the exclusion for one route; the model selector or a `pin` runs any offered route. Model IDs contain the provider, so an entry names both (`models.opencode.auto: ["anthropic/claude-sonnet-4-5"]`, or `"opencode/anthropic/claude-sonnet-4-5"` in `auto_allow`). A plan node hint may name an exact OpenCode route (`opencode/anthropic/claude-sonnet-4-5`) copied from `list_route_options`; it is honoured only when that route is eligible for automatic routing, and an engine-level `opencode` hint does not lift the exclusion. See [owner-configured models](../routing-and-fallback/index.md#owner-configured-models-selection-tiers-and-policy).
+- **Routing.** By default every `opencode` route is excluded from automatic selection. A `routing.json` `models.opencode.auto` list makes exactly the listed models eligible (with `models.opencode.tiers` and `policy` placing them; unlisted OpenCode models get a tier by list position), and an exact `auto_allow` entry lifts the exclusion for one route; the model selector or a `pin` runs any offered route. Model IDs contain the provider, so an entry names both (`models.opencode.auto: ["anthropic/claude-sonnet-4-5"]`, or `"opencode/anthropic/claude-sonnet-4-5"` in `auto_allow`). A plan node hint may name an exact OpenCode route (`opencode/anthropic/claude-sonnet-4-5`) copied from `list_route_options`; it is honoured only when that route is eligible for automatic routing, and an engine-level `opencode` hint does not lift the exclusion. See [owner-configured models](../routing-and-fallback/index.md#owner-configured-models-selection-tiers-and-policy).
 - **Access modes.** Guarded and Auto both work at the bridge. OpenCode has no more permissive mode to switch to, so Auto only answers the permission cards.
 
 ## Recovery, compaction and usage
@@ -234,7 +239,7 @@ The table records the no-paid qualification observations.
 
 ## Evidence and limits
 
-- `tests/test_engine_opencode.py` (default suite, no binary needed) covers these paths:
+- The former Python suite `test_engine_opencode` (default suite, no binary needed) covered these paths (removed on 2026-11-16, not ported):
   - registration and qualification tables;
   - configuration content and prompt assembly;
   - option mapping;
@@ -245,11 +250,11 @@ The table records the no-paid qualification observations.
   - jail isolation, masking and the read-only prompt file;
   - sibling-jail `/proc/<pid>/environ` denial;
   - automatic-routing exclusion and refusal continuation.
-- `tests/test_engine_opencode_qualification.py` runs the real binary through `EngineSessionManager`, the engine jail, the brokered Cortex MCP server and the permission bridge. It uses a loopback fake OpenAI-compatible provider, which is the only test seam: it is added to Cortex's configuration. The disposable owner configuration also defines a provider on the same endpoint with a stand-in key: it must be offered, a turn on it must authenticate with that key read from its jail file, and no OpenCode process environment may hold the key. The disposable data directory is created by the binary itself (one prompt-free `session/new`, which fetches the public models.dev catalog) and holds stand-in logins for `nvidia` and for a third owner-configured provider: `session/new` must still offer only `cortex`, list `nvidia` models, and a turn on the third provider must authenticate with its login; native credential rows must stay unchanged while session state uses the same database. Opt in with `CORTEX_PINNED_OPENCODE_BINARY=<absolute path>`.
+- The former Python qualification test ran the real binary through `EngineSessionManager`, the engine jail, the brokered Cortex MCP server and the permission bridge. It uses a loopback fake OpenAI-compatible provider, which is the only test seam: it is added to Cortex's configuration. The disposable owner configuration also defines a provider on the same endpoint with a stand-in key: it must be offered, a turn on it must authenticate with that key read from its jail file, and no OpenCode process environment may hold the key. The disposable data directory is created by the binary itself (one prompt-free `session/new`, which fetches the public models.dev catalog) and holds stand-in logins for `nvidia` and for a third owner-configured provider: `session/new` must still offer only `cortex`, list `nvidia` models, and a turn on the third provider must authenticate with its login; native credential rows must stay unchanged while session state uses the same database. Opt in with `CORTEX_PINNED_OPENCODE_BINARY=<absolute path>`.
 - On 2026-09-29, against 2.0.19, the qualification test failed once and then passed 10 consecutive runs. The failed run was the first after the MCP settle wait was added: the test provider's model was missing from `session/new`'s options. Twelve raw ACP launches outside the jail did not reproduce it, and the cause was not isolated. In production, a route model that is not offered fails configuration closed.
 - The original 2026-09-29 qualification made no paid model, real-provider, Zed or Paseo run. On 2026-09-30, the same no-paid installed-binary qualification passed against OpenCode 2.0.20 with a loopback fake provider. This does not establish the owner's BytePlus model in ACP or a live user-route outcome.
 - **Native-login qualification passes on 2.0.20** (2026-09-30):
-  `tests/test_engine_opencode_qualification.py` passes (6 consecutive runs),
+  the former Python qualification test passed (6 consecutive runs),
   including a manual `/compact` turn. With the plugin removal switched off, it
   fails with `['build', 'plan'] == ['cortex']` before any prompt.
 - Prompt-free probes with a stand-in `nvidia` login: without the removal, 2 of 2

@@ -59,7 +59,12 @@ export function createBuffers(io: BufferIo) {
   let autosave = false;
 
   const find = (key: string) => list().find(b => b.key === key);
-  const update = (key: string, patch: Partial<FileBuffer>) => setList(all => all.map(b => b.key === key ? { ...b, ...patch } : b));
+  // A patch that changes nothing keeps the record, so the disk poll on a quiet file wakes no screen.
+  const update = (key: string, patch: Partial<FileBuffer>) => {
+    const b = find(key);
+    if (!b || (Object.keys(patch) as (keyof FileBuffer)[]).every(k => Object.is(b[k], patch[k]))) return;
+    setList(all => all.map(b => b.key === key ? { ...b, ...patch } : b));
+  };
   const cancel = (key: string) => { clearTimeout(timers.get(key)); timers.delete(key); };
   const textOf = (key: string) => texts.get(key) ?? "";
   const canAutosave = (b: FileBuffer) => b.dirty && !b.saving && !b.conflict && !b.unconfirmed && !b.writer && !b.readOnly;

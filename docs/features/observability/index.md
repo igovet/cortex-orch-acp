@@ -1,6 +1,6 @@
 # Observability and resource attribution
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 This page describes how route use, recovery, resource limits, and uncertainty
@@ -9,23 +9,21 @@ replaces an existing durable evidence path (the `task_events` log,
 `attempt_route_audit`, `context_generations`/
 `capsule_deliveries`, ...); it reads and joins those, plus two new tables,
 to build the metrics and attribution
-require (`src/cortex_runtime/observability/`).
+require.
 
-## 1. Structured events (`observability.events`)
+## 1. Structured events
 
 `observability_events` (additive table in the current format-12 store; the metadata signals in this section add no schema change) is an
-append-only, immutable table (see `observability/store.py`): every row
+append-only, immutable table: every row
 carries whichever runtime identities the occurrence actually has —
 `assignment_ref`, `attempt_id`, `engine_session_ref`,
 `context_generation_id`, `config_revision_id`, `connection_id`,
 `route_engine`, `source_event_ref` — every one nullable, never fabricated
 when absent, plus a mandatory `category`/`outcome` and a `basis`
 classification chosen out of the same closed set
-`recovery.compaction_guard`/`recovery.token_budget` already use:
+`compaction_guard`/`token_budget` already use:
 `observed` | `engine_reported` | `derived` | `estimated` | `unknown`.
-There is no default basis — every append site chooses explicitly
-(`observability/events.py`'s `append_event`/`append_event_tx` raise on an
-unknown value).
+There is no default basis — every append site chooses explicitly.
 
 The additive [tool discovery/read API](../tool-discovery-and-read-batch/index.md)
 records `tool_read_api` events: catalogue revision, hashed channel/outer/item
@@ -41,14 +39,14 @@ read projection.
 
 The current append sites are:
 
-- `store.py`'s `_call` records a `publication`/`duplicate_attempt` row, in
+- The store layer records a `publication`/`duplicate_attempt` row, in
   the very same transaction, whenever a `(scope, operation, delivery_key)`
   already has a confirmed `deliveries` row — an idempotent replay of an
   already-confirmed write, never a new mutation, but a genuine *duplicate
   publication attempt* for the metric below.
-- `delegation.mcp_tools.dispatch` records a `validation`/`<error code>` row
+- the runtime records a `validation`/`<error code>` row
   whenever a channel's own tool-call arguments fail
-  `delegation.contracts.validate` — the "schema/validation errors" metric.
+  the runtime — the "schema/validation errors" metric.
 - Rejected worker submissions also produce `submission_rejection` rows. The
   event records the safe error code and bounded field-path diagnostics, not
   rejected values or report content. This includes result-schema corrections
@@ -87,8 +85,7 @@ text or credentials. A signal the runtime cannot observe is reported as
 unavailable or partial, never as zero.
 
 - **`project_read`** (`category='project_read'`, `basis='observed'`). One row per
-  gateway `project_read` call, written in the call's own transaction
-  (`orchestration/gateway.py`, `_record_project_read`). `outcome` is the kind:
+  gateway `project_read` call, written in the call's own transaction. `outcome` is the kind:
   `text`, `dir`, `image`, `binary`, `missing` or `failed`. `detail` carries only
   `path`, `kind` and, where meaningful, `sha256`, `start_line`, `end_line`,
   `complete`, `size_bytes` or an error code. Row volume follows call count, not
@@ -99,7 +96,7 @@ unavailable or partial, never as zero.
   `outcome` and `detail.error` carry the error code; `detail` holds the operation
   name and error code only. Recording is best-effort and never changes the refusal
   the caller receives.
-- **`external_refusal` and `external_error`** (`engine/external_proxy.py`). A
+- **`external_refusal` and `external_error`**. A
   denied external MCP tool (`external_refusal`), or a denied method, timeout,
   closed pipe, oversized frame or response mismatch (`external_error`). `detail`
   holds `server`, `tool` and `error` only. An engine's startup discovery
@@ -119,16 +116,14 @@ unavailable or partial, never as zero.
 - **`COORDINATOR_TURN_ENDED`** (runtime event). Each coordinator `prompt()` call
   that recorded `COORDINATOR_TURN_STARTED` gets one paired end event carrying
   `stop_reason` when the call returned, or `failure_kind` (the exception class
-  name) when it raised (`orchestration/controller.py`).
+  name) when it raised.
 - **`FIRST_MODEL_OUTPUT` gating.** Recorded only for the first
-  `agent_message_chunk`, `agent_thought_chunk` or `tool_call` update of an attempt
-  (`engine/session_manager.py`, `_FIRST_MODEL_OUTPUT_UPDATE_KINDS`). Its payload
+  `agent_message_chunk`, `agent_thought_chunk` or `tool_call` update of an attempt. Its payload
   carries `update_kind` only. The earlier rule, the first update of any kind, could
   record a non-model update; rows already written are not reclassified.
 - **Usage across inner turns.** Still one `usage_records` row per `prompt()` call.
   When a stall-nudge or refusal continuation runs several inner engine turns inside
-  that call, the row's tokens are the sum of the turns' reported usage
-  (`delegation/live_adapters.py`, `_bank_turn_usage`); previously only the last inner
+  that call, the row's tokens are the sum of the turns' reported usage; previously only the last inner
   turn counted. The basis stays `unknown` with empty tokens when no inner turn
   reported usage. When some inner turns reported usage and another inner turn
   reported none, the basis is also `unknown` with empty tokens: the sum would omit
@@ -136,9 +131,9 @@ unavailable or partial, never as zero.
   whose inner turns all reported usage keeps `engine_reported` and the summed tokens.
 
 **Engine limits.** Claude's native Bash, Read, Edit, Write, Grep, Glob and
-NotebookEdit tools are disabled by configuration (`engine/claude_adapter_acp.py`);
+NotebookEdit tools are disabled by configuration;
 this page does not re-verify live compliance. The Codex CLI version examined in the
-observability audit (0.154.0, `engine/process.py`) cannot disable `unified_exec`,
+observability audit cannot disable `unified_exec`,
 so Codex native `exec` reads appear only as ACP-reported events, and Codex
 `apply_patch` edits have no runtime receipt. Codex read and edit figures are
 therefore partial and must be labelled so. ACP v1 has no per-inference boundary:
@@ -167,7 +162,7 @@ coordinator stream (`integrations/paseo/shared/worker-card-outcome.ts`). The
 card shows the role, status (icon and text), task title, the actual
 engine · model · effort route, on its own muted line how that route was chosen
 (tier, hint status, `by …` and the chosen plan's usage as `plan usage N%`, from
-the runtime's `routing/decision_display.py` summary; the worker page shows the
+the runtime's route-decision summary; the worker page shows the
 same as "Route choice: …" from the route audit's recorded decision), at most one
 fixed attention category (for example "Failure details in the worker tab";
 never any part of a failure or cancellation reason), labelled context/token
@@ -391,7 +386,7 @@ sequence and gives `foldedCards`. Durable task history (task events, the Workers
 panel and reports) keeps every call. Only the live and replayed host stream is
 bounded.
 
-The regression scale test (`tests/test_emission_scale.py`) drives the real
+The regression scale test drives the real
 Agent over a pipe transport with a Paseo client, the fake engine and
 300-character worker titles. It records each repeated `task_get_context` poll
 at 481–483 bytes after the first read. Each worker card sends 3 updates and
@@ -440,11 +435,11 @@ no retained text stays a compact `Edit · Preparing file…` row and never turns
 empty `{}`/`[]` transport placeholders into a raw JSON detail view; the panel
 does not infer a diff from the current file or from a status-only event.
 
-## 2. Usage/cost attribution (`observability.usage`)
+## 2. Usage/cost attribution
 
 `usage_records` (also additive) holds one immutable row per completed
 engine `prompt()` call
-(`delegation.live_adapters.LiveEngineAdapters.prompt`) — a coordinator
+ — a coordinator
 continuation, a worker assignment, a retry/fallback hop, or a
 recovery-capsule/clarification delivery. Every call gets its own row
 (`record_call_usage`, called from a `finally` block so a raised
@@ -452,16 +447,16 @@ recovery-capsule/clarification delivery. Every call gets its own row
 recovery calls are never collapsed into, or dropped in favor of, only the
 final successful attempt.
 
-`portable.engine_contract.UsageBasis` (`OBSERVED`/`ENGINE_REPORTED`/
+`UsageBasis` (`OBSERVED`/`ENGINE_REPORTED`/
 `ESTIMATED`/`UNKNOWN`) is the wire vocabulary;
-`engine.session_manager` translates recognized token fields in a settled
+`session_manager` translates recognized token fields in a settled
 `session/prompt` response (or a token-bearing `usage_update`) into
 `EngineEvent(usage_basis=UsageBasis.ENGINE_REPORTED, usage_values={...})`.
 Top-level `usage_update.used/size` is context occupancy only. Field values are
 copied unchanged; their scope is the adapter's: Claude reports the whole turn,
 Codex only the turn's last model request (see
 [adapter token semantics](../token-and-plan-usage/index.md#adapter-token-semantics)).
-`delegation.live_adapters.prompt()` consumes token events and,
+the runtime consumes token events and,
 when the engine reported nothing during the call, persists
 `basis='unknown'` with empty `tokens_json` — never `0`/free.
 
@@ -518,11 +513,11 @@ the hop (from its `fallback_failure_class`), so a retry or fallback can be trace
 cause.
 
 Route/connection/model/config-revision are **not** duplicated onto every
-usage row: `observability.usage.list_usage`/`usage_summary` join
+usage row: `list_usage`/`usage_summary` join
 `attempt_route_audit` on `attempt_id` at read time
 (`route_basis='derived'`), so the two tables never drift apart.
 
-## 3. Metrics and the read API (`observability.metrics`)
+## 3. Metrics and the read API
 
 `observability.metrics.diagnostics_summary(store, task_id)` returns, for
 every metric, its own `unit` and either `availability="available"` or
@@ -555,7 +550,7 @@ Route metrics are task-local, descriptive observations; they do not feed routing
 `route_fix_cycles` counts durable `REVIEW_CHANGES_REQUESTED` events. Its route groups count distinct cycles with at least one fix assignment dispatched on that engine/model/role/complexity. One review cycle can appear in multiple groups when its fixes use different routes, so group counts are not additive. Pending fixes and dispatched fixes without route audits remain explicit in the attribution counters. Both grouped outputs cap the displayed group list at 100 and set `groups_truncated` when more groups exist.
 
 `resource_caps` never presents an exact monetary cap unless
-`configuration.policy.PolicyCeiling.spend_limit_enforceable` is `True` —
+`spend_limit_enforceable` is `True` —
 that dataclass already refuses to construct a `spend_limit` without it
 (`unenforceable_spend_limit`), so a non-`None` `monetary_cap` here is
 always backed by that construction-time enforcement gate. Absent that,
@@ -563,7 +558,7 @@ only the conservative `attempts`/`calls`/`tokens`/`concurrency` limits are
 surfaced.
 
 **MCP read.** A coordinator channel's `read_diagnostics` tool
-(`delegation.mcp_tools._coordinator_read_diagnostics`) returns this same
+ returns this same
 summary for `channel.task_id` — never a caller-supplied task id, same
 pattern as `read_capsule`/`read_large_output`. Not offered to worker
 channels (resource attribution is a coordinator-level concern here).
@@ -617,15 +612,15 @@ is `unavailable_reason` with a reason, never 0.
 session, not repeated tool calls. Its `truncated` flag is set when the 2,000-row
 usage read cap is reached.
 
-## 4. Redaction (`observability.redact`)
+## 4. Redaction
 
 A single scrubbing path, reused by every free-text sink in this runtime:
 
-- `engine.logs.EngineLogs.observe()` (the JSONL observation log) and the
+- the runtime (the JSONL observation log) and the
   new `EngineLogs.stderr_line()` (replacing the old direct
-  `stderr.append_line` call in `engine.process.EngineProcess._drain_stderr`
+  `stderr.append_line` call in `_drain_stderr`
   — a launched engine's own stderr is untrusted text).
-- `observability.redact.scrub_text()`/`scrub_mapping()` — the former
+- `scrub_text()`/`scrub_mapping()` — the former
   `gateway.diagnostics.safe_value()` it replaced only
   stripped *characters* (`_SAFE`), which does not redact a credential-shaped
   value using only allowed characters; this scrubs *patterns* first.
@@ -633,7 +628,7 @@ A single scrubbing path, reused by every free-text sink in this runtime:
 `scrub_text`: URL userinfo (`scheme://user:pass@host` →
 `scheme://[REDACTED]@host`), `Bearer`/`token`-prefixed credentials,
 credential-shaped `key=value`/`key: value` pairs (reusing
-`connections.environment.DENYLIST_PATTERN`'s vocabulary), and any
+`DENYLIST_PATTERN`'s vocabulary), and any
 remaining long (24+ char) opaque run **containing at least one digit** —
 collapsed to a stable short digest. Requiring a digit is deliberate: a
 plain English/snake_case identifier (an error code, an event name) never
@@ -664,35 +659,32 @@ outright with `[REDACTED]` when its *key* itself matches
 prompt/report/source body there. That narrow guarantee does not extend to every
 durable evidence path in this runtime: the external MCP broker persists the
 complete tool-call reply twice, once in `runtime_requests.result_json` and once
-in the `EXTERNAL_TOOL_RESULT` event payload
-(`src/cortex_runtime/engine/external_proxy.py:236-242`), and
+in the `EXTERNAL_TOOL_RESULT` event payload, and
 `orchestrating_runtime`'s worker-activity panel event persists the scrubbed but
 still content-bearing `raw_input`/`raw_output`/`content` fields (rows written
 before 2026-10-13 also carry `input`/`output` copies of the first two; readers
 use `raw_*` first) rather than a
-ref + digest + size
-(`src/cortex_runtime/acp/orchestrating_runtime.py:3516-3537`). Treat
+ref + digest + size. Treat
 ref + digest + size as this page's policy for the new measurements it adds,
 not as an existing guarantee across every stored record.
 
-Fixture-based tests (`tests/test_observability_redaction.py`) plant a
+Fixture-based tests plant a
 secret in an engine's environment, a launch argv, report/source text, and
 simulated engine stderr, and assert nothing leaks through `EngineLogs`,
-`observability.redact`, or `store.py`'s `create_task` redaction
-path, while ids/status/error-category fields survive unredacted.
+the redaction helper, or the task-creation redaction path, while ids/status/error-category fields survive unredacted.
 
 ## 5. Missing telemetry never gates execution
 
-`delegation.live_adapters.prompt()` records `basis='unknown'` and still
+the runtime records `basis='unknown'` and still
 returns the engine's actual `PromptOutcome` — a `claude-agent-acp`/
 `codex-acp` turn that emits no `usage_update` at all (either adapter, per
 the adapter distribution evidence) completes exactly as it would with
-usage reported; `observability.metrics.diagnostics_summary`'s `tokens`
+usage reported; `diagnostics_summary`'s `tokens`
 section reports `availability="unavailable_reason"` in that case, never
 `0`/free. Conservative caps (`PolicyCeiling.limits`: `attempts`/`calls`/
 `tokens`/`concurrency`, enforced by the attempt and concurrency
 gates) remain in force regardless of whether usage telemetry exists.
-`tests/test_observability_usage.py` exercises this directly: a fake
+The usage tests exercise this directly: a fake
 adapter that never emits `usage_update` still lets `prompt()` return a
 successful outcome, and the resulting `usage_records` row is
 `basis='unknown'`.
@@ -726,12 +718,12 @@ writes to the main repository's `.cortex/cortex.sqlite3`, not to one under the
 worktree. The plugin resolves the workspace directory the same way, read-only,
 before it opens the store. A forged, ambiguous or unsafe worktree layout gets
 "unavailable". The plugin never guesses a different store and never creates
-one. `tests/test_paseo_worktree_store.py` checks that the plugin resolves the
+one. The Paseo store-reader tests check that the plugin resolves the
 same root as the runtime.
 
 Only the store is shared. The session records the worktree it was opened in
 (`acp_session_workspaces`), and the task it creates is bound to that worktree in
-the same transaction (`task_workspaces`, see `cortex_runtime/task_workspace.py`).
+the same transaction (`task_workspaces`).
 The binding is permanent. Every file-side consumer uses the task's tree: the
 coordinator and worker engines' cwd, the gateway's `project_read`/`project_write`/
 `project_delete`/`project_mkdir`/`project_skill_link`/`command_run`/`project_git`, verification,
@@ -759,391 +751,14 @@ presentation rule does not affect acceptance, worker evidence, or final replies.
 
 The plugin's GUI RPC handlers that previously used synchronous child-process calls now use asynchronous `execFile` with bounded concurrency. Worker-history identities are cached, and overlapping worker-history and pipeline poll requests are coalesced. `cortex-acp.invoke` timeout diagnostics identify the RPC method so a slow history read can be distinguished from other handlers. These measures remove the observed event-loop serialization cause and reduce duplicate work; they do not by themselves establish a timeout-free workload or a rendered GUI result. Use the plugin typecheck and unit-test commands in [verification guidance](../../project/verification.md), and inspect the actual Electron timeline for GUI claims.
 
-## Bound task inspection
+## Removed Python-era readers
 
-`scripts/cortex_inspect_task.py` is a no-model-call, bounded metadata reader.
-Use it only on a newly owned disposable qualification project with an actual
-read grant. Obtain the exact ACP session from the owned host's current
-`runtimeInfo`, using the [dev binding exporter](../../project/dev-environment.md#read-only-dev-binding)
-and the existing strict `parsePaseoRuntimeSessionId` wrapper parser. The exporter
-fetches/refetches only the exact owned agent and rechecks guarded durable ownership.
-It returns host/wrapper, endpoint and binding digests with explicit provenance. An opaque host
-agent ID or an acknowledged send alone is not an ACP/task binding. If the
-installed CLI does not expose that observation, verify the existing plugin API
-against the installed host; do not guess an ID, reopen a denied store or infer
-binding from completion. This helper adds no host API or daemon startup.
-
-Once the exact session is observed, discovery can read its task/current owner
-without guessing either identity:
-
-```bash
-python3 -B scripts/cortex_inspect_task.py --discover --project "$PROJECT" --session "$ACP_SESSION"
-```
-
-`--discover` cannot be combined with task/epoch/cursor or non-default limit
-arguments. It shares the same guarded, non-mutating storage refusal boundary;
-it does not enumerate sessions or choose the newest task. Use its returned
-binding for the explicit paged command below; ownership can change afterward.
-
-```bash
-python3 -B scripts/cortex_inspect_task.py --project "$PROJECT" \
-  --session "$ACP_SESSION" --task "$TASK" --owner-epoch "$OWNER_EPOCH" --limit 100
-# Continue with the exact returned next_cursor, retaining every page:
-python3 -B scripts/cortex_inspect_task.py --project "$PROJECT" \
-  --session "$ACP_SESSION" --task "$TASK" --owner-epoch "$OWNER_EPOCH" \
-  --cursor "$NEXT_CURSOR" --limit 100
-```
-
-The project must be an absolute logical project root. Session/task/epoch must
-match durable current ownership. A page reports `offset`, `total`,
-`snapshot_sha256`, `next_cursor` and collection `complete`; only the last page
-is complete. Retain all pages with that same digest, checking offsets/counts.
-Any projected change invalidates the cursor. Wrong/missing/stale bindings,
-unsafe paths, unsupported/legacy storage, more than 10,000 metadata rows,
-over 32 MiB of source JSON per inspected stream or 4 MiB of projected metadata,
-busy access locks and nonempty WALs refuse instead of yielding a truncated
-success. The reader never creates files, checkpoints WAL, migrates or repairs.
-The dev binding wrapper can retain a complete exit-1 inspector's allowlisted
-refusal reason as `diagnostic` while still returning no binding. It also reports
-bounded local endpoint/spawn/subprocess/output stages without forwarding private
-exception text or treating a zero child exit as complete binding evidence; see
-[refusal diagnosis](../../project/dev-environment.md#diagnose-a-refused-binding-without-bypassing-it).
-A historical generic refusal does not establish busy storage, WAL or any other cause.
-Wait for a checkpointed snapshot through the normal runtime connection lifecycle
-and re-observe; do not stop a completed task to manufacture timestamps.
-In-process, `read_binding_page` and `discover_binding` signal a busy access lock
-by raising `BlockingIOError` (the CLIs print `inspection_busy`); other refusals
-are `StoreError` codes. A qualification supervisor retries only that busy case,
-within its deadline, through
-[the qualification observer](../../project/dev-environment.md#observe-and-steer-within-the-case-budget).
-
-The projection contains configuration revisions (selected/pending/ACTIVE kept
-distinct), dispatch audits, provisioned attempts, plan/review node identities,
-report edition digests/sizes, verification command hashes/exit/completeness and
-retained-output identities, synthesis hash, source identity hashes, ordered
-task/runtime event IDs, action-receipt completeness, process-termination
-observations and reservation releases. No report bodies, prompts, raw tool
-arguments/output or private host logs are returned. Event payload hashes retain
-identity without exposing those bodies. Missing records remain missing.
-
-Allowlisted outcome metadata is projected from records the runtime already
-keeps (`src/cortex_runtime/storage/inspection.py`):
-
-- **Action receipts.** A completed receipt keeps its fields in a nested
-  `receipt` object. The reader takes the gateway `tool_call_ref`, `exit_code`,
-  `failure`, `profile` and `large_output_id` from there. It shows both the
-  receipt's `complete` and the command's own `run_complete`, plus the issuing
-  channel's attempt and owner epoch. When a retained-output record exists, its
-  `byte_count`, `truncated`, exit code, signal and failure are shown, and
-  `bound` says whether the record belongs to that receipt. The output body is
-  not read.
-- **Worker results.** `WORKER_COMPLETED`/`WORKER_FAILED` rows carry the attempt,
-  node, verdict and, per check, a name hash plus `outcome`, `claimed_outcome`,
-  `evidence_gap`, `tool_call_ref`, `closed_by` and `retracted_by`.
-  `CHECK_FAILURE_PRESENTED` carries its attempt and receipt.
-- **Tool events.** `TOOL_AUTHORIZED`/`TOOL_COMPLETED`/`TOOL_REJECTED` rows carry
-  the operation, receipt, channel attempt and, for a rejection, its error code.
-- **Dispatch rows.** Each dispatch row carries a `route` object:
-  `route_basis`, effort and its source, basis, `decided_by`, tiers, the
-  provider preference and its status, hint status, `cross_provider_review`,
-  the chosen `engine/model`, the user-request status and whether a pin effort
-  was clamped. Candidates, usage figures and reasons are omitted.
-- **Observability rows.** The `observability` section lists `validation`,
-  `submission_rejection` and `gateway_refusal` rows: category, error code,
-  attempt, operation and bounded field paths. `tool_read_api` rows additionally
-  retain allowlisted correlation digests, member index, counts, elapsed/byte
-  measurements and deferred-output identity/hash; never bodies or arguments.
-  The `report_reads` section exposes successful read metadata, hashed native
-  request identities and runtime-derived composite batch request ids, never
-  arbitrary caller request-id text. These prove observations, not model
-  consumption or native command receipts.
-- **Questions.** `USER_QUESTION_REQUESTED` exposes the question ID, whether it
-  is a runtime stop, its blocker code, resume state, revision and option count.
-  Its text and options are never exposed.
-- **Steering.** `USER_STEERING`/`STEERING_APPLIED` expose only the actor hash
-  that pairs them.
-
-A check reference that is not an exact gateway receipt is shown as
-`unrecognized`, and a non-code string as `unsafe_value`; neither is echoed.
-Some things never reach the store, so they cannot appear here:
-
-- a client-side schema rejection that never became a dispatched `tools/call`;
-- the worker-card status a host renders, including a status the host bridge
-  synthesizes.
-
-The inspector does not report either one as observed.
-
-Dispatch audit is intent, not engine confirmation. Successful worker/reviewer
-native configuration now appends `worker_configuration_confirmed` with the
-exact attempt/session/config/connection/model, applied effort/mode and actual
-confirmation reference. It is recorded only after the engine confirm-or-fail
-call returns evidence. Coordinator confirmation remains the ACTIVE revision's
-reference. Neither host Thinking text nor a dispatch effort substitutes for
-these observations. Unknown native parameter keys are hash-only.
-
-`closed_at` is not a transport disconnect receipt. Use a retained
-`host_disconnected` event and its history-completeness/unknown-action counts;
-truncated history or incomplete action receipts block qualification. The
-inspector does not probe `/proc`, prove native resource liveness, verify report
-body bytes, or invent SIGKILL telemetry. It has no acceptance verdict. Missing
-host/cleanup/engine evidence still requires an explicit limitation, not a pass.
-
-### Prepared read fingerprints
-
-`read_api_calls` is an allowlisted immutable server-boundary observation:
-canonical sorted compact UTF-8 JSON hashes and bytes for arguments and decoded
-responses; typed request and channel hashes; owner/attempt binding; member index,
-item hash/status, deferred ID and delivery-request hash. Markdown and decoded
-output chunks have content hashes/bytes, never bodies. Native partial, truncation
-and paging flags remain explicit. Missing request identity or unsupported/oversized
-serialization is unavailable, not success. Member execution metadata additionally
-carries the same request hash, so a rejected envelope can be checked for zero reads.
-
-These observations mean **prepared**, not delivered to the engine. Reused request
-identities are ambiguous and cannot qualify. They are not `tool_call_ref` command
-receipts and never close automated checks. The [executable public evidence
-matrix](../tool-discovery-and-read-batch/index.md#executable-public-evidence)
-compares independently known bytes/schema expectations with these observations.
-Distinct request/observation identities can represent legitimate repeated
-idempotent reads with identical response hashes. The public matrix validates
-every selected-worker occurrence and reports safe counts/identities. Actor binding
-precedes shape matching: authenticated coordinator/reviewer/other-attempt reads
-within the same bound snapshot are counted separately, not worker evidence.
-Duplicate rows, reused correlation, unbound/foreign identities and contradictory
-worker occurrences remain failures. The inspector still never opens report or
-output bodies.
-
-`REVIEW_NOT_REQUIRED` and `EXECUTION_BASELINE` project only revision, reason,
-reference and project digest/head. A valid unchanged-project waiver is not a
-failed review. Actual review approval requires a runtime review node and its
-exact attempt's structured verdict, not execution QA labels or synthesis prose.
-
-## Orchestration phase measurement
-
-Inspect a checkpointed format-12 project store without a model call:
-
-```bash
-python3 -B scripts/cortex_timeline.py --project "$PROJECT" --task "$TASK"
-python3 -B scripts/cortex_timeline.py --project "$PROJECT" --task "$TASK" --json
-```
-
-This reader uses the existing guarded immutable snapshot: SQLite URI
-`mode=ro&immutable=1`, query-only, an existing access lock opened read-only,
-and no Store initialization, migration, repair, checkpoint or file creation.
-Unsafe paths, a busy lock, nonempty WAL, unsupported/legacy storage, a missing
-task or more than 10,000 events refuse (exit 1), never return partial success.
-Wait for the normal runtime to checkpoint; do not bypass a refusal.
-
-Only allowlisted event metadata is projected. Text and JSON show coordinator
-turn → plan, plan → baseline, assignment → engine ready → first update → first
-gateway tool → completed → released, review, verification and synthesis
-intervals. Exact event IDs and timestamps are returned with durations. Missing
-endpoints remain `missing` with null durations; duplicate milestones are not
-selected as a success. No start time is synthesized from task creation.
-Historical runs without the new milestones cannot split startup latency.
-Overlapping workers are shown separately, not summed into a claimed critical
-path; this is a phase breakdown for analyzing the critical path, not a
-reconstructed DAG critical-path verdict. Native engine actions are not gateway
-tool receipts, and their first-call timing is not inferred.
-
-### Multi-task aggregates
-
-```bash
-python3 -B scripts/cortex_timeline.py --project "$PROJECT" --aggregate --json
-python3 -B scripts/cortex_timeline.py --project "$PROJECT" --aggregate --task "$TASK" --task "$TASK_2" --json
-```
-
-`--aggregate` uses the same guarded snapshot read as the single-task mode and refuses
-in the same way (`unsafe_storage`, `legacy_storage_migration_required`,
-`unsupported_storage`, `inspection_uncheckpointed_wal`, `inspection_busy`), plus
-`timeline_task_missing` and `timeline_aggregate_overflow` above 500 tasks. Without
-`--task` it covers every task in the store up to that cap. For each task it calls
-`observability.metrics.diagnostics_summary` and prints counts, ratios, durations,
-availability and task IDs only: no paths, report bodies or logs.
-
-The output has two parts:
-
-- `cohorts`: separate populations by dispatched engine, connection, model and full
-  parameters fingerprint (including effort). Missing route identity is unattributed,
-  not pooled. The validity gate requires 10 completed tasks or 30 execution attempts
-  and at least 80% exact completed, non-truncated phase chains per cohort.
-- `token_coverage`: complete retained-call counts and known token-field subtotals
-  by audited engine and role, including coordinator and review. Missing engine
-  or role evidence stays explicitly unattributed. Released calls remain missing
-  for cost coverage even when the UI omits their alarm. Known subtotals never
-  represent full verified-result cost with missing calls. See
-  [interrupted-turn accounting](../token-and-plan-usage/index.md#coverage-and-interrupted-turns).
-- `validity`: execution-worker token coverage counts calls, not tasks. Unknown-basis plus
-  released-after-result calls must be at most 20% of that cohort's calls before
-  token criteria are usable; missing call coverage withholds token criteria.
-- `branches`: each cohort evaluates only its eligible execution chains. Missing
-  approved input withholds the affected branch (`availability=unavailable_reason`,
-  `holds=null`), not a false verdict. The three branches are:
-  - `worker_loops`: holds when the mean worker-execution share is at least 50%, the
-    median tool calls per execution attempt is at least 15 and the mean per-attempt
-    inference-gap share of worker execution is at least 40%. Its edit fields
-    (`code_apply_recommended`, `promote_project_edit`) also need `project_write` write
-    redundancy of at least 5 and a `project_write` share of writes of at least 30%.
-    `code_apply_recommended` keeps the name of an earlier plan: `true` means the
-    file-edit gate holds, not that a new tool exists.
-  - `reinvestigation`: holds when the mean within-task repeat ratio of dependent text
-    reads is at least 25% and the repeated-read share of worker-execution time is at
-    least 15%. `cross_task_reuse_considered` is `true` only when a retained per-call
-    cross-task repeat ratio is at least 30%, and `null` without usable history.
-    The read-count population is dependent attempts only; the time denominator
-    is all eligible worker execution. Independent repeats remain descriptive
-    per-attempt observations and cannot satisfy this gate. No dependent reads
-    withholds the branch rather than manufacturing zero. Unknown dependency
-    status also withholds it. Codex read evidence stays `partial` and is never
-    pooled with Claude's.
-  - `orchestration_chain`: holds when the orchestration share of critical-path
-    wall time is at least 35%, or review plus verification is at least 25%.
-  The top-level verdict mirrors a cohort only when there is exactly one cohort and
-  no unattributed attempt. Otherwise the top-level branches are withheld and each
-  cohort's own verdict applies.
-- **Not computed by the reader.** The several-branch rule (take the largest share;
-  do both when two are within 5 percentage points; stop when none qualifies), the
-  pilot criteria and any branch that uses token figures are outside `--aggregate`.
-  `token_criteria_usable` is reported per cohort, but no branch consumes it yet.
-  Mixed cohorts have no pooled verdict. The owner applies these remaining rules to
-  the reported branch values.
-  Thresholds are recorded in
-  [decisions](../../project/decisions.md#2026-10-09-observability-decision-gates-and-the-edit-tool-decision).
-
-Run it as the owner, outside the worker sandbox, on a checkpointed store. The
-observability audit saw the store refused as `unsafe_storage` from inside a worker
-sandbox.
-
-**Observation limits.** Historical tasks may lack the required phases, read
-identities or ACP durations. No native-read history is reconstructed. Cross-task
-history is available only for retained per-call text reads from at least two tasks;
-truncation withholds the ratio. Current producer metadata does not always allow a
-unique project-read-to-ACP-span binding, so the re-investigation time branch can
-remain unavailable even with a known repeat ratio. Dispatch parameters identify
-comparable cohorts; they are not native configuration confirmation. These outputs
-do not change scheduling, authorization, independent review or final verification.
-
-Additive `runtime_events`:
-- `COORDINATOR_TURN_STARTED`: immediately before a planning/reconciliation
-  prompt, carrying revision, state and engine session identity.
-- `ENGINE_READY`: the downstream process has started, initialize and
-  session/new have acknowledged a valid session. This is not native model
-  configuration confirmation.
-- `FIRST_MODEL_OUTPUT`: the first correlated session/update from that engine,
-  including non-text updates; it is **not** a first-token assertion.
-  Both worker/reviewer milestones carry only assignment, attempt and engine
-  session IDs; created_at supplies the timestamp. They are transactionally
-  deduplicated per actual attempt. Updates before session/new identity is
-  available are not attributed or fabricated.
-- `SCHEDULER_WAIT_REASON`: changes only, keyed by revision/node or attempt.
-  `dependency`, `scope_overlap` and `capacity_limit` are actual scheduler
-  decisions; `route_capacity` means the selected connection/session
-  reservation refused capacity (not proof of provider quota exhaustion).
-  A null reason clears an observed wait. Node waits for `scope_overlap` and
-  `capacity_limit` also carry `blocked_by` (holder kind, task, node, role,
-  objective, running state and the overlapping held/requested paths, or the
-  worker limit); a change of holder is recorded as a new wait. The chat shows
-  these waits as runtime "Waiting" cards (see
-  [orchestration](../orchestration/index.md)); the cards only present recorded events. Legacy standalone adapter calls
-  without a runtime task retain their existing progress event only.
-- `WORKER_COMPLETED`/`WORKER_FAILED` retain their prior fields and now
-  additionally carry attempt_id, preventing cross-attempt completion matching.
-
-These are metadata-only observations in normal runtime storage, not full dev
-wire logging. No prompt, tool content, credentials or private report body is
-added; acceptance, authority, scheduling limits and process release semantics
-are unchanged.
-
-## Developer-only wire tracing
-
-Wire tracing is **off by default**. Disabled instrumentation does not create
-directories or files and only checks the trace flag. There is no routing,
-production settings or MCP tool switch for it. The guarded wrapper clears
-inherited trace opt-ins on ordinary calls. Enable it only on a fresh
-`~/.paseo-dev` daemon start, between active tasks:
-
-```bash
-python3 -B scripts/cortex_paseo_dev.py --wire-trace -- start --timeout 60 --json
-```
-
-This command does not authorize a paid workload. Follow the
-[dev environment rules](../../project/dev-environment.md) before any launch.
-An already-running daemon does not acquire a new environment; stop it before
-an explicitly authorized traced start. To disable tracing, stop that dev daemon
-and start it through the wrapper without `--wire-trace`.
-
-The wrapper accepts this opt-in only for `start` or `daemon start` at the
-exact canonical `~/.paseo-dev` home, not alternate homes, GUI, status or binding
-commands. The runtime additionally requires the matching dev config/state XDG
-paths, the wrapper's explicit source root, and a real checkout with `.git`
-and the guarded script. Installed production payloads/state refuse even with
-the opt-in. These are source/state launch checks, not a cryptographic proof
-of environment provenance; the account owner controls their environment.
-
-JSONL goes only to
-`~/.paseo-dev/cortex-xdg/state/cortex/wire-traces/`: private owned 0700
-directories, 0600 files, no symlinks/hardlinked files, outside every Git
-repository and project `.cortex` store. Existing non-private targets refuse
-rather than being chmodded. All processes share a locked rotation ring:
-`trace.jsonl` and three numbered predecessors, each at most 16 MiB
-(64 MiB total plus an empty lock). Rotation replaces old history.
-A record too large for one file becomes an explicit
-`record_exceeds_rotation_size` diagnostic, never silently a full capture.
-Path/redaction/write failure stops that process's trace with a sanitized stderr
-diagnostic; it cannot change protocol, command or storage outcomes.
-
-Channels and directions:
-- `upstream_acp`: parsed client → Cortex (`in`), successfully written
-  Cortex → client (`out`) JSON-RPC at Cortex's stdio boundary, including
-  requests, responses and notifications.
-- `downstream_acp`: the same traffic between Cortex and each engine,
-  including initialization, session setup, updates, tool events and errors.
-- `mcp`: actual Cortex MCP request/reply frames, including `tools/call`
-  arguments, complete results and JSON-RPC errors.
-- `verification`: literal argv/cwd (`out`), complete combined stdout/stderr
-  lines and exit/interruption status (`in`); setup/launch failures are explicit.
-- `lifecycle`: runtime event insert attempts (`internal`), labelled
-  `transaction: pending`. They are **not** commit receipts; SQLite remains
-  authoritative.
-
-Rows include UTC timestamp, monotonic time, PID, direction/channel, session,
-channel, task, assignment and attempt IDs, with engine-session/connection or
-command references when available. Pre-session/pre-task/unbound IDs are null,
-not guessed. Response correlation is bounded to 1,024 requests per transport;
-evicted or unavailable identities stay missing. Malformed/oversized input has
-a diagnostic rather than an invented parsed body.
-
-Credentials are redacted before serialization: sensitive keys and environment
-name/value pairs, inherited and runtime-resolved engine secret-looking environment literals,
-auth headers,
-Bearer/Basic values, token/API-key/password argv, relay tokens, embedded JSON,
-common key formats, URL userinfo/credential claims through the shared redactor,
-and verification private-key blocks. Learned credential
-literals are also removed from echoes. Exhausting the bounded secret registry
-stops capture. Redaction is not a guarantee against arbitrary unfamiliar
-secrets or secrets fragmented across independent messages. Traces can contain
-private prompts, report/file bodies and model thought updates: never commit,
-publish or include raw traces in reports. Native actions invisible on these
-wires are not synthesized as command receipts.
-
-Read existing traces without a daemon, Store initialization or writes:
-
-```bash
-python3 -B scripts/cortex_trace_view.py --task "$TASK" --assignment "$ASSIGNMENT" --direction in --pretty
-python3 -B scripts/cortex_trace_view.py --channel verification --pretty
-```
-
-Optional `--directory` selects an existing private trace directory; unsafe
-targets and invalid/incomplete JSON return exit 1 (earlier output may be partial).
-Stop the writer before exact analysis: concurrent rotation can change which
-generations a reader sees. Rotation, explicit gaps or missing IDs prevent
-claims of complete retained history. Traces are debugging data, never
-acceptance evidence or substitutes for independent review and verified receipts.
+Three Python tools read the project store for diagnostics: the bound task inspector (`cortex_inspect_task`), the phase and aggregate timeline reader (`cortex_timeline`) and the developer wire trace with its viewer (`paseo-dev --wire-trace`, `cortex_trace_view`). They were removed on 2026-11-16 without replacement, together with the dev binding exporter, so the sections that described their commands, bindings, pagination, phase intervals, aggregates and trace files no longer apply and the corresponding events are not read by any shipped tool. The runtime still writes the events (`task_events`, `attempt_route_audit`, `context_generations`, capsule deliveries and the metadata signals above) to the store. The shipped read-only readers are `cortex-paseo-tools` `project-root`, `task-id`, `worker-history`, `worker-results`, `running-commands` and `pipeline`, which open the store through the non-initializing live read-only mode. A missing derived measurement is reported as unavailable, never inferred, and a trace or diagnostic is never acceptance evidence or a substitute for independent review and verified receipts.
 
 ## Runtime-composed-synthesis share and fallback reasons
 
-`scripts/cortex_timeline.py --aggregate` reads, per engine/connection/model/
-parameters-fingerprint cohort, the already-retained
+The retained events below were read, per engine/connection/model/
+parameters-fingerprint cohort, by the former aggregate timeline reader (removed; see above). The already-retained
 `SYNTHESIS_RUNTIME_COMPOSED`/`SYNTHESIS_RUNTIME_DECLINED` events (see
 [runtime-composed synthesis](../task-lifecycle/index.md#runtime-composed-synthesis))
 for every task that reached RECONCILING: each cohort's `runtime_synthesis`

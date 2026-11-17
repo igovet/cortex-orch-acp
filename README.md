@@ -19,6 +19,308 @@
   <strong>Recommended client: <a href="https://github.com/getpaseo/paseo">Paseo</a></strong>
 </p>
 
+Workspace engine limits retain connected engines with an explicit Unavailable state when no provider usage is observed. Coordinator choices exclude switched-off engines. See [desktop engine controls](docs/cortex-workspace/maintenance-and-controls.md).
+
+The incoming Rust ACP-v1 binary in `crates/cortex-acp` is the only entry for
+Zed registration, the Paseo setup launch record and a Paseo source-root launch:
+this checkout's `target/debug/cortex-acp`, built with
+`cargo build --locked --offline -p cortex-acp -p cortex-paseo-tools`. An unbuilt
+default refuses with that remedy. The Python entry and runtime were removed on
+2026-11-16 (the product contains no Python); an earlier owner-requested live Paseo `cli`
+qualification on Claude and Codex native accounts covered the Rust entry before
+that removal, and live Zed qualification was not run. `--rust-binary` and
+`CORTEX_ACP_RUST_BINARY` name another binary. The Git-install bootstrap builds and
+stages the Rust binaries. Known limits remain; see
+[native launch and limits](docs/project/native-incoming-acp.md#default-launch).
+The Paseo shim accepts the public absolute runtime root. Native question cards and
+engine permission requests keep their response correlation until an answer or
+cancellation, rather than expiring after 30 seconds; disconnect clears pending waits.
+Sessions accept client MCP entries no engine is handed, such as the HTTP
+server Paseo injects into every session; an unconfigured stdio server still refuses.
+Question cards use Python's Paseo card shape, and the cancel Paseo sends before a
+follow-up message is held for five seconds as in Python, so the message steers and
+`/cortex-answer` still answers instead of pausing the task.
+The exact-hash Codex 2.3.0 and 2.6.0 installs' model catalogue is observed natively.
+The binary must be built separately. Startup checks, model-efforts output, preset
+and default-profile seeding, approved-adapter following and Python's request
+error envelopes are available. The background engine download/registration/
+catalogue pass also runs and uses verified packaged bundles; a launch the native verifier still does not admit is not observed and reports `native_catalog_unavailable`, so first-run parity is incomplete (a Codex adapter package whose `@openai/codex` dependency or vendored binary Python cannot resolve is now launched directly and observed like Python's unverified launch).
+For a Rust launch the plugin's read-only store readers (worker history and results,
+running commands, pipeline, project root and task binding) and its Settings reads
+(user defaults, routing, profiles, MCP servers, connections and the model catalogue)
+run in the Rust `cortex-paseo-tools` binary, which must sit beside `cortex-acp`
+(`cargo build --locked --offline -p cortex-acp -p cortex-paseo-tools`); without it
+those reads are refused, never served by Python. Its output is byte-identical to the
+Python readers on fixture stores and homes, apart from two declared value-free native
+messages (`cargo test --locked --offline -p cortex-paseo-tools`).
+Every Settings change also runs natively there: user defaults, routing (user and
+project files), routing profiles (create, save, update, delete, activate,
+deactivate), MCP servers, connection rename/session limit/validate/remove, the
+project ceiling and the default preset (read, apply, reset), plus catalogue refresh,
+engine discovery, onboarding and pinned engine download. Each keeps the Python API's
+revision checks, owner lock, atomic file bytes/modes and refusal payloads (`field`,
+per-item `errors`, `current_revision`), checked against Python on fixture homes.
+Plugin automatic setup runs `cortex-paseo-tools setup`, cortex-acp's native first-run
+pass. Build both binaries for the same channel: Settings, setup and the agent share
+compiled-channel roots. Dev uses `cortex-workspace-dev` beneath the launch XDG config
+root and `cortex-workspace-dev/state` beneath its XDG state root, plus `.cortex-dev`
+for project settings; release keeps the ordinary roots and `.cortex`. A runtime
+`CORTEX_WORKSPACE_CHANNEL` value cannot switch these native Settings roots. Only shapes the Python provider alone can answer refuse explicitly with
+`config_api_unavailable` and their reason before any effect: an OS-keyring connection
+validation, an installed or named OpenCode binary (its version probe needs the
+OpenCode namespace jail), a catalogue refresh whose engine has no qualified native
+producer, and settings numbers outside the exact native range. See
+[Settings under the Rust launch](docs/project/native-incoming-acp.md#paseo-settings-under-the-rust-launch).
+Cached first-run catalogue entries must pass evidence and route-identity validation;
+new observations publish under the registry lock after rechecking the connection.
+Startup reads and rewrites `connections.json` exactly as Python does, including
+Python-only JSON values in its override history; it repairs an existing open
+configuration root to 0700 and waits for the owner lock without a bound, like
+Python. A pre-task model or effort choice is saved as the user-default route; a
+model change drops the previous model's effort before the new model is checked,
+while re-sending the current model keeps it, like Python. The provider, model and
+thought-level options now match Python's picker: Zed gets per-account providers
+(labelled with the signed-in account when it can be read) and provider-scoped
+models, Paseo gets one model picker with exact route IDs across accounts, and
+the thought level shows its observed default. Each new session also refreshes
+the catalogue once per connection without a prompt, like Python. Every Python
+`/cortex-*`, `/harvest`, `/harvest-refresh` and `/skill-management` command is
+advertised and replies with Python's text, usage errors and transcript;
+`/cortex-clear` previews retention but refuses a confirmed deletion, and other
+`/cortex-*` text that Python does not recognize is an ordinary prompt.
+`/cortex-new-task` retains the invoking client's access mode and language; cancelling
+that prompt stops only its separate task, not the invoking session's existing task.
+A missing route, image-capture refusals and refused-prompt transcript rows now match Python's
+error envelopes. Image, embedded-resource and link attachments of a follow-up prompt
+to an admitted native task are retained as its next source revision, listed under
+that prompt's transcript row and sent with later engine prompts; one task's retained
+attachments stay within 10 MiB in total. Internal control retries with the same request
+identity and capture return the settled receipt without duplicating input; changed
+captures conflict and unfinished controls remain unknown. While a turn runs, a typed message answers
+its one open worker question (a number selects that option), `/cortex-answer <n>`
+picks among several, and with Paseo's question cards a typed message also answers
+the coordinator's open card, as in Python. Python-created
+sessions reload with Python's options, read-only. Claude account-label lookup
+shares one five-second deadline across execution, pipe reading and cleanup;
+timeouts fall back to the engine name, including when a descendant retains stdout.
+It uses the same native service host and refuses an already-owned project rather
+than starting a competing scheduler. It is not the installed ACP entry point:
+initial image/resource snapshots, worker question batches and read-only legacy
+history loading and owner-configured stdio MCP worker attachment are supported.
+External tool grants are filtered per role; consultants receive none. External
+servers run in a Landlock/seccomp sandbox unless the owner explicitly sets
+`"containment": "none"` per server or as the registry default, which runs them
+with the owner's full user authority (see [configuration](docs/configuration.md)
+and [SECURITY.md](SECURITY.md)). Native
+routing now exposes owner-configured menus, plan hints, effort policy and
+recorded-consent selection. Rust table tests cover the legacy English/Russian
+request, chosen-option, project-instruction and explicit-effort cases; plan
+previews retain instruction provenance and explain preferred or hot hints.
+Coordinator questions now retain evidence-backed skill proposals and route exact
+approval to the skill-management planning request; declined or unclear answers
+never change project files. Channel-scoped native draft/publication/report reads and
+bounded schema discovery are available; published results must name the calling
+principal's own evidence. Native model, effort and language slash commands reuse
+the validated selectors. Access controls now persist Development/Guarded/Auto,
+confirm observed worker engine modes and govern one-shot outside-write/command
+routes. Workspace-service recovery now adopts Python-owned format-12 tasks under
+its scheduler fence, advances their owner epoch and preserves unknown-effect
+barriers. Settled checkpoints and pending questions continue natively; old sessions
+and in-flight effects are never replayed. Native history reload does not dispatch
+tasks; explicit follow-up input
+resumes a paused task, and new-session startup can recover a settled coordinator
+from retained state. Observed compaction and settled coordinator replacement
+rebuild bounded capsules from recorded constraints, answers, sources and current
+work; instructions and served schemas are redelivered. Post-verification
+reconciliation supports synthesis, owner questions, certified answers,
+verification repair and budgeted replan/scope/escalation proposals. Rejected
+synthesis disclosures now identify the current unresolved check names and explain
+how to correct the proposal; old revision names cannot silently close new gaps.
+Permission approval is not synthesis acceptance. Native source,
+project-file and Git tools now retain channel-local read coverage and full command
+output. Brokered worker commands and runtime verification now launch bubblewrap
+from Rust: private read-only process views, private literal /var/tmp scratch and
+read-only metadata protection use mounts, not Landlock alone. Protected children
+remain overlaid after writable parent grants. Writing roles receive project-wide
+command grants independently of reservations; Development/Auto permit outside cwd.
+Verification can write existing Git-ignored directories and discard other project
+writes through a probed disk overlay. Whole-project writers can update Git data
+while configuration/hooks/pointers stay guarded. Guarded HOME tool state,
+read-only relocated caches, SSH config/opt-in askpass, hardlink detachment and
+expanded owner denials use the Rust command backend. Main source/text reads
+are not subject to the image-size cap; oversized catalogues/schemas retain whole
+JSON for paging. Answer reads preserve recorded transport-session provenance,
+and retained output can follow the same owner scope across channel replacement.
+Native file replacements require complete, non-truncated same-channel read
+coverage of the current digest; a partial read hash is identity, not overwrite
+authority. Missing, incomplete and stale read errors provide correction guidance,
+not access decisions. New files use the absent-content precondition.
+File replacements now retain before/after hashes and reconcile matching on-disk
+bytes after restart without replaying an edit. Unmatched or legacy intents remain
+unknown. Brokered commands now run under independent Rust supervisors with
+boot/PID/start identities and private output/status files. After a service restart,
+the same command can be observed or owner-stopped without relaunch; lost or
+mismatched supervisors stay unknown. Recovered output and exit status never
+invent a project-revision binding or certify a passed check.
+Worker results derive evidence strength and check retained output, project-digest
+bindings, duplicate references and non-shell trivial commands, including confirmed
+outside-command receipts. Failed check history now derives exact latest-rerun
+closures, explicit probe retractions and supported invocation corrections; unknown
+or trivial passed claims stay unverified. General inline-shell status-flow
+analysis remains unfinished.
+Engine containment, unconfigured client stdio servers, Python's worker-card presentation
+and automatic engine-permission policy, and confirmed `/cortex-clear` deletion remain
+unfinished. See [native incoming ACP](docs/project/native-incoming-acp.md)
+for the supported surface and no-paid checks. Do not switch existing client
+launchers to it as a completed Python replacement.
+
+The Rust Core migration is in progress in `crates/cortex-core`. It is additive:
+the active ACP runtime still uses Python, and the desktop has not cut over to
+one all-Rust engine. The Rust library includes project-local format-12 storage,
+file-backed report/draft publication, newest-first pipeline editions, bounded
+catalogue/content cursors and verified format-11 migration/restore. These library
+checks do not qualify an installed application or establish performance parity.
+An additive [configuration observation library](docs/project/native-config-read.md)
+now normalizes profiles/connections and reads credential-redacted connection
+management metadata with exact byte revisions and MCP management with env presence
+only, ordered entries and per-entry validation problems. Malformed MCP documents
+retain their safe surface error without erasing other settings. Its composed reader feeds advisory
+Claude caches, bounded Codex rollout observations and exact-model context into
+the settings envelope without writes or engine probes. An additional composed path
+loads the full routing management view: project/environment/user precedence,
+byte revisions, normalized rules, builtin metadata and cached observed efforts.
+Invalid earlier files never inherit lower-precedence rules. Native defaults/profile
+management now adds byte revisions, stored ceilings, cached exact coordinator binding,
+profile snapshots, differences and interrupted/unavailable states to that compositor.
+The catalog-composed path now loads genuine cached snapshots, selector identities,
+model presentation and exact settings-only eligibility/policy diagnostics natively.
+It uses stored connection states and refuses unsafe/ambiguous catalogs as a whole;
+display selectability never authorizes execution. Machine `config.read` now uses
+the native passive reader on the bounded inspection lane, without a Python fallback.
+Its result adds sanitized `diagnostics`; opening settings never refreshes accounts,
+catalogs or usage. `config.action` now runs connection rename, session-limit edits
+and confirmed default-preset reset in Rust, preserving complete replies, private
+configuration files and revision checks. Reset retains byte-identical backups and
+in-process rollback; a hard kill can still leave the two files mixed. Profile read,
+create, save, rename/description update, delete and deactivate now also run in Rust,
+with shared-lock revision checks, private format-1 migration backups and verified
+migration/deletion rollback. Qualified format-1 and format-2 activation now uses a
+native pending journal across routing, defaults/ceiling, MCP usage policy and
+connection limits. Wider ignored profile-document metadata also stays native; wider
+modeled fields/backing files and unqualified materialization shapes retain Python. Profiles never
+capture MCP commands, arguments or environment.
+Filesystem-reference validation and connection removal also run in Rust, with
+complete offline reply/file/mode comparisons. Removal unlinks only canonical,
+owned, regular single-link secret files without reading their contents; native
+directories and keyring entries are untouched. Preset apply now seeds absent files
+and the default profile natively for qualified public-payload/current-file shapes.
+Valid keyring validation, unsupported removal defaults, custom preset documents,
+unqualified catalog refresh, setup, unqualified numeric locations and activation shapes retain
+Python before admission, never after a native error
+([action boundary](docs/configuration.md#native-machine-actions)).
+OpenCode metadata-only install rejections now return native failed refresh outcomes
+without probing or launching anything; every potentially usable OpenCode install
+still retains Python ([exact boundary](docs/configuration.md#opencode-pre-probe-rejection)).
+`config.save` now uses the native writer for routing, defaults and MCP. Engine limits refresh in the background with free, model-less reads (Claude Code `/usage`, Codex `account/rateLimits/read`, its App Server without plugins or marketplace sync); see [token and plan usage](docs/features/token-and-plan-usage/index.md#claude-plan-usage-the-local-usage-cli). Cortex-launched Codex sessions start none of the owner's own Codex MCP servers: their relays reach App Server as launcher config layers, not ACP `mcpServers`, and codex-acp gets the launcher's disabled features in `CODEX_CONFIG`, so a session thread does not turn the owner's plugins and their MCP servers back on ([Codex engine](docs/features/codex-engine/index.md)); the catalogue observation does not set it yet. A Claude or Codex session whose transport is lost while it is configured starts once more, and every session start failure keeps the engine's exit status, transport close reason and a private, redacted stderr tail ([session start failures](docs/features/recovery-and-replacement/index.md#native-session-start-failures)). A model list whose first refresh failed is fetched again within seconds and appears in the open app. The host-only
+dispatch separates display from explicit filesystem refresh; selected keyrings
+refuse atomically, while stored keyring
+state is displayed with a not-observed diagnostic. No keyring backend is invoked. Native prompt-free adapter/setup discovery
+now composes bundle/owned-package selection, login-marker metadata, opt-outs and
+passive setup status. No engine runs; unprobed OpenCode discovery stays explicitly
+unavailable with a diagnostic rather than inventing installation/version evidence.
+A further composed reader now loads Workspace-only mode/checkout defaults from an explicit host-selected
+channel root, without creating state or using supplied Workspace observations.
+A separate host-only Rust refresh helper now arbitrates selected filesystem-backed
+connection states under the shared registry lock and exact read revision. It does
+not run from display reads or approve fingerprints; keyring refresh is unsupported.
+Desktop task pages, task detail/state and filtered conversation reads now use a
+service-hosted, read-only Rust Core provider when `native.query` is advertised.
+Versioned task deltas update the existing UI without refetching the project task
+list. Creating a draft, with or without attachments, writes directly through the
+service's reusable Rust Core writer, with the existing wire-1 request/receipt
+contract; draft files are validated against the wire limits when they are saved. Legacy-owned executions still use the
+retained Python adapter. A cooperative project/channel lease is acquired before
+a service starts its controller; standalone legacy ACP does not honor that lease.
+This is a partial migration, not the completed zero-Python engine or an update
+to an already running application.
+Confirmed draft renames retain their committed task version, so Start does not
+wait for a background board refresh or reuse an older version. A task's title
+stays renamable after Start (it is presentation only); its saved request and
+settings do not.
+A separate native session-host API now composes Rust ACP sessions with durable
+channel authentication, capacity reservations and a restricted MCP gateway.
+Workers can publish inline reports and record attempt-bound native results;
+publication retries reuse the same immutable report. The native gateway accepts
+validated plans. A host-owned driver claims execution nodes, schedules independent
+review after observed changes, consumes fix/replan verdicts, executes bounded
+read-only verification argv and checks completion invariants. Disposable fake-engine
+tests cover that journey, a pending-review reopen, failed checks and truncated output.
+Native broker sockets use a pinned parent-directory descriptor so long project or
+temporary paths do not prevent session startup. Unavailable verifier containment
+is an explicit refusal, never an unsandboxed retry.
+Service shutdown joins its supervision and event tasks before the server returns;
+their ownership cannot outlive that boundary and retain the service endpoint lock.
+Worker passed-check claims still require unfinished command-tool parity.
+The service now composes native Start through its ordinary desktop command handler
+with a read-only configured route provider in the production service binary.
+Native restart recovery now continues fully settled durable checkpoints. Unknown
+session, control or verification effects are reported without replay; paused
+tasks and question/wait records are preserved. Lost-session questions cannot
+continue on a replacement session. Full permissions, instruction-delivery
+qualification and live ACP session reattachment remain incomplete.
+Native sessions now embed the canonical coordinator and all 23 worker profiles,
+inline their required skills, and serve role-scoped skill/reference reads without
+Python. Codex receives a supplement derived only from that channel's served tool
+schemas. A trusted native binding connects a saved draft to its existing runtime
+task/epoch and a separate display session. Native public messages and minimal tool
+activity then feed the existing history/outbox/delta path; thoughts and raw tool
+inputs/outputs are excluded. See the qualified native Start boundary below.
+The additive Rust `native_routes` candidate binder reads existing owner routing,
+defaults, approved connection argv and genuine cached catalog identities without
+Python, discovery or file writes. It handles exact coordinator defaults and a
+restricted explicit-pin subset. Its configured provider checks executable availability
+without launching an engine, including approved bare commands on absolute PATH entries.
+Automatic ranking, live account/quota checks and project/task ceilings remain incomplete;
+unsupported selection returns an explicit reason before Start admission.
+Regenerate/check its instruction data with
+`scripts/cortex-xtask.sh generate-instructions write` / `check` after changing
+canonical profiles or skills.
+It must not run beside the retained scheduler. Updated native and legacy production
+hosts share a separate process-lifetime scheduler lock; conflicting owners refuse
+instead of adopting unfinished tasks. Older installed runtimes do not honor this
+new fence. The retained facade serializes first-use construction and keeps the
+lease during ambiguous teardown.
+
+Qualified native Start owns admission and a service-resident progress pump: draft,
+runtime task/epoch, display execution, saved-input event and request receipt commit
+together before engine effects. Fake-engine command-path tests exercise plan,
+worker, independent review, bounded host verification, completion and versioned
+UI deltas with no Python controller. Exact Start retries never redispatch.
+The production service now binds the configured native route provider by default.
+Projects whose stores contain tasks written by the former Python runtime are not adopted automatically (see [native recovery](docs/cortex-workspace/local-task-execution.md#legacy-task-adoption)); the retained controller and the `CORTEX_WORKSPACE_NATIVE=0` opt-out were removed.
+Missing, untrusted, ambiguous or unsupported routes fail visibly without a Python
+mutation fallback. A built-binary socket test covers native create/start through
+completion with PATH fake engines and private HOME/XDG state; it does not qualify
+real engine accounts or a released application. Native worktree execution still fails closed rather than being ignored. Owner attachments (new task, follow-up and Request-changes messages, and question answers) are retained as private source bodies and delivered to the engine; the native service advertises `attachments: true` in its capabilities, and worker guidance carries no files.
+Native-owned task controls now use the same Rust host through the ordinary
+service handlers: send/steer, Stop/Pause/Resume, question answers, explicit Retry
+and confirmed Mark resolved/Close as is. Stop settles the owned process before
+replying; Resume continues the retained task (questions and worker waits stay answerable), while retry and steering use a fresh coordinator and plan; neither revives a revoked
+channel. Answers continue the same waiting worker session. Exact request retries
+return receipts without replaying effects; incomplete intents remain unknown.
+Owner resolution closes unfinished work without certifying it. Versioned deltas
+carry those changes; legacy-owned tasks keep their retained controls.
+Native worker guidance now reaches the same session after a confirmed prompt
+cancellation; worker stop cancels only the bound assignment and settles its owned process,
+leaving independent siblings runnable and an owner wait when no work can continue. Exact host-verifier commands can be stopped and retained checks rerun
+in the same read-only sandbox. Native task settings persist for next use: eligible
+coordinator model/effort and response language, with Guarded access only. Native
+worker/check/settings presentation reads use the same Rust store. These five
+command-handler effects have disposable fake-engine tests and versioned UI deltas,
+not installed-GUI or real-account qualification. Restart recovery remains separate.
+See [architecture](docs/project/architecture.md#rust-core-migration) and
+[storage](docs/project/storage.md#rust-core-storage-domain).
+
 Cortex is an incoming [ACP](https://agentclientprotocol.com) agent: a client
 such as Paseo talks to it over stdio, and Cortex acts as a coordinator. It
 plans your request, has its runtime dispatch independent specialist AI
@@ -36,11 +338,29 @@ For local desktop Debian builds, run `./scripts/build-dev-deb.sh` or
 Run the prod wrapper explicitly for a non-official production-channel build in a disposable environment; its Debian version ends in `.local` and is rejected by the GitHub publisher. Dev remains the default, with a separate store.
 See [local build instructions](docs/project/packaging.md#local-desktop-debian-builds). An installed interaction pass does not qualify an archive that emits a native crash or allocator diagnostic; the installed gate must remain fail-closed. The Linux task window leaves GPU compositing available. Approved closure waits for outstanding service replies, then terminates only its WebKit web process through the public API before destroying the view, avoiding its EGL/Skia exit race without disabling compositing. Failed closure leaves a visible reason; the independent service stays alive. Disposable software-display checks are not real-GPU performance qualification.
 
+Workspace's Rust service starts without an interpreter or Python helper assets, and the `.deb` depends on no `python3` and ships no `src/` or `.py` files. Native Git/files, task/history reads, Settings and native-account setup stay available; requests that only the former Python helper could answer are refused natively. Bundled engine/voice assets use the trusted runtime root. See [native service startup](docs/cortex-workspace/local-task-execution.md#python-independent-native-service-startup).
+
+Workspace waits for its local service socket on cold start, separately from request deadlines. Reconnect invalidates presentation caches without waiting for each project controller. Registered projects remain listed while their stores load or fail; those issues stay on the affected project. Slow reads finish in the background and failed reads retry without replaying actions; a failed repository read retries on its own within seconds and names an owner-fixable cause such as an unsafe private settings folder. A normal pending read is silent; only repeated failures produce a project issue. The desktop renders its last confirmed, display-only board snapshot before service readiness, then reconciles it. Native batched task reads and saved sprint membership no longer wait for full conversation/worker history. Queue state is never inferred from UI loading. Sprint membership remains behind a successful complete first board even if that read rejects; facts polls request a coherent reread for new members instead of publishing unloaded IDs. Starting without a failure reason is silent, including on the sprint summary. The first screen waits only for the machine's settings (`config.read` and project overrides), never for the machine overview with its storage accounting: that is read when a screen that shows it opens (see [startup](docs/cortex-workspace/SCREENS.md)). See [connection and project recovery](docs/cortex-workspace/consistency-and-recovery.md#startup-and-project-read-isolation). The [installed dev gate](docs/project/verification.md#installed-desktop-real-input-gate) exercises fresh-profile launch, an observed ten-second service-start delay and three visible registered projects (one unreadable store), including registry preservation across plain apt upgrade. Release-channel upgrade remains outside that harness.
+
+Workspace distinguishes a recorded interrupted turn from unconfirmed recovery: it shows **Interrupted**, keeps messaging available for an explicit continuation, and never restarts work during Re-check state. Unknown or contradictory recovery stays blocked. See [task state confirmation](docs/cortex-workspace/local-task-execution.md#recorded-data-and-pending-questions).
+
 Workspace supports editing a never-started task's saved request and adding drafts to an active sprint. Close sprint explicitly archives the sprint and stops its queue, preserving unfinished tasks and any running execution; Archive keeps the summary. The separate Delete sprint… action permanently removes the sprint and all its tasks after confirmation, stopping running work first. Clean app-created worktrees can be removed; other worktrees are kept with their paths shown. The project folder and Git branches are never deleted. Unconfirmed stops leave a visible, retryable deletion instead of claiming success. See [editing and sprint closure](docs/cortex-workspace/local-task-execution.md#editing-saved-tasks-and-closing-sprints).
 
 Workspace animates a loader only while its work is pending (a sweeping bar on the pressed control, a stepped turning icon for loading and working states), using transform and opacity only, paused in hidden windows and tabs out of view, and never on an idle screen. Conversation history is reused by task/execution version, and slow Git completion publishes facts rather than starting another full refresh. See [CPU measurements and limits](docs/cortex-workspace/performance.md#recorded-on-the-reference-machine).
 
 Workspace action acknowledgements no longer wait for a full workspace refresh. Task and sprint actions reconcile their own project in the background, with a separate Updating confirmed state notice; only confirmed renames and queue controls update locally. If an acknowledgement interrupts a workspace refresh, reconciliation rereads every project before clearing the synchronization notice. Facts notifications arriving during reconciliation queue a fresh read of their project, so another project's updates are not lost when later polls are unchanged. Project facts combine product and worker reads into one helper call, while Git reads overlap. Writable store initialization adds activity/operation lookup indexes without changing format 12; inspection opens remain non-mutating. See [action latency measurements](docs/cortex-workspace/performance.md#action-latency-recorded).
+
+Workspace now executes standalone Git inspection/actions, folder search, private machine settings/logs and conversation/sprint JSON operations in its Rust service, without a Python helper process for those operations. Core-owned repository baseline/checkout reads, saved attachment reads, linked-store disk accounting and runtime-writer-checked file operations now use Rust Core directly. Explicit workflow descriptions, maintenance jobs, retention cleanup and two-phase sprint deletion also run natively. Saved draft edit/settings/rename, target selection, reopening, archive restoration and sprint linking now run natively for materialized checkout options, retaining existing replies and Start arbitration. Owner close/archive, automatic-ready/merged presentation updates and conflict handoff now also run in Rust with offline Python-oracle reply/state comparisons. External closure rechecks execution/session/owner evidence and live workers under Start arbitration; these overlays never complete the runtime or certify checks. Integration admission now refuses unconfirmed/stale overlays, observed already-landed content and absent or non-result runtime bindings natively, with exact offline Python reply comparisons and no saved-state or Git mutations. Completed bound results now use the existing native result/source validator for a narrow local squash: a clean, already-committed project-folder source into an existing clean target worktree, with the target already an ancestor and no checkout cleanup. Reply/state/Git comparisons include real commit-hook failure and changed-HEAD uncertainty. Unsupported evidence, source staging, same-branch commit, target updates, temporary targets, PRs and cleanup still delegate before any effect. Remaining machine config.action variants, task/review actions and receipt-backed worker withdrawals still use the explicit migration provider; this is not the completed all-Rust product or an installed-app upgrade. See [the native machine boundary](docs/cortex-workspace/local-task-execution.md#native-machine-boundary).
+
+Owner task deletion (`product.task` actions `purge` and `clear_old`) now uses Rust Core for materialized checkouts, with unchanged reply and saved-state shapes compared against 117 offline Python cases. Confirmation, cutoff, archive/unmerged-work checks, unknown Start and exclusive store-access fences remain enforced. Native Core additionally refuses a still-running worker node even when a legacy terminal task row would allow deletion. Reclamation failure reports committed deletion rather than inviting replay; dirty or unproven worktrees remain kept. Owner acceptance and archive-discard answers now also run natively within the existing evidence/materialized-checkout boundary: 110 offline Python comparisons cover replies and persisted state, including result-version, source, review, acknowledgement and unobservable-work refusals. Acceptance revalidates under Start arbitration through its private save; neither action completes the runtime, invents check evidence or deletes work. File-conflict choices (`resolve_block`) now also run in Rust for materialized checkouts, using literal Git paths, descriptor-relative saves and durable unknown-effect fences. Thirty-six offline real-Git captures compare replies, JSON/SQLite state and file/index outcomes; native Git failures retain sanitized messages instead of Python stderr. Merge finish/abort now also run in Rust on the materialized-checkout boundary, with 38 offline real-Git comparisons and durable no-replay protection for uncertain commits, aborts and overlay saves. Unsupported legacy projections/evidence still delegate only before effects. See [manual file resolution](docs/cortex-workspace/local-task-execution.md#native-manual-file-resolution) and [merge finish/abort](docs/cortex-workspace/local-task-execution.md#native-merge-finish-and-abort). See [the deletion boundary](docs/cortex-workspace/local-task-execution.md#native-owner-deletion).
+
+Engine connection `login_command` and `recheck` now run in Rust: lookup returns verified native login argv without executing it; recheck runs the fixed native status command with discarded output and an eight-second timeout, then creates/reuses the native-account reference under the shared registry lock. `add_key` now also runs in Rust, retaining canonical private secret storage, separate create/write/validate transactions and known-failure removal/opt-out effects. Uncertain commits or cleanup remain unknown and never replay. Offline complete reply/file/mode comparisons use disposable roots, synthetic keys and fake executable installs; additional captures compare private-write failures and exact fake-keyring lookup sequences. Valid keyring validation and install/onboarding requests outside their pre-effect refusals still use Python; stale-revision and installer pre-effect refusals are native. Catalog refresh retains its read-only empty/null/empty-argv/relative subset and observes qualified Codex/Claude native-account and secret-file launches in Rust, including qualified two-argument Codex/Claude installs and unresolved direct commands. Codex resolves nested/hoisted npm dependencies, creates Python-compatible private adapter/launcher artifacts and enriches per-model efforts through offline debug-model output. Unicode labels and scrubbed noisy-peer logs now have offline Python comparisons. A Codex package whose `@openai/codex` dependency or vendored binary Python cannot resolve is launched directly like Python's unverified launch, without private artifacts or extra variables. Sixty-seven Python captures (54 prior cases, eight OpenCode pre-probe failures and five unverified Codex direct launches) compare complete replies/files/modes and exact prompt-free requests without helper calls; new snapshots preserve existing files. The exact-hash Codex 2.3.0 bundle is now patched and observed natively too (its adapter is byte-identical to Python's; the digest and every call site are still checked). Potentially usable OpenCode installs, keyrings, verifier-dependent Codex candidates, unqualified Claude candidates, unsafe names/roots, missing locks and unqualified projections still use Python. Unqualified post-observation outcomes never replay through Python. The qualified catalog launcher now uses the compiled Rust service as a native Linux shebang interpreter, without Python or a shell. Safe existing Python artifacts migrate atomically without replay. 39 actual offline launcher comparisons cover argv/environment/cwd/stdio, checks, timeouts/reaping and final PID/status/signals; catalog comparisons explicitly validate the changed launcher content. Unsupported interpreter paths and separate engine/session launching still retain Python; this is not an overall Python-free execution claim. This does not complete Settings migration. See [the launch-capable producer boundary](docs/configuration.md#native-launch-capable-catalog-producer) and [retained engine setup](docs/configuration.md#retained-engine-connection-setup).
+
+OS-keyring validation and launch-capable catalog refresh require an actual provider observation. An unavailable provider/helper refuses without changing credential state or creating catalog logs/snapshots; it is not treated as a keyring import failure. Stale-revision refusals remain native.
+
+Project settings reads (`project.config.read`) now also run in Rust: project-only routing, its exact byte revision and saved policy ceiling retain the Python editor shape. Offline Python fixtures compare replies without a helper or engine; reads do not initialize a missing store, update configuration or inspect credentials. Project saves (`project.config.save`) now validate and persist routing/ceilings in Rust, with revision locking, atomic file replacement and Core transactions. Offline comparisons cover replies and persisted bytes; uncertain writes never fall back. Machine-wide [config.save](docs/configuration.md#native-machine-saves) now selects Rust for routing, defaults and MCP with no Python fallback. Socket regressions compare 224 complete offline Python reply/file observations, including malformed-input error envelopes, and assert no helper invocation. Native storage and exact-number bounds fail closed; defaults files are individually atomic, not one transaction. Remaining machine config.action variants, legacy projection/evidence paths and explicit retained-runtime mode still need Python; native service startup and passive config.read do not. Pre-save MCP discovery (`config.mcp.discover`) now also runs natively: it only initializes a contained server and lists its tools, retaining the existing reply shapes, budgets and sanitized descriptions. Offline Python comparisons and disposable native containment/process-cleanup tests cover this boundary; no server definition is saved and no tool is called.
+
+Unactivated task facts read private overlays, saved task options, waiting controls and informational-answer controls through Rust Core. Completed-work controls also read report integrity, current-plan review verdicts/waivers and missing, stale or digest-less verification natively. Provisioned worker-check disclosures and obsolete-revision rerun records also read natively. Current rerun controls without a reviewed source digest now read pending, failed, ambiguous and same-owner technical outcomes natively; a recorded success alone never closes a check. Source-bound literal-gap reruns now revalidate current source, exact request/start/finish records, private complete output and the author's publication in Rust. Final-verification gap closures also validate unique exact runtime starts/outputs, reviewed current source and the recorded gap author's completion/publication; later pending or failed reruns supersede those closures. The 135 offline Python-oracle cases compare machine read/facts controls without a Python helper at test time. Matching missing-command/tool blockers can carry across owners only for the unchanged exact target and source; neither an absent source nor a recorded success alone proves a pass. Standalone worker history now reads attempt identities, status, selected tool/edit/command activity, guidance delivery and confirmed route chains in Rust, including bounded two-position continuation. Coordinator detail history also reads retained messages, plans and selected tool activity natively, with session-bound high-watermark cursors, original byte budgets and confirmed route labels. Current source-bound verification now also reads natively in plain folders and Git checkouts using the exact legacy manifest/digest format, including drift and unavailable-source refusals. Git file selection uses a fixed sandboxed read-only command, with the legacy whole-tree fallback when unavailable; listed-walk fixtures are separate from positive sandbox qualification. Receipt-derived failed/passed rerun targets, potentially authorized pass receipts, claimed failed-check withdrawals, alternate timestamp forms, unsupported coordinator display shapes, large or malformed evidence and unmaterialized legacy worktree options still use the retained Python provider. This remains a partial migration; native reads do not accept unverified work.
 
 Workspace Git keeps the last known checkout visible while refreshing repository details; a pending read never means the folder has no repository. Opening or returning to a Git tab and focusing the window request fresh facts automatically, with visible-window polling for external changes. Untracked dependency/cache files are shown when Git does not ignore them; only private helper state is excluded. Above 2,000 untracked files, wholly untracked directories collapse to one entry each, so an un-ignored dependency tree cannot make the Git tab unreadable. Commit sends one request, including when nothing is staged. Push resolves the confirmed display URL to a configured Git remote name before sending, and refuses stale or ambiguous destinations. Workspace Git status, diff and log inspect raw content without requiring installed clean/smudge filters. Write commands retain normal filter and hook requirements; repository configuration is not changed.
 
@@ -67,7 +387,7 @@ for merge confirmation keeps its owner-action highlight. Result cards separate h
 paragraphs, quotes and code, and omit empty outcome counters.
 Plain project folders support tasks and result acceptance without Git. Git initialization is explicit;
 local Commit, squash merge and task closure need no remote. Local-only repositories omit network controls and push/PR wording; generated commit messages are English independently of conversation language. Task actions open the actual checkout in the detected editor, with a visible reason when unavailable. Worktree settings allow writable external `.cortex/worktrees` folders, retain refused drafts with a persistent reason, and never move existing checkouts. Diagnostics list each failing check and its recovery steps, including in Copy report. Accept binds the reviewed runtime-evidence version while displaying its result number; late progress/transcript updates do not invalidate unchanged work. Refused or unconfirmed acceptance stays beside the result with a Refresh action, even after its toast closes;
-withdrawn probes do not count as failed worker checks. Check programs are probed in the real verification environment before accepting a plan; workers can declare checks early through the same preflight. Probe launch failures remain unavailable observations, not false missing-program diagnoses. Missing tools require project-private installation or an executable alternative, with an immediate owner question when neither is possible. Review separates human-only items as **Check manually**, outside outcome counts and acceptance blockers. Rerun is available only for recorded commands, with fresh output and a bounded deadline; policy-prohibited checks stay explicitly not run. Legacy technical check blockers remain honest evidence and allow explicit acknowledged acceptance; an informational answer needs no invented tests. Sprint creation offers Project folder or Separate worktree, just like a single task. All tasks created from its plan inherit that choice; worktree mode prepares a separate worktree per task on explicit start. Sprint planning produces a description-only plan without starting implementation. Unusable model output and engine setup failures show a readable reason beside Retry planning, not just a cancelled badge; Create tasks saves drafts, and only an explicit task/queue start executes them. Planned tasks carry only their own item's scope and relevant plain-text owner answers, not sibling work or internal conversation records. Explicit unanswered owner questions belong to the relevant item. Review previews new text files as additions, preserves the implementation summary on no-file follow-ups, and retains unchanged missing-tool recovery. Local integration stages only non-helper user paths and restores prior staging if saving fails. See [local review and Git behavior](docs/cortex-workspace/local-task-execution.md).
+withdrawn probes do not count as failed worker checks. Check programs are probed in the real verification environment before accepting a plan, a bare name on the same search path worker commands use (project tool folders, then the owner's `PATH`, so version-manager links such as `/usr/local/bin/node` resolve); workers can declare checks early through the same preflight. Probe launch failures remain unavailable observations, not false missing-program diagnoses. Missing tools require project-private installation or an executable alternative, with an immediate owner question when neither is possible. Review separates human-only items as **Check manually**, outside outcome counts and acceptance blockers. Rerun is available only for recorded commands, with fresh output and a bounded deadline; policy-prohibited checks stay explicitly not run. Legacy technical check blockers remain honest evidence and allow explicit acknowledged acceptance; an informational answer needs no invented tests. Once the runtime's own verification of a native result's current version passed on the unchanged folder, the workers' and reviewer's unconfirmed or not-run self-reported checks are listed as notes on the result and do not block Accept; a self-reported failure, a policy-blocked check or failed runtime verification still does. Sprint creation offers Project folder or Separate worktree, just like a single task. All tasks created from its plan inherit that choice; worktree mode prepares a separate worktree per task on explicit start. Sprint planning produces a description-only plan without starting implementation. Unusable model output and engine setup failures show a readable reason beside Retry planning, not just a cancelled badge; Create tasks saves drafts, and only an explicit task/queue start executes them. Planned tasks carry only their own item's scope and relevant plain-text owner answers, not sibling work or internal conversation records. Explicit unanswered owner questions belong to the relevant item. Review previews new text files as additions, preserves the implementation summary on no-file follow-ups, and retains unchanged missing-tool recovery. Local integration stages only non-helper user paths and restores prior staging if saving fails. See [local review and Git behavior](docs/cortex-workspace/local-task-execution.md).
 Clickable controls use a pointer; disabled controls use the default cursor and text fields keep the text cursor.
 Ready to merge distinguishes local content already in the target branch from its last-fetched push status. Already-contained work offers owner-confirmed closure, not another merge. Shared-checkout tasks on their target branch use recorded task-file evidence: committed content offers closure even after later sibling edits; known pending files offer Commit to that branch without sweeping other files into the commit. Unknown attribution offers Close as is or Done outside the app, never a same-branch merge. Board cards can be moved manually only to Done, with “Done outside the app” confirmation after the task stops. This durable owner decision is not acceptance, merging or passing checks; sprint dependencies can continue. See [local review and Git behavior](docs/cortex-workspace/local-task-execution.md).
 Pointer and keyboard focus keep their behavior without adding decorative outlines or shifting controls.
@@ -117,8 +437,8 @@ Routing marks stored references to disabled models as inactive without deleting 
 
 ## What Cortex is
 
-Cortex is an [ACP v1](https://agentclientprotocol.com) stdio agent
-(`src/cortex_acp.py`) — it is not a plugin that runs inside another agent's
+Cortex is an [ACP v1](https://agentclientprotocol.com) stdio agent (the Rust
+`cortex-acp` binary) — it is not a plugin that runs inside another agent's
 process. Any ACP-speaking client (Paseo, Zed, or others) launches Cortex as a
 subprocess and talks to it over stdio. Internally, Cortex opens its own
 outgoing ACP sessions against other coding agents —
@@ -127,9 +447,9 @@ outgoing ACP sessions against other coding agents —
 [OpenCode v2](docs/features/opencode-engine/index.md) — and drives them
 itself, inside the exact project your client has open.
 
-Exact adapter support includes Codex ACP **2.3.0** and Claude ACP **0.97.0**,
-with **2.1.1** and **0.88.0** retained for rollback. Both newer adapters retain
-Cortex's ACP v1 path; source qualification and no-paid initialization do not
+Exact adapter support includes Codex ACP **2.6.0** (Codex 0.166.0) and Claude ACP
+**0.107.0**, with **2.3.0**/**2.1.1** and **0.97.0**/**0.88.0** retained for rollback.
+Both newer adapters retain Cortex's ACP v1 path; source qualification and no-paid initialization do not
 establish paid CLI or desktop behavior. See the engine pages above.
 
 The runtime, not any model, owns the task lifecycle: scheduling, dependency
@@ -185,7 +505,9 @@ flowchart LR
 6. **Everything is recorded next to your project.** Immutable Markdown
    worker/reviewer reports and one newest-first pipeline document per task
    live under the project's own `.cortex/` folder, indexed by a local SQLite
-   file, so nothing lives only in chat scrollback. These records themselves
+   file, so nothing lives only in chat scrollback. The folder carries its own
+   `*` ignore file, so it stays out of `git status` without any change to your
+   `.gitignore`. These records themselves
    stay on your machine, but getting there still means running the engines
    you chose, and some of those engines send your prompts and project
    content to an external AI provider under that provider's own policy. See
@@ -243,8 +565,8 @@ acknowledgement for the whole task to end.
 ### Prerequisites
 
 - **Ubuntu (Linux)** — see [Platform support](#platform-support).
-- **Python 3.11+** with only the standard library — `cortex_runtime` has no
-  pip dependencies for the agent itself.
+- **Rust** (the pinned toolchain in `rust-toolchain.toml`, through `~/.cargo/bin/cargo`) to build the agent from a checkout; the agent itself has no
+  interpreter or pip dependency. Run builds and tests under `umask 022`. The Git-hosted Paseo install builds it for you.
 - **[Paseo](https://github.com/getpaseo/paseo)** installed and running.
 - **At least one supported engine**, each with its own existing account or
   credential, set up independently of Cortex:
@@ -282,8 +604,15 @@ installs or reloads it in your Paseo daemon, and verifies it comes up
 ```bash
 git clone https://github.com/igovet/cortex-orch-acp.git
 cd cortex-orch-acp
-python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
+cargo build --locked --offline -p cortex-acp -p cortex-paseo-tools
+scripts/cortex-paseo-tools.sh install-paseo-plugin
 ```
+
+The local-checkout setup records this checkout's Rust `target/debug/cortex-acp`
+entry and refuses before any change if it or `cortex-paseo-tools` is not built;
+`--rust-binary` names another binary. The Git-hosted install builds the Rust
+binaries in its plugin build step and stages them. See
+[default launch](docs/project/native-incoming-acp.md#default-launch).
 
 Both commands are idempotent and safe to rerun; neither touches unrelated
 Paseo plugins or configuration. Each seeds the [default preset](docs/configuration.md#default-preset)
@@ -316,8 +645,8 @@ Log in once outside Cortex with the engine's own command (`codex login` or
 `claude` and `/login`). If automatic setup already finished without a login,
 restart the plugin/agent or use *Add connection* with its opt-in switch. Removing
 a connection disables automatic registration for that engine; only an explicit
-*Add connection* restores it. *Download engine* remains a manual retry (up to a
-minute). `CORTEX_ENGINE_UPDATE=off` skips the automatic setup pass. No credential
+*Add connection* restores it. *Download engine* remains a manual retry (native
+Workspace npm is killed and reaped within its 30-second request budget). `CORTEX_ENGINE_UPDATE=off` skips the automatic setup pass. No credential
 is copied, and OpenCode remains manual.
 
 Settings checks only that the engine's login marker file exists, not that the login
@@ -325,69 +654,50 @@ works, so press *Validate* on the new connection. Settings never asks for an API
 OpenCode appears in the same list for its status only; enable it with *Enable OpenCode v2*
 in its own section, and Cortex never downloads it. See [Manage settings in Paseo](docs/configuration.md#manage-settings-in-paseo).
 
-**From the command line** (native account or API key). Registering from the command line
-needs an **install record**: a small JSON file that
-names the exact files (Node binary, adapter entry point, package hashes)
-Cortex is allowed to execute for that engine. Prepare it once per engine by
-following [the Codex install record](docs/features/codex-engine/index.md#current-runtime-gateway-policy)
-or [the Claude install record](docs/features/claude-engine/index.md#pinned-install-requirements-manual-recipe-placeholder) —
-both link the exact template Cortex verifies against. The record never
-contains a credential.
-
-An API-key secret is always read from a file or stdin — never put it on the
-command line:
+**From the command line** (native account). The Rust setup tool
+(`scripts/cortex-paseo-tools.sh`, the `cortex-paseo-tools` binary) registers a
+native-account connection for an engine that is installed and already logged in
+with its own CLI. It needs no install record, and it never takes an API key:
+`--api-key-file`, `--api-key-stdin` and `--install-record` are refused (API-key
+connections and install records are not offered by the Rust setup). Install the pinned
+adapter first if needed, then register and validate it:
 
 ```bash
-# Native account login (Codex or Claude's own CLI login, run outside Cortex)
-python3 -B scripts/cortex_acp_setup.py add-connection \
-    --name work --engine codex-acp --provider openai \
-    --auth-mode native_account \
-    --install-record /path/to/codex-install-record.json
+# Install the manifest-pinned adapter into Cortex's own engine root (explicit opt-in)
+scripts/cortex-paseo-tools.sh install-engine --engine codex-acp
 
-# Or an API key, read from a file (never inline on argv)
-python3 -B scripts/cortex_acp_setup.py add-connection \
-    --name work --engine claude-agent-acp --provider anthropic \
-    --auth-mode api_key --key-kind anthropic_api_key \
-    --api-key-file /path/to/key.txt \
-    --install-record /path/to/claude-install-record.json
+# Register the native-account connection (Codex or Claude's own CLI login, run outside Cortex)
+scripts/cortex-paseo-tools.sh add-connection --engine codex-acp
 ```
 
-Both commands print a `connection_id` (`cn_xxxxxxxxxxxx`) — save it; the
-steps below need it.
-
-For `native_account`, `add-connection` does not import an existing login by
-itself: it prints non-secret instructions naming an isolated directory and
-environment variable (for example `CODEX_HOME=...`). Run that engine's own
-native login with exactly that variable set, as instructed — this is where
-the actual authentication happens, entirely outside Cortex — then confirm
-the connection is ready:
+Both commands print one JSON document; the registration reports the new
+connection's id (`cn_xxxxxxxxxxxx`) — save it, the steps below need it.
+`add-connection` does not import credentials: log in with the engine's own
+native login first (`codex login`, or `claude` and `/login`), then confirm the
+connection is ready:
 
 ```bash
-python3 -B scripts/cortex_acp_setup.py validate-connection \
-    --connection cn_xxxxxxxxxxxx
+scripts/cortex-paseo-tools.sh validate-connection --connection cn_xxxxxxxxxxxx
 ```
 
 Re-run `validate-connection` until it reports a qualified, ready state before
-pinning a route. `api_key` connections are generally ready immediately after
-`add-connection`, but running `validate-connection` once is still a safe
-sanity check.
-
-Then pin a default route so a new chat picks a model automatically, with no
-further per-task action:
+pinning a route. Refresh the model catalogue once a ready connection exists
+(`scripts/cortex-paseo-tools.sh refresh-catalog`), then pin a default route so a
+new chat picks a model automatically, with no further per-task action:
 
 ```bash
-python3 -B scripts/cortex_acp_setup.py pin-route \
+scripts/cortex-paseo-tools.sh pin-route \
     --connection cn_xxxxxxxxxxxx --model gpt-5-codex
 ```
 
 See [first-run setup](docs/project/packaging.md#first-run-setup) for the
-full command reference, including `record-observation` for a route built
-from a real observed engine configuration.
+full command reference. The former manual `record-observation` step was removed;
+`refresh-catalog` replaces it.
 
 ### 3. Verify it works
 
 ```bash
-python3 -B scripts/cortex_acp_setup.py status
+scripts/cortex-paseo-tools.sh status
 ```
 
 This only reads and reports current connection/route state — it is always
@@ -410,7 +720,8 @@ For a local checkout, reinstall and reload instead — local directory sources
 are reloaded, not updated with `plugin update`:
 
 ```bash
-python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
+cargo build --locked --offline -p cortex-acp -p cortex-paseo-tools
+scripts/cortex-paseo-tools.sh install-paseo-plugin
 ```
 
 An update restarts the plugin process, which closes every open Cortex chat's
@@ -421,9 +732,9 @@ in-flight work is reconciled, not lost. See
 ### Uninstall
 
 ```bash
-python3 -B scripts/cortex_uninstall.py                                   # dry run, deletes nothing
-python3 -B scripts/cortex_uninstall.py --remove-user-scope --i-confirm-removal
-python3 -B scripts/cortex_uninstall.py --project /path/to/project \
+scripts/cortex-paseo-tools.sh uninstall                                   # dry run, deletes nothing
+scripts/cortex-paseo-tools.sh uninstall --remove-user-scope --i-confirm-removal
+scripts/cortex-paseo-tools.sh uninstall --project /path/to/project \
     --remove-project-store --i-confirm-removal
 ```
 
@@ -437,7 +748,9 @@ Cortex-owned roots, your project files, or Git history. See
 
 Starting a task is independent of other tasks in the same project, including retained waiting or recovering ACP tasks. Pending, unknown or running Workspace starts also do not block new ordinary ACP tasks. A duplicate start is refused only for that already-started task; a crashed start remains unknown without replay. Sprint queues still select tasks by dependency order and pause for attention. Manual Start does not enforce that order on the server. See [local task execution](docs/cortex-workspace/local-task-execution.md#choices-and-checkout).
 
-Cortex Workspace is a desktop application being built alongside Cortex. Its local slice is built and checked, but it is not released. A user-level service owns the Cortex agent process and talks to Cortex through the `_cortex/workspace` extension method, in addition to the standard ACP methods. The service listens only on a private Unix socket and opens no network port. The Ubuntu package is built in a Docker container with `python3 -B scripts/build_workspace_desktop.py`; a local build is the dev channel. Releases start manually through GitHub Actions: choose `main` for production (`v<debian-version>`, Latest), or `dev` for a separate dev prerelease (`dev-v<debian-version>`, never Latest). Both appear in one release list. Dev and production can coexist, including in the same project folder: Dev uses `.cortex-dev` beside release `.cortex` without reading or migrating release data. There is one store per logical project per channel, shared by its linked worktrees. Project metadata stays inside the channel store; Dev reserves `.cortex-dev/owner.json`, not a root JSON file. Saved sprint plans can restore missing member drafts after an upgrade, without reading release history; the queue pauses for review before any new start. Dev installs manually and has no in-app updates. See the [release steps](docs/project/packaging.md#manual-workspace-releases). See [Cortex Workspace](docs/cortex-workspace/index.md) for the design, the contract and the current status, and [SECURITY.md](SECURITY.md) for its trust boundary.
+Cortex Workspace is a desktop application being built alongside Cortex. Its local slice is built and checked, but it is not released. A user-level service owns the Cortex agent process and talks to Cortex through the `_cortex/workspace` extension method, in addition to the standard ACP methods. The service listens only on a private Unix socket and opens no network port. The Ubuntu package is built in a Docker container with `scripts/cortex-xtask.sh build-deb` (wrapped by `./scripts/build-dev-deb.sh` and `./scripts/build-prod-deb.sh`); a local build is the dev channel. Releases start manually through GitHub Actions: choose `main` for production (`v<debian-version>`, Latest), or `dev` for a separate dev prerelease (`dev-v<debian-version>`, never Latest). Both appear in one release list. Dev and production can coexist, including in the same project folder: Dev uses `.cortex-dev` beside release `.cortex` without reading or migrating release data. There is one store per logical project per channel, shared by its linked worktrees. Project metadata stays inside the channel store; Dev reserves `.cortex-dev/owner.json`, not a root JSON file. Saved sprint plans can restore missing member drafts after an upgrade, without reading release history; the queue pauses for review before any new start. Dev installs manually and has no in-app updates. See the [release steps](docs/project/packaging.md#manual-workspace-releases). See [Cortex Workspace](docs/cortex-workspace/index.md) for the design, the contract and the current status, and [SECURITY.md](SECURITY.md) for its trust boundary.
+
+Desktop container builds derive their Rust source inputs from the root Cargo workspace membership and preserve `Cargo.lock`; new crates do not require a separate staging allowlist entry. See [local desktop builds](docs/project/packaging.md#local-desktop-debian-builds).
 
 Both dev and release `.deb` packages include the complete Cortex runtime. Debian versions now put an increasing UTC build stamp before the content hash, with a `z` prefix that sorts above all older hash-only versions. The embedded runtime identity is unchanged; see [build ordering and reproducibility](docs/cortex-workspace/platforms.md#debian-build-ordering-and-reproducibility). Install with `sudo apt install ./cortex-workspace-dev_*.deb` (or the release package), then launch the application: no checkout, settings clone or `service.env` is required. The package arranges service startup at login; the desktop starts its own unit in an existing session. Upgrade restarts active user units best effort, and removal leaves user data intact. Both channels include qualified Codex/Claude adapters, their locked dependencies and checksum-verified Node 24.14.1 under `/usr/lib/<package>/engines`; first activation needs neither npm nor an adapter download. Native logins stay in `~/.codex` and `~/.claude`, never copied. Models still require account access and network; missing login or failed discovery is shown separately from service connectivity. Installer, systemd and sandbox qualification limits are in [platforms](docs/cortex-workspace/platforms.md).
 
@@ -445,7 +758,9 @@ The real task conversation reads durable Cortex messages, plans, tool activity, 
 
 The task execution slice adds per-task route/access/language choices, linked task worktrees sharing one project store, task-owned diffs, guarded squash/PR actions, real runtime-row purge with space reclamation, project overrides and window-independent automatic queues. Automatic LLM titles remain unavailable. Pre-save MCP listing now uses the existing sandbox with a bounded deadline, and Open logs opens private rotating status events (never raw stderr). Sprint-created tasks inherit their route and target; partial composer-setting failures name what was acknowledged. These additions still require fresh installed-package and native-rendered qualification. See [local task execution](docs/cortex-workspace/local-task-execution.md) for safety refusals, evidence limits and focused checks.
 
-Task and project ages use recorded timestamps, not refresh time, and elapsed times use whole seconds/minutes/hours. All work shows unmaterialized sprint planning explicitly. Pending worker questions reach the task, Inbox and sidebar even while other workers continue. Weekly Claude/Codex limits use the runtime quota reader, with bundled Claude CLI fallback when no global CLI is on PATH; no five-hour or OpenCode usage is displayed. Codex weekly display follows the reported 10080-minute duration, whether the provider calls that slot primary or secondary. Missing duration or expired quota remains unavailable.
+Task and project ages use recorded timestamps, not refresh time, and elapsed times use whole seconds/minutes/hours. All work shows unmaterialized sprint planning explicitly. Pending worker questions reach the task, Inbox and sidebar even while other workers continue. Weekly Claude/Codex limits use the runtime quota reader, refreshed in the background every five minutes while the app is open by the verified bundled Claude Code and Codex CLIs (free reads, no model turn); while the window is visible the app reads each new snapshot shortly after it is due, so a shown value is at most about six minutes old. Claude shows its general weekly window and its Fable window separately, each Not reported when absent, and every value shows when it was observed, marked stale after 15 minutes; no five-hour or OpenCode usage is displayed. Codex weekly display follows the reported 10080-minute duration, whether the provider calls that slot primary or secondary. Missing duration or expired quota remains unavailable.
+
+Accept and check-rerun commands use the result identity the screen displays, from the delivered machine facts; the raw wire result is used only when no result fact is supplied. Server acceptance still revalidates current evidence. See [local task execution](docs/cortex-workspace/local-task-execution.md).
 
 First activation and background setup are followed by fresh configuration reads. Settings conflicts keep the draft for explicit review and reapplication, while Git Commit uses the visible local message immediately. Sprint planning requires a connected, selectable model before creating planning work. Worktree reset uses the service-reported channel default and never moves existing checkouts. See [local task execution](docs/cortex-workspace/local-task-execution.md).
 
@@ -454,10 +769,11 @@ Workspace invalidations use connection-local SQLite hooks on supported Store wri
 ## Other ACP clients
 
 Paseo is the recommended client, but any ACP stdio client can register
-Cortex as a secondary provider:
+Cortex as a secondary provider. The default entry is the built Rust binary,
+with the public runtime root in its environment:
 
 ```text
-python3 -B /absolute/path/to/cortex-orch-acp/src/cortex_acp.py
+CORTEX_ACP_RUNTIME_ROOT=/absolute/path/to/cortex-orch-acp /absolute/path/to/cortex-orch-acp/target/debug/cortex-acp
 ```
 
 - **[Zed](docs/features/zed-agent/index.md)** — Custom Agent setup, including
@@ -521,6 +837,17 @@ end-user install guide:
   separate `~/.paseo-dev` daemon and disposable project for plugin
   development; it never touches a production Paseo install
 - [Conventions](docs/project/conventions.md)
+
+The product is Rust and contains no Python. Use the pinned toolchain (`rust-toolchain.toml`) through `~/.cargo/bin/cargo` under `umask 022`, and these wrappers:
+
+```bash
+scripts/cortex-xtask.sh check-generated          # contract, instruction and profile generation checks
+scripts/cortex-xtask.sh package stamp            # regenerate the content hash after a payload edit
+scripts/cortex-xtask.sh package check            # validate the stamp
+scripts/cortex-xtask.sh check-pins               # reviewed dependency pins
+scripts/cortex-xtask.sh test-fast                # bounded no-paid cargo, Vitest and Paseo suites
+scripts/cortex-paseo-tools.sh acp-smoke          # no-paid startup smoke
+```
 
 ## Security
 

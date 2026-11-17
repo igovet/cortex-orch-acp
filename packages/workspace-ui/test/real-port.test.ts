@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { LIMITS, validate } from "@cortex/workspace-contract";
-import type { CommandEnvelope, PortUpdate, ProjectionUpdate, WorkspaceCommand } from "@cortex/workspace-domain";
-import { createRealPort, planFrom, unavailableTransport, type ProjectLocator } from "../src/port/real";
+import { emptyWorkspace } from "@cortex/workspace-domain";
+import type { CommandEnvelope, MachineFacts, PortUpdate, ProjectionUpdate, WorkspaceCommand } from "@cortex/workspace-domain";
+import { createRealPort, MACHINE_POLL_MS, machineReadDelay, planFrom, unavailableTransport, usageObserved, USAGE_GRACE_MS, USAGE_LATE_MS, USAGE_REFRESH_MS, USAGE_RETRY_MS, type ProjectLocator } from "../src/port/real";
 import { capabilitiesWire, flush, scriptedTransport, snapshot, wireDecision, wireTask } from "./support";
+import { REPO_RETRY_MS } from "../src/port/real";
 
 const projects: ProjectLocator[] = [{ projectId: "p", name: "Project", repository: "/p", openBranch: "main", defaultBranch: "main" }];
 const ALL = ["capabilities.get", "project.snapshot", "tasks.create", "tasks.start", "decisions.list", "decisions.answer", "results.get"];
@@ -317,6 +319,68 @@ describe("real port", () => {
       } finally { stop(); vi.useRealTimers(); }
     });
 
+    it("names a failed repository read and recovers on its own once the cause is fixed", async () => {
+      vi.useFakeTimers();
+      let stop = () => {};
+      try {
+        const {s,p,ready} = helper({hasGit:true});
+        const answer = s.answers["machine.call"]!;
+        const reason = "Cortex's private folder has unsafe permissions (writable by every account on this machine): /fixture/config/cortex-workspace-dev. Make it private to your account (for example chmod 700 on that folder), then try again.";
+        let broken = true, snapshots = 0;
+        s.answers["machine.call"] = message => {
+          if ((message as {op:string}).op !== "repo.snapshot") return answer(message);
+          snapshots++;
+          return broken ? { ok: false, code: "private_directory_unsafe", message: reason } : answer(message);
+        };
+        const updates: PortUpdate[] = [];
+        stop = p.subscribe(update => updates.push(update));
+        await ready();
+        const [failed] = await p.query("project.facts", {});
+        expect(failed.repo).toBeNull();
+        expect(failed.reviews[0].unavailableReason).toBe(reason);
+        // The owner fixes the folder. No event, poll round or restart is needed to see the repository again.
+        broken = false;
+        const before = snapshots;
+        await vi.advanceTimersByTimeAsync(REPO_RETRY_MS + 1);
+        expect(snapshots).toBe(before + 1);
+        expect(updates).toContainEqual(expect.objectContaining({kind:"facts",facts:expect.objectContaining({repo})}));
+        const [recovered] = await p.query("project.facts", {});
+        expect(recovered.repo).toEqual(repo);
+        expect(recovered.reviews[0].unavailableReason).toBeUndefined();
+        // A recovered read schedules nothing further of its own.
+        const settled = snapshots;
+        await vi.advanceTimersByTimeAsync(REPO_RETRY_MS * 4);
+        expect(snapshots).toBe(settled);
+      } finally { stop(); vi.useRealTimers(); }
+    });
+
+    it("backs off repository retries while the failure lasts", async () => {
+      vi.useFakeTimers();
+      let stop = () => {};
+      try {
+        const {s,p,ready} = helper({hasGit:true});
+        const answer = s.answers["machine.call"]!;
+        let snapshots = 0;
+        s.answers["machine.call"] = message => {
+          if ((message as {op:string}).op !== "repo.snapshot") return answer(message);
+          snapshots++;
+          return { ok: false, code: "machine_tool_failed", message: "Filesystem operation failed." };
+        };
+        stop = p.subscribe(() => {});
+        await ready();
+        const [failed] = await p.query("project.facts", {});
+        // A generic failure keeps the generic guidance rather than echoing an internal message.
+        expect(failed.reviews[0].unavailableReason).toMatch(/Repository details are updating or unavailable/);
+        const first = snapshots;
+        await vi.advanceTimersByTimeAsync(REPO_RETRY_MS + 1);
+        expect(snapshots).toBe(first + 1);
+        await vi.advanceTimersByTimeAsync(REPO_RETRY_MS + 1);
+        expect(snapshots).toBe(first + 1);
+        await vi.advanceTimersByTimeAsync(REPO_RETRY_MS);
+        expect(snapshots).toBe(first + 2);
+      } finally { stop(); vi.useRealTimers(); }
+    });
+
     it("uses authoritative repository presence while the first Git snapshot is pending", async () => {
       vi.useFakeTimers();
       try {
@@ -343,7 +407,9 @@ describe("real port", () => {
         s.answers["machine.call"] = message => (message as {op:string}).op === "repo.snapshot"
           ? new Promise(resolve => {finish = resolve;}) : answer(message);
         await p.query("capabilities.get", {});
-        await p.query("project.snapshot", {});
+        const snapshotRead = p.query("project.snapshot", {});
+        await vi.advanceTimersByTimeAsync(51);
+        await snapshotRead;
         const reading = p.query("project.facts", {});
         await vi.advanceTimersByTimeAsync(51);
         await reading;
@@ -372,12 +438,150 @@ describe("real port", () => {
       expect(facts.reviews[0].files).toEqual([{ path: "a.txt", status: "M", add: 2, del: 1, hunks: [] }]);
     });
 
+    // Live run: closing an accepted project-folder task as is turned its Changes tab into "No diff recorded, 0 files".
+    // Its changes stay in the folder, so the files its workers recorded writing stay its diff; nothing else is attributed to it.
+    it("a task closed as is keeps the diff of the files its workers recorded", async () => {
+      const worker = (edits: {path:string;add:number;del:number}[]) => ({ id: "w", taskId: "task-1", executionId: "e", role: "technical-writer", status: "completed", lane: "execution", goal: "Write", now: null, waitsFor: null,
+        scope: [], route: null, attempt: null, elapsedMs: null, runningSince: null, context: null, usage: null, activity: [], messages: [], result: { summary: "Wrote", checks: [], edits } });
+      for (const [edits, files] of [[[{ path: "a.txt", add: 2, del: 1 }], ["a.txt"]], [[{ path: "elsewhere.txt", add: 1, del: 0 }], []], [[], null]] as const) {
+        const { s, p, ready } = helper({ tasks: { "task-1": { status: "done", closedAs: "as_is", acceptance: { at: 1, digest: "d", version: "1" } } } });
+        const answer = s.answers["machine.call"]!;
+        s.answers["machine.call"] = message => (message as {op:string}).op === "workers" ? { ok: true, result: [worker([...edits])] } : answer(message);
+        await ready();
+        const [facts] = await p.query("project.facts", {});
+        const review = facts.reviews.find(r => r.taskId === "task-1");
+        if (files === null) expect(review).toBeUndefined();
+        else expect(review?.files.map(f => f.path)).toEqual(files);
+      }
+    });
+
     it("reports the machine, its orchestration and the plan usage engines gave", async () => {
-      const { p, ready } = helper();
+      const { p, ready, asked } = helper();
       await ready();
       const [facts] = await p.query("machine.facts", {});
-      expect(facts.patch).toMatchObject({ name: "Desk", retentionDays: 9, worktreeRoot: "~/t" });
-      expect(facts.engineUsage[0]).toMatchObject({ engine: "codex", usedPercent: 40 });
+      expect(facts.patch.config).toMatchObject({ active: "default" });
+      expect(facts.patch.connections).toEqual([]);
+      expect(facts.engineUsage![0]).toMatchObject({ engine: "codex", usedPercent: 40 });
+      // Startup reads only what the first screen needs: storage accounting and the rest of the overview wait for a screen.
+      expect(facts.patch).not.toHaveProperty("name");
+      expect(facts.patch).not.toHaveProperty("retentionDays");
+      expect(asked.map(a => a.op)).not.toContain("overview");
+      const configReads = asked.filter(a => a.op === "config.read").length;
+      const [overview] = await p.query("machine.overview", {});
+      expect(overview.patch).toEqual({ name: "Desk", retentionDays: 9, autoArchiveDays: 3, worktreeRoot: "~/t", version: "1", diskMb: 2, storage: [], cleanup: null, diagnostics: null, ghAvailable: undefined, reclamationFailures: undefined, defaultWorktreeRoot: undefined });
+      // An overview-only update leaves the engine usage and the composer's options as they were.
+      expect(overview).not.toHaveProperty("engineUsage");
+      expect(overview).not.toHaveProperty("options");
+      expect(asked.filter(a => a.op === "overview")).toHaveLength(1);
+      // The on-demand read is the overview alone: it does not reread the configuration.
+      expect(asked.filter(a => a.op === "config.read")).toHaveLength(configReads);
+    });
+
+    it("keeps an overview a screen asked for current on the machine poll, and never reads it before", async () => {
+      vi.useFakeTimers();
+      let stop = () => {};
+      try {
+        const { p, ready, asked } = helper();
+        await ready();
+        const machines: MachineFacts[] = [];
+        stop = p.subscribe(update => { if (update.kind === "machine") machines.push(update.facts); });
+        await vi.advanceTimersByTimeAsync(2 * MACHINE_POLL_MS);
+        expect(asked.map(a => a.op)).not.toContain("overview");
+        expect(machines.length).toBeGreaterThan(0);
+        expect(machines.every(m => !("name" in m.patch))).toBe(true);
+        await p.query("machine.overview", {});
+        asked.length = 0; machines.length = 0;
+        await vi.advanceTimersByTimeAsync(2 * MACHINE_POLL_MS);
+        expect(asked.filter(a => a.op === "overview").length).toBeGreaterThan(0);
+        expect(machines.find(m => "retentionDays" in m.patch)?.patch).toMatchObject({ retentionDays: 9, name: "Desk" });
+      } finally { stop(); vi.useRealTimers(); }
+    });
+
+    /** A machine whose service refreshes the limits as `usage_refresh.rs` does: from the first settings read, every
+     *  five minutes plus one pass (15 s), each read taking a few seconds; before that it holds a snapshot two hours old. */
+    const refreshing = (works = true) => {
+      const h = helper();
+      let start: number | null = null;
+      const old = Date.now() - 2 * 3600_000;
+      const snapshotAt = (now: number) => start === null || !works || now < start + 3_000 ? old : start + 3_000 + Math.floor((now - start - 3_000) / 315_000) * 315_000;
+      const answer = h.s.answers["machine.call"]!;
+      h.s.answers["machine.call"] = message => {
+        const reply = answer(message) as { ok: boolean; result: Record<string, unknown> };
+        if ((message as { op: string }).op !== "config.read") return reply;
+        start ??= Date.now();
+        const at = new Date(snapshotAt(Date.now())).toISOString();
+        return { ...reply, result: { ...reply.result, usage: [{ engine: "codex", connected: true, usedPercent: 40, resetAt: null, observedAt: at, window: "weekly" },
+          { engine: "claude", connected: true, usedPercent: 50, resetAt: null, observedAt: at, window: "weekly", windows: [{ name: "seven_day", usedPercent: 50, resetAt: null, observedAt: at }] }] } };
+      };
+      return h;
+    };
+    /** Drives a visible window for `minutes`; returns the oldest any shown limit got, and how many settings reads it took. */
+    const watch = async (minutes: number, works = true) => {
+      const { p, ready, asked } = refreshing(works);
+      await ready();
+      let shown = Math.min(...((await p.query("machine.facts", {}))[0].engineUsage ?? []).map(u => Date.parse(u.observedAt!)));
+      let oldest = 0;
+      const stop = p.subscribe(update => {
+        if (update.kind !== "machine" || !update.facts.engineUsage) return;
+        oldest = Math.max(oldest, Date.now() - shown);
+        shown = Math.min(...update.facts.engineUsage.map(u => Date.parse(u.observedAt!)));
+      });
+      const reads = asked.filter(a => a.op === "config.read").length;
+      // The first minute is the service catching up from a snapshot it held before the app opened.
+      await vi.advanceTimersByTimeAsync(60_000);
+      oldest = 0;
+      for (let t = 60_000; t < minutes * 60_000; t += 5_000) { await vi.advanceTimersByTimeAsync(5_000); oldest = Math.max(oldest, Date.now() - shown); }
+      stop();
+      return { oldest, reads: asked.filter(a => a.op === "config.read").length - reads };
+    };
+
+    it("keeps the limits a visible window shows at most about six minutes old, reading the machine about once per snapshot", async () => {
+      vi.useFakeTimers();
+      try {
+        const { oldest, reads } = await watch(60);
+        // Two unaligned five-minute timers in a row let a snapshot stay on screen for twenty minutes in a live run.
+        expect(oldest).toBeLessThanOrEqual(USAGE_REFRESH_MS + USAGE_GRACE_MS + 15_000);
+        expect(oldest).toBeLessThanOrEqual(6 * 60_000);
+        // Lined up with the service, not polling faster: about one read per five-minute snapshot, plus the catch-up at start.
+        expect(reads).toBeLessThanOrEqual(Math.ceil(60 / 5) + 3);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("never reads the machine more often than the plain poll once an engine stops reporting", async () => {
+      vi.useFakeTimers();
+      try {
+        const { reads } = await watch(60, false);
+        // The old snapshot is asked for once soon after start, then only on the five-minute poll.
+        expect(reads).toBeLessThanOrEqual(Math.ceil(60 / 5) + 2);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it("lines the next machine read up with the service's next limits snapshot", () => {
+      const now = Date.parse("2026-11-17T04:20:00Z");
+      // Just read: due one refresh and the grace after it was observed.
+      expect(machineReadDelay([now - 10_000], now, false)).toBe(USAGE_REFRESH_MS + USAGE_GRACE_MS - 10_000);
+      // The engine that goes stale first sets it.
+      expect(machineReadDelay([now - 10_000, now - 100_000], now, false)).toBe(USAGE_REFRESH_MS + USAGE_GRACE_MS - 100_000);
+      // A late snapshot is asked for again soon, for a while; then the plain poll.
+      expect(machineReadDelay([now - USAGE_REFRESH_MS - USAGE_GRACE_MS - 10_000], now, false)).toBe(USAGE_RETRY_MS);
+      expect(machineReadDelay([now - USAGE_REFRESH_MS - USAGE_GRACE_MS - USAGE_LATE_MS - 1], now, false)).toBe(MACHINE_POLL_MS);
+      // The first read, or the first after the window was hidden, asks once more soon for an old snapshot.
+      expect(machineReadDelay([now - 2 * 3600_000], now, true)).toBe(USAGE_RETRY_MS);
+      // Nothing observed: the plain poll. Never longer than one snapshot and its grace, whatever the clock says.
+      expect(machineReadDelay([], now, true)).toBe(MACHINE_POLL_MS);
+      expect(machineReadDelay([now + 3600_000], now, false)).toBe(USAGE_REFRESH_MS + USAGE_GRACE_MS);
+      expect(usageObserved([{ engine: "claude", connected: true, usedPercent: 1, resetAt: null, observedAt: null, window: "weekly",
+        windows: [{ name: "seven_day", usedPercent: 1, resetAt: null, observedAt: "2026-11-17T04:15:00Z" }, { name: "seven_day_fable", usedPercent: null, resetAt: null, observedAt: null }] },
+      { engine: "codex", connected: true, usedPercent: null, resetAt: null, observedAt: null, window: "weekly" }])).toEqual([Date.parse("2026-11-17T04:15:00Z")]);
+    });
+
+    it("keeps the machine orchestration when one project's settings are refused", async () => {
+      const { p } = helper({}, "project.config.read");
+      await p.query("capabilities.get", {});
+      const [facts] = await p.query("machine.facts", {});
+      expect(facts.patch.config).toMatchObject({ active: "default" });
+      expect(facts.patch.config?.projects).toEqual({});
+      await expect(p.command(envelope({ type: "save_surface", machineId: "local", projectId: "p", surface: "routing", revision: 0, value: {} }))).resolves.toMatchObject({ ok: false });
     });
 
     it("stops and steers through the execution, never through a helper", async () => {
@@ -387,6 +591,36 @@ describe("real port", () => {
       await p.command(envelope({ type: "send_message", taskId: "task-1", text: "Use the other file", mode: "send_now" }));
       expect(s.calls.find(c => c.operation === "executions.control")!.message).toMatchObject({ projectId: "p", executionId: "e", action:"pause",expectedVersion:"1" });
       expect(s.calls.find(c => c.operation === "executions.prompt")!.message).toEqual({ projectId: "p", executionId: "e", text: "Use the other file", requestId:"req-1" });
+    });
+
+    // Live D3 remainder: a native host cannot run a task in a separate worktree, so the
+    // composer must not offer one (it showed the option and Start was then refused).
+    it("offers task worktrees only when the service does not rule them out", async () => {
+      const { s, p } = helper();
+      expect((await p.query("capabilities.get", {})).operations).toContain("workspace.task_worktrees");
+      s.answers["service.capabilities"] = () => ({ methods: ["machine.call"], machine: true, taskWorktrees: false });
+      const native = (await p.query("capabilities.get", {})).operations;
+      expect(native).not.toContain("workspace.task_worktrees");
+      expect(native).toContain("workspace.close_task");
+    });
+
+    // Live N3/N4: on a native execution, Request changes and Close task reached the runtime
+    // but the saved card never reopened or closed, so the task stayed in review.
+    it("runs native owner mutations on the execution, then updates the saved card as Python does", async () => {
+      const { s, p, asked, ready } = helper();
+      await ready();
+      s.answers["executions.prompt"] = () => ({outcome:"recorded",native:true});
+      s.answers["executions.control"] = () => ({outcome:"recorded",native:true});
+      asked.length = 0;
+      expect(await p.command(envelope({type:"stop_task",taskId:"task-1",confirmed:true},"stop"))).toMatchObject({ok:true});
+      expect(await p.command(envelope({type:"continue_task",taskId:"task-1"},"continue"))).toMatchObject({ok:true});
+      expect(asked.some(c=>c.op==="product.task")).toBe(false);
+      expect(await p.command(envelope({type:"request_changes",taskId:"task-1",text:"Add a docstring"},"changes"))).toMatchObject({ok:true});
+      expect(s.calls.filter(c => c.operation === "executions.prompt").at(-1)!.message).toMatchObject({executionId:"e",text:"Add a docstring"});
+      expect(asked.filter(c=>c.op==="product.task").map(c=>c.params)).toEqual([{action:"reopen",taskId:"task-1"}]);
+      expect(await p.command(envelope({type:"close_task",taskId:"task-1",choice:"as_is",confirmed:true,now:1},"close"))).toMatchObject({ok:true});
+      expect(s.calls.filter(c => c.operation === "executions.control").at(-1)!.message).toMatchObject({action:"close_task",confirmed:true});
+      expect(asked.filter(c=>c.op==="product.task").at(-1)?.params).toEqual({action:"close",taskId:"task-1",choice:"as_is",confirmed:true});
     });
 
     it("carries actual bytes for prompt, queue and queued delivery", async () => {
@@ -410,7 +644,13 @@ describe("real port", () => {
       const original = s.answers["machine.call"]!;
       s.answers["machine.call"] = message => {
         const call = message as {op:string;params?:Record<string,unknown>};
-        if (call.op === "config.read") return {ok:true,result:{config:{catalogue:{"codex-acp":{models:[{id:"model"}]},"claude-agent-acp":{models:[]},opencode:{models:[]}}}}};
+        if (call.op === "config.read") {
+          const config = structuredClone(emptyWorkspace().machines[0].config);
+          config.setup["codex-acp"].status = "connected";
+          config.catalogue["codex-acp"].models = [{id:"model",label:"Model",efforts:[],observed:true}];
+          config.surfaces.routing.engines["codex-acp"].enabled = ["model"];
+          return {ok:true,result:{config}};
+        }
         if (call.op === "product.sprint" && call.params?.action === "create") {
           asked.push(call); return {ok:true,result:{sprintId:"sp"}};
         }
@@ -503,6 +743,42 @@ describe("real port", () => {
       expect(asked.some(c => c.op === "product.comment" && c.params?.action === "mark_sent")).toBe(false);
     });
 
+    it("binds result commands to displayed facts, preserving stale, cleared and missing-version refusals", async () => {
+      const result = {version:2,sourceVersion:"47",digest:"native-digest",summary:"Native",checks:[{name:"Native check",outcome:"not_run",detail:"",command:["/bin/true"],kind:"automated",rerunnable:true}]};
+      const overlay: {result:typeof result | null} = {result};
+      const {s,p,asked,ready} = helper({tasks:{"task-1":overlay}});
+      await ready();
+      expect(await p.command(envelope({type:"accept_result",taskId:"task-1",digest:"old"}))).toMatchObject({ok:false,outcome:"stale_result"});
+      expect(asked.some(c => c.op === "product.task")).toBe(false);
+      expect(await p.command(envelope({type:"rerun_check",taskId:"task-1",digest:result.digest,checkIndex:0}))).toMatchObject({ok:true});
+      expect(s.calls.find(c => c.operation === "executions.control")?.message).toMatchObject({checkName:"Native check",resultVersion:"47",digest:result.digest});
+      expect(await p.command(envelope({type:"accept_result",taskId:"task-1",digest:result.digest,openChecks:true}))).toMatchObject({ok:true});
+      expect(asked.find(c => c.op === "product.task")?.params).toMatchObject({action:"accept",version:"47",digest:result.digest,acknowledgeOpenChecks:true});
+
+      for (const missing of [null, {...result,sourceVersion:""}]) {
+        overlay.result = missing;
+        await p.query("project.facts",{fresh:true});
+        asked.length=0;
+        expect(await p.command(envelope({type:"accept_result",taskId:"task-1",digest:result.digest}))).toMatchObject({ok:false,outcome:"stale_result"});
+        expect(asked.some(c => c.op === "product.task")).toBe(false);
+      }
+      overlay.result = null;
+      await p.query("project.facts",{fresh:true});
+      s.calls.length=0;
+      expect(await p.command(envelope({type:"rerun_check",taskId:"task-1",digest:"result:res:1",checkIndex:0}))).toMatchObject({ok:false,outcome:"stale_result"});
+      expect(s.calls.some(c => c.operation === "executions.control")).toBe(false);
+    });
+
+    it("retains the server's stale refusal after a result command is dispatched", async () => {
+      const result = {version:2,sourceVersion:"47",digest:"native-digest",summary:"Native",checks:[]};
+      const {s,p,ready} = helper({tasks:{"task-1":{result}}});
+      await ready();
+      const answer=s.answers["machine.call"]!;
+      s.answers["machine.call"]=message => (message as {op:string}).op === "product.task"
+        ? {ok:false,code:"stale_result",message:"Files changed after review"} : answer(message);
+      expect(await p.command(envelope({type:"accept_result",taskId:"task-1",digest:result.digest}))).toMatchObject({ok:false,outcome:"stale_result",message:"Files changed after review"});
+    });
+
     it("sends a forced check request bound to the current result, and refuses a stale result", async () => {
       const { s, p, ready } = helper();
       s.answers["results.get"] = () => ({kind:"answer",resultId:"res",taskId:"task-1",executionId:"e",version:"47",sequenceNumber:"1",text:"Done",evidence:[],checks:[{name:"Focused test",outcome:"not_run",evidenceRef:null,detail:"Technical blocker",command:["python3","check.py"],rerunnable:true}],observedWorkspaceDigest:null});
@@ -515,6 +791,18 @@ describe("real port", () => {
       expect(result.version).toBe(1);
     });
 
+    it("uses native host check observations when the ACP result adapter is absent", async () => {
+      const { s, p, ready } = helper();
+      s.answers["capabilities.get"] = () => capabilitiesWire(ALL.filter(op => op !== "results.get"));
+      await ready();
+      s.answers["machine.call"] = message => {
+        const call = message as {op:string};
+        if (call.op === "product.read") return {ok:true,result:{tasks:{"task-1":{result:{version:17,sourceVersion:"17",digest:"native-digest",summary:"Host checks",acceptanceAvailable:false,checks:[{name:"Host check",outcome:"failed",detail:"owner_stopped",command:["/bin/true"],kind:"automated",rerunnable:true}]}}},sprints:[]}};
+        return {ok:true,result:{}};
+      };
+      expect(await p.command(envelope({type:"rerun_check",taskId:"task-1",digest:"native-digest",checkIndex:0}))).toMatchObject({ok:true});
+      expect(s.calls.find(c => c.operation === "executions.control")!.message).toMatchObject({action:"rerun_check",checkName:"Host check",digest:"native-digest",resultVersion:"17"});
+    });
     it("does not send rerun requests for manual or policy items", async () => {
       for (const kind of ["manual", "policy"]) {
         const { s, p, ready } = helper();
@@ -535,7 +823,7 @@ describe("real port", () => {
       expect(result).toMatchObject({ ok: false, outcome: "git_failed", message: "nothing to commit" });
     });
 
-    it("forwards the push dialog URL exactly once, while fetch and pull need no remote field", async () => {
+    it("forwards each Git command identity and the push dialog URL exactly once, while fetch and pull need no remote field", async () => {
       const { p, asked, ready } = helper();
       await ready();
       const remote = "git@github.com:igovet/cortex-orch-acp.git";
@@ -543,9 +831,9 @@ describe("real port", () => {
       await p.command(envelope({type:"git_fetch",projectId:"p",now:1}));
       await p.command(envelope({type:"git_pull",checkoutId:"p:main",now:1}));
       expect(asked.filter(a => a.op === "git")).toEqual([
-        {op:"git",projectId:"p",params:{action:"push",checkoutId:"p:main",remote,branch:"dev",confirmed:true}},
-        {op:"git",projectId:"p",params:{action:"fetch"}},
-        {op:"git",projectId:"p",params:{action:"pull",checkoutId:"p:main"}},
+        {op:"git",projectId:"p",params:{requestId:"req-1",action:"push",checkoutId:"p:main",remote,branch:"dev",confirmed:true}},
+        {op:"git",projectId:"p",params:{requestId:"req-1",action:"fetch"}},
+        {op:"git",projectId:"p",params:{requestId:"req-1",action:"pull",checkoutId:"p:main"}},
       ]);
     });
 
@@ -559,6 +847,27 @@ describe("real port", () => {
       expect(facts.repo?.checkouts[0].draft).toBe("wip");
     });
 
+    it("finishes an in-flight machine read when activation or a save invalidates the config cache", async () => {
+      const {s,p,ready} = helper();
+      await ready();
+      const answer=s.answers["machine.call"]!;
+      let release!: () => void, entered!: () => void;
+      const held=new Promise<void>(resolve => {release=resolve;});
+      const reading=new Promise<void>(resolve => {entered=resolve;});
+      s.answers["machine.call"]=async message => {
+        if ((message as {op:string}).op==="project.config.read") {entered(); await held;}
+        return answer(message);
+      };
+      const pending=p.query("machine.facts",{});
+      await reading;
+      expect((await p.command(envelope({type:"save_surface",machineId:"local",surface:"routing",value:{deny:[]},revision:1}))).ok).toBe(true);
+      release();
+      const [facts]=await pending;
+      expect(facts.patch.config?.projects.p).toEqual({});
+      expect(facts.patch.connections).toEqual([]);
+      expect(facts.engineUsage![0]).toMatchObject({ engine: "codex" });
+    });
+
     it("saves a surface with the revision it read, then rereads the configuration", async () => {
       const { p, asked, ready } = helper();
       await ready();
@@ -566,6 +875,35 @@ describe("real port", () => {
       expect(asked.find(a => a.op === "config.save")!.params).toMatchObject({ surface: "routing", tokens: { routing: "sha256:a" } });
       await p.query("machine.facts", {});
       expect(asked.filter(a => a.op === "config.read")).toHaveLength(2);
+    });
+
+    it.each([false, true])("starts a confirmed rename without waiting for board reconciliation (late read: %s)", async late => {
+      const {s,p,ready} = helper();
+      s.answers["project.snapshot"] = () => snapshot("4", [wireTask({version:"1",executionId:null})]);
+      await ready();
+      let finish!: (value: unknown) => void;
+      const pending = late ? (() => {
+        s.answers["project.snapshot"] = () => new Promise(resolve => {finish=resolve;});
+        return p.query("project.snapshot", {});
+      })() : null;
+      s.answers["machine.call"] = () => ({ok:true,result:{done:true,version:"2"}});
+      expect((await p.command(envelope({type:"rename_task",taskId:"task-1",title:"Owner title"}))).ok).toBe(true);
+      if (pending) { finish(snapshot("4", [wireTask({version:"1",executionId:null})])); await pending; }
+      await p.command(envelope({type:"start_task",taskId:"task-1"}));
+      expect(s.calls.find(c => c.operation==="tasks.start")!.message).toMatchObject({expectedVersion:"2"});
+    });
+
+    it("does not invent a rename version on refusal or replay a stale Start", async () => {
+      const {s,p,ready} = helper();
+      s.answers["project.snapshot"] = () => snapshot("4", [wireTask({version:"1",executionId:null})]);
+      await ready();
+      s.answers["machine.call"] = () => ({ok:false,code:"task_started",message:"Task started"});
+      expect((await p.command(envelope({type:"rename_task",taskId:"task-1",title:"Not saved"}))).ok).toBe(false);
+      s.answers["tasks.start"] = message => receipt(message,"stale_version");
+      expect((await p.command(envelope({type:"start_task",taskId:"task-1"}))).outcome).toBe("stale_version");
+      const starts=s.calls.filter(c => c.operation==="tasks.start");
+      expect(starts).toHaveLength(1);
+      expect(starts[0].message).toMatchObject({expectedVersion:"1"});
     });
 
     it("a lost reply stays unknown, and an intent with no machine effect stays unsupported", async () => {
@@ -607,6 +945,10 @@ describe("real port", () => {
       expect(creates).toHaveLength(2);
       for (const call of creates) expect(call.message).toMatchObject({payload:{settings,checkout:{kind}}});
       expect(s.calls.some(c => (c.message as {params?:{action?:string}}).params?.action === "rename")).toBe(false);
+      // Live run: every sprint task read as the first sentence of its description. The plan's own title names
+      // the task when it joins the sprint; an item without one keeps the description label.
+      const joins = s.calls.map(c => (c.message as {params?:{action?:string;title?:string}}).params).filter(p => p?.action === "sprint");
+      expect(joins.map(p => p!.title)).toEqual(["Planned name", undefined]);
       expect(s.calls.some(c => c.operation === "tasks.start")).toBe(false);
     });
 

@@ -1,3 +1,6 @@
+# Decisions
+
+> Historical record. Module, test and script paths in this page that name `.py` files, `src/`, `tests/test_*.py` or the former Python scripts refer to the former Python runtime, which was removed on 2026-11-16; they are kept as dated history, no longer exist in the checkout and are not current commands. The behavior statements are unverified against the Rust runtime unless a Rust source path is given.
 ## 2026-10-14 orchestration audit decisions
 
 An owner-approved audit of the orchestration prompts and logic produced these
@@ -271,7 +274,7 @@ compute the several-branch rule, the pilot criteria or any token-based branch; t
 owner applies them to the reported branch values. The edit field
 `code_apply_recommended` keeps its earlier name and means that the file-edit gate
 holds. See the definitions and remaining observation limits in
-[observability](../features/observability/index.md#multi-task-aggregates).
+[observability](../features/observability/index.md).
 
 ---
 

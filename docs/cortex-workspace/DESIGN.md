@@ -66,18 +66,23 @@ While any question, permission or access decision is pending, including a held b
 One composer draws every message draft: task, answer, worker, planner, new task, new sprint, request changes, saved comment, guidance and stop reason. Where the mode applies, its anatomy is the same, from top to bottom:
 
 1. An optional recipient or effect line, such as "Replying to QA Engineer" or "Sending reopens this task".
-2. Attachment chips and the dictation transcript, only when they have content.
+2. Attachment chips, attachment status or errors and the dictation transcript, only when they have content.
 3. One labelled writing area that grows to a bounded height.
 4. One tools row: Attach, Voice, model, effort, Settings (access and language), the delivery choice where offered, and the plane at the far end.
-5. One reason or error slot, outside the controls.
 
-Attach and Voice keep their positions in every mode. A control that cannot be used stays visible and disabled, with its reason. Model and effort appear wherever an engine route applies. They are omitted only where no engine call exists, such as a saved comment or a stop reason, and are never shown as a fake choice. A worker's recorded model and effort are read-only.
+Attach and Voice keep their positions in every mode. A control that cannot be used stays visible and disabled; no words sit beside the plane, and each control says why in its own box, opened by a press or keyboard focus. Model and effort appear wherever an engine route applies. They are omitted only where no engine call exists, such as a saved comment or a stop reason, and are never shown as a fake choice. A worker's recorded model and effort are read-only.
 
 The send control is a paper-plane icon named for its real consequence: "Send message", "Send answer", "Send to <role>", "Send and reopen", "Save comment", "Save draft" or "Start planning". No generic "Send" may hide starting work or clearing an acceptance. The plane is the standard control in the row, not a round exception.
 
 Start, Resume and Stop are task actions in the title band or an inline lifecycle item. They never replace the plane, and the plane never turns into Stop.
 
 Where delivery is a choice (task messages), it sits beside the plane as Send now or Queue. A queued item is one line above the composer, with Edit, Send now, remove and reorder. Its files do not appear in the queue row; they return in Edit and in the sent conversation. Worker messages show their own delivery state and offer no interruption.
+
+## Editing text
+
+No text field saves by itself. A name, title or setting typed into a field changes only a local draft; nothing is written when the field loses focus or after a pause in typing. Save, or Enter in a one-line field, writes the draft, and Cancel or Escape puts the saved text back. Save and Cancel sit beside the field at its height, and no words sit beside them. Save is off while nothing changed or the text is not valid (an empty name, for example), and, like every control that is off, says why in its own box, opened by a press or keyboard focus. While a save is under way the field is read-only and Save shows its loader. A refused or lost save keeps the typed text and states the reason in words on the line below the field, or, in the title band, in a box under the field, until the next Save or Cancel. A read of the machine never replaces text that is still being edited. After a save the field keeps the saved text until the machine reads it back, for at most 5 seconds; then it shows what the machine reports. Focus returns to the field, or to the name that opened it. The one implementation is `FieldEdit` in `packages/workspace-ui/src/field-edit.tsx`.
+
+Settings surfaces that already keep a per-surface draft with a save bar (routing, defaults, limits, MCP servers, worktrees, storage) keep that bar. Switches and choices that are meant to apply at once stay immediate. Autosave for files in Code is a separate, explicit choice that is off by default.
 
 ## Control sizing and spacing
 

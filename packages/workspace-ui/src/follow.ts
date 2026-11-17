@@ -63,5 +63,18 @@ export function createFollow(el: () => HTMLElement | undefined, size: Accessor<n
       document.removeEventListener("pointerup", up); document.removeEventListener("pointercancel", up);
     });
   });
-  return { following, missed, jump, onScroll, set: (on: boolean) => { if (on) jump(); else { setFollowing(false); remember(); } } };
+  /** The reader opened `node`, a row: it stays where they can read it. Following stops, so the pinned end no longer pulls the
+   *  opened row up and out of view as it grows, and what opened is scrolled into view only as far as the row's own heading
+   *  stays visible. `inset` is what covers the bottom of the box, such as a docked composer. */
+  const reveal = (node: Element, inset = 0) => {
+    const box = el();
+    if (!box) return;
+    setFollowing(false);
+    const view = box.getBoundingClientRect(), row = node.getBoundingClientRect();
+    const above = row.top - view.top, below = row.bottom - (view.bottom - inset);
+    if (above < 0) box.scrollTop += above;
+    else if (below > 0) box.scrollTop += Math.min(below, above);
+    remember();
+  };
+  return { following, missed, jump, onScroll, reveal, set: (on: boolean) => { if (on) jump(); else { setFollowing(false); remember(); } } };
 }

@@ -2,7 +2,7 @@ import { createMemo, createSignal, createUniqueId, For, Show } from "solid-js";
 import { GitLetter } from "./diff";
 import type { Commit, GitFile, ProjectRepo, RepoCheckout } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
-import { A, Count, I, MenuItem, place, Pop } from "./kit";
+import { A, Count, I, MenuItem, place, Pop, useWantOverview } from "./kit";
 import { ActionBar, revealCutIn, SectionHead, Toolbar } from "./layout";
 import { conflictFacts, dirName, fileName, fileResolved, inConflict, worktreeRows, worktreeState, type WorktreeRow } from "./review-model";
 import type { Route } from "./router";
@@ -113,6 +113,13 @@ function History(props: { repo: ProjectRepo; c: RepoCheckout }) {
 }
 
 type Menu = { row: WorktreeRow };
+/** GitHub CLI availability comes with the machine's overview, read when this item is first shown. Not known yet is not "missing". */
+function PrItem(props: { taskId: string; blocked: string | undefined }) {
+  const ws = useWs();
+  useWantOverview();
+  return <MenuItem icon="merge" label="Create PR…" disabled={props.blocked ?? (ws.machine().ghAvailable === false ? "Install and sign in to GitHub CLI (gh) to create a pull request" : undefined)} needs="integrate" onSelect={() => ws.open({ kind: "merge", taskId: props.taskId, how: "pr" })} />;
+}
+
 function Worktrees(props: { repo: ProjectRepo | null; summary: ProjectSummary; pick: (id: string) => void }) {
   const ws = useWs();
   const rows = createMemo(() => worktreeRows(ws.store.index(), props.summary, props.repo));
@@ -154,7 +161,7 @@ function Worktrees(props: { repo: ProjectRepo | null; summary: ProjectSummary; p
           <MenuItem icon="refresh" label="Update from base…" disabled={finished()} needs="update_from_target" onSelect={() => { ws.run({ type: "update_from_target", taskId: v().id, now: ws.store.clock() }); }} />
           <Show when={!sameBranch(v().task, v().target)}>
           <MenuItem icon="merge" label="Merge…" disabled={mergeable()} needs="integrate" onSelect={() => ws.open({ kind: "merge", taskId: v().id, how: "squash" })} />
-          <Show when={props.repo?.remote.trim()}><MenuItem icon="merge" label="Create PR…" disabled={mergeable() ?? (ws.machine().ghAvailable === false ? "Install and sign in to GitHub CLI (gh) to create a pull request" : undefined)} needs="integrate" onSelect={() => ws.open({ kind: "merge", taskId: v().id, how: "pr" })} /></Show>
+          <Show when={props.repo?.remote.trim()}><PrItem taskId={v().id} blocked={mergeable()} /></Show>
           </Show>
         </>}</Show>
         <Show when={!task() && c()}>{x => <><div class="mi-sep"></div><MenuItem icon="plus" label="Attach as task" needs="attach_worktree" onSelect={() => ws.run({ type: "attach_worktree", checkoutId: x().id })} /></>}</Show>

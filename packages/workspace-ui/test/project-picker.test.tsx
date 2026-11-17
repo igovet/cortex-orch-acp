@@ -78,7 +78,10 @@ describe("entry points", () => {
     await mount(machine());
     for (const control of all("button").filter(b => b.textContent?.includes("Add project"))) {
       control.click(); await settle();
-      expect(dialog()?.getAttribute("aria-label")).toBe("Add a project");
+      expect(dialog()?.getAttribute("data-dialog")).toBe("Add a project");
+      // Named by its visible title, which says which step it is on.
+      expect(dialog()?.hasAttribute("aria-label")).toBe(false);
+      expect(document.getElementById(dialog()!.getAttribute("aria-labelledby")!)?.textContent).toBe(dialog()!.querySelector("h2")!.textContent);
       expect(titles()).toContain("Search for folder");
       escape(); await settle();
       expect(dialog()).toBeNull();
@@ -89,7 +92,7 @@ describe("entry points", () => {
     const palette = dialog()!.querySelector<HTMLInputElement>("input")!;
     palette.value = ">add project"; palette.dispatchEvent(new Event("input", { bubbles: true })); await settle();
     all('dialog[open] [role="option"]').find(o => o.textContent?.includes("Add project"))!.click(); await settle();
-    expect(dialog()?.getAttribute("aria-label")).toBe("Add a project");
+    expect(dialog()?.getAttribute("data-dialog")).toBe("Add a project");
   });
 
   it("names the machine it searches, and offers the system chooser only for this machine", async () => {
@@ -302,7 +305,10 @@ describe("the name", () => {
     await mount(s);
     const field = await (async () => { for (let i = 0; i < 20; i++) { const el = document.querySelector<HTMLInputElement>('input[aria-label="Project name"]'); if (el) return el; await flush(); } throw new Error("no name field: " + location.pathname); })();
     expect(field.value).toBe("cedar");
-    field.value = "Cedar Notes"; field.dispatchEvent(new Event("change", { bubbles: true })); await settle();
+    // Typing alone, and leaving the field, save nothing: only Save writes the name.
+    field.value = "Cedar Notes"; field.dispatchEvent(new Event("input", { bubbles: true })); field.dispatchEvent(new Event("change", { bubbles: true })); await settle();
+    expect(s.calls.filter(c => c.operation === "projects.rename")).toEqual([]);
+    all("button").find(b => b.textContent?.trim() === "Save")!.click(); await settle();
     expect(s.calls.filter(c => c.operation === "projects.rename").map(c => c.message)).toEqual([{ projectId: "p", displayName: "Cedar Notes" }]);
     expect(document.querySelector<HTMLInputElement>('input[aria-label="Project name"]')!.value).toBe("Cedar Notes");
   });

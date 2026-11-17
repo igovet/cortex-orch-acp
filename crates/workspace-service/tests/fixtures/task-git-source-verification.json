@@ -1,0 +1,1650 @@
+{
+  "oracle": "machine_tools.product_read",
+  "sourceSha256": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+  "cases": [
+    {
+      "name": "git-passed-command",
+      "git": true,
+      "git_commands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ]
+      ],
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": [[\"tool\"]]}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "assignment1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235\", \"checks\": [{\"argv\": [\"tool\"], \"complete\": true, \"exit_code\": 0, \"revision_digest\": \"5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235\"}]}"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        }
+      ],
+      "drift": [],
+      "delete": null,
+      "link": null,
+      "saved": {},
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": true,
+              "requestChanges": true,
+              "reason": null,
+              "unblockAction": null,
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "git-source-modify",
+      "git": true,
+      "git_commands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ]
+      ],
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "assignment1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        }
+      ],
+      "drift": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "changed"
+        }
+      ],
+      "delete": null,
+      "link": null,
+      "saved": {},
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Result evidence is unavailable or the files changed. Request changes and run fresh checks.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "git-source-add",
+      "git": true,
+      "git_commands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ]
+      ],
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "assignment1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        }
+      ],
+      "drift": [
+        {
+          "path": "added",
+          "kind": "f",
+          "text": "new"
+        }
+      ],
+      "delete": null,
+      "link": null,
+      "saved": {},
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Result evidence is unavailable or the files changed. Request changes and run fresh checks.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "git-source-delete",
+      "git": true,
+      "git_commands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ]
+      ],
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "assignment1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        }
+      ],
+      "drift": [],
+      "delete": "source.txt",
+      "link": null,
+      "saved": {},
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Result evidence is unavailable or the files changed. Request changes and run fresh checks.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "git-source-link",
+      "git": true,
+      "git_commands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ]
+      ],
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "assignment1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        }
+      ],
+      "drift": [],
+      "delete": null,
+      "link": "folder",
+      "saved": {},
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Result evidence is unavailable or the files changed. Request changes and run fresh checks.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "git-failed-check",
+      "git": true,
+      "git_commands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ]
+      ],
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": [[\"tool\"]]}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "assignment1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235\", \"checks\": [{\"argv\": [\"tool\"], \"complete\": true, \"exit_code\": 1, \"revision_digest\": \"5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235\"}]}"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        }
+      ],
+      "drift": [],
+      "delete": null,
+      "link": null,
+      "saved": {},
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Result evidence is unavailable or the files changed. Request changes and run fresh checks.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "git-incomplete-check",
+      "git": true,
+      "git_commands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ]
+      ],
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": [[\"tool\"]]}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "assignment1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235\", \"checks\": [{\"argv\": [\"tool\"], \"complete\": false, \"exit_code\": 0, \"revision_digest\": \"5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235\"}]}"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        }
+      ],
+      "drift": [],
+      "delete": null,
+      "link": null,
+      "saved": {},
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Result evidence is unavailable or the files changed. Request changes and run fresh checks.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "git-wrong-check-digest",
+      "git": true,
+      "git_commands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ]
+      ],
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": [[\"tool\"]]}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "assignment1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235\", \"checks\": [{\"argv\": [\"tool\"], \"complete\": true, \"exit_code\": 0, \"revision_digest\": \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]}"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        }
+      ],
+      "drift": [],
+      "delete": null,
+      "link": null,
+      "saved": {},
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Result evidence is unavailable or the files changed. Request changes and run fresh checks.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "git-stale-review",
+      "git": true,
+      "git_commands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ]
+      ],
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "assignment1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"REQUEST_CHANGES\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        }
+      ],
+      "drift": [],
+      "delete": null,
+      "link": null,
+      "saved": {},
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "git-fresh-result-fence",
+      "git": true,
+      "git_commands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ]
+      ],
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "assignment1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        }
+      ],
+      "drift": [],
+      "delete": null,
+      "link": null,
+      "saved": {
+        "tasks": {
+          "t1": {
+            "requiresFreshResult": {
+              "resultId": "wr_e1",
+              "version": "1"
+            }
+          }
+        }
+      },
+      "expected": {
+        "tasks": {
+          "t1": {
+            "requiresFreshResult": {
+              "resultId": "wr_e1",
+              "version": "1"
+            },
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "The source changed after this result. Request changes for fresh checks and review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "git-store-excluded",
+      "git": true,
+      "git_commands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ]
+      ],
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "assignment1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        }
+      ],
+      "drift": [
+        {
+          "path": ".cortex/extra",
+          "kind": "f",
+          "text": "private"
+        }
+      ],
+      "delete": null,
+      "link": null,
+      "saved": {},
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": true,
+              "requestChanges": true,
+              "reason": null,
+              "unblockAction": null,
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    }
+  ],
+  "sources": {
+    "crates/workspace-service/machine_tools.py": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+    "src/cortex_runtime/delegation/revision.py": "f69d4f27986397d17e210225fcf88ebae0c4a35dac767bfa0d42ca1ac92e2880",
+    "src/cortex_runtime/workspace_api/projections.py": "2a12388eff6c93b2d4d6a19a1d250908c45f186a8de5880ba1556e2fb9d56109",
+    "src/cortex_runtime/orchestration/sandbox.py": "8c88d10c51d56479cba7d4cea45b167d04b9991f88fc583c02c6dbb0505f851a",
+    "src/cortex_runtime/orchestration/project_paths.py": "0a89d60d5bf4b8bbe43abb10a0c9a5ee0a3c848265f0cd54a48d504af40067ba"
+  }
+}

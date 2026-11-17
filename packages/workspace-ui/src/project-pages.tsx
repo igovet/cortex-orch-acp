@@ -1,7 +1,8 @@
 import { Show } from "solid-js";
 import { capabilityOf, machineDefaults } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
-import { A, I } from "./kit";
+import { FieldEdit } from "./field-edit";
+import { A, I, OverviewShown, useWantOverview } from "./kit";
 import { Whole } from "./layout";
 import type { ProjectSummary } from "./selectors";
 import { SetH, Srow } from "./settings-kit";
@@ -38,17 +39,17 @@ export function KnowledgePage(props: { summary: ProjectSummary }) {
 export function ProjectSettingsPage(props: { summary: ProjectSummary }) {
   const ws = useWs();
   const p = () => props.summary.project, m = () => props.summary.machine;
-  const rename = (name: string) => { if (name.trim() && name.trim() !== p().name) void ws.run({ type: "rename_project", projectId: p().id, name: name.trim() }); };
   const own = () => { const c = m().config.projects[p().id]; return [c?.routing ? "its own routing file" : null, c?.ceiling ? "its own limits" : null].filter(Boolean).join(" and "); };
+  useWantOverview();
   return <div class="page"><div class="page-in">
     <div class="page-h"><div><h1>Project settings</h1><p>What sets this project apart from its machine.</p></div></div>
     <div class="surface">
-      <Srow t="Name" d="A new project starts with its folder's name."><input class="inp" aria-label="Project name" value={p().name} disabled={!!ws.gate("rename_project")} onChange={e => rename(e.currentTarget.value)} /><Show when={ws.gate("rename_project")}>{why => <span class="ws-why">{why()}</span>}</Show></Srow>
+      <Srow t="Name" d="A new project starts with its folder's name."><FieldEdit class="ws-name-edit" label="Project name" value={p().name} off={ws.gate("rename_project")} save={name => ws.run({ type: "rename_project", projectId: p().id, name })} /></Srow>
       <Srow t="Repository" d="Folder on this machine."><span class="mono">{p().repository}</span></Srow>
       <Srow t="Open branch" d="Currently checked out."><span style={{ "max-width": "24ch", "min-width": "0" }}><Whole class="mono" text={p().openBranch} /></span></Srow>
       <Srow t="Git default branch" d="Tasks merge here unless you pick another target."><span class="mono">{p().defaultBranch}</span></Srow>
-      <Srow t="Machine" d="Where this project lives."><A class="lnk" to={{ name: "settings", section: "overview", machine: m().id }}>{m().name}</A></Srow>
-      <Srow t="Worktrees" d="New worktrees for this project go under the machine's folder."><A class="lnk mono" to={{ name: "settings", section: "worktrees", machine: m().id }}>{m().worktreeRoot}</A></Srow>
+      <Srow t="Machine" d="Where this project lives."><OverviewShown inline><A class="lnk" to={{ name: "settings", section: "overview", machine: m().id }}>{m().name}</A></OverviewShown></Srow>
+      <Srow t="Worktrees" d="New worktrees for this project go under the machine's folder."><OverviewShown inline><A class="lnk mono" to={{ name: "settings", section: "worktrees", machine: m().id }}>{m().worktreeRoot}</A></OverviewShown></Srow>
     </div>
     <SetH title="Orchestration" />
     <div class="surface"><Srow t="Project override" d={own() ? `This project has ${own()}.` : "Follows the machine."}>

@@ -1,13 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
 import { STOP_COMMAND_CONFIG_ID } from "../shared/command-stop.ts";
 import { commandStopSender, unconfirmedStopError } from "./command-stop-registry.ts";
-import { readRunningCommandsInStore, stopCommandHandler } from "./command-stop.ts";
+import { stopCommandHandler } from "./command-stop.ts";
 import { wrapCortexConnection } from "./provider.ts";
-import { execSqlite, sqlValues } from "./test-fixture-db.ts";
 
 /**
  * The Paseo-side stop of one running worker command: the panel RPC handler
@@ -132,62 +128,4 @@ test("an unacknowledged stop is reported as unconfirmed, not as refused or stopp
   const result = await stopCommandHandler(input, context(), () => async () => { throw unconfirmedStopError(); });
   assert.equal(result.status, "unconfirmed");
   assert.match(result.message!, /retry/);
-});
-
-function fixtureStore(withTables = true): { root: string; cleanup: () => void } {
-  const root = mkdtempSync(join(tmpdir(), "cortex-command-stop-test-"));
-  mkdirSync(join(root, ".cortex"));
-  const db = join(root, ".cortex", "cortex.sqlite3");
-  const started = (ref: string, channel: string, argv: string[], id: number) =>
-    `insert into runtime_events (task_id, type, actor, payload_json, created_at) values ${sqlValues(["t_1", "COMMAND_PROCESS_STARTED", channel,
-      JSON.stringify({ tool_call_ref: ref, operation: "command_run", argv }), `2026-10-18T01:0${id}:00+00:00`])};`;
-  execSqlite(db, withTables ? `
-    create table runtime_tasks (task_id text primary key, state text);
-    create table task_owners (task_id text, epoch integer);
-    create table trusted_channels (channel_id text primary key, task_id text, role text, revoked_at text, expires_at text, owner_epoch integer, assignment_id text, attempt_id text);
-    create table delegation_provisioning (task_id text, channel_id text, idempotency_key text, attempt_id text);
-    create table runtime_events (id integer primary key autoincrement, task_id text, type text, actor text, payload_json text, created_at text);
-    insert into runtime_tasks values ${sqlValues(["t_1", "EXECUTING"])};
-    insert into task_owners values ${sqlValues(["t_1", 1])};
-    insert into trusted_channels values ${sqlValues(["ch_live", "t_1", "worker", null, null, 1, "wa_1", "xa_1"])};
-    insert into trusted_channels values ${sqlValues(["ch_revoked", "t_1", "worker", "2026-10-18T00:00:00+00:00", null, 1, "wa_2", "xa_2"])};
-    insert into delegation_provisioning values ${sqlValues(["t_1", "ch_live", "assignment-ref-1", "xa_1"])};
-    ${started(REF, "ch_live", ["npm", "install", "--prefix", "/home/someone/project"], 1)}
-    ${started(`gateway:${"b".repeat(32)}`, "ch_live", ["sleep", "1"], 2)}
-    insert into runtime_events (task_id, type, actor, payload_json, created_at) values ${sqlValues(["t_1", "COMMAND_PROCESS_EXITED", "ch_live",
-      JSON.stringify({ tool_call_ref: `gateway:${"b".repeat(32)}`, exit_code: 0 }), "2026-10-18T01:05:00+00:00"])};
-    ${started(`gateway:${"c".repeat(32)}`, "ch_revoked", ["make"], 3)}
-    insert into runtime_events (task_id, type, actor, payload_json, created_at) values ${sqlValues(["t_1", "COMMAND_STOP_REQUESTED", "user:owner_cli",
-      JSON.stringify({ tool_call_ref: REF, reason: "Not approved.", origin: "owner_cli", request_key: "k" }), "2026-10-18T01:06:00+00:00"])};
-  ` : "create table unrelated (id integer);");
-  return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
-}
-
-test("the running-command list is exact, scrubbed and carries a recorded stop", async () => {
-  const { root, cleanup } = fixtureStore();
-  try {
-    const listed = await readRunningCommandsInStore(root, "t_1");
-    assert.equal(listed.available, true);
-    assert.equal(listed.commands.length, 1, "exited and revoked-channel commands are not running");
-    const [command] = listed.commands;
-    assert.equal(command.toolCallRef, REF);
-    assert.equal(command.operation, "command_run");
-    assert.equal(command.assignmentRef, "assignment-ref-1");
-    assert.equal(command.attemptId, "xa_1");
-    assert.equal(command.argvSummary, "npm install --prefix [private path]");
-    assert.deepEqual(command.stopRequest, { reason: "Not approved.", origin: "owner_cli" });
-    assert.equal((await readRunningCommandsInStore(root, "t_1", "assignment-ref-1")).commands.length, 1);
-    assert.equal((await readRunningCommandsInStore(root, "t_1", "another-ref")).commands.length, 0);
-    assert.equal((await readRunningCommandsInStore(root, "t_other")).commands.length, 0);
-  } finally { cleanup(); }
-});
-
-test("an older store without command events is reported unavailable, not empty-and-fine", async () => {
-  const { root, cleanup } = fixtureStore(false);
-  try {
-    const listed = await readRunningCommandsInStore(root, "t_1");
-    assert.equal(listed.available, false);
-    assert.deepEqual(listed.commands, []);
-    assert.match(listed.message!, /unavailable/);
-  } finally { cleanup(); }
 });

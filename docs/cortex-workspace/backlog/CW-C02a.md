@@ -6,7 +6,7 @@ Split from [CW-C02](CW-C02.md) to keep each part within the two-day limit.
 
 ## Goal
 
-Add one project-level public event sequence and an append-only outbox. Runtime mutators write an outbox row in the same SQLite transaction as the state change the row describes. The outbox is separate from the existing sequence domains, which must stay separate: `runtime_events.id` (`src/cortex_runtime/orchestration/state.py`), `task_events.id` (`src/cortex_runtime/delegation/events_store.py`) and transcript sequence numbers. The public sequence is a new domain and is never a merge of those integers.
+Add one project-level public event sequence and an append-only outbox. Runtime mutators write an outbox row in the same SQLite transaction as the state change the row describes. The outbox is separate from the existing sequence domains, which must stay separate: `runtime_events.id` (the former `orchestration/state` module), `task_events.id` (the former `delegation/events_store` module) and transcript sequence numbers. The public sequence is a new domain and is never a merge of those integers.
 
 ## Requirements
 
@@ -17,9 +17,9 @@ CW-R07 (durable, ordered public events that recover gaps). See [requirements](..
 - [consistency-and-recovery](../consistency-and-recovery.md): commit runtime-owned state and its public event atomically where supported; reordered or duplicate events must not duplicate effects.
 - [protocol](../protocol.md): outbox ordering, deduplication and retention.
 - [ADR 0005](../adr/0005-public-contract.md).
-- The transactional pattern in `src/cortex_runtime/orchestration/policy.py` (`steer` runs its event append inside `BEGIN IMMEDIATE`, using the `event(db, ...)` helper). New appends follow the same pattern; the helper's own definition location is to be confirmed before reuse.
+- The transactional pattern in the former `orchestration/policy` module (`steer` runs its event append inside `BEGIN IMMEDIATE`, using the `event(db, ...)` helper). New appends follow the same pattern; the helper's own definition location is to be confirmed before reuse.
 - [storage](../../project/storage.md): additive schema under the existing writable-open migration rules; `initialize=False` opens must not create anything.
-- Baseline test pattern: `tests/test_orchestration_events_store.py` (additive columns on an existing database).
+- Baseline test pattern: the former Python test `test_orchestration_events_store` (additive columns on an existing database).
 
 ## Deliverables
 

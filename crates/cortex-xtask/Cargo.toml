@@ -1,0 +1,19 @@
+[package]
+name = "cortex-xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Python-free build, generation and packaging toolchain for Cortex."
+
+[[bin]]
+name = "cortex-xtask"
+path = "src/main.rs"
+
+# Deliberately minimal and exactly pinned: JSON handling is in-tree because the
+# generators need Python-compatible key order and formatting, which serde_json's
+# feature-unified Map cannot provide without changing every other workspace member.
+[dependencies]
+sha2 = "=0.10.9"
+regex = "=1.13.1"
+libc = "=0.2.191"

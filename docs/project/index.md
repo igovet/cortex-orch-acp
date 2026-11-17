@@ -14,6 +14,7 @@ Feature behavior is documented one page per feature in the [feature index](../fe
 - [Conventions](conventions.md)
 - [Decisions](decisions.md)
 - [Gotchas](gotchas.md)
+- [Known orchestration issues (open)](known-issues.md)
 - [Storage and recovery](storage.md)
 - [Storage format 12 migration and rollback](format-migration.md)
 - [Security boundary audit](security.md)
@@ -24,10 +25,10 @@ Feature behavior is documented one page per feature in the [feature index](../fe
 - [Paseo plugin dependency audit](paseo-dependency-audit.md)
 - [Isolated dev Paseo environment](dev-environment.md)
 - [Configuration reference](../configuration.md)
+- [Native configuration observations and read effects](native-config-read.md)
 
 Release readiness is decided by the checks in [verification](verification.md).
 
-Tool contracts live in `src/cortex_runtime/contracts.py` and
-`src/cortex_runtime/orchestration/contracts.py`; the entry point is
-`src/cortex_acp.py`. The runtime tool gateway is part of this ACP product.
+Tool contracts live in `crates/cortex-engine/src/schema.rs`; the entry point is
+the Rust binary `cortex-acp` (`crates/cortex-acp`). The product contains no Python. The runtime tool gateway is part of this ACP product.
 Historical Codex-plugin, MITM gateway and native-subagent harnesses are removed.

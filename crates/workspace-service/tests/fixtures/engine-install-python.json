@@ -1,0 +1,3922 @@
+{
+  "oracle": "machine_tools config.action install_engine",
+  "sources": {
+    "crates/workspace-service/machine_tools.py": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+    "pinned-dependencies.json": "6e64860aa15edf8d3d58f9fbcabc8362253534ddc394bab4c973eb3a4fe002bc",
+    "src/cortex_runtime/connections/engine_update.py": "10c111573aed157216fa5231b17571f33a33f025a0e25d9a295ffca97d200bb8",
+    "src/cortex_runtime/connections/discovery.py": "a70769b2a1fc667699cd5011baf7a11cea8e9e3f97428771ab73989e51c95360",
+    "src/cortex_runtime/configuration/management.py": "f035019940568b7b2881c7548e29f53a8e1ce0433eb5b7b1d2fc12e70f6ae8a2"
+  },
+  "fakeNpm": "#!/usr/bin/python3 -I\nimport json, os, pathlib, sys\nhere = pathlib.Path(sys.argv[0]).resolve().parent\nbase = here.parent\nwith open(base / \"npm-calls\", \"a\") as out:\n    out.write(json.dumps(dict(argv=sys.argv, path=os.environ.get(\"PATH\"))) + \"\\n\")\nmode = json.loads((base / \"npm-mode.json\").read_text())\nassert sys.argv[1:4] == [\"install\", \"--prefix\", sys.argv[3]] and sys.argv[4:8] == [\"--no-audit\", \"--no-fund\", \"--omit=dev\", \"--no-save\"]\nif mode.get(\"version\"):\n    package = pathlib.Path(sys.argv[3]) / \"node_modules\" / sys.argv[8].rsplit(\"@\", 1)[0]\n    package.mkdir(parents=True)\n    (package / \"package.json\").write_text(json.dumps(dict(name=\"fixture\", version=mode[\"version\"], bin=dict(adapter=\"dist/index.js\"))))\n    if mode.get(\"bin\", True):\n        (package / \"dist\").mkdir()\n        (package / \"dist/index.js\").write_text(\"// fixture adapter\\n\")\nsys.exit(mode.get(\"exit\", 0))\n",
+  "fakeNode": "#!/bin/sh\nexit 97\n",
+  "packages": {
+    "codex-acp": "@agentclientprotocol/codex-acp",
+    "claude-agent-acp": "@agentclientprotocol/claude-agent-acp"
+  },
+  "cases": [
+    {
+      "name": "codex-acp-no-node",
+      "engine": "codex-acp",
+      "npm": "none",
+      "mode": {
+        "version": "2.6.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ]
+      ],
+      "busy": false,
+      "path": "none",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned installation is unavailable, busy or failed verification."
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "codex-acp-npm-missing",
+      "engine": "codex-acp",
+      "npm": "none",
+      "mode": {
+        "version": "2.6.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned installation is unavailable, busy or failed verification."
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "codex-acp-success",
+      "engine": "codex-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "2.6.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/first-run-codex-acp.json",
+          "e242ec61a4b17fe80e27b0b1231c01ba4e6d2389c3e9b295a0dc80888e3c04f4",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/package.json",
+          "dabeb45cda157ce5294c33a092b05d4e26e64be0cc6d9ebe5d6021e123026a41",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": true,
+        "result": {
+          "engine": "codex-acp",
+          "version": "2.6.0",
+          "status": "installed",
+          "discovery": {
+            "surface": "connections",
+            "revision": "absent",
+            "engines": [
+              {
+                "engine": "codex-acp",
+                "status": "downloaded_no_login",
+                "version": "2.6.0",
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": true,
+                "install_supported": true,
+                "automatic_setup": "downloaded",
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "claude-agent-acp",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": true,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "opencode",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": false,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              }
+            ]
+          }
+        }
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/codex-acp@2.6.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "codex-acp-npm-on-path",
+      "engine": "codex-acp",
+      "npm": "path",
+      "mode": {
+        "version": "2.6.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/first-run-codex-acp.json",
+          "e242ec61a4b17fe80e27b0b1231c01ba4e6d2389c3e9b295a0dc80888e3c04f4",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/package.json",
+          "dabeb45cda157ce5294c33a092b05d4e26e64be0cc6d9ebe5d6021e123026a41",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin:other",
+      "setup": {},
+      "expected": {
+        "ok": true,
+        "result": {
+          "engine": "codex-acp",
+          "version": "2.6.0",
+          "status": "installed",
+          "discovery": {
+            "surface": "connections",
+            "revision": "absent",
+            "engines": [
+              {
+                "engine": "codex-acp",
+                "status": "downloaded_no_login",
+                "version": "2.6.0",
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": true,
+                "install_supported": true,
+                "automatic_setup": "downloaded",
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "claude-agent-acp",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": true,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "opencode",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": false,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              }
+            ]
+          }
+        }
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/other/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/codex-acp@2.6.0"
+          ],
+          "path": "$BASE/other:$BASE/bin:$BASE/other"
+        }
+      ]
+    },
+    {
+      "name": "codex-acp-npm-fails",
+      "engine": "codex-acp",
+      "npm": "beside",
+      "mode": {
+        "exit": 1
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned engine installation failed; retry after checking npm/network."
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/codex-acp@2.6.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "codex-acp-npm-fails-after-tree",
+      "engine": "codex-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "2.6.0",
+        "exit": 3
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0/node_modules/@agentclientprotocol/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0/node_modules/@agentclientprotocol/codex-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0/node_modules/@agentclientprotocol/codex-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0/node_modules/@agentclientprotocol/codex-acp/package.json",
+          "dabeb45cda157ce5294c33a092b05d4e26e64be0cc6d9ebe5d6021e123026a41",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned engine installation failed; retry after checking npm/network."
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/codex-acp@2.6.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "codex-acp-wrong-version",
+      "engine": "codex-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "9.9.9"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned installation is unavailable, busy or failed verification."
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/codex-acp@2.6.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "codex-acp-missing-bin",
+      "engine": "codex-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "2.6.0",
+        "bin": false
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned installation is unavailable, busy or failed verification."
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/codex-acp@2.6.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "codex-acp-no-tree",
+      "engine": "codex-acp",
+      "npm": "beside",
+      "mode": {},
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned installation is unavailable, busy or failed verification."
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/codex-acp@2.6.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "codex-acp-existing-valid",
+      "engine": "codex-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "2.6.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/first-run-codex-acp.json",
+          "e242ec61a4b17fe80e27b0b1231c01ba4e6d2389c3e9b295a0dc80888e3c04f4",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/package.json",
+          "085957a8a644014a4b767fe8ce904758f2496c0dddfe4898a8d22ec9dfe07e5b",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {
+        "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/{package}/package.json": "{\"name\": \"fixture\", \"version\": \"2.6.0\", \"bin\": \"dist/index.js\"}",
+        "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/{package}/dist/index.js": "// fixture adapter\n"
+      },
+      "expected": {
+        "ok": true,
+        "result": {
+          "engine": "codex-acp",
+          "version": "2.6.0",
+          "status": "installed",
+          "discovery": {
+            "surface": "connections",
+            "revision": "absent",
+            "engines": [
+              {
+                "engine": "codex-acp",
+                "status": "downloaded_no_login",
+                "version": "2.6.0",
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": true,
+                "install_supported": true,
+                "automatic_setup": "downloaded",
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "claude-agent-acp",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": true,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "opencode",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": false,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              }
+            ]
+          }
+        }
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "codex-acp-existing-other-version",
+      "engine": "codex-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "2.6.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/package.json",
+          "7c427290ecb27aed3e422530447b8d9d5bea51927301bcdb6e8677024662599a",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {
+        "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/{package}/package.json": "{\"name\": \"fixture\", \"version\": \"1.0.0\", \"bin\": \"dist/index.js\"}",
+        "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/{package}/dist/index.js": "// fixture adapter\n"
+      },
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned installation is unavailable, busy or failed verification."
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "codex-acp-existing-invalid",
+      "engine": "codex-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "2.6.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/README",
+          "14d1d6359773e36be8162fe7dddd52b67d75c22986ad37df455cc45dbfeb01aa",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {
+        "home/.local/share/cortex/engines/codex-acp/2.6.0/README": "not an install\n"
+      },
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned installation is unavailable, busy or failed verification."
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "codex-acp-prune",
+      "engine": "codex-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "2.6.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/first-run-codex-acp.json",
+          "e242ec61a4b17fe80e27b0b1231c01ba4e6d2389c3e9b295a0dc80888e3c04f4",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.hidden",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.hidden/x",
+          "78051faade059d70866df6a3fb83ef348721fd74a87e93ef95c493f87d0d236b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.tmp-file",
+          "e5cc9af51a789c122402d7d05376b2e57542995cb1696c13a6fa307a17578bdf",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/1.12.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/1.12.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/1.12.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/1.12.0/node_modules/@agentclientprotocol/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/1.12.0/node_modules/@agentclientprotocol/codex-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/1.12.0/node_modules/@agentclientprotocol/codex-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/1.12.0/node_modules/@agentclientprotocol/codex-acp/package.json",
+          "88e7c305e315de2465fbc7d9657ccbd7c842fef347a2fe9b8e683dbd353055c3",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/package.json",
+          "dabeb45cda157ce5294c33a092b05d4e26e64be0cc6d9ebe5d6021e123026a41",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {
+        "home/.local/share/cortex/engines/codex-acp/1.0.0/node_modules/{package}/package.json": "{\"name\": \"fixture\", \"version\": \"1.0.0\", \"bin\": \"dist/index.js\"}",
+        "home/.local/share/cortex/engines/codex-acp/1.0.0/node_modules/{package}/dist/index.js": "// fixture adapter\n",
+        "home/.local/share/cortex/engines/codex-acp/1.1.0/node_modules/{package}/package.json": "{\"name\": \"fixture\", \"version\": \"1.1.0\", \"bin\": \"dist/index.js\"}",
+        "home/.local/share/cortex/engines/codex-acp/1.1.0/node_modules/{package}/dist/index.js": "// fixture adapter\n",
+        "home/.local/share/cortex/engines/codex-acp/1.12.0/node_modules/{package}/package.json": "{\"name\": \"fixture\", \"version\": \"1.12.0\", \"bin\": \"dist/index.js\"}",
+        "home/.local/share/cortex/engines/codex-acp/1.12.0/node_modules/{package}/dist/index.js": "// fixture adapter\n",
+        "home/.local/share/cortex/engines/codex-acp/.tmp-old/x": "stale\n",
+        "home/.local/share/cortex/engines/codex-acp/.tmp-file": "stale file\n",
+        "home/.local/share/cortex/engines/codex-acp/.hidden/x": "kept\n"
+      },
+      "expected": {
+        "ok": true,
+        "result": {
+          "engine": "codex-acp",
+          "version": "2.6.0",
+          "status": "installed",
+          "discovery": {
+            "surface": "connections",
+            "revision": "absent",
+            "engines": [
+              {
+                "engine": "codex-acp",
+                "status": "downloaded_no_login",
+                "version": "2.6.0",
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": true,
+                "install_supported": true,
+                "automatic_setup": "downloaded",
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "claude-agent-acp",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": true,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "opencode",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": false,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              }
+            ]
+          }
+        }
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/codex-acp@2.6.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "codex-acp-lock-busy",
+      "engine": "codex-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "2.6.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ]
+      ],
+      "busy": true,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned installation is unavailable, busy or failed verification."
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "codex-acp-login-marker",
+      "engine": "codex-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "2.6.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/first-run-codex-acp.json",
+          "e242ec61a4b17fe80e27b0b1231c01ba4e6d2389c3e9b295a0dc80888e3c04f4",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.codex",
+          "dir",
+          448
+        ],
+        [
+          "home/.codex/auth.json",
+          "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          384
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/package.json",
+          "dabeb45cda157ce5294c33a092b05d4e26e64be0cc6d9ebe5d6021e123026a41",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {
+        "home/.codex/auth.json": "{}"
+      },
+      "expected": {
+        "ok": true,
+        "result": {
+          "engine": "codex-acp",
+          "version": "2.6.0",
+          "status": "installed",
+          "discovery": {
+            "surface": "connections",
+            "revision": "absent",
+            "engines": [
+              {
+                "engine": "codex-acp",
+                "status": "ready_to_connect",
+                "version": "2.6.0",
+                "native_login_detected": true,
+                "already_connected": null,
+                "qualified": true,
+                "install_supported": true,
+                "automatic_setup": "downloaded",
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "claude-agent-acp",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": true,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "opencode",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": false,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              }
+            ]
+          }
+        }
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/codex-acp@2.6.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "codex-acp-first-run-existing",
+      "engine": "codex-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "2.6.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/first-run-codex-acp.json",
+          "e242ec61a4b17fe80e27b0b1231c01ba4e6d2389c3e9b295a0dc80888e3c04f4",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/codex-acp/2.6.0/node_modules/@agentclientprotocol/codex-acp/package.json",
+          "dabeb45cda157ce5294c33a092b05d4e26e64be0cc6d9ebe5d6021e123026a41",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {
+        "config/cortex/first-run-codex-acp.json": "{\"phase\": \"downloading\"}",
+        "config/cortex/.gitignore": "*\n"
+      },
+      "expected": {
+        "ok": true,
+        "result": {
+          "engine": "codex-acp",
+          "version": "2.6.0",
+          "status": "installed",
+          "discovery": {
+            "surface": "connections",
+            "revision": "absent",
+            "engines": [
+              {
+                "engine": "codex-acp",
+                "status": "downloaded_no_login",
+                "version": "2.6.0",
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": true,
+                "install_supported": true,
+                "automatic_setup": "downloaded",
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "claude-agent-acp",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": true,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "opencode",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": false,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              }
+            ]
+          }
+        }
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/codex-acp/.tmp-2.6.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/codex-acp@2.6.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "claude-agent-acp-no-node",
+      "engine": "claude-agent-acp",
+      "npm": "none",
+      "mode": {
+        "version": "0.107.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ]
+      ],
+      "busy": false,
+      "path": "none",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned installation is unavailable, busy or failed verification."
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "claude-agent-acp-npm-missing",
+      "engine": "claude-agent-acp",
+      "npm": "none",
+      "mode": {
+        "version": "0.107.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned installation is unavailable, busy or failed verification."
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "claude-agent-acp-success",
+      "engine": "claude-agent-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "0.107.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/first-run-claude-agent-acp.json",
+          "e242ec61a4b17fe80e27b0b1231c01ba4e6d2389c3e9b295a0dc80888e3c04f4",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
+          "f4fc1c45b692eedfc0be341d02775fbcc522a16e5abb80a091f3cdb8be71b64e",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": true,
+        "result": {
+          "engine": "claude-agent-acp",
+          "version": "0.107.0",
+          "status": "installed",
+          "discovery": {
+            "surface": "connections",
+            "revision": "absent",
+            "engines": [
+              {
+                "engine": "codex-acp",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": true,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "claude-agent-acp",
+                "status": "downloaded_no_login",
+                "version": "0.107.0",
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": true,
+                "install_supported": true,
+                "automatic_setup": "downloaded",
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "opencode",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": false,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              }
+            ]
+          }
+        }
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/claude-agent-acp@0.107.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "claude-agent-acp-npm-on-path",
+      "engine": "claude-agent-acp",
+      "npm": "path",
+      "mode": {
+        "version": "0.107.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/first-run-claude-agent-acp.json",
+          "e242ec61a4b17fe80e27b0b1231c01ba4e6d2389c3e9b295a0dc80888e3c04f4",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
+          "f4fc1c45b692eedfc0be341d02775fbcc522a16e5abb80a091f3cdb8be71b64e",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin:other",
+      "setup": {},
+      "expected": {
+        "ok": true,
+        "result": {
+          "engine": "claude-agent-acp",
+          "version": "0.107.0",
+          "status": "installed",
+          "discovery": {
+            "surface": "connections",
+            "revision": "absent",
+            "engines": [
+              {
+                "engine": "codex-acp",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": true,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "claude-agent-acp",
+                "status": "downloaded_no_login",
+                "version": "0.107.0",
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": true,
+                "install_supported": true,
+                "automatic_setup": "downloaded",
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "opencode",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": false,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              }
+            ]
+          }
+        }
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/other/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/claude-agent-acp@0.107.0"
+          ],
+          "path": "$BASE/other:$BASE/bin:$BASE/other"
+        }
+      ]
+    },
+    {
+      "name": "claude-agent-acp-npm-fails",
+      "engine": "claude-agent-acp",
+      "npm": "beside",
+      "mode": {
+        "exit": 1
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned engine installation failed; retry after checking npm/network."
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/claude-agent-acp@0.107.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "claude-agent-acp-npm-fails-after-tree",
+      "engine": "claude-agent-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "0.107.0",
+        "exit": 3
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0/node_modules/@agentclientprotocol/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
+          "f4fc1c45b692eedfc0be341d02775fbcc522a16e5abb80a091f3cdb8be71b64e",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned engine installation failed; retry after checking npm/network."
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/claude-agent-acp@0.107.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "claude-agent-acp-wrong-version",
+      "engine": "claude-agent-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "9.9.9"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned installation is unavailable, busy or failed verification."
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/claude-agent-acp@0.107.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "claude-agent-acp-missing-bin",
+      "engine": "claude-agent-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "0.107.0",
+        "bin": false
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned installation is unavailable, busy or failed verification."
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/claude-agent-acp@0.107.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "claude-agent-acp-no-tree",
+      "engine": "claude-agent-acp",
+      "npm": "beside",
+      "mode": {},
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned installation is unavailable, busy or failed verification."
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/claude-agent-acp@0.107.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "claude-agent-acp-existing-valid",
+      "engine": "claude-agent-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "0.107.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/first-run-claude-agent-acp.json",
+          "e242ec61a4b17fe80e27b0b1231c01ba4e6d2389c3e9b295a0dc80888e3c04f4",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
+          "0f3ea3899a8d1e7849e1f45e999b792e7ccce54c4be30ce7bbe9c02cbbc7673f",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {
+        "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/{package}/package.json": "{\"name\": \"fixture\", \"version\": \"0.107.0\", \"bin\": \"dist/index.js\"}",
+        "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/{package}/dist/index.js": "// fixture adapter\n"
+      },
+      "expected": {
+        "ok": true,
+        "result": {
+          "engine": "claude-agent-acp",
+          "version": "0.107.0",
+          "status": "installed",
+          "discovery": {
+            "surface": "connections",
+            "revision": "absent",
+            "engines": [
+              {
+                "engine": "codex-acp",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": true,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "claude-agent-acp",
+                "status": "downloaded_no_login",
+                "version": "0.107.0",
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": true,
+                "install_supported": true,
+                "automatic_setup": "downloaded",
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "opencode",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": false,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              }
+            ]
+          }
+        }
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "claude-agent-acp-existing-other-version",
+      "engine": "claude-agent-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "0.107.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
+          "7c427290ecb27aed3e422530447b8d9d5bea51927301bcdb6e8677024662599a",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {
+        "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/{package}/package.json": "{\"name\": \"fixture\", \"version\": \"1.0.0\", \"bin\": \"dist/index.js\"}",
+        "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/{package}/dist/index.js": "// fixture adapter\n"
+      },
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned installation is unavailable, busy or failed verification."
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "claude-agent-acp-existing-invalid",
+      "engine": "claude-agent-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "0.107.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/README",
+          "14d1d6359773e36be8162fe7dddd52b67d75c22986ad37df455cc45dbfeb01aa",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {
+        "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/README": "not an install\n"
+      },
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned installation is unavailable, busy or failed verification."
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "claude-agent-acp-prune",
+      "engine": "claude-agent-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "0.107.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/first-run-claude-agent-acp.json",
+          "e242ec61a4b17fe80e27b0b1231c01ba4e6d2389c3e9b295a0dc80888e3c04f4",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.hidden",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.hidden/x",
+          "78051faade059d70866df6a3fb83ef348721fd74a87e93ef95c493f87d0d236b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.tmp-file",
+          "e5cc9af51a789c122402d7d05376b2e57542995cb1696c13a6fa307a17578bdf",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
+          "f4fc1c45b692eedfc0be341d02775fbcc522a16e5abb80a091f3cdb8be71b64e",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.78.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.78.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.78.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.78.0/node_modules/@agentclientprotocol/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.78.0/node_modules/@agentclientprotocol/claude-agent-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.78.0/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.78.0/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
+          "e19461694866a0ed96c21b0a308a701aea8a772ed8743d05eeca206a172abe6b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/1.0.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/1.0.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/1.0.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/1.0.0/node_modules/@agentclientprotocol/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/1.0.0/node_modules/@agentclientprotocol/claude-agent-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/1.0.0/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/1.0.0/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
+          "7c427290ecb27aed3e422530447b8d9d5bea51927301bcdb6e8677024662599a",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/1.1.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/1.1.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/1.1.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/1.1.0/node_modules/@agentclientprotocol/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/1.1.0/node_modules/@agentclientprotocol/claude-agent-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/1.1.0/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/1.1.0/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
+          "989051acc65dd52e55b3f863fc44fd87893fa550d8971a1c02f03f1c6d67c4fd",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {
+        "home/.local/share/cortex/engines/claude-agent-acp/1.0.0/node_modules/{package}/package.json": "{\"name\": \"fixture\", \"version\": \"1.0.0\", \"bin\": \"dist/index.js\"}",
+        "home/.local/share/cortex/engines/claude-agent-acp/1.0.0/node_modules/{package}/dist/index.js": "// fixture adapter\n",
+        "home/.local/share/cortex/engines/claude-agent-acp/1.1.0/node_modules/{package}/package.json": "{\"name\": \"fixture\", \"version\": \"1.1.0\", \"bin\": \"dist/index.js\"}",
+        "home/.local/share/cortex/engines/claude-agent-acp/1.1.0/node_modules/{package}/dist/index.js": "// fixture adapter\n",
+        "home/.local/share/cortex/engines/claude-agent-acp/0.78.0/node_modules/{package}/package.json": "{\"name\": \"fixture\", \"version\": \"0.78.0\", \"bin\": \"dist/index.js\"}",
+        "home/.local/share/cortex/engines/claude-agent-acp/0.78.0/node_modules/{package}/dist/index.js": "// fixture adapter\n",
+        "home/.local/share/cortex/engines/claude-agent-acp/.tmp-old/x": "stale\n",
+        "home/.local/share/cortex/engines/claude-agent-acp/.tmp-file": "stale file\n",
+        "home/.local/share/cortex/engines/claude-agent-acp/.hidden/x": "kept\n"
+      },
+      "expected": {
+        "ok": true,
+        "result": {
+          "engine": "claude-agent-acp",
+          "version": "0.107.0",
+          "status": "installed",
+          "discovery": {
+            "surface": "connections",
+            "revision": "absent",
+            "engines": [
+              {
+                "engine": "codex-acp",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": true,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "claude-agent-acp",
+                "status": "downloaded_no_login",
+                "version": "0.107.0",
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": true,
+                "install_supported": true,
+                "automatic_setup": "downloaded",
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "opencode",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": false,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              }
+            ]
+          }
+        }
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/claude-agent-acp@0.107.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "claude-agent-acp-lock-busy",
+      "engine": "claude-agent-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "0.107.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ]
+      ],
+      "busy": true,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "engine_install_failed",
+        "message": "Pinned installation is unavailable, busy or failed verification."
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "claude-agent-acp-login-marker",
+      "engine": "claude-agent-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "0.107.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/first-run-claude-agent-acp.json",
+          "e242ec61a4b17fe80e27b0b1231c01ba4e6d2389c3e9b295a0dc80888e3c04f4",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.claude",
+          "dir",
+          448
+        ],
+        [
+          "home/.claude/.credentials.json",
+          "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+          384
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
+          "f4fc1c45b692eedfc0be341d02775fbcc522a16e5abb80a091f3cdb8be71b64e",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {
+        "home/.claude/.credentials.json": "{}"
+      },
+      "expected": {
+        "ok": true,
+        "result": {
+          "engine": "claude-agent-acp",
+          "version": "0.107.0",
+          "status": "installed",
+          "discovery": {
+            "surface": "connections",
+            "revision": "absent",
+            "engines": [
+              {
+                "engine": "codex-acp",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": true,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "claude-agent-acp",
+                "status": "ready_to_connect",
+                "version": "0.107.0",
+                "native_login_detected": true,
+                "already_connected": null,
+                "qualified": true,
+                "install_supported": true,
+                "automatic_setup": "downloaded",
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "opencode",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": false,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              }
+            ]
+          }
+        }
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/claude-agent-acp@0.107.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "claude-agent-acp-first-run-existing",
+      "engine": "claude-agent-acp",
+      "npm": "beside",
+      "mode": {
+        "version": "0.107.0"
+      },
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/first-run-claude-agent-acp.json",
+          "e242ec61a4b17fe80e27b0b1231c01ba4e6d2389c3e9b295a0dc80888e3c04f4",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ],
+        [
+          "home/.local",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/dist",
+          "dir",
+          493
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js",
+          "4d1812b6e382332d617af54ec40d53cd1ecd8589ee108b0bc66a97df29fc8d9b",
+          420
+        ],
+        [
+          "home/.local/share/cortex/engines/claude-agent-acp/0.107.0/node_modules/@agentclientprotocol/claude-agent-acp/package.json",
+          "f4fc1c45b692eedfc0be341d02775fbcc522a16e5abb80a091f3cdb8be71b64e",
+          420
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {
+        "config/cortex/first-run-claude-agent-acp.json": "{\"phase\": \"downloading\"}",
+        "config/cortex/.gitignore": "*\n"
+      },
+      "expected": {
+        "ok": true,
+        "result": {
+          "engine": "claude-agent-acp",
+          "version": "0.107.0",
+          "status": "installed",
+          "discovery": {
+            "surface": "connections",
+            "revision": "absent",
+            "engines": [
+              {
+                "engine": "codex-acp",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": true,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "claude-agent-acp",
+                "status": "downloaded_no_login",
+                "version": "0.107.0",
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": true,
+                "install_supported": true,
+                "automatic_setup": "downloaded",
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              },
+              {
+                "engine": "opencode",
+                "status": "not_downloaded",
+                "version": null,
+                "native_login_detected": false,
+                "already_connected": null,
+                "qualified": false,
+                "install_supported": false,
+                "automatic_setup": null,
+                "automatic_setup_reason": null,
+                "auto_connect_disabled": false
+              }
+            ]
+          }
+        }
+      },
+      "npmCalls": [
+        {
+          "argv": [
+            "$BASE/bin/npm",
+            "install",
+            "--prefix",
+            "$BASE/home/.local/share/cortex/engines/claude-agent-acp/.tmp-0.107.0",
+            "--no-audit",
+            "--no-fund",
+            "--omit=dev",
+            "--no-save",
+            "@agentclientprotocol/claude-agent-acp@0.107.0"
+          ],
+          "path": "$BASE/bin:$BASE/bin"
+        }
+      ]
+    },
+    {
+      "name": "onboard-opencode-absent",
+      "engine": null,
+      "params": {
+        "action": "onboard_opencode",
+        "explicit_opt_in": true,
+        "expected_revision": "absent"
+      },
+      "npm": "beside",
+      "mode": {},
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/connections.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "opencode_not_found",
+        "message": "No trusted OpenCode binary reporting a version was found (looked at the given binary, $CORTEX_OPENCODE_BINARY, ~/.opencode/bin/opencode and PATH)."
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "onboard-opencode-named",
+      "engine": null,
+      "params": {
+        "action": "onboard_opencode",
+        "explicit_opt_in": true,
+        "expected_revision": "absent",
+        "name": "My OpenCode",
+        "binary": "/ignored/opencode"
+      },
+      "npm": "beside",
+      "mode": {},
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/connections.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "opencode_not_found",
+        "message": "No trusted OpenCode binary reporting a version was found (looked at the given binary, $CORTEX_OPENCODE_BINARY, ~/.opencode/bin/opencode and PATH)."
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "onboard-opencode-stale",
+      "engine": null,
+      "params": {
+        "action": "onboard_opencode",
+        "explicit_opt_in": true,
+        "expected_revision": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "npm": "beside",
+      "mode": {},
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/connections.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {},
+      "expected": {
+        "ok": false,
+        "code": "revision_conflict",
+        "message": "The connections configuration changed after it was read (expected revision sha256:0000000000000000000000000000000000000000000000000000000000000000, current absent); nothing was written. Re-read it and apply the change again."
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "onboard-opencode-registry-match",
+      "engine": null,
+      "params": {
+        "action": "onboard_opencode",
+        "explicit_opt_in": true,
+        "expected_revision": "sha256:ecf87c30c9d77bfeb72e3ce08bbc56a95dded225820e71446f323e89760017de"
+      },
+      "npm": "beside",
+      "mode": {},
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/connections.json",
+          "ecf87c30c9d77bfeb72e3ce08bbc56a95dded225820e71446f323e89760017de",
+          384
+        ],
+        [
+          "config/cortex/connections.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {
+        "config/cortex/connections.json": "{\"schema_version\": 1, \"connections\": {}}"
+      },
+      "expected": {
+        "ok": false,
+        "code": "opencode_not_found",
+        "message": "No trusted OpenCode binary reporting a version was found (looked at the given binary, $CORTEX_OPENCODE_BINARY, ~/.opencode/bin/opencode and PATH)."
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "onboard-opencode-registry-stale",
+      "engine": null,
+      "params": {
+        "action": "onboard_opencode",
+        "explicit_opt_in": true,
+        "expected_revision": "absent"
+      },
+      "npm": "beside",
+      "mode": {},
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/connections.json",
+          "ecf87c30c9d77bfeb72e3ce08bbc56a95dded225820e71446f323e89760017de",
+          384
+        ],
+        [
+          "config/cortex/connections.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {
+        "config/cortex/connections.json": "{\"schema_version\": 1, \"connections\": {}}"
+      },
+      "expected": {
+        "ok": false,
+        "code": "revision_conflict",
+        "message": "The connections configuration changed after it was read (expected revision absent, current sha256:ecf87c30c9d77bfeb72e3ce08bbc56a95dded225820e71446f323e89760017de); nothing was written. Re-read it and apply the change again."
+      },
+      "npmCalls": []
+    },
+    {
+      "name": "onboard-opencode-existing-ignore",
+      "engine": null,
+      "params": {
+        "action": "onboard_opencode",
+        "explicit_opt_in": true,
+        "expected_revision": "absent"
+      },
+      "npm": "beside",
+      "mode": {},
+      "files": [
+        [
+          "config",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex",
+          "dir",
+          448
+        ],
+        [
+          "config/cortex/.gitignore",
+          "cdbcae15105d6b781e620813c79c7e868740d4e9cc53ce6f5fcbbc12387adf4b",
+          384
+        ],
+        [
+          "config/cortex/connections.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          384
+        ],
+        [
+          "home",
+          "dir",
+          448
+        ]
+      ],
+      "busy": false,
+      "path": "bin",
+      "setup": {
+        "config/cortex/.gitignore": "*\n"
+      },
+      "expected": {
+        "ok": false,
+        "code": "opencode_not_found",
+        "message": "No trusted OpenCode binary reporting a version was found (looked at the given binary, $CORTEX_OPENCODE_BINARY, ~/.opencode/bin/opencode and PATH)."
+      },
+      "npmCalls": []
+    }
+  ]
+}

@@ -1,0 +1,6078 @@
+{
+  "format": 1,
+  "now": "2026-11-13T21:30:00+00:00",
+  "sources": {
+    "crates/workspace-service/tests/generate_config_read_dispatch_fixture.py": "53aea1dee3e453b14c6f0d3d9a05354dba9354f17f0f77b33c7b75f197291f8e",
+    "crates/workspace-service/tests/fixtures/registry-refresh-python.json": "ee30f67f0afbb84d89f4704d8c1d6c9fda31c1f76d7228fe1051533e0806d271",
+    "crates/workspace-service/machine_tools.py": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+    "src/cortex_runtime/connections/onboarding.py": "b1791f29cba616e1cc570f89a0e69ef63fcdede1d5a738bb304204460eec7569",
+    "src/cortex_runtime/connections/registry.py": "6c96df2025a2b3e73d81dbcfabb57f2d9fcd233c167b19b5684163c4986a1ce5",
+    "src/cortex_runtime/connections/model.py": "94d5fbb6fe33b126cae1ea57e6453414d7ed40c7ba9752da57d7b1f16806e97e",
+    "src/cortex_runtime/configuration/management.py": "f035019940568b7b2881c7548e29f53a8e1ce0433eb5b7b1d2fc12e70f6ae8a2"
+  },
+  "evidence": {
+    "process_attempts": 0,
+    "real_engine_calls": 0,
+    "real_keyring_calls": 0,
+    "disposable_home": true,
+    "fake_executables": true
+  },
+  "deltas": [
+    "Stored-state display; no lazy usage refresh or OpenCode version probe.",
+    "Native explicit keyring refresh refuses atomically; display retains state with diagnostic.",
+    "Connection byte-revision tokens are checked against each implementation's actual bytes, not compared across serialization/root differences."
+  ],
+  "cases": [
+    {
+      "name": "codex-acp-False-engine_native_dir-present",
+      "files": {
+        "home/.codex/auth.json": "fixture-not-a-credential",
+        "config/cortex/connections.json": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_000000000001\": {\n      \"id\": \"cn_000000000001\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"Fixture\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": null,\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"@ROOT@/home/.codex\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"b3372ee5e4d1645087ddfb4ad67210c89e35096d64350bafec55927e6ad0334a\",\n      \"state\": \"unavailable\",\n      \"qualified\": true,\n      \"max_concurrent_sessions\": 4,\n      \"created_at\": \"2026-01-01\",\n      \"updated_at\": \"2026-01-01\"\n    }\n  },\n  \"override_history\": {},\n  \"auto_connect_disabled\": [\n    \"opencode\"\n  ]\n}\n",
+        "bin/node": "#!/bin/sh\nexit 98\n",
+        "bin/codex": "#!/bin/sh\nexit 98\n",
+        "bin/claude": "#!/bin/sh\nexit 98\n",
+        "bin/opencode": "#!/bin/sh\nexit 98\n",
+        "bin/codex-acp": "#!/bin/sh\nexit 98\n",
+        "bin/claude-agent-acp": "#!/bin/sh\nexit 98\n"
+      },
+      "directories": [
+        "config",
+        "config/cortex",
+        "home",
+        "home/.codex"
+      ],
+      "ids": [
+        "cn_000000000001"
+      ],
+      "keyring": null,
+      "before": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "codex",
+            "label": "Fixture",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "unavailable",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "native_account",
+              "keyKind": null,
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "engine_native_dir",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "codex",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly"
+          }
+        ]
+      },
+      "after": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "codex",
+            "label": "Fixture",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "connected",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "native_account",
+              "keyKind": null,
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "engine_native_dir",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-11-13T21:30:00+00:00"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "codex",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly"
+          }
+        ]
+      },
+      "states": [
+        {
+          "id": "cn_000000000001",
+          "state": "configured"
+        }
+      ],
+      "registry_after": {
+        "auto_connect_disabled": [
+          "opencode"
+        ],
+        "connections": {
+          "cn_000000000001": {
+            "approved_fingerprint": "b3372ee5e4d1645087ddfb4ad67210c89e35096d64350bafec55927e6ad0334a",
+            "auth_mode": "native_account",
+            "created_at": "2026-01-01",
+            "credential_ref": {
+              "kind": "engine_native_dir",
+              "owned": false,
+              "path": "@ROOT@/home/.codex"
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_000000000001",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "2026-11-13T21:30:00+00:00"
+          }
+        },
+        "override_history": {},
+        "schema_version": 1
+      },
+      "fake_keyring_lookups": 0
+    },
+    {
+      "name": "claude-agent-acp-False-engine_native_dir-missing",
+      "files": {
+        "config/cortex/connections.json": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_000000000001\": {\n      \"id\": \"cn_000000000001\",\n      \"name\": \"Fixture\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"Fixture\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": null,\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"@ROOT@/home/.claude\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"b147178ff504e40949b9317928995152a7122d2a58eabba74f6084bc264ab251\",\n      \"state\": \"unavailable\",\n      \"qualified\": true,\n      \"max_concurrent_sessions\": 4,\n      \"created_at\": \"2026-01-01\",\n      \"updated_at\": \"2026-01-01\"\n    }\n  },\n  \"override_history\": {},\n  \"auto_connect_disabled\": [\n    \"opencode\"\n  ]\n}\n",
+        "bin/node": "#!/bin/sh\nexit 98\n",
+        "bin/codex": "#!/bin/sh\nexit 98\n",
+        "bin/claude": "#!/bin/sh\nexit 98\n",
+        "bin/opencode": "#!/bin/sh\nexit 98\n",
+        "bin/codex-acp": "#!/bin/sh\nexit 98\n",
+        "bin/claude-agent-acp": "#!/bin/sh\nexit 98\n"
+      },
+      "directories": [
+        "config",
+        "config/cortex"
+      ],
+      "ids": [
+        "cn_000000000001"
+      ],
+      "keyring": null,
+      "before": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "claude",
+            "label": "Fixture",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "unavailable",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "native_account",
+              "keyKind": null,
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "engine_native_dir",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "claude",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly",
+            "windows": []
+          }
+        ]
+      },
+      "after": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "claude",
+            "label": "Fixture",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "needs_login",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "native_account",
+              "keyKind": null,
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "engine_native_dir",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-11-13T21:30:00+00:00"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "claude",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly",
+            "windows": []
+          }
+        ]
+      },
+      "states": [
+        {
+          "id": "cn_000000000001",
+          "state": "authorization_required"
+        }
+      ],
+      "registry_after": {
+        "auto_connect_disabled": [
+          "opencode"
+        ],
+        "connections": {
+          "cn_000000000001": {
+            "approved_fingerprint": "b147178ff504e40949b9317928995152a7122d2a58eabba74f6084bc264ab251",
+            "auth_mode": "native_account",
+            "created_at": "2026-01-01",
+            "credential_ref": {
+              "kind": "engine_native_dir",
+              "owned": false,
+              "path": "@ROOT@/home/.claude"
+            },
+            "endpoint": null,
+            "engine": "claude-agent-acp",
+            "id": "cn_000000000001",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "authorization_required",
+            "updated_at": "2026-11-13T21:30:00+00:00"
+          }
+        },
+        "override_history": {},
+        "schema_version": 1
+      },
+      "fake_keyring_lookups": 0
+    },
+    {
+      "name": "codex-acp-True-secret_file-empty",
+      "files": {
+        "config/cortex/secrets/cn_000000000001": "",
+        "config/cortex/connections.json": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_000000000001\": {\n      \"id\": \"cn_000000000001\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"Fixture\",\n      \"auth_mode\": \"api_key\",\n      \"key_kind\": \"openai_api_key\",\n      \"endpoint\": null,\n      \"launch_command\": null,\n      \"credential_ref\": {\n        \"kind\": \"secret_file\",\n        \"path\": \"@ROOT@/config/cortex/secrets/cn_000000000001\"\n      },\n      \"approved_fingerprint\": \"b3372ee5e4d1645087ddfb4ad67210c89e35096d64350bafec55927e6ad0334a\",\n      \"state\": \"unavailable\",\n      \"qualified\": true,\n      \"max_concurrent_sessions\": 4,\n      \"created_at\": \"2026-01-01\",\n      \"updated_at\": \"2026-01-01\"\n    }\n  },\n  \"override_history\": {},\n  \"auto_connect_disabled\": [\n    \"opencode\"\n  ]\n}\n",
+        "bin/node": "#!/bin/sh\nexit 98\n",
+        "bin/codex": "#!/bin/sh\nexit 98\n",
+        "bin/claude": "#!/bin/sh\nexit 98\n",
+        "bin/opencode": "#!/bin/sh\nexit 98\n",
+        "bin/codex-acp": "#!/bin/sh\nexit 98\n",
+        "bin/claude-agent-acp": "#!/bin/sh\nexit 98\n"
+      },
+      "directories": [
+        "config",
+        "config/cortex",
+        "config/cortex/secrets"
+      ],
+      "ids": [
+        "cn_000000000001"
+      ],
+      "keyring": null,
+      "before": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "codex",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "unavailable",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "openai_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "secret_file",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "codex",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly"
+          }
+        ]
+      },
+      "after": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "codex",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "needs_login",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "openai_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "secret_file",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-11-13T21:30:00+00:00"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "codex",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly"
+          }
+        ]
+      },
+      "states": [
+        {
+          "id": "cn_000000000001",
+          "state": "authorization_required"
+        }
+      ],
+      "registry_after": {
+        "auto_connect_disabled": [
+          "opencode"
+        ],
+        "connections": {
+          "cn_000000000001": {
+            "approved_fingerprint": "b3372ee5e4d1645087ddfb4ad67210c89e35096d64350bafec55927e6ad0334a",
+            "auth_mode": "api_key",
+            "created_at": "2026-01-01",
+            "credential_ref": {
+              "kind": "secret_file",
+              "path": "@ROOT@/config/cortex/secrets/cn_000000000001"
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_000000000001",
+            "key_kind": "openai_api_key",
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "authorization_required",
+            "updated_at": "2026-11-13T21:30:00+00:00"
+          }
+        },
+        "override_history": {},
+        "schema_version": 1
+      },
+      "fake_keyring_lookups": 0
+    },
+    {
+      "name": "codex-acp-False-engine_native_dir-noop",
+      "files": {
+        "home/.codex/auth.json": "fixture-not-a-credential",
+        "config/cortex/connections.json": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_000000000001\": {\n      \"id\": \"cn_000000000001\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"Fixture\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": null,\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"@ROOT@/home/.codex\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"b3372ee5e4d1645087ddfb4ad67210c89e35096d64350bafec55927e6ad0334a\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"max_concurrent_sessions\": 4,\n      \"created_at\": \"2026-01-01\",\n      \"updated_at\": \"2026-01-01\"\n    }\n  },\n  \"override_history\": {},\n  \"auto_connect_disabled\": [\n    \"opencode\"\n  ]\n}\n",
+        "bin/node": "#!/bin/sh\nexit 98\n",
+        "bin/codex": "#!/bin/sh\nexit 98\n",
+        "bin/claude": "#!/bin/sh\nexit 98\n",
+        "bin/opencode": "#!/bin/sh\nexit 98\n",
+        "bin/codex-acp": "#!/bin/sh\nexit 98\n",
+        "bin/claude-agent-acp": "#!/bin/sh\nexit 98\n"
+      },
+      "directories": [
+        "config",
+        "config/cortex",
+        "home",
+        "home/.codex"
+      ],
+      "ids": [
+        "cn_000000000001"
+      ],
+      "keyring": null,
+      "before": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "codex",
+            "label": "Fixture",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "connected",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "native_account",
+              "keyKind": null,
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "engine_native_dir",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "codex",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly"
+          }
+        ]
+      },
+      "after": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "codex",
+            "label": "Fixture",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "connected",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "native_account",
+              "keyKind": null,
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "engine_native_dir",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "codex",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly"
+          }
+        ]
+      },
+      "states": [
+        {
+          "id": "cn_000000000001",
+          "state": "configured"
+        }
+      ],
+      "registry_after": {
+        "schema_version": 1,
+        "connections": {
+          "cn_000000000001": {
+            "id": "cn_000000000001",
+            "name": "Fixture",
+            "engine": "codex-acp",
+            "provider": "Fixture",
+            "auth_mode": "native_account",
+            "key_kind": null,
+            "endpoint": null,
+            "launch_command": null,
+            "credential_ref": {
+              "kind": "engine_native_dir",
+              "path": "@ROOT@/home/.codex",
+              "owned": false
+            },
+            "approved_fingerprint": "b3372ee5e4d1645087ddfb4ad67210c89e35096d64350bafec55927e6ad0334a",
+            "state": "configured",
+            "qualified": true,
+            "max_concurrent_sessions": 4,
+            "created_at": "2026-01-01",
+            "updated_at": "2026-01-01"
+          }
+        },
+        "override_history": {},
+        "auto_connect_disabled": [
+          "opencode"
+        ]
+      },
+      "fake_keyring_lookups": 0
+    },
+    {
+      "name": "codex-acp-keyring-present",
+      "files": {
+        "config/cortex/connections.json": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_000000000001\": {\n      \"id\": \"cn_000000000001\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"Fixture\",\n      \"auth_mode\": \"api_key\",\n      \"key_kind\": \"openai_api_key\",\n      \"endpoint\": null,\n      \"launch_command\": null,\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fixture-service\",\n        \"account\": \"fixture-account\"\n      },\n      \"approved_fingerprint\": \"b3372ee5e4d1645087ddfb4ad67210c89e35096d64350bafec55927e6ad0334a\",\n      \"state\": \"unavailable\",\n      \"qualified\": true,\n      \"max_concurrent_sessions\": 4,\n      \"created_at\": \"2026-01-01\",\n      \"updated_at\": \"2026-01-01\"\n    }\n  },\n  \"override_history\": {},\n  \"auto_connect_disabled\": [\n    \"opencode\"\n  ]\n}\n",
+        "bin/node": "#!/bin/sh\nexit 98\n",
+        "bin/codex": "#!/bin/sh\nexit 98\n",
+        "bin/claude": "#!/bin/sh\nexit 98\n",
+        "bin/opencode": "#!/bin/sh\nexit 98\n",
+        "bin/codex-acp": "#!/bin/sh\nexit 98\n",
+        "bin/claude-agent-acp": "#!/bin/sh\nexit 98\n"
+      },
+      "directories": [],
+      "ids": [
+        "cn_000000000001"
+      ],
+      "keyring": "present",
+      "before": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "codex",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "unavailable",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "openai_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "codex",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly"
+          }
+        ]
+      },
+      "after": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "codex",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "connected",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "openai_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-11-13T21:30:00+00:00"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "codex",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly"
+          }
+        ]
+      },
+      "states": [
+        {
+          "id": "cn_000000000001",
+          "state": "configured"
+        }
+      ],
+      "registry_after": {
+        "auto_connect_disabled": [
+          "opencode"
+        ],
+        "connections": {
+          "cn_000000000001": {
+            "approved_fingerprint": "b3372ee5e4d1645087ddfb4ad67210c89e35096d64350bafec55927e6ad0334a",
+            "auth_mode": "api_key",
+            "created_at": "2026-01-01",
+            "credential_ref": {
+              "account": "fixture-account",
+              "kind": "os_keyring",
+              "service": "fixture-service"
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_000000000001",
+            "key_kind": "openai_api_key",
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "2026-11-13T21:30:00+00:00"
+          }
+        },
+        "override_history": {},
+        "schema_version": 1
+      },
+      "fake_keyring_lookups": 1
+    },
+    {
+      "name": "codex-acp-keyring-empty",
+      "files": {
+        "config/cortex/connections.json": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_000000000001\": {\n      \"id\": \"cn_000000000001\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"Fixture\",\n      \"auth_mode\": \"api_key\",\n      \"key_kind\": \"openai_api_key\",\n      \"endpoint\": null,\n      \"launch_command\": null,\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fixture-service\",\n        \"account\": \"fixture-account\"\n      },\n      \"approved_fingerprint\": \"b3372ee5e4d1645087ddfb4ad67210c89e35096d64350bafec55927e6ad0334a\",\n      \"state\": \"unavailable\",\n      \"qualified\": true,\n      \"max_concurrent_sessions\": 4,\n      \"created_at\": \"2026-01-01\",\n      \"updated_at\": \"2026-01-01\"\n    }\n  },\n  \"override_history\": {},\n  \"auto_connect_disabled\": [\n    \"opencode\"\n  ]\n}\n",
+        "bin/node": "#!/bin/sh\nexit 98\n",
+        "bin/codex": "#!/bin/sh\nexit 98\n",
+        "bin/claude": "#!/bin/sh\nexit 98\n",
+        "bin/opencode": "#!/bin/sh\nexit 98\n",
+        "bin/codex-acp": "#!/bin/sh\nexit 98\n",
+        "bin/claude-agent-acp": "#!/bin/sh\nexit 98\n"
+      },
+      "directories": [],
+      "ids": [
+        "cn_000000000001"
+      ],
+      "keyring": "empty",
+      "before": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "codex",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "unavailable",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "openai_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "codex",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly"
+          }
+        ]
+      },
+      "after": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "codex",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "connected",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "openai_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-11-13T21:30:00+00:00"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "codex",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly"
+          }
+        ]
+      },
+      "states": [
+        {
+          "id": "cn_000000000001",
+          "state": "configured"
+        }
+      ],
+      "registry_after": {
+        "auto_connect_disabled": [
+          "opencode"
+        ],
+        "connections": {
+          "cn_000000000001": {
+            "approved_fingerprint": "b3372ee5e4d1645087ddfb4ad67210c89e35096d64350bafec55927e6ad0334a",
+            "auth_mode": "api_key",
+            "created_at": "2026-01-01",
+            "credential_ref": {
+              "account": "fixture-account",
+              "kind": "os_keyring",
+              "service": "fixture-service"
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_000000000001",
+            "key_kind": "openai_api_key",
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "2026-11-13T21:30:00+00:00"
+          }
+        },
+        "override_history": {},
+        "schema_version": 1
+      },
+      "fake_keyring_lookups": 1
+    },
+    {
+      "name": "codex-acp-keyring-absent",
+      "files": {
+        "config/cortex/connections.json": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_000000000001\": {\n      \"id\": \"cn_000000000001\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"Fixture\",\n      \"auth_mode\": \"api_key\",\n      \"key_kind\": \"openai_api_key\",\n      \"endpoint\": null,\n      \"launch_command\": null,\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fixture-service\",\n        \"account\": \"fixture-account\"\n      },\n      \"approved_fingerprint\": \"b3372ee5e4d1645087ddfb4ad67210c89e35096d64350bafec55927e6ad0334a\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"max_concurrent_sessions\": 4,\n      \"created_at\": \"2026-01-01\",\n      \"updated_at\": \"2026-01-01\"\n    }\n  },\n  \"override_history\": {},\n  \"auto_connect_disabled\": [\n    \"opencode\"\n  ]\n}\n",
+        "bin/node": "#!/bin/sh\nexit 98\n",
+        "bin/codex": "#!/bin/sh\nexit 98\n",
+        "bin/claude": "#!/bin/sh\nexit 98\n",
+        "bin/opencode": "#!/bin/sh\nexit 98\n",
+        "bin/codex-acp": "#!/bin/sh\nexit 98\n",
+        "bin/claude-agent-acp": "#!/bin/sh\nexit 98\n"
+      },
+      "directories": [],
+      "ids": [
+        "cn_000000000001"
+      ],
+      "keyring": "absent",
+      "before": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "codex",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "connected",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "openai_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "codex",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly"
+          }
+        ]
+      },
+      "after": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "codex",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "needs_login",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "openai_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-11-13T21:30:00+00:00"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "codex",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly"
+          }
+        ]
+      },
+      "states": [
+        {
+          "id": "cn_000000000001",
+          "state": "authorization_required"
+        }
+      ],
+      "registry_after": {
+        "auto_connect_disabled": [
+          "opencode"
+        ],
+        "connections": {
+          "cn_000000000001": {
+            "approved_fingerprint": "b3372ee5e4d1645087ddfb4ad67210c89e35096d64350bafec55927e6ad0334a",
+            "auth_mode": "api_key",
+            "created_at": "2026-01-01",
+            "credential_ref": {
+              "account": "fixture-account",
+              "kind": "os_keyring",
+              "service": "fixture-service"
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_000000000001",
+            "key_kind": "openai_api_key",
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "authorization_required",
+            "updated_at": "2026-11-13T21:30:00+00:00"
+          }
+        },
+        "override_history": {},
+        "schema_version": 1
+      },
+      "fake_keyring_lookups": 1
+    },
+    {
+      "name": "codex-acp-keyring-error",
+      "files": {
+        "config/cortex/connections.json": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_000000000001\": {\n      \"id\": \"cn_000000000001\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"Fixture\",\n      \"auth_mode\": \"api_key\",\n      \"key_kind\": \"openai_api_key\",\n      \"endpoint\": null,\n      \"launch_command\": null,\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fixture-service\",\n        \"account\": \"fixture-account\"\n      },\n      \"approved_fingerprint\": \"b3372ee5e4d1645087ddfb4ad67210c89e35096d64350bafec55927e6ad0334a\",\n      \"state\": \"unavailable\",\n      \"qualified\": true,\n      \"max_concurrent_sessions\": 4,\n      \"created_at\": \"2026-01-01\",\n      \"updated_at\": \"2026-01-01\"\n    }\n  },\n  \"override_history\": {},\n  \"auto_connect_disabled\": [\n    \"opencode\"\n  ]\n}\n",
+        "bin/node": "#!/bin/sh\nexit 98\n",
+        "bin/codex": "#!/bin/sh\nexit 98\n",
+        "bin/claude": "#!/bin/sh\nexit 98\n",
+        "bin/opencode": "#!/bin/sh\nexit 98\n",
+        "bin/codex-acp": "#!/bin/sh\nexit 98\n",
+        "bin/claude-agent-acp": "#!/bin/sh\nexit 98\n"
+      },
+      "directories": [],
+      "ids": [
+        "cn_000000000001"
+      ],
+      "keyring": "error",
+      "before": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "codex",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "unavailable",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "openai_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "codex",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly"
+          }
+        ]
+      },
+      "after": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "codex",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "unavailable",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "openai_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "codex",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly"
+          }
+        ]
+      },
+      "states": [
+        {
+          "id": "cn_000000000001",
+          "state": "unavailable"
+        }
+      ],
+      "registry_after": {
+        "schema_version": 1,
+        "connections": {
+          "cn_000000000001": {
+            "id": "cn_000000000001",
+            "name": "Fixture",
+            "engine": "codex-acp",
+            "provider": "Fixture",
+            "auth_mode": "api_key",
+            "key_kind": "openai_api_key",
+            "endpoint": null,
+            "launch_command": null,
+            "credential_ref": {
+              "kind": "os_keyring",
+              "service": "fixture-service",
+              "account": "fixture-account"
+            },
+            "approved_fingerprint": "b3372ee5e4d1645087ddfb4ad67210c89e35096d64350bafec55927e6ad0334a",
+            "state": "unavailable",
+            "qualified": true,
+            "max_concurrent_sessions": 4,
+            "created_at": "2026-01-01",
+            "updated_at": "2026-01-01"
+          }
+        },
+        "override_history": {},
+        "auto_connect_disabled": [
+          "opencode"
+        ]
+      },
+      "fake_keyring_lookups": 1
+    },
+    {
+      "name": "codex-acp-keyring-missing-module",
+      "files": {
+        "config/cortex/connections.json": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_000000000001\": {\n      \"id\": \"cn_000000000001\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"Fixture\",\n      \"auth_mode\": \"api_key\",\n      \"key_kind\": \"openai_api_key\",\n      \"endpoint\": null,\n      \"launch_command\": null,\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fixture-service\",\n        \"account\": \"fixture-account\"\n      },\n      \"approved_fingerprint\": \"b3372ee5e4d1645087ddfb4ad67210c89e35096d64350bafec55927e6ad0334a\",\n      \"state\": \"unavailable\",\n      \"qualified\": true,\n      \"max_concurrent_sessions\": 4,\n      \"created_at\": \"2026-01-01\",\n      \"updated_at\": \"2026-01-01\"\n    }\n  },\n  \"override_history\": {},\n  \"auto_connect_disabled\": [\n    \"opencode\"\n  ]\n}\n",
+        "bin/node": "#!/bin/sh\nexit 98\n",
+        "bin/codex": "#!/bin/sh\nexit 98\n",
+        "bin/claude": "#!/bin/sh\nexit 98\n",
+        "bin/opencode": "#!/bin/sh\nexit 98\n",
+        "bin/codex-acp": "#!/bin/sh\nexit 98\n",
+        "bin/claude-agent-acp": "#!/bin/sh\nexit 98\n"
+      },
+      "directories": [],
+      "ids": [
+        "cn_000000000001"
+      ],
+      "keyring": "missing-module",
+      "before": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "codex",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "unavailable",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "openai_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "codex",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly"
+          }
+        ]
+      },
+      "after": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "codex",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "unavailable",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "openai_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "codex",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly"
+          }
+        ]
+      },
+      "states": [
+        {
+          "id": "cn_000000000001",
+          "state": "unavailable"
+        }
+      ],
+      "registry_after": {
+        "schema_version": 1,
+        "connections": {
+          "cn_000000000001": {
+            "id": "cn_000000000001",
+            "name": "Fixture",
+            "engine": "codex-acp",
+            "provider": "Fixture",
+            "auth_mode": "api_key",
+            "key_kind": "openai_api_key",
+            "endpoint": null,
+            "launch_command": null,
+            "credential_ref": {
+              "kind": "os_keyring",
+              "service": "fixture-service",
+              "account": "fixture-account"
+            },
+            "approved_fingerprint": "b3372ee5e4d1645087ddfb4ad67210c89e35096d64350bafec55927e6ad0334a",
+            "state": "unavailable",
+            "qualified": true,
+            "max_concurrent_sessions": 4,
+            "created_at": "2026-01-01",
+            "updated_at": "2026-01-01"
+          }
+        },
+        "override_history": {},
+        "auto_connect_disabled": [
+          "opencode"
+        ]
+      },
+      "fake_keyring_lookups": 0
+    },
+    {
+      "name": "claude-agent-acp-keyring-present",
+      "files": {
+        "config/cortex/connections.json": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_000000000001\": {\n      \"id\": \"cn_000000000001\",\n      \"name\": \"Fixture\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"Fixture\",\n      \"auth_mode\": \"api_key\",\n      \"key_kind\": \"anthropic_api_key\",\n      \"endpoint\": null,\n      \"launch_command\": null,\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fixture-service\",\n        \"account\": \"fixture-account\"\n      },\n      \"approved_fingerprint\": \"b147178ff504e40949b9317928995152a7122d2a58eabba74f6084bc264ab251\",\n      \"state\": \"unavailable\",\n      \"qualified\": true,\n      \"max_concurrent_sessions\": 4,\n      \"created_at\": \"2026-01-01\",\n      \"updated_at\": \"2026-01-01\"\n    }\n  },\n  \"override_history\": {},\n  \"auto_connect_disabled\": [\n    \"opencode\"\n  ]\n}\n",
+        "bin/node": "#!/bin/sh\nexit 98\n",
+        "bin/codex": "#!/bin/sh\nexit 98\n",
+        "bin/claude": "#!/bin/sh\nexit 98\n",
+        "bin/opencode": "#!/bin/sh\nexit 98\n",
+        "bin/codex-acp": "#!/bin/sh\nexit 98\n",
+        "bin/claude-agent-acp": "#!/bin/sh\nexit 98\n"
+      },
+      "directories": [],
+      "ids": [
+        "cn_000000000001"
+      ],
+      "keyring": "present",
+      "before": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "claude",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "unavailable",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "anthropic_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "claude",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly",
+            "windows": []
+          }
+        ]
+      },
+      "after": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "claude",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "connected",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "anthropic_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-11-13T21:30:00+00:00"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "claude",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly",
+            "windows": []
+          }
+        ]
+      },
+      "states": [
+        {
+          "id": "cn_000000000001",
+          "state": "configured"
+        }
+      ],
+      "registry_after": {
+        "auto_connect_disabled": [
+          "opencode"
+        ],
+        "connections": {
+          "cn_000000000001": {
+            "approved_fingerprint": "b147178ff504e40949b9317928995152a7122d2a58eabba74f6084bc264ab251",
+            "auth_mode": "api_key",
+            "created_at": "2026-01-01",
+            "credential_ref": {
+              "account": "fixture-account",
+              "kind": "os_keyring",
+              "service": "fixture-service"
+            },
+            "endpoint": null,
+            "engine": "claude-agent-acp",
+            "id": "cn_000000000001",
+            "key_kind": "anthropic_api_key",
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "2026-11-13T21:30:00+00:00"
+          }
+        },
+        "override_history": {},
+        "schema_version": 1
+      },
+      "fake_keyring_lookups": 1
+    },
+    {
+      "name": "claude-agent-acp-keyring-empty",
+      "files": {
+        "config/cortex/connections.json": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_000000000001\": {\n      \"id\": \"cn_000000000001\",\n      \"name\": \"Fixture\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"Fixture\",\n      \"auth_mode\": \"api_key\",\n      \"key_kind\": \"anthropic_api_key\",\n      \"endpoint\": null,\n      \"launch_command\": null,\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fixture-service\",\n        \"account\": \"fixture-account\"\n      },\n      \"approved_fingerprint\": \"b147178ff504e40949b9317928995152a7122d2a58eabba74f6084bc264ab251\",\n      \"state\": \"unavailable\",\n      \"qualified\": true,\n      \"max_concurrent_sessions\": 4,\n      \"created_at\": \"2026-01-01\",\n      \"updated_at\": \"2026-01-01\"\n    }\n  },\n  \"override_history\": {},\n  \"auto_connect_disabled\": [\n    \"opencode\"\n  ]\n}\n",
+        "bin/node": "#!/bin/sh\nexit 98\n",
+        "bin/codex": "#!/bin/sh\nexit 98\n",
+        "bin/claude": "#!/bin/sh\nexit 98\n",
+        "bin/opencode": "#!/bin/sh\nexit 98\n",
+        "bin/codex-acp": "#!/bin/sh\nexit 98\n",
+        "bin/claude-agent-acp": "#!/bin/sh\nexit 98\n"
+      },
+      "directories": [],
+      "ids": [
+        "cn_000000000001"
+      ],
+      "keyring": "empty",
+      "before": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "claude",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "unavailable",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "anthropic_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "claude",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly",
+            "windows": []
+          }
+        ]
+      },
+      "after": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "claude",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "connected",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "anthropic_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-11-13T21:30:00+00:00"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "claude",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly",
+            "windows": []
+          }
+        ]
+      },
+      "states": [
+        {
+          "id": "cn_000000000001",
+          "state": "configured"
+        }
+      ],
+      "registry_after": {
+        "auto_connect_disabled": [
+          "opencode"
+        ],
+        "connections": {
+          "cn_000000000001": {
+            "approved_fingerprint": "b147178ff504e40949b9317928995152a7122d2a58eabba74f6084bc264ab251",
+            "auth_mode": "api_key",
+            "created_at": "2026-01-01",
+            "credential_ref": {
+              "account": "fixture-account",
+              "kind": "os_keyring",
+              "service": "fixture-service"
+            },
+            "endpoint": null,
+            "engine": "claude-agent-acp",
+            "id": "cn_000000000001",
+            "key_kind": "anthropic_api_key",
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "2026-11-13T21:30:00+00:00"
+          }
+        },
+        "override_history": {},
+        "schema_version": 1
+      },
+      "fake_keyring_lookups": 1
+    },
+    {
+      "name": "claude-agent-acp-keyring-absent",
+      "files": {
+        "config/cortex/connections.json": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_000000000001\": {\n      \"id\": \"cn_000000000001\",\n      \"name\": \"Fixture\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"Fixture\",\n      \"auth_mode\": \"api_key\",\n      \"key_kind\": \"anthropic_api_key\",\n      \"endpoint\": null,\n      \"launch_command\": null,\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fixture-service\",\n        \"account\": \"fixture-account\"\n      },\n      \"approved_fingerprint\": \"b147178ff504e40949b9317928995152a7122d2a58eabba74f6084bc264ab251\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"max_concurrent_sessions\": 4,\n      \"created_at\": \"2026-01-01\",\n      \"updated_at\": \"2026-01-01\"\n    }\n  },\n  \"override_history\": {},\n  \"auto_connect_disabled\": [\n    \"opencode\"\n  ]\n}\n",
+        "bin/node": "#!/bin/sh\nexit 98\n",
+        "bin/codex": "#!/bin/sh\nexit 98\n",
+        "bin/claude": "#!/bin/sh\nexit 98\n",
+        "bin/opencode": "#!/bin/sh\nexit 98\n",
+        "bin/codex-acp": "#!/bin/sh\nexit 98\n",
+        "bin/claude-agent-acp": "#!/bin/sh\nexit 98\n"
+      },
+      "directories": [],
+      "ids": [
+        "cn_000000000001"
+      ],
+      "keyring": "absent",
+      "before": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "claude",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "connected",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "anthropic_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "claude",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly",
+            "windows": []
+          }
+        ]
+      },
+      "after": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "claude",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "needs_login",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "anthropic_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-11-13T21:30:00+00:00"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "claude",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly",
+            "windows": []
+          }
+        ]
+      },
+      "states": [
+        {
+          "id": "cn_000000000001",
+          "state": "authorization_required"
+        }
+      ],
+      "registry_after": {
+        "auto_connect_disabled": [
+          "opencode"
+        ],
+        "connections": {
+          "cn_000000000001": {
+            "approved_fingerprint": "b147178ff504e40949b9317928995152a7122d2a58eabba74f6084bc264ab251",
+            "auth_mode": "api_key",
+            "created_at": "2026-01-01",
+            "credential_ref": {
+              "account": "fixture-account",
+              "kind": "os_keyring",
+              "service": "fixture-service"
+            },
+            "endpoint": null,
+            "engine": "claude-agent-acp",
+            "id": "cn_000000000001",
+            "key_kind": "anthropic_api_key",
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "authorization_required",
+            "updated_at": "2026-11-13T21:30:00+00:00"
+          }
+        },
+        "override_history": {},
+        "schema_version": 1
+      },
+      "fake_keyring_lookups": 1
+    },
+    {
+      "name": "claude-agent-acp-keyring-error",
+      "files": {
+        "config/cortex/connections.json": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_000000000001\": {\n      \"id\": \"cn_000000000001\",\n      \"name\": \"Fixture\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"Fixture\",\n      \"auth_mode\": \"api_key\",\n      \"key_kind\": \"anthropic_api_key\",\n      \"endpoint\": null,\n      \"launch_command\": null,\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fixture-service\",\n        \"account\": \"fixture-account\"\n      },\n      \"approved_fingerprint\": \"b147178ff504e40949b9317928995152a7122d2a58eabba74f6084bc264ab251\",\n      \"state\": \"unavailable\",\n      \"qualified\": true,\n      \"max_concurrent_sessions\": 4,\n      \"created_at\": \"2026-01-01\",\n      \"updated_at\": \"2026-01-01\"\n    }\n  },\n  \"override_history\": {},\n  \"auto_connect_disabled\": [\n    \"opencode\"\n  ]\n}\n",
+        "bin/node": "#!/bin/sh\nexit 98\n",
+        "bin/codex": "#!/bin/sh\nexit 98\n",
+        "bin/claude": "#!/bin/sh\nexit 98\n",
+        "bin/opencode": "#!/bin/sh\nexit 98\n",
+        "bin/codex-acp": "#!/bin/sh\nexit 98\n",
+        "bin/claude-agent-acp": "#!/bin/sh\nexit 98\n"
+      },
+      "directories": [],
+      "ids": [
+        "cn_000000000001"
+      ],
+      "keyring": "error",
+      "before": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "claude",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "unavailable",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "anthropic_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "claude",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly",
+            "windows": []
+          }
+        ]
+      },
+      "after": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "claude",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "unavailable",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "anthropic_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "claude",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly",
+            "windows": []
+          }
+        ]
+      },
+      "states": [
+        {
+          "id": "cn_000000000001",
+          "state": "unavailable"
+        }
+      ],
+      "registry_after": {
+        "schema_version": 1,
+        "connections": {
+          "cn_000000000001": {
+            "id": "cn_000000000001",
+            "name": "Fixture",
+            "engine": "claude-agent-acp",
+            "provider": "Fixture",
+            "auth_mode": "api_key",
+            "key_kind": "anthropic_api_key",
+            "endpoint": null,
+            "launch_command": null,
+            "credential_ref": {
+              "kind": "os_keyring",
+              "service": "fixture-service",
+              "account": "fixture-account"
+            },
+            "approved_fingerprint": "b147178ff504e40949b9317928995152a7122d2a58eabba74f6084bc264ab251",
+            "state": "unavailable",
+            "qualified": true,
+            "max_concurrent_sessions": 4,
+            "created_at": "2026-01-01",
+            "updated_at": "2026-01-01"
+          }
+        },
+        "override_history": {},
+        "auto_connect_disabled": [
+          "opencode"
+        ]
+      },
+      "fake_keyring_lookups": 1
+    },
+    {
+      "name": "claude-agent-acp-keyring-missing-module",
+      "files": {
+        "config/cortex/connections.json": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_000000000001\": {\n      \"id\": \"cn_000000000001\",\n      \"name\": \"Fixture\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"Fixture\",\n      \"auth_mode\": \"api_key\",\n      \"key_kind\": \"anthropic_api_key\",\n      \"endpoint\": null,\n      \"launch_command\": null,\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fixture-service\",\n        \"account\": \"fixture-account\"\n      },\n      \"approved_fingerprint\": \"b147178ff504e40949b9317928995152a7122d2a58eabba74f6084bc264ab251\",\n      \"state\": \"unavailable\",\n      \"qualified\": true,\n      \"max_concurrent_sessions\": 4,\n      \"created_at\": \"2026-01-01\",\n      \"updated_at\": \"2026-01-01\"\n    }\n  },\n  \"override_history\": {},\n  \"auto_connect_disabled\": [\n    \"opencode\"\n  ]\n}\n",
+        "bin/node": "#!/bin/sh\nexit 98\n",
+        "bin/codex": "#!/bin/sh\nexit 98\n",
+        "bin/claude": "#!/bin/sh\nexit 98\n",
+        "bin/opencode": "#!/bin/sh\nexit 98\n",
+        "bin/codex-acp": "#!/bin/sh\nexit 98\n",
+        "bin/claude-agent-acp": "#!/bin/sh\nexit 98\n"
+      },
+      "directories": [],
+      "ids": [
+        "cn_000000000001"
+      ],
+      "keyring": "missing-module",
+      "before": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "claude",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "unavailable",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "anthropic_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "claude",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly",
+            "windows": []
+          }
+        ]
+      },
+      "after": {
+        "config": {
+          "revisions": {
+            "routing": 0,
+            "user_defaults": 0,
+            "project_ceiling": 0,
+            "mcp_servers": 0
+          },
+          "surfaces": {
+            "routing": {
+              "version": 2,
+              "deny": [],
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "engines": {
+                "claude-agent-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "codex-acp": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                },
+                "opencode": {
+                  "enabled": [],
+                  "auto": [],
+                  "tiers": {},
+                  "policy": {},
+                  "quota": []
+                }
+              },
+              "pins": {},
+              "affinity": {},
+              "autoAllow": [],
+              "legacyTiers": []
+            },
+            "user_defaults": {
+              "coordinator": null,
+              "routeDefault": null,
+              "language": "auto",
+              "mode": "guarded",
+              "checkout": "main",
+              "ceiling": {
+                "allowedRoutes": null,
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "attempts": null,
+                "failureClasses": null,
+                "targetRoutes": null,
+                "budget": null,
+                "consent": false,
+                "stored": {
+                  "permissionLevel": null,
+                  "calls": null,
+                  "tokens": null,
+                  "concurrency": null,
+                  "spendLimit": null,
+                  "spendEnforceable": false
+                }
+              },
+              "preserved": []
+            },
+            "mcp_servers": []
+          },
+          "projects": {},
+          "active": null,
+          "interrupted": false,
+          "unavailable": null,
+          "profiles": [],
+          "catalogue": {
+            "claude-agent-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "codex-acp": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            },
+            "opencode": {
+              "observedAt": null,
+              "failed": false,
+              "models": []
+            }
+          },
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [],
+            "opencode": []
+          },
+          "mcpObserved": {},
+          "setup": {
+            "claude-agent-acp": {
+              "status": "connected",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "codex-acp": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": false
+            },
+            "opencode": {
+              "status": "not_downloaded",
+              "automatic": false,
+              "reason": null,
+              "autoConnectDisabled": true
+            }
+          },
+          "files": {
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "backups": 0,
+            "preservedRouting": [],
+            "preservedDefaults": [],
+            "askpass": false,
+            "env": {
+              "engineUpdate": null,
+              "engineFollow": null,
+              "opencodeBinary": null
+            }
+          }
+        },
+        "connections": [
+          {
+            "id": "cn_000000000001",
+            "engine": "claude",
+            "label": "Fixture",
+            "note": "api_key",
+            "sessions": 4,
+            "state": "unavailable",
+            "checkedAt": null,
+            "detail": {
+              "connectionId": "cn_000000000001",
+              "provider": "Fixture",
+              "authMode": "api_key",
+              "keyKind": "anthropic_api_key",
+              "endpoint": null,
+              "launchCommand": "",
+              "credential": "os_keyring",
+              "qualified": true,
+              "createdAt": "2026-01-01",
+              "updatedAt": "2026-01-01"
+            }
+          }
+        ],
+        "tokens": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "routing_profiles": "absent",
+          "connections": "sha256:@CONNECTION_BYTES@",
+          "profile_sections": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:@CONNECTION_BYTES@"
+          }
+        },
+        "usage": [
+          {
+            "engine": "claude",
+            "connected": true,
+            "usedPercent": null,
+            "resetAt": null,
+            "observedAt": null,
+            "window": "weekly",
+            "windows": []
+          }
+        ]
+      },
+      "states": [
+        {
+          "id": "cn_000000000001",
+          "state": "unavailable"
+        }
+      ],
+      "registry_after": {
+        "schema_version": 1,
+        "connections": {
+          "cn_000000000001": {
+            "id": "cn_000000000001",
+            "name": "Fixture",
+            "engine": "claude-agent-acp",
+            "provider": "Fixture",
+            "auth_mode": "api_key",
+            "key_kind": "anthropic_api_key",
+            "endpoint": null,
+            "launch_command": null,
+            "credential_ref": {
+              "kind": "os_keyring",
+              "service": "fixture-service",
+              "account": "fixture-account"
+            },
+            "approved_fingerprint": "b147178ff504e40949b9317928995152a7122d2a58eabba74f6084bc264ab251",
+            "state": "unavailable",
+            "qualified": true,
+            "max_concurrent_sessions": 4,
+            "created_at": "2026-01-01",
+            "updated_at": "2026-01-01"
+          }
+        },
+        "override_history": {},
+        "auto_connect_disabled": [
+          "opencode"
+        ]
+      },
+      "fake_keyring_lookups": 0
+    }
+  ]
+}

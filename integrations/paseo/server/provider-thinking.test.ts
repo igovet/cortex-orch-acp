@@ -14,45 +14,47 @@ import { WorkerCardFence } from "./worker-card-fence.ts";
 // thinking configuration". A stale effort the model does not offer is
 // dropped, so Cortex keeps the model's own effort; supported ones still apply.
 const dir = mkdtempSync(join(tmpdir(), "cortex-thinking-test-"));
-const fixture = join(dir, "agent.py");
+const fixture = join(dir, "agent.mjs");
 const calls = join(dir, "config-calls.jsonl");
 writeFileSync(fixture, `
-import json, os, sys
-EFFORTS = {"opus": ["low", "medium", "high"], "haiku": []}
-if os.environ.get("CORTEX_MODEL_EFFORTS") == "1":
-    print(json.dumps(EFFORTS)); sys.exit(0)
-state = {"model": "opus", "thought_level": "medium"}
-def options():
-    result = [{"id": "model", "name": "Model", "category": "model", "type": "select",
-               "currentValue": state["model"],
-               "options": [{"value": model, "name": model} for model in EFFORTS]}]
-    if EFFORTS[state["model"]]:
-        result.append({"id": "thought_level", "name": "Thought level", "category": "thought_level",
-                       "type": "select", "currentValue": state["thought_level"],
-                       "options": [{"value": value, "name": value} for value in EFFORTS[state["model"]]]})
-    return result
-def send(frame): print(json.dumps(frame), flush=True)
-for line in sys.stdin:
-    req = json.loads(line)
-    method = req.get("method")
-    if method == "initialize":
-        send({"jsonrpc": "2.0", "id": req["id"], "result": {"protocolVersion": 1, "agentCapabilities": {}}})
-    elif method == "session/new":
-        send({"jsonrpc": "2.0", "id": req["id"], "result": {"sessionId": "native", "configOptions": options()}})
-    elif method == "session/set_config_option":
-        with open(${JSON.stringify(calls)}, "a") as log: log.write(json.dumps(req["params"]) + "\\n")
-        config_id, value = req["params"]["configId"], req["params"]["value"]
-        allowed = {item["value"] for option in options() if option["id"] == config_id for item in option["options"]}
-        if value not in allowed:
-            send({"jsonrpc": "2.0", "id": req["id"], "error": {"code": -32602,
-                  "message": f"{value!r} is not a valid value for configId {config_id!r}."}})
-            continue
-        state[config_id] = value
-        if config_id == "model":
-            state["thought_level"] = (EFFORTS[value] or [None])[0]
-        send({"jsonrpc": "2.0", "id": req["id"], "result": {"configOptions": options()}})
-    elif "id" in req:
-        send({"jsonrpc": "2.0", "id": req["id"], "result": {}})
+import { appendFileSync } from "node:fs";
+import { createInterface } from "node:readline";
+const EFFORTS = { opus: ["low", "medium", "high"], haiku: [] };
+if (process.env.CORTEX_MODEL_EFFORTS === "1") { console.log(JSON.stringify(EFFORTS)); process.exit(0); }
+const state = { model: "opus", thought_level: "medium" };
+function options() {
+  const result = [{ id: "model", name: "Model", category: "model", type: "select",
+    currentValue: state.model, options: Object.keys(EFFORTS).map((model) => ({ value: model, name: model })) }];
+  if (EFFORTS[state.model].length) {
+    result.push({ id: "thought_level", name: "Thought level", category: "thought_level", type: "select",
+      currentValue: state.thought_level, options: EFFORTS[state.model].map((value) => ({ value, name: value })) });
+  }
+  return result;
+}
+const send = (frame) => process.stdout.write(JSON.stringify(frame) + "\\n");
+for await (const line of createInterface({ input: process.stdin })) {
+  const req = JSON.parse(line);
+  const method = req.method;
+  if (method === "initialize") {
+    send({ jsonrpc: "2.0", id: req.id, result: { protocolVersion: 1, agentCapabilities: {} } });
+  } else if (method === "session/new") {
+    send({ jsonrpc: "2.0", id: req.id, result: { sessionId: "native", configOptions: options() } });
+  } else if (method === "session/set_config_option") {
+    appendFileSync(${JSON.stringify(calls)}, JSON.stringify(req.params) + "\\n");
+    const { configId, value } = req.params;
+    const allowed = options().filter((option) => option.id === configId).flatMap((option) => option.options.map((item) => item.value));
+    if (!allowed.includes(value)) {
+      send({ jsonrpc: "2.0", id: req.id, error: { code: -32602,
+        message: "'" + value + "' is not a valid value for configId '" + configId + "'." } });
+      continue;
+    }
+    state[configId] = value;
+    if (configId === "model") state.thought_level = EFFORTS[value][0] ?? null;
+    send({ jsonrpc: "2.0", id: req.id, result: { configOptions: options() } });
+  } else if ("id" in req) {
+    send({ jsonrpc: "2.0", id: req.id, result: {} });
+  }
+}
 `);
 
 function configCalls(): Array<{ configId: string; value: string }> {
@@ -72,7 +74,7 @@ async function until(connection: any, matches: (event: any) => boolean, label: s
 }
 
 async function open(config: { model?: string; thinkingOption?: string }, configure?: Record<string, string>) {
-  const command = ["env", "CORTEX_ACP_TARGET=" + JSON.stringify({ argv: ["python3", "-B", fixture] }),
+  const command = ["env", "CORTEX_ACP_TARGET=" + JSON.stringify({ argv: [process.execPath, fixture] }),
     process.execPath, fileURLToPath(new URL("./acp-load-shim.mjs", import.meta.url))] as [string, ...string[]];
   const replay = new ReplayController(command);
   const fence = new WorkerCardFence();

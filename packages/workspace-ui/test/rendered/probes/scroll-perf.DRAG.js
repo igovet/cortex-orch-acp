@@ -1,0 +1,11 @@
+window.__bench = null;
+const el = document.querySelector('[data-perf="ID"]'), axis = 'AXIS', range = RANGE, sign = REVERSE ? -1 : 1;
+__perf.start();
+let n = 0;
+const seen = [];
+const step = () => { const f = n < 120 ? n / 119 : 1 - (n - 120) / 59, v = Math.round(f * range);
+  if (axis === 'y') el.scrollTop = sign * v; else el.scrollLeft = v;
+  if (n % 30 === 0) seen.push(Math.round(Math.abs(axis === 'y' ? el.scrollTop : el.scrollLeft) - v));
+  if (++n < 180) requestAnimationFrame(step); else requestAnimationFrame(() => { window.__bench = {...__perf.stop(), seen}; }); };
+requestAnimationFrame(step);
+return 1;

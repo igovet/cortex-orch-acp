@@ -223,6 +223,26 @@ it("opens the worker result on a card with its report, without a disclosure tria
   expect(card.querySelector(".i-x-circle")).not.toBeNull();
 });
 
+it("shows a reported failure with its summary, report and checks, and a one-line reason when no result exists",async()=>{
+  const state=withTask(emptyWorkspace(),"Feed task");
+  state.tasks[0].status="review";
+  state.workers=[feedWorker({status:"failed",result:{outcome:"failed",summary:"The documentation update remains incomplete.",checks:[{name:"docs check",outcome:"not_run",detail:"no tool",source:"worker"}],reportId:"r_1"} as Worker["result"]})];
+  await mount(`/m/${LOCAL_MACHINE_ID}/t/t/workers/w`,state);
+  const card=document.querySelector(".ws-worker-result")!;
+  expect(card.querySelector(".rcard-h")?.textContent).toContain("Reported failure");
+  expect(card.querySelector(".rcard-h .btn")?.textContent).toBe("Open report");
+  expect(card.querySelector(".rcard-b")?.textContent).toContain("The documentation update remains incomplete.");
+  expect(card.textContent).toContain("docs check");
+  expect(card.textContent).not.toContain("reported no result");
+  for(const [ended,text] of [["stopped_by_owner","You stopped this worker"],["cancelled_by_coordinator","The coordinator cancelled this worker"],["worker_lost","This worker was lost"],[undefined,"This worker reported no result."]] as const){
+    document.body.innerHTML="";
+    const s=withTask(emptyWorkspace(),"Feed task");
+    s.tasks[0].status="review"; s.workers=[feedWorker({status:"failed",result:null,endedReason:ended})];
+    await mount(`/m/${LOCAL_MACHINE_ID}/t/t/workers/w`,s);
+    expect(document.querySelector(".ws-worker-result .rcard-b")?.textContent).toContain(text);
+  }
+});
+
 it("shows the recorded model and effort wherever an agent is named, and omits them when none is recorded",async()=>{
   const state=withTask(emptyWorkspace(),"Routes");
   state.tasks[0].status="working"; state.tasks[0].process="live"; state.tasks[0].coordinatorRoute={model:"gpt-6-luna",effort:"medium"};

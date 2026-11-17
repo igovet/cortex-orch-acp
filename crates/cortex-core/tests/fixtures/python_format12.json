@@ -1,0 +1,5879 @@
+{
+  "application_id": 1129467218,
+  "columns": {
+    "acp_host_sessions": [
+      [
+        0,
+        "session_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "project_root",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "task_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        3,
+        "client_info",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "client_capabilities",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "mcp_servers",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "closed_at",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "acp_session_access_defaults": [
+      [
+        0,
+        "session_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "mode",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "selected_mode",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        3,
+        "selection_origin",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "acp_session_workspaces": [
+      [
+        0,
+        "session_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "workspace_root",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "attempt_effective_context": [
+      [
+        0,
+        "attempt_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "role",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "selected_config_revision_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        4,
+        "effective_config_revision_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        5,
+        "route_engine",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "route_connection_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        7,
+        "resource_policy_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "recorded_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "attempt_process_registry": [
+      [
+        0,
+        "attempt_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "role",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "engine_session_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        4,
+        "connection_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        5,
+        "pid",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "pgid",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "start_ticks",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "boot_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        9,
+        "launch_command_digest",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        10,
+        "recorded_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        11,
+        "terminated_at",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        12,
+        "termination_reason",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "attempt_revisions": [
+      [
+        0,
+        "attempt_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        1,
+        "captured_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "phase",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "kind",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "head",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        5,
+        "dirty_digest",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        6,
+        "detail",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        7,
+        "manifest_json",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "attempt_route_audit": [
+      [
+        0,
+        "id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "attempt_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "role",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "engine",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "connection_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "model",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "params_fingerprint",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "config_revision_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        9,
+        "decision",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        10,
+        "decision_detail_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        11,
+        "predecessor_attempt_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        12,
+        "recorded_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "binding_receipts": [
+      [
+        0,
+        "thread_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "receipt",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "state",
+        "TEXT",
+        1,
+        "'cortex'",
+        0
+      ],
+      [
+        3,
+        "updated_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "capacity_reservations": [
+      [
+        0,
+        "reservation_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "connection_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "assignment_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        4,
+        "attempt_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "kind",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "state",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "reserved_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "updated_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        9,
+        "release_observation",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "capsule_deliveries": [
+      [
+        0,
+        "id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "recipient",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "context_generation_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "capsule_revision",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "assignment_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        6,
+        "engine_session_ref",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "state",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "evidence_source",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        9,
+        "uncertainty",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        10,
+        "reason",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        11,
+        "retry_count",
+        "INTEGER",
+        1,
+        "0",
+        0
+      ],
+      [
+        12,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        13,
+        "updated_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "compaction_events_seen": [
+      [
+        0,
+        "engine_session_ref",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        1,
+        "evidence_id",
+        "TEXT",
+        1,
+        null,
+        2
+      ],
+      [
+        2,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "phase",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "observed_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "generation_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "compaction_owners": [
+      [
+        0,
+        "engine_session_ref",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "owner",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "tier",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "engine",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "engine_version",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "limitation",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        7,
+        "set_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "compaction_recovery_events": [
+      [
+        0,
+        "id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "engine_session_ref",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "generation_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        4,
+        "before_tokens",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "before_basis",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "after_tokens",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "after_basis",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "recovered_tokens",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        9,
+        "recovered_ratio",
+        "REAL",
+        1,
+        null,
+        0
+      ],
+      [
+        10,
+        "status",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        11,
+        "reason",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        12,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "configuration_revisions": [
+      [
+        0,
+        "id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "revision",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "route_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "route_engine",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "route_connection_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "parameters",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "ceiling_snapshot",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "state",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        9,
+        "confirmation_evidence_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        10,
+        "error_code",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        11,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        12,
+        "updated_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "configuration_route_extras": [
+      [
+        0,
+        "revision_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "route_model",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "route_profile_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "route_details_json",
+        "TEXT",
+        1,
+        "'{}'",
+        0
+      ],
+      [
+        5,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "context_generations": [
+      [
+        0,
+        "id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "engine_session_ref",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "assignment_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        4,
+        "recipient",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "sequence",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "cause",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "evidence_source",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "evidence_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        9,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "delegation_effects": [
+      [
+        0,
+        "id",
+        "INTEGER",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "idempotency_key",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "step",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "phase",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "detail_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "delegation_provisioning": [
+      [
+        0,
+        "idempotency_key",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "assignment_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        3,
+        "attempt_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        4,
+        "role_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "step",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "status",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "workspace_binding_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        8,
+        "channel_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        9,
+        "config_revision",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        10,
+        "context_snapshot_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        11,
+        "engine_session_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        12,
+        "instruction_delivery",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        13,
+        "error_code",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        14,
+        "owner_epoch",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        15,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        16,
+        "updated_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "deliveries": [
+      [
+        0,
+        "scope",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        1,
+        "operation",
+        "TEXT",
+        1,
+        null,
+        2
+      ],
+      [
+        2,
+        "delivery_key",
+        "TEXT",
+        1,
+        null,
+        3
+      ],
+      [
+        3,
+        "digest",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "content_digest",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "response",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "draft_revisions": [
+      [
+        0,
+        "draft_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "source_revision",
+        "INTEGER",
+        1,
+        null,
+        0
+      ]
+    ],
+    "drafts": [
+      [
+        0,
+        "id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "owner_thread_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "kind",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "template",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "path",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "device",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "inode",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        9,
+        "published_report_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        10,
+        "published_digest",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "editions": [
+      [
+        0,
+        "sequence",
+        "INTEGER",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "report_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "title",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "summary",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "author",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "updated_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "digest",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "size_bytes",
+        "INTEGER",
+        1,
+        null,
+        0
+      ]
+    ],
+    "fallback_consent_records": [
+      [
+        0,
+        "id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "target_connection_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "target_provider",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "data_scope",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "granted_by",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "granted_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "revoked_at",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "format_history": [
+      [
+        0,
+        "sequence",
+        "INTEGER",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "action",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "from_version",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "to_version",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "backup_path",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "backup_digest",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "governance": [
+      [
+        0,
+        "id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "mode",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "report_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "host_transcript": [
+      [
+        0,
+        "id",
+        "INTEGER",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "session_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "seq",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "kind",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "text",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "attachments_json",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        6,
+        "message_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        7,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "host_updates": [
+      [
+        0,
+        "session_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        1,
+        "seq",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "update_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "large_outputs": [
+      [
+        0,
+        "id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "owner_scope",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "source_kind",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "source_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        5,
+        "filename",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "byte_count",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "truncated",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "exit_code",
+        "INTEGER",
+        0,
+        null,
+        0
+      ],
+      [
+        9,
+        "signal",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        10,
+        "failure",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        11,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "observability_events": [
+      [
+        0,
+        "id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "category",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "outcome",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "basis",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "assignment_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        6,
+        "attempt_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        7,
+        "engine_session_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        8,
+        "context_generation_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        9,
+        "config_revision_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        10,
+        "connection_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        11,
+        "route_engine",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        12,
+        "source_event_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        13,
+        "detail_json",
+        "TEXT",
+        1,
+        "'{}'",
+        0
+      ],
+      [
+        14,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "pending_deletions": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ]
+    ],
+    "pending_question_late_answers": [
+      [
+        0,
+        "id",
+        "INTEGER",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "question_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "answer_text",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "answer_source",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "received_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "pending_questions": [
+      [
+        0,
+        "id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "assignment_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        3,
+        "dedup_key",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "text",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "options_json",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        6,
+        "status",
+        "TEXT",
+        1,
+        "'open'",
+        0
+      ],
+      [
+        7,
+        "answer_text",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        8,
+        "answer_source",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        9,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        10,
+        "answered_at",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "pending_source_deletions": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        1,
+        "draft_id",
+        "TEXT",
+        1,
+        null,
+        2
+      ],
+      [
+        2,
+        "path",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "digest",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "permission_receipts": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        1,
+        "attempt_id",
+        "TEXT",
+        1,
+        null,
+        2
+      ],
+      [
+        2,
+        "tool_call_ref",
+        "TEXT",
+        1,
+        null,
+        3
+      ],
+      [
+        3,
+        "command_sha256",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "command_text",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "host_outcome",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "project_configuration_defaults": [
+      [
+        0,
+        "project_root",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "defaults",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "ceiling",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "updated_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "report_provenance": [
+      [
+        0,
+        "edition_sequence",
+        "INTEGER",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "source_revision",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "artifacts",
+        "TEXT",
+        1,
+        "'[]'",
+        0
+      ]
+    ],
+    "report_read_observations": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        1,
+        "attempt_id",
+        "TEXT",
+        1,
+        null,
+        2
+      ],
+      [
+        2,
+        "report_id",
+        "TEXT",
+        1,
+        null,
+        3
+      ],
+      [
+        3,
+        "request_id",
+        "TEXT",
+        1,
+        null,
+        4
+      ],
+      [
+        4,
+        "outcome",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "reports": [
+      [
+        0,
+        "id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "kind",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "filename",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "runtime_events": [
+      [
+        0,
+        "id",
+        "INTEGER",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "type",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "actor",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "payload_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "runtime_nodes": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        1,
+        "revision",
+        "INTEGER",
+        1,
+        null,
+        2
+      ],
+      [
+        2,
+        "node_id",
+        "TEXT",
+        1,
+        null,
+        3
+      ],
+      [
+        3,
+        "role",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "objective",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "dependencies_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "scope_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "stage",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "status",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        9,
+        "assignment_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        10,
+        "result_json",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "runtime_requests": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        1,
+        "request_key",
+        "TEXT",
+        1,
+        null,
+        3
+      ],
+      [
+        2,
+        "actor",
+        "TEXT",
+        1,
+        null,
+        2
+      ],
+      [
+        3,
+        "operation",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "digest",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "result_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "runtime_tasks": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "state",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "revision",
+        "INTEGER",
+        1,
+        "0",
+        0
+      ],
+      [
+        3,
+        "goal",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "plan_json",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        5,
+        "synthesis",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        6,
+        "review_cycle",
+        "INTEGER",
+        1,
+        "0",
+        0
+      ],
+      [
+        7,
+        "blocker",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        8,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        9,
+        "updated_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "source_block_reads": [
+      [
+        0,
+        "id",
+        "INTEGER",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "report_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "block_index",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "observed_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "availability",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "reason",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "source_blocks": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        1,
+        "report_id",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        2,
+        "block_index",
+        "INTEGER",
+        1,
+        null,
+        2
+      ],
+      [
+        3,
+        "kind",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "mime",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        5,
+        "name",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        6,
+        "uri",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        7,
+        "sha256",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        8,
+        "size_bytes",
+        "INTEGER",
+        0,
+        null,
+        0
+      ],
+      [
+        9,
+        "availability",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        10,
+        "reason",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        11,
+        "trust_label",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        12,
+        "body_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        13,
+        "fetched_at",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        14,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "source_cursors": [
+      [
+        0,
+        "thread_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "cursor",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "source_events": [
+      [
+        0,
+        "origin",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        1,
+        "event_id",
+        "TEXT",
+        1,
+        null,
+        2
+      ],
+      [
+        2,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "captured_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "meta_json",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        5,
+        "ledger_state",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "source_messages": [
+      [
+        0,
+        "thread_id",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        1,
+        "message_id",
+        "TEXT",
+        1,
+        null,
+        2
+      ],
+      [
+        2,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "report_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "digest",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "source_resets": [
+      [
+        0,
+        "thread_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "pause_turn",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "source_revisions": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        1,
+        "revision",
+        "INTEGER",
+        1,
+        null,
+        2
+      ],
+      [
+        2,
+        "thread_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "message_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "report_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "attachments",
+        "TEXT",
+        1,
+        "'[]'",
+        0
+      ]
+    ],
+    "source_turns": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        1,
+        "thread_id",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        2,
+        "turn_id",
+        "TEXT",
+        1,
+        null,
+        2
+      ],
+      [
+        3,
+        "report_id",
+        "TEXT",
+        1,
+        null,
+        3
+      ],
+      [
+        4,
+        "digest",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "task_changes": [
+      [
+        0,
+        "sequence",
+        "INTEGER",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "kind",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "reference",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        4,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "task_events": [
+      [
+        0,
+        "id",
+        "INTEGER",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "event_type",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "assignment_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        4,
+        "dedup_key",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "payload_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "origin",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "consumed_by",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        9,
+        "superseded",
+        "INTEGER",
+        1,
+        "0",
+        0
+      ],
+      [
+        10,
+        "delivered_at",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "task_language": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "language",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "task_orchestration": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "state",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "coordinator_attempt_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        3,
+        "updated_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "wait_reason",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        5,
+        "wait_detail_json",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        6,
+        "no_progress_count",
+        "INTEGER",
+        1,
+        "0",
+        0
+      ],
+      [
+        7,
+        "requirement_revision",
+        "INTEGER",
+        1,
+        "0",
+        0
+      ],
+      [
+        8,
+        "stopped_at",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        9,
+        "language",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "task_owners": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "owner_ref",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "epoch",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "acquired_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "task_route_selections": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        1,
+        "sequence",
+        "INTEGER",
+        1,
+        null,
+        2
+      ],
+      [
+        2,
+        "route_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "label_at_selection",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "supported_parameters",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "catalog_snapshot_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "evidence",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "selected_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "task_stopped": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "stopped_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "task_workspaces": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "workspace_root",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "recorded_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "tasks": [
+      [
+        0,
+        "id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "project_root",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "thread_bindings": [
+      [
+        0,
+        "thread_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "parent_thread_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        2,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "tool_result_observations": [
+      [
+        0,
+        "id",
+        "INTEGER",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "attempt_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "tool_call_ref",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "kind",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        5,
+        "title",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        6,
+        "status",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "trusted_channels": [
+      [
+        0,
+        "channel_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "secret_hash",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "principal_thread_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "parent_principal_thread_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        5,
+        "role",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "assignment_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        7,
+        "attempt_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        8,
+        "workspace_binding_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        9,
+        "context_generation_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        10,
+        "owner_epoch",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        11,
+        "issued_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        12,
+        "expires_at",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        13,
+        "revoked_at",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "usage_records": [
+      [
+        0,
+        "id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "attempt_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        3,
+        "engine_session_ref",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "call_sequence",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "basis",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "tokens_json",
+        "TEXT",
+        1,
+        "'{}'",
+        0
+      ],
+      [
+        7,
+        "stop_reason",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        8,
+        "failed",
+        "INTEGER",
+        1,
+        "0",
+        0
+      ],
+      [
+        9,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "work_assignment_attempts": [
+      [
+        0,
+        "attempt_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "assignment_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "attempt_no",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "predecessor_attempt_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        5,
+        "input_candidate_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        6,
+        "requirement_bindings_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "status",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "failure_reason",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        9,
+        "idempotency_key",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        10,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "work_assignment_predecessors": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        1,
+        "assignment_id",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        2,
+        "predecessor_assignment_id",
+        "TEXT",
+        1,
+        null,
+        2
+      ],
+      [
+        3,
+        "predecessor_candidate_ref",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "work_assignments": [
+      [
+        0,
+        "assignment_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "node_key",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "requirement_bindings_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "candidate_ref",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        5,
+        "status",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "requirement_state",
+        "TEXT",
+        1,
+        "'structured'",
+        0
+      ],
+      [
+        7,
+        "idempotency_key",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "work_graph_operations": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        1,
+        "idempotency_key",
+        "TEXT",
+        1,
+        null,
+        2
+      ],
+      [
+        2,
+        "operation",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "request_json",
+        "TEXT",
+        1,
+        "'{}'",
+        0
+      ],
+      [
+        4,
+        "response_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "work_requirement_revisions": [
+      [
+        0,
+        "requirement_id",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        1,
+        "revision",
+        "INTEGER",
+        1,
+        null,
+        2
+      ],
+      [
+        2,
+        "statement",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "criteria_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "digest",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "requirement_type",
+        "TEXT",
+        1,
+        "'general'",
+        0
+      ],
+      [
+        6,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "work_requirements": [
+      [
+        0,
+        "requirement_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "current_revision",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "workspace_candidate_seeds": [
+      [
+        0,
+        "assignment_ref",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "candidate_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "workspace_executions": [
+      [
+        0,
+        "execution_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "runtime_task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "acp_session_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "owner_epoch",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "version",
+        "INTEGER",
+        1,
+        "1",
+        0
+      ],
+      [
+        6,
+        "bound_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "workspace_integration_journal": [
+      [
+        0,
+        "journal_key",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        1,
+        "relpath",
+        "TEXT",
+        1,
+        null,
+        2
+      ],
+      [
+        2,
+        "before_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "before_bytes",
+        "BLOB",
+        0,
+        null,
+        0
+      ],
+      [
+        4,
+        "desired_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "state",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "workspace_integrations": [
+      [
+        0,
+        "id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "assignment_ref",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "request_key",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "attempt_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "workspace_binding_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        6,
+        "status",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "applied_paths_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "conflict_paths_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        9,
+        "integrated_head",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        10,
+        "integrated_dirty_digest",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        11,
+        "host_buffer_state",
+        "TEXT",
+        1,
+        "'unknown'",
+        0
+      ],
+      [
+        12,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "workspace_outbox": [
+      [
+        0,
+        "project_id",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        1,
+        "sequence",
+        "INTEGER",
+        1,
+        null,
+        2
+      ],
+      [
+        2,
+        "event_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "entity_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "kind",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "entity_version",
+        "INTEGER",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "recorded_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "payload_digest",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "workspace_outbox_state": [
+      [
+        0,
+        "project_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "high_watermark",
+        "INTEGER",
+        1,
+        "0",
+        0
+      ],
+      [
+        2,
+        "retained_floor",
+        "INTEGER",
+        1,
+        "0",
+        0
+      ]
+    ],
+    "workspace_projects": [
+      [
+        0,
+        "project_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "project_root",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "activated_by",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "activated_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "version",
+        "INTEGER",
+        1,
+        "1",
+        0
+      ]
+    ],
+    "workspace_requests": [
+      [
+        0,
+        "project_id",
+        "TEXT",
+        1,
+        null,
+        1
+      ],
+      [
+        1,
+        "actor_id",
+        "TEXT",
+        1,
+        null,
+        2
+      ],
+      [
+        2,
+        "request_id",
+        "TEXT",
+        1,
+        null,
+        3
+      ],
+      [
+        3,
+        "operation",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "digest",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "receipt_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "workspace_snapshot_lineage": [
+      [
+        0,
+        "workspace_binding_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "candidate_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "workspace_snapshots": [
+      [
+        0,
+        "workspace_binding_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "attempt_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "project_root",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "root_path",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        5,
+        "base_path",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        6,
+        "mode",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "manifest_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "base_kind",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        9,
+        "base_head",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        10,
+        "base_dirty_digest",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        11,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        12,
+        "cleaned_up_at",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        13,
+        "cleanup_reason",
+        "TEXT",
+        0,
+        null,
+        0
+      ]
+    ],
+    "workspace_starts": [
+      [
+        0,
+        "execution_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "project_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "actor_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "request_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        5,
+        "source_origin",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        6,
+        "source_event_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        7,
+        "state",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        8,
+        "version",
+        "INTEGER",
+        1,
+        "1",
+        0
+      ],
+      [
+        9,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "workspace_task_options": [
+      [
+        0,
+        "task_id",
+        "TEXT",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "options_json",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ],
+    "workspace_tasks": [
+      [
+        0,
+        "sequence",
+        "INTEGER",
+        0,
+        null,
+        1
+      ],
+      [
+        1,
+        "task_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        2,
+        "project_id",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        3,
+        "description",
+        "TEXT",
+        1,
+        null,
+        0
+      ],
+      [
+        4,
+        "version",
+        "INTEGER",
+        1,
+        "1",
+        0
+      ],
+      [
+        5,
+        "execution_id",
+        "TEXT",
+        0,
+        null,
+        0
+      ],
+      [
+        6,
+        "created_at",
+        "TEXT",
+        1,
+        null,
+        0
+      ]
+    ]
+  },
+  "objects": [
+    {
+      "name": "tasks",
+      "sql": "CREATE TABLE tasks (\n id TEXT PRIMARY KEY, project_root TEXT NOT NULL, created_at TEXT NOT NULL\n)",
+      "tbl_name": "tasks",
+      "type": "table"
+    },
+    {
+      "name": "tasks_by_project",
+      "sql": "CREATE INDEX tasks_by_project ON tasks(project_root)",
+      "tbl_name": "tasks",
+      "type": "index"
+    },
+    {
+      "name": "thread_bindings",
+      "sql": "CREATE TABLE thread_bindings (\n thread_id TEXT PRIMARY KEY, parent_thread_id TEXT,\n task_id TEXT NOT NULL REFERENCES tasks(id)\n)",
+      "tbl_name": "thread_bindings",
+      "type": "table"
+    },
+    {
+      "name": "reports",
+      "sql": "CREATE TABLE reports (\n id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),\n kind TEXT NOT NULL, filename TEXT NOT NULL, created_at TEXT NOT NULL\n)",
+      "tbl_name": "reports",
+      "type": "table"
+    },
+    {
+      "name": "source_cursors",
+      "sql": "CREATE TABLE source_cursors (\n thread_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), cursor TEXT NOT NULL\n)",
+      "tbl_name": "source_cursors",
+      "type": "table"
+    },
+    {
+      "name": "source_messages",
+      "sql": "CREATE TABLE source_messages (\n thread_id TEXT NOT NULL, message_id TEXT NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id),\n report_id TEXT NOT NULL REFERENCES reports(id), digest TEXT NOT NULL,\n PRIMARY KEY(thread_id,message_id)\n)",
+      "tbl_name": "source_messages",
+      "type": "table"
+    },
+    {
+      "name": "one_pipeline",
+      "sql": "CREATE UNIQUE INDEX one_pipeline ON reports(task_id) WHERE kind='pipeline'",
+      "tbl_name": "reports",
+      "type": "index"
+    },
+    {
+      "name": "editions",
+      "sql": "CREATE TABLE editions (\n sequence INTEGER PRIMARY KEY AUTOINCREMENT,\n report_id TEXT NOT NULL REFERENCES reports(id),\n title TEXT NOT NULL, summary TEXT NOT NULL, author TEXT NOT NULL,\n updated_at TEXT NOT NULL, digest TEXT NOT NULL, size_bytes INTEGER NOT NULL\n)",
+      "tbl_name": "editions",
+      "type": "table"
+    },
+    {
+      "name": "report_editions",
+      "sql": "CREATE INDEX report_editions ON editions(report_id,sequence)",
+      "tbl_name": "editions",
+      "type": "index"
+    },
+    {
+      "name": "governance",
+      "sql": "CREATE TABLE governance (\n id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), mode TEXT NOT NULL,\n report_id TEXT NOT NULL REFERENCES reports(id)\n)",
+      "tbl_name": "governance",
+      "type": "table"
+    },
+    {
+      "name": "deliveries",
+      "sql": "CREATE TABLE deliveries (\n scope TEXT NOT NULL, operation TEXT NOT NULL, delivery_key TEXT NOT NULL,\n digest TEXT NOT NULL, content_digest TEXT NOT NULL, response TEXT NOT NULL,\n PRIMARY KEY(scope,operation,delivery_key)\n)",
+      "tbl_name": "deliveries",
+      "type": "table"
+    },
+    {
+      "name": "drafts",
+      "sql": "CREATE TABLE drafts (\n id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),\n owner_thread_id TEXT NOT NULL, kind TEXT NOT NULL, template TEXT NOT NULL,\n path TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL,\n device INTEGER NOT NULL, inode INTEGER NOT NULL,\n published_report_id TEXT REFERENCES reports(id), published_digest TEXT\n)",
+      "tbl_name": "drafts",
+      "type": "table"
+    },
+    {
+      "name": "pending_source_deletions",
+      "sql": "CREATE TABLE pending_source_deletions (\n task_id TEXT NOT NULL REFERENCES tasks(id), draft_id TEXT NOT NULL REFERENCES drafts(id),\n path TEXT NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(task_id,draft_id)\n)",
+      "tbl_name": "pending_source_deletions",
+      "type": "table"
+    },
+    {
+      "name": "pending_deletions",
+      "sql": "CREATE TABLE pending_deletions (\n task_id TEXT PRIMARY KEY REFERENCES tasks(id)\n)",
+      "tbl_name": "pending_deletions",
+      "type": "table"
+    },
+    {
+      "name": "editions_no_update",
+      "sql": "CREATE TRIGGER editions_no_update BEFORE UPDATE ON editions BEGIN\n SELECT RAISE(ABORT, 'immutable'); END",
+      "tbl_name": "editions",
+      "type": "trigger"
+    },
+    {
+      "name": "editions_no_delete",
+      "sql": "CREATE TRIGGER editions_no_delete BEFORE DELETE ON editions\nWHEN NOT EXISTS (\n SELECT 1 FROM pending_deletions d JOIN reports r ON r.task_id=d.task_id\n WHERE r.id=OLD.report_id\n) BEGIN SELECT RAISE(ABORT, 'immutable'); END",
+      "tbl_name": "editions",
+      "type": "trigger"
+    },
+    {
+      "name": "binding_receipts",
+      "sql": "CREATE TABLE binding_receipts (\n thread_id TEXT PRIMARY KEY REFERENCES thread_bindings(thread_id), receipt TEXT NOT NULL UNIQUE,\n state TEXT NOT NULL DEFAULT 'cortex', updated_at TEXT NOT NULL\n)",
+      "tbl_name": "binding_receipts",
+      "type": "table"
+    },
+    {
+      "name": "source_resets",
+      "sql": "CREATE TABLE source_resets (\n thread_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), pause_turn TEXT\n)",
+      "tbl_name": "source_resets",
+      "type": "table"
+    },
+    {
+      "name": "source_turns",
+      "sql": "CREATE TABLE source_turns (\n task_id TEXT NOT NULL REFERENCES tasks(id), thread_id TEXT NOT NULL,\n turn_id TEXT NOT NULL, report_id TEXT NOT NULL REFERENCES reports(id), digest TEXT NOT NULL,\n PRIMARY KEY(thread_id,turn_id,report_id)\n)",
+      "tbl_name": "source_turns",
+      "type": "table"
+    },
+    {
+      "name": "source_revisions",
+      "sql": "CREATE TABLE source_revisions (\n task_id TEXT NOT NULL REFERENCES tasks(id), revision INTEGER NOT NULL,\n thread_id TEXT NOT NULL, message_id TEXT NOT NULL, report_id TEXT NOT NULL REFERENCES reports(id),\n attachments TEXT NOT NULL DEFAULT '[]', PRIMARY KEY(task_id,revision), UNIQUE(thread_id,message_id)\n)",
+      "tbl_name": "source_revisions",
+      "type": "table"
+    },
+    {
+      "name": "report_provenance",
+      "sql": "CREATE TABLE report_provenance (\n edition_sequence INTEGER PRIMARY KEY REFERENCES editions(sequence), source_revision INTEGER NOT NULL,\n artifacts TEXT NOT NULL DEFAULT '[]'\n)",
+      "tbl_name": "report_provenance",
+      "type": "table"
+    },
+    {
+      "name": "draft_revisions",
+      "sql": "CREATE TABLE draft_revisions (\n draft_id TEXT PRIMARY KEY REFERENCES drafts(id), source_revision INTEGER NOT NULL\n)",
+      "tbl_name": "draft_revisions",
+      "type": "table"
+    },
+    {
+      "name": "task_changes",
+      "sql": "CREATE TABLE task_changes (\n sequence INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL REFERENCES tasks(id),\n kind TEXT NOT NULL, reference TEXT, created_at TEXT NOT NULL\n)",
+      "tbl_name": "task_changes",
+      "type": "table"
+    },
+    {
+      "name": "changes_by_task",
+      "sql": "CREATE INDEX changes_by_task ON task_changes(task_id,sequence)",
+      "tbl_name": "task_changes",
+      "type": "index"
+    },
+    {
+      "name": "attempt_revisions",
+      "sql": "CREATE TABLE attempt_revisions (\n attempt_id TEXT NOT NULL, captured_at TEXT NOT NULL, phase TEXT NOT NULL,\n kind TEXT NOT NULL, head TEXT, dirty_digest TEXT, detail TEXT, manifest_json TEXT\n)",
+      "tbl_name": "attempt_revisions",
+      "type": "table"
+    },
+    {
+      "name": "attempt_revisions_by_attempt",
+      "sql": "CREATE INDEX attempt_revisions_by_attempt ON attempt_revisions(attempt_id,captured_at)",
+      "tbl_name": "attempt_revisions",
+      "type": "index"
+    },
+    {
+      "name": "format_history",
+      "sql": "CREATE TABLE format_history (\n sequence INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL,\n from_version INTEGER NOT NULL, to_version INTEGER NOT NULL,\n backup_path TEXT NOT NULL, backup_digest TEXT NOT NULL, at TEXT NOT NULL\n)",
+      "tbl_name": "format_history",
+      "type": "table"
+    },
+    {
+      "name": "trusted_channels",
+      "sql": "CREATE TABLE trusted_channels (\n channel_id TEXT PRIMARY KEY, secret_hash TEXT NOT NULL,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n principal_thread_id TEXT NOT NULL, parent_principal_thread_id TEXT,\n role TEXT NOT NULL, assignment_id TEXT, attempt_id TEXT,\n workspace_binding_id TEXT, context_generation_id TEXT,\n owner_epoch INTEGER NOT NULL, issued_at TEXT NOT NULL,\n expires_at TEXT, revoked_at TEXT\n)",
+      "tbl_name": "trusted_channels",
+      "type": "table"
+    },
+    {
+      "name": "source_events",
+      "sql": "CREATE TABLE source_events (\n origin TEXT NOT NULL, event_id TEXT NOT NULL, task_id TEXT NOT NULL REFERENCES tasks(id),\n captured_at TEXT NOT NULL, meta_json TEXT, ledger_state TEXT, PRIMARY KEY(origin,event_id)\n)",
+      "tbl_name": "source_events",
+      "type": "table"
+    },
+    {
+      "name": "task_owners",
+      "sql": "CREATE TABLE task_owners (\n task_id TEXT PRIMARY KEY REFERENCES tasks(id), owner_ref TEXT NOT NULL,\n epoch INTEGER NOT NULL, acquired_at TEXT NOT NULL\n)",
+      "tbl_name": "task_owners",
+      "type": "table"
+    },
+    {
+      "name": "task_route_selections",
+      "sql": "CREATE TABLE task_route_selections (\n task_id TEXT NOT NULL REFERENCES tasks(id), sequence INTEGER NOT NULL,\n route_id TEXT NOT NULL, label_at_selection TEXT NOT NULL,\n supported_parameters TEXT NOT NULL, catalog_snapshot_id TEXT NOT NULL,\n evidence TEXT NOT NULL, selected_at TEXT NOT NULL,\n PRIMARY KEY(task_id,sequence)\n)",
+      "tbl_name": "task_route_selections",
+      "type": "table"
+    },
+    {
+      "name": "task_route_selections_by_task",
+      "sql": "CREATE INDEX task_route_selections_by_task ON task_route_selections(task_id,sequence)",
+      "tbl_name": "task_route_selections",
+      "type": "index"
+    },
+    {
+      "name": "task_route_selections_no_update",
+      "sql": "CREATE TRIGGER task_route_selections_no_update BEFORE UPDATE ON task_route_selections\nBEGIN SELECT RAISE(ABORT, 'immutable'); END",
+      "tbl_name": "task_route_selections",
+      "type": "trigger"
+    },
+    {
+      "name": "task_route_selections_no_delete",
+      "sql": "CREATE TRIGGER task_route_selections_no_delete BEFORE DELETE ON task_route_selections\nWHEN NOT EXISTS (\n SELECT 1 FROM pending_deletions d WHERE d.task_id=OLD.task_id\n) BEGIN SELECT RAISE(ABORT, 'immutable'); END",
+      "tbl_name": "task_route_selections",
+      "type": "trigger"
+    },
+    {
+      "name": "project_configuration_defaults",
+      "sql": "CREATE TABLE project_configuration_defaults (\n project_root TEXT PRIMARY KEY, defaults TEXT NOT NULL, ceiling TEXT NOT NULL, updated_at TEXT NOT NULL\n)",
+      "tbl_name": "project_configuration_defaults",
+      "type": "table"
+    },
+    {
+      "name": "configuration_revisions",
+      "sql": "CREATE TABLE configuration_revisions (\n id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), revision INTEGER NOT NULL,\n route_id TEXT NOT NULL, route_engine TEXT NOT NULL, route_connection_id TEXT NOT NULL,\n parameters TEXT NOT NULL, ceiling_snapshot TEXT NOT NULL,\n state TEXT NOT NULL, confirmation_evidence_ref TEXT, error_code TEXT,\n created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(task_id,revision)\n)",
+      "tbl_name": "configuration_revisions",
+      "type": "table"
+    },
+    {
+      "name": "configuration_revisions_by_task",
+      "sql": "CREATE INDEX configuration_revisions_by_task ON configuration_revisions(task_id,revision)",
+      "tbl_name": "configuration_revisions",
+      "type": "index"
+    },
+    {
+      "name": "configuration_revisions_guard",
+      "sql": "CREATE TRIGGER configuration_revisions_guard BEFORE UPDATE ON configuration_revisions\nBEGIN\n SELECT CASE\n  WHEN NEW.id!=OLD.id OR NEW.task_id!=OLD.task_id OR NEW.revision!=OLD.revision\n   OR NEW.route_id!=OLD.route_id OR NEW.route_engine!=OLD.route_engine\n   OR NEW.route_connection_id!=OLD.route_connection_id OR NEW.parameters!=OLD.parameters\n   OR NEW.ceiling_snapshot!=OLD.ceiling_snapshot OR NEW.created_at!=OLD.created_at\n  THEN RAISE(ABORT,'immutable')\n  WHEN OLD.state='selected' AND NEW.state NOT IN ('selected','pending_next_use','rejected')\n  THEN RAISE(ABORT,'invalid_transition')\n  WHEN OLD.state='pending_next_use' AND NEW.state NOT IN ('pending_next_use','active','failed','indeterminate')\n  THEN RAISE(ABORT,'invalid_transition')\n  WHEN OLD.state='indeterminate' AND NEW.state NOT IN ('indeterminate','active','failed')\n  THEN RAISE(ABORT,'invalid_transition')\n  WHEN OLD.state IN ('active','rejected','failed') AND NEW.state!=OLD.state\n  THEN RAISE(ABORT,'invalid_transition')\n  WHEN NEW.state='active' AND (NEW.confirmation_evidence_ref IS NULL OR NEW.confirmation_evidence_ref='')\n  THEN RAISE(ABORT,'missing_confirmation_evidence')\n  WHEN NEW.state='active' AND EXISTS (\n   SELECT 1 FROM configuration_revisions o WHERE o.task_id=NEW.task_id AND o.revision>NEW.revision\n    AND o.state NOT IN ('rejected','failed')\n  )\n  THEN RAISE(ABORT,'stale_reconcile_target')\n END;\nEND",
+      "tbl_name": "configuration_revisions",
+      "type": "trigger"
+    },
+    {
+      "name": "configuration_revisions_no_delete",
+      "sql": "CREATE TRIGGER configuration_revisions_no_delete BEFORE DELETE ON configuration_revisions\nWHEN NOT EXISTS (\n SELECT 1 FROM pending_deletions d WHERE d.task_id=OLD.task_id\n) BEGIN SELECT RAISE(ABORT, 'immutable'); END",
+      "tbl_name": "configuration_revisions",
+      "type": "trigger"
+    },
+    {
+      "name": "acp_host_sessions",
+      "sql": "CREATE TABLE acp_host_sessions (\n session_id TEXT PRIMARY KEY, project_root TEXT NOT NULL,\n task_id TEXT REFERENCES tasks(id), client_info TEXT NOT NULL,\n client_capabilities TEXT NOT NULL, mcp_servers TEXT NOT NULL,\n created_at TEXT NOT NULL, closed_at TEXT\n)",
+      "tbl_name": "acp_host_sessions",
+      "type": "table"
+    },
+    {
+      "name": "acp_host_sessions_by_task",
+      "sql": "CREATE INDEX acp_host_sessions_by_task ON acp_host_sessions(task_id)",
+      "tbl_name": "acp_host_sessions",
+      "type": "index"
+    },
+    {
+      "name": "acp_host_sessions_task_immutable",
+      "sql": "CREATE TRIGGER acp_host_sessions_task_immutable\nBEFORE UPDATE OF task_id ON acp_host_sessions\nWHEN OLD.task_id IS NOT NULL\nBEGIN SELECT RAISE(ABORT, 'immutable'); END",
+      "tbl_name": "acp_host_sessions",
+      "type": "trigger"
+    },
+    {
+      "name": "acp_session_access_defaults",
+      "sql": "CREATE TABLE acp_session_access_defaults (\n session_id TEXT PRIMARY KEY REFERENCES acp_host_sessions(session_id) ON DELETE CASCADE,\n mode TEXT NOT NULL CHECK(mode IN ('development','guarded','auto')),\n selected_mode TEXT CHECK(selected_mode IN ('development','guarded','auto')),\n selection_origin TEXT\n)",
+      "tbl_name": "acp_session_access_defaults",
+      "type": "table"
+    },
+    {
+      "name": "task_workspaces",
+      "sql": "CREATE TABLE task_workspaces (\n task_id TEXT PRIMARY KEY REFERENCES tasks(id),\n workspace_root TEXT NOT NULL,\n recorded_at TEXT NOT NULL\n)",
+      "tbl_name": "task_workspaces",
+      "type": "table"
+    },
+    {
+      "name": "acp_session_workspaces",
+      "sql": "CREATE TABLE acp_session_workspaces (\n session_id TEXT PRIMARY KEY REFERENCES acp_host_sessions(session_id),\n workspace_root TEXT NOT NULL\n)",
+      "tbl_name": "acp_session_workspaces",
+      "type": "table"
+    },
+    {
+      "name": "delegation_provisioning",
+      "sql": "CREATE TABLE delegation_provisioning (\n idempotency_key TEXT PRIMARY KEY,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n assignment_id TEXT, attempt_id TEXT, role_id TEXT NOT NULL,\n step TEXT NOT NULL, status TEXT NOT NULL,\n workspace_binding_id TEXT, channel_id TEXT, config_revision TEXT,\n context_snapshot_ref TEXT, engine_session_ref TEXT, instruction_delivery TEXT,\n error_code TEXT, owner_epoch INTEGER NOT NULL,\n created_at TEXT NOT NULL, updated_at TEXT NOT NULL\n)",
+      "tbl_name": "delegation_provisioning",
+      "type": "table"
+    },
+    {
+      "name": "delegation_provisioning_by_task",
+      "sql": "CREATE INDEX delegation_provisioning_by_task ON delegation_provisioning(task_id)",
+      "tbl_name": "delegation_provisioning",
+      "type": "index"
+    },
+    {
+      "name": "delegation_effects",
+      "sql": "CREATE TABLE delegation_effects (\n id INTEGER PRIMARY KEY AUTOINCREMENT,\n idempotency_key TEXT NOT NULL REFERENCES delegation_provisioning(idempotency_key),\n step TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('intent','outcome')),\n detail_json TEXT NOT NULL, at TEXT NOT NULL\n)",
+      "tbl_name": "delegation_effects",
+      "type": "table"
+    },
+    {
+      "name": "delegation_effects_by_key",
+      "sql": "CREATE INDEX delegation_effects_by_key ON delegation_effects(idempotency_key,step,id)",
+      "tbl_name": "delegation_effects",
+      "type": "index"
+    },
+    {
+      "name": "work_requirements",
+      "sql": "CREATE TABLE work_requirements (\n requirement_id TEXT PRIMARY KEY,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n current_revision INTEGER NOT NULL,\n created_at TEXT NOT NULL\n)",
+      "tbl_name": "work_requirements",
+      "type": "table"
+    },
+    {
+      "name": "work_requirements_by_task",
+      "sql": "CREATE INDEX work_requirements_by_task ON work_requirements(task_id)",
+      "tbl_name": "work_requirements",
+      "type": "index"
+    },
+    {
+      "name": "work_requirement_revisions",
+      "sql": "CREATE TABLE work_requirement_revisions (\n requirement_id TEXT NOT NULL REFERENCES work_requirements(requirement_id),\n revision INTEGER NOT NULL,\n statement TEXT NOT NULL,\n criteria_json TEXT NOT NULL,\n digest TEXT NOT NULL,\n requirement_type TEXT NOT NULL DEFAULT 'general',\n created_at TEXT NOT NULL,\n PRIMARY KEY(requirement_id, revision)\n)",
+      "tbl_name": "work_requirement_revisions",
+      "type": "table"
+    },
+    {
+      "name": "work_assignments",
+      "sql": "CREATE TABLE work_assignments (\n assignment_id TEXT PRIMARY KEY,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n node_key TEXT NOT NULL,\n requirement_bindings_json TEXT NOT NULL,\n candidate_ref TEXT,\n status TEXT NOT NULL,\n requirement_state TEXT NOT NULL DEFAULT 'structured',\n idempotency_key TEXT NOT NULL,\n created_at TEXT NOT NULL,\n UNIQUE(task_id, idempotency_key)\n)",
+      "tbl_name": "work_assignments",
+      "type": "table"
+    },
+    {
+      "name": "work_assignments_by_task",
+      "sql": "CREATE INDEX work_assignments_by_task ON work_assignments(task_id)",
+      "tbl_name": "work_assignments",
+      "type": "index"
+    },
+    {
+      "name": "work_assignment_predecessors",
+      "sql": "CREATE TABLE work_assignment_predecessors (\n task_id TEXT NOT NULL REFERENCES tasks(id),\n assignment_id TEXT NOT NULL REFERENCES work_assignments(assignment_id),\n predecessor_assignment_id TEXT NOT NULL REFERENCES work_assignments(assignment_id),\n predecessor_candidate_ref TEXT NOT NULL,\n PRIMARY KEY(assignment_id, predecessor_assignment_id)\n)",
+      "tbl_name": "work_assignment_predecessors",
+      "type": "table"
+    },
+    {
+      "name": "work_predecessors_by_predecessor",
+      "sql": "CREATE INDEX work_predecessors_by_predecessor\n ON work_assignment_predecessors(predecessor_assignment_id)",
+      "tbl_name": "work_assignment_predecessors",
+      "type": "index"
+    },
+    {
+      "name": "work_assignment_attempts",
+      "sql": "CREATE TABLE work_assignment_attempts (\n attempt_id TEXT PRIMARY KEY,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n assignment_id TEXT NOT NULL REFERENCES work_assignments(assignment_id),\n attempt_no INTEGER NOT NULL,\n predecessor_attempt_id TEXT REFERENCES work_assignment_attempts(attempt_id),\n input_candidate_ref TEXT,\n requirement_bindings_json TEXT NOT NULL,\n status TEXT NOT NULL,\n failure_reason TEXT,\n idempotency_key TEXT NOT NULL,\n created_at TEXT NOT NULL,\n UNIQUE(task_id, idempotency_key),\n UNIQUE(assignment_id, attempt_no)\n)",
+      "tbl_name": "work_assignment_attempts",
+      "type": "table"
+    },
+    {
+      "name": "work_attempts_by_assignment",
+      "sql": "CREATE INDEX work_attempts_by_assignment\n ON work_assignment_attempts(assignment_id, attempt_no)",
+      "tbl_name": "work_assignment_attempts",
+      "type": "index"
+    },
+    {
+      "name": "work_graph_operations",
+      "sql": "CREATE TABLE work_graph_operations (\n task_id TEXT NOT NULL REFERENCES tasks(id),\n idempotency_key TEXT NOT NULL,\n operation TEXT NOT NULL,\n request_json TEXT NOT NULL DEFAULT '{}',\n response_json TEXT NOT NULL,\n created_at TEXT NOT NULL,\n PRIMARY KEY(task_id, idempotency_key)\n)",
+      "tbl_name": "work_graph_operations",
+      "type": "table"
+    },
+    {
+      "name": "task_events",
+      "sql": "CREATE TABLE task_events (\n id INTEGER PRIMARY KEY AUTOINCREMENT,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n event_type TEXT NOT NULL CHECK(event_type IN (\n   'delegation_requested','assignment_ready','assignment_failed',\n   'assignment_cancel_requested','assignment_cancelled',\n   'worker_result','worker_question','coordinator_clarification',\n   'coordinator_decision','user_message','progress'\n )),\n assignment_ref TEXT, dedup_key TEXT NOT NULL,\n payload_json TEXT NOT NULL, origin TEXT NOT NULL,\n created_at TEXT NOT NULL, consumed_by TEXT,\n superseded INTEGER NOT NULL DEFAULT 0,\n delivered_at TEXT,\n UNIQUE(task_id, dedup_key)\n)",
+      "tbl_name": "task_events",
+      "type": "table"
+    },
+    {
+      "name": "task_events_by_task",
+      "sql": "CREATE INDEX task_events_by_task ON task_events(task_id, id)",
+      "tbl_name": "task_events",
+      "type": "index"
+    },
+    {
+      "name": "task_events_by_activity_ref",
+      "sql": "CREATE INDEX task_events_by_activity_ref ON task_events(task_id, json_extract(payload_json,'$.activity_ref'), id)",
+      "tbl_name": "task_events",
+      "type": "index"
+    },
+    {
+      "name": "task_events_by_assignment",
+      "sql": "CREATE INDEX task_events_by_assignment ON task_events(task_id, assignment_ref)",
+      "tbl_name": "task_events",
+      "type": "index"
+    },
+    {
+      "name": "task_events_by_type",
+      "sql": "CREATE INDEX task_events_by_type ON task_events(task_id, event_type, id)",
+      "tbl_name": "task_events",
+      "type": "index"
+    },
+    {
+      "name": "task_events_unconsumed",
+      "sql": "CREATE INDEX task_events_unconsumed ON task_events(task_id, id) WHERE consumed_by IS NULL AND superseded=0",
+      "tbl_name": "task_events",
+      "type": "index"
+    },
+    {
+      "name": "task_orchestration",
+      "sql": "CREATE TABLE task_orchestration (\n task_id TEXT PRIMARY KEY REFERENCES tasks(id),\n state TEXT NOT NULL,\n coordinator_attempt_ref TEXT,\n updated_at TEXT NOT NULL,\n wait_reason TEXT,\n wait_detail_json TEXT,\n no_progress_count INTEGER NOT NULL DEFAULT 0,\n requirement_revision INTEGER NOT NULL DEFAULT 0,\n stopped_at TEXT,\n language TEXT\n)",
+      "tbl_name": "task_orchestration",
+      "type": "table"
+    },
+    {
+      "name": "runtime_tasks",
+      "sql": "CREATE TABLE runtime_tasks (\n task_id TEXT PRIMARY KEY REFERENCES tasks(id),\n state TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0,\n goal TEXT NOT NULL, plan_json TEXT, synthesis TEXT,\n review_cycle INTEGER NOT NULL DEFAULT 0, blocker TEXT,\n created_at TEXT NOT NULL, updated_at TEXT NOT NULL\n)",
+      "tbl_name": "runtime_tasks",
+      "type": "table"
+    },
+    {
+      "name": "runtime_nodes",
+      "sql": "CREATE TABLE runtime_nodes (\n task_id TEXT NOT NULL REFERENCES runtime_tasks(task_id),\n revision INTEGER NOT NULL, node_id TEXT NOT NULL,\n role TEXT NOT NULL, objective TEXT NOT NULL, dependencies_json TEXT NOT NULL,\n scope_json TEXT NOT NULL, stage TEXT NOT NULL, status TEXT NOT NULL,\n assignment_ref TEXT UNIQUE, result_json TEXT,\n PRIMARY KEY(task_id,revision,node_id)\n)",
+      "tbl_name": "runtime_nodes",
+      "type": "table"
+    },
+    {
+      "name": "runtime_events",
+      "sql": "CREATE TABLE runtime_events (\n id INTEGER PRIMARY KEY AUTOINCREMENT,\n task_id TEXT NOT NULL REFERENCES runtime_tasks(task_id),\n type TEXT NOT NULL, actor TEXT NOT NULL, payload_json TEXT NOT NULL,\n created_at TEXT NOT NULL\n)",
+      "tbl_name": "runtime_events",
+      "type": "table"
+    },
+    {
+      "name": "runtime_events_task",
+      "sql": "CREATE INDEX runtime_events_task ON runtime_events(task_id,id)",
+      "tbl_name": "runtime_events",
+      "type": "index"
+    },
+    {
+      "name": "runtime_events_type",
+      "sql": "CREATE INDEX runtime_events_type ON runtime_events(type,task_id,id)",
+      "tbl_name": "runtime_events",
+      "type": "index"
+    },
+    {
+      "name": "runtime_requests",
+      "sql": "CREATE TABLE runtime_requests (\n task_id TEXT NOT NULL, request_key TEXT NOT NULL, actor TEXT NOT NULL,\n operation TEXT NOT NULL, digest TEXT NOT NULL, result_json TEXT NOT NULL,\n PRIMARY KEY(task_id,actor,request_key)\n)",
+      "tbl_name": "runtime_requests",
+      "type": "table"
+    },
+    {
+      "name": "runtime_requests_by_operation",
+      "sql": "CREATE INDEX runtime_requests_by_operation ON runtime_requests(task_id,actor,operation)",
+      "tbl_name": "runtime_requests",
+      "type": "index"
+    },
+    {
+      "name": "capacity_reservations",
+      "sql": "CREATE TABLE capacity_reservations (\n reservation_id TEXT PRIMARY KEY,\n connection_id TEXT NOT NULL,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n assignment_ref TEXT,\n attempt_id TEXT NOT NULL,\n kind TEXT NOT NULL CHECK(kind IN ('coordinator','worker')),\n state TEXT NOT NULL CHECK(state IN ('reserved','ambiguous','released')),\n reserved_at TEXT NOT NULL,\n updated_at TEXT NOT NULL,\n release_observation TEXT\n)",
+      "tbl_name": "capacity_reservations",
+      "type": "table"
+    },
+    {
+      "name": "capacity_by_connection",
+      "sql": "CREATE INDEX capacity_by_connection ON capacity_reservations(connection_id, state)",
+      "tbl_name": "capacity_reservations",
+      "type": "index"
+    },
+    {
+      "name": "capacity_by_task",
+      "sql": "CREATE INDEX capacity_by_task ON capacity_reservations(task_id)",
+      "tbl_name": "capacity_reservations",
+      "type": "index"
+    },
+    {
+      "name": "capacity_by_attempt",
+      "sql": "CREATE INDEX capacity_by_attempt ON capacity_reservations(attempt_id)",
+      "tbl_name": "capacity_reservations",
+      "type": "index"
+    },
+    {
+      "name": "tool_result_observations",
+      "sql": "CREATE TABLE tool_result_observations (\n id INTEGER PRIMARY KEY AUTOINCREMENT,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n attempt_id TEXT NOT NULL,\n tool_call_ref TEXT NOT NULL,\n kind TEXT,\n title TEXT,\n status TEXT NOT NULL,\n created_at TEXT NOT NULL\n)",
+      "tbl_name": "tool_result_observations",
+      "type": "table"
+    },
+    {
+      "name": "tool_result_observations_by_attempt",
+      "sql": "CREATE INDEX tool_result_observations_by_attempt ON tool_result_observations(attempt_id, tool_call_ref, id)",
+      "tbl_name": "tool_result_observations",
+      "type": "index"
+    },
+    {
+      "name": "tool_result_observations_by_task",
+      "sql": "CREATE INDEX tool_result_observations_by_task ON tool_result_observations(task_id)",
+      "tbl_name": "tool_result_observations",
+      "type": "index"
+    },
+    {
+      "name": "report_read_observations",
+      "sql": "CREATE TABLE report_read_observations (\n task_id TEXT NOT NULL REFERENCES tasks(id),\n attempt_id TEXT NOT NULL,\n report_id TEXT NOT NULL REFERENCES reports(id),\n request_id TEXT NOT NULL,\n outcome TEXT NOT NULL CHECK (outcome IN ('success')),\n created_at TEXT NOT NULL,\n PRIMARY KEY (task_id, attempt_id, report_id, request_id)\n)",
+      "tbl_name": "report_read_observations",
+      "type": "table"
+    },
+    {
+      "name": "report_read_observations_by_attempt",
+      "sql": "CREATE INDEX report_read_observations_by_attempt ON report_read_observations(task_id, attempt_id, report_id)",
+      "tbl_name": "report_read_observations",
+      "type": "index"
+    },
+    {
+      "name": "permission_receipts",
+      "sql": "CREATE TABLE permission_receipts (\n task_id TEXT NOT NULL REFERENCES tasks(id),\n attempt_id TEXT NOT NULL,\n tool_call_ref TEXT NOT NULL,\n command_sha256 TEXT NOT NULL,\n command_text TEXT NOT NULL,\n host_outcome TEXT NOT NULL CHECK (host_outcome IN ('allow_once','reject_once','cancelled')),\n created_at TEXT NOT NULL,\n PRIMARY KEY (task_id, attempt_id, tool_call_ref)\n)",
+      "tbl_name": "permission_receipts",
+      "type": "table"
+    },
+    {
+      "name": "permission_receipts_by_attempt",
+      "sql": "CREATE INDEX permission_receipts_by_attempt ON permission_receipts(task_id, attempt_id)",
+      "tbl_name": "permission_receipts",
+      "type": "index"
+    },
+    {
+      "name": "source_blocks",
+      "sql": "CREATE TABLE source_blocks (\n task_id TEXT NOT NULL REFERENCES tasks(id),\n report_id TEXT NOT NULL REFERENCES reports(id),\n block_index INTEGER NOT NULL,\n kind TEXT NOT NULL,\n mime TEXT,\n name TEXT,\n uri TEXT,\n sha256 TEXT,\n size_bytes INTEGER,\n availability TEXT NOT NULL,\n reason TEXT,\n trust_label TEXT NOT NULL,\n body_ref TEXT,\n fetched_at TEXT,\n created_at TEXT NOT NULL,\n PRIMARY KEY(report_id, block_index)\n)",
+      "tbl_name": "source_blocks",
+      "type": "table"
+    },
+    {
+      "name": "source_blocks_by_task",
+      "sql": "CREATE INDEX source_blocks_by_task ON source_blocks(task_id)",
+      "tbl_name": "source_blocks",
+      "type": "index"
+    },
+    {
+      "name": "source_block_reads",
+      "sql": "CREATE TABLE source_block_reads (\n id INTEGER PRIMARY KEY AUTOINCREMENT,\n report_id TEXT NOT NULL,\n block_index INTEGER NOT NULL,\n observed_at TEXT NOT NULL,\n availability TEXT NOT NULL,\n reason TEXT\n)",
+      "tbl_name": "source_block_reads",
+      "type": "table"
+    },
+    {
+      "name": "source_block_reads_by_block",
+      "sql": "CREATE INDEX source_block_reads_by_block ON source_block_reads(report_id, block_index, id)",
+      "tbl_name": "source_block_reads",
+      "type": "index"
+    },
+    {
+      "name": "host_transcript",
+      "sql": "CREATE TABLE host_transcript (\n id INTEGER PRIMARY KEY AUTOINCREMENT,\n session_id TEXT NOT NULL REFERENCES acp_host_sessions(session_id),\n seq INTEGER NOT NULL,\n kind TEXT NOT NULL CHECK(kind IN ('user_message','agent_message')),\n text TEXT NOT NULL,\n attachments_json TEXT,\n message_id TEXT,\n created_at TEXT NOT NULL,\n UNIQUE(session_id, seq)\n)",
+      "tbl_name": "host_transcript",
+      "type": "table"
+    },
+    {
+      "name": "host_transcript_by_session",
+      "sql": "CREATE INDEX host_transcript_by_session ON host_transcript(session_id, seq)",
+      "tbl_name": "host_transcript",
+      "type": "index"
+    },
+    {
+      "name": "host_updates",
+      "sql": "CREATE TABLE host_updates (\n session_id TEXT NOT NULL REFERENCES acp_host_sessions(session_id),\n seq INTEGER NOT NULL,\n update_json TEXT NOT NULL,\n created_at TEXT NOT NULL,\n UNIQUE(session_id, seq)\n)",
+      "tbl_name": "host_updates",
+      "type": "table"
+    },
+    {
+      "name": "host_updates_by_session",
+      "sql": "CREATE INDEX host_updates_by_session ON host_updates(session_id, seq)",
+      "tbl_name": "host_updates",
+      "type": "index"
+    },
+    {
+      "name": "pending_questions",
+      "sql": "CREATE TABLE pending_questions (\n id TEXT PRIMARY KEY,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n assignment_ref TEXT,\n dedup_key TEXT NOT NULL,\n text TEXT NOT NULL,\n options_json TEXT,\n status TEXT NOT NULL DEFAULT 'open',\n answer_text TEXT,\n answer_source TEXT,\n created_at TEXT NOT NULL,\n answered_at TEXT,\n UNIQUE(task_id, dedup_key)\n)",
+      "tbl_name": "pending_questions",
+      "type": "table"
+    },
+    {
+      "name": "pending_questions_by_task",
+      "sql": "CREATE INDEX pending_questions_by_task ON pending_questions(task_id, status, id)",
+      "tbl_name": "pending_questions",
+      "type": "index"
+    },
+    {
+      "name": "pending_question_late_answers",
+      "sql": "CREATE TABLE pending_question_late_answers (\n id INTEGER PRIMARY KEY AUTOINCREMENT,\n question_id TEXT NOT NULL,\n task_id TEXT NOT NULL,\n answer_text TEXT NOT NULL,\n answer_source TEXT NOT NULL,\n received_at TEXT NOT NULL\n)",
+      "tbl_name": "pending_question_late_answers",
+      "type": "table"
+    },
+    {
+      "name": "task_language",
+      "sql": "CREATE TABLE task_language (\n task_id TEXT PRIMARY KEY REFERENCES tasks(id),\n language TEXT\n)",
+      "tbl_name": "task_language",
+      "type": "table"
+    },
+    {
+      "name": "task_stopped",
+      "sql": "CREATE TABLE task_stopped (\n task_id TEXT PRIMARY KEY REFERENCES tasks(id),\n stopped_at TEXT NOT NULL\n)",
+      "tbl_name": "task_stopped",
+      "type": "table"
+    },
+    {
+      "name": "context_generations",
+      "sql": "CREATE TABLE context_generations (\n id TEXT PRIMARY KEY,\n engine_session_ref TEXT NOT NULL,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n assignment_ref TEXT,\n recipient TEXT NOT NULL CHECK(recipient IN ('coordinator','worker')),\n sequence INTEGER NOT NULL,\n cause TEXT NOT NULL CHECK(cause IN (\n   'session_open','observed_compaction','observed_reset',\n   'session_replacement','controlled_boundary_refresh'\n )),\n evidence_source TEXT NOT NULL,\n evidence_id TEXT,\n created_at TEXT NOT NULL,\n UNIQUE(engine_session_ref, sequence)\n)",
+      "tbl_name": "context_generations",
+      "type": "table"
+    },
+    {
+      "name": "context_generations_by_session",
+      "sql": "CREATE INDEX context_generations_by_session ON context_generations(engine_session_ref, sequence)",
+      "tbl_name": "context_generations",
+      "type": "index"
+    },
+    {
+      "name": "context_generations_by_task",
+      "sql": "CREATE INDEX context_generations_by_task ON context_generations(task_id)",
+      "tbl_name": "context_generations",
+      "type": "index"
+    },
+    {
+      "name": "compaction_owners",
+      "sql": "CREATE TABLE compaction_owners (\n engine_session_ref TEXT PRIMARY KEY,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n owner TEXT NOT NULL CHECK(owner IN ('engine_adapter','cortex_controlled','none')),\n tier TEXT NOT NULL CHECK(tier IN ('automatic','controlled_boundary','unqualified')),\n engine TEXT NOT NULL,\n engine_version TEXT NOT NULL,\n limitation TEXT,\n set_at TEXT NOT NULL\n)",
+      "tbl_name": "compaction_owners",
+      "type": "table"
+    },
+    {
+      "name": "compaction_owners_by_task",
+      "sql": "CREATE INDEX compaction_owners_by_task ON compaction_owners(task_id)",
+      "tbl_name": "compaction_owners",
+      "type": "index"
+    },
+    {
+      "name": "compaction_events_seen",
+      "sql": "CREATE TABLE compaction_events_seen (\n engine_session_ref TEXT NOT NULL,\n evidence_id TEXT NOT NULL,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n phase TEXT NOT NULL,\n observed_at TEXT NOT NULL,\n generation_id TEXT,\n PRIMARY KEY (engine_session_ref, evidence_id)\n)",
+      "tbl_name": "compaction_events_seen",
+      "type": "table"
+    },
+    {
+      "name": "compaction_events_seen_by_task",
+      "sql": "CREATE INDEX compaction_events_seen_by_task ON compaction_events_seen(task_id)",
+      "tbl_name": "compaction_events_seen",
+      "type": "index"
+    },
+    {
+      "name": "capsule_deliveries",
+      "sql": "CREATE TABLE capsule_deliveries (\n id TEXT PRIMARY KEY,\n recipient TEXT NOT NULL CHECK(recipient IN ('coordinator','worker')),\n context_generation_id TEXT NOT NULL REFERENCES context_generations(id),\n capsule_revision TEXT NOT NULL,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n assignment_ref TEXT,\n engine_session_ref TEXT NOT NULL,\n state TEXT NOT NULL CHECK(state IN (\n   'built','transmitted','delivery_confirmed','continuation_observed','blocked','superseded'\n )),\n evidence_source TEXT NOT NULL,\n uncertainty TEXT,\n reason TEXT,\n retry_count INTEGER NOT NULL DEFAULT 0,\n created_at TEXT NOT NULL,\n updated_at TEXT NOT NULL,\n UNIQUE(recipient, context_generation_id, capsule_revision)\n)",
+      "tbl_name": "capsule_deliveries",
+      "type": "table"
+    },
+    {
+      "name": "capsule_deliveries_by_task",
+      "sql": "CREATE INDEX capsule_deliveries_by_task ON capsule_deliveries(task_id)",
+      "tbl_name": "capsule_deliveries",
+      "type": "index"
+    },
+    {
+      "name": "capsule_deliveries_by_session",
+      "sql": "CREATE INDEX capsule_deliveries_by_session ON capsule_deliveries(engine_session_ref, id)",
+      "tbl_name": "capsule_deliveries",
+      "type": "index"
+    },
+    {
+      "name": "large_outputs",
+      "sql": "CREATE TABLE large_outputs (\n id TEXT PRIMARY KEY,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n owner_scope TEXT NOT NULL,\n source_kind TEXT NOT NULL CHECK(source_kind IN ('terminal','tool_result')),\n source_ref TEXT,\n filename TEXT NOT NULL,\n byte_count INTEGER NOT NULL,\n truncated INTEGER NOT NULL CHECK(truncated IN (0,1)),\n exit_code INTEGER,\n signal TEXT,\n failure TEXT,\n created_at TEXT NOT NULL\n)",
+      "tbl_name": "large_outputs",
+      "type": "table"
+    },
+    {
+      "name": "large_outputs_by_task",
+      "sql": "CREATE INDEX large_outputs_by_task ON large_outputs(task_id)",
+      "tbl_name": "large_outputs",
+      "type": "index"
+    },
+    {
+      "name": "large_outputs_by_owner",
+      "sql": "CREATE INDEX large_outputs_by_owner ON large_outputs(task_id, owner_scope)",
+      "tbl_name": "large_outputs",
+      "type": "index"
+    },
+    {
+      "name": "compaction_recovery_events",
+      "sql": "CREATE TABLE compaction_recovery_events (\n id TEXT PRIMARY KEY,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n engine_session_ref TEXT NOT NULL,\n generation_id TEXT REFERENCES context_generations(id),\n before_tokens INTEGER NOT NULL,\n before_basis TEXT NOT NULL,\n after_tokens INTEGER NOT NULL,\n after_basis TEXT NOT NULL,\n recovered_tokens INTEGER NOT NULL,\n recovered_ratio REAL NOT NULL,\n status TEXT NOT NULL CHECK(status IN ('ok','blocked')),\n reason TEXT,\n created_at TEXT NOT NULL\n)",
+      "tbl_name": "compaction_recovery_events",
+      "type": "table"
+    },
+    {
+      "name": "compaction_recovery_events_by_session",
+      "sql": "CREATE INDEX compaction_recovery_events_by_session\n ON compaction_recovery_events(engine_session_ref, id)",
+      "tbl_name": "compaction_recovery_events",
+      "type": "index"
+    },
+    {
+      "name": "compaction_recovery_events_by_task",
+      "sql": "CREATE INDEX compaction_recovery_events_by_task ON compaction_recovery_events(task_id)",
+      "tbl_name": "compaction_recovery_events",
+      "type": "index"
+    },
+    {
+      "name": "attempt_process_registry",
+      "sql": "CREATE TABLE attempt_process_registry (\n attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),\n role TEXT NOT NULL, engine_session_ref TEXT, connection_id TEXT,\n pid INTEGER NOT NULL, pgid INTEGER NOT NULL,\n start_ticks TEXT NOT NULL, boot_id TEXT NOT NULL,\n launch_command_digest TEXT NOT NULL,\n recorded_at TEXT NOT NULL, terminated_at TEXT, termination_reason TEXT\n)",
+      "tbl_name": "attempt_process_registry",
+      "type": "table"
+    },
+    {
+      "name": "attempt_effective_context",
+      "sql": "CREATE TABLE attempt_effective_context (\n attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id),\n role TEXT NOT NULL,\n selected_config_revision_id TEXT, effective_config_revision_id TEXT,\n route_engine TEXT NOT NULL, route_connection_id TEXT,\n resource_policy_json TEXT NOT NULL, recorded_at TEXT NOT NULL\n)",
+      "tbl_name": "attempt_effective_context",
+      "type": "table"
+    },
+    {
+      "name": "workspace_snapshots",
+      "sql": "CREATE TABLE workspace_snapshots (\n workspace_binding_id TEXT PRIMARY KEY,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n attempt_id TEXT NOT NULL,\n project_root TEXT NOT NULL,\n root_path TEXT,\n base_path TEXT,\n mode TEXT NOT NULL,\n manifest_json TEXT NOT NULL,\n base_kind TEXT NOT NULL,\n base_head TEXT,\n base_dirty_digest TEXT,\n created_at TEXT NOT NULL,\n cleaned_up_at TEXT,\n cleanup_reason TEXT\n)",
+      "tbl_name": "workspace_snapshots",
+      "type": "table"
+    },
+    {
+      "name": "workspace_snapshots_by_attempt",
+      "sql": "CREATE INDEX workspace_snapshots_by_attempt ON workspace_snapshots(attempt_id, created_at)",
+      "tbl_name": "workspace_snapshots",
+      "type": "index"
+    },
+    {
+      "name": "workspace_snapshot_lineage",
+      "sql": "CREATE TABLE workspace_snapshot_lineage (\n workspace_binding_id TEXT PRIMARY KEY REFERENCES workspace_snapshots(workspace_binding_id),\n candidate_id TEXT NOT NULL,\n created_at TEXT NOT NULL\n)",
+      "tbl_name": "workspace_snapshot_lineage",
+      "type": "table"
+    },
+    {
+      "name": "workspace_candidate_seeds",
+      "sql": "CREATE TABLE workspace_candidate_seeds (\n assignment_ref TEXT PRIMARY KEY,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n candidate_id TEXT NOT NULL,\n created_at TEXT NOT NULL\n)",
+      "tbl_name": "workspace_candidate_seeds",
+      "type": "table"
+    },
+    {
+      "name": "workspace_integrations",
+      "sql": "CREATE TABLE workspace_integrations (\n id TEXT PRIMARY KEY,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n assignment_ref TEXT NOT NULL,\n request_key TEXT NOT NULL,\n attempt_id TEXT NOT NULL,\n workspace_binding_id TEXT,\n status TEXT NOT NULL,\n applied_paths_json TEXT NOT NULL,\n conflict_paths_json TEXT NOT NULL,\n integrated_head TEXT,\n integrated_dirty_digest TEXT,\n host_buffer_state TEXT NOT NULL DEFAULT 'unknown',\n created_at TEXT NOT NULL,\n UNIQUE(assignment_ref, request_key)\n)",
+      "tbl_name": "workspace_integrations",
+      "type": "table"
+    },
+    {
+      "name": "workspace_integration_journal",
+      "sql": "CREATE TABLE workspace_integration_journal (\n journal_key TEXT NOT NULL,\n relpath TEXT NOT NULL,\n before_json TEXT NOT NULL,\n before_bytes BLOB,\n desired_json TEXT NOT NULL,\n state TEXT NOT NULL,\n created_at TEXT NOT NULL,\n PRIMARY KEY(journal_key, relpath)\n)",
+      "tbl_name": "workspace_integration_journal",
+      "type": "table"
+    },
+    {
+      "name": "configuration_route_extras",
+      "sql": "CREATE TABLE configuration_route_extras (\n revision_id TEXT PRIMARY KEY REFERENCES configuration_revisions(id),\n task_id TEXT NOT NULL REFERENCES tasks(id),\n route_model TEXT NOT NULL,\n route_profile_json TEXT NOT NULL,\n route_details_json TEXT NOT NULL DEFAULT '{}',\n created_at TEXT NOT NULL\n)",
+      "tbl_name": "configuration_route_extras",
+      "type": "table"
+    },
+    {
+      "name": "configuration_route_extras_by_task",
+      "sql": "CREATE INDEX configuration_route_extras_by_task ON configuration_route_extras(task_id)",
+      "tbl_name": "configuration_route_extras",
+      "type": "index"
+    },
+    {
+      "name": "attempt_route_audit",
+      "sql": "CREATE TABLE attempt_route_audit (\n id TEXT PRIMARY KEY,\n attempt_id TEXT NOT NULL,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n role TEXT NOT NULL,\n engine TEXT NOT NULL,\n connection_id TEXT NOT NULL,\n model TEXT NOT NULL,\n params_fingerprint TEXT NOT NULL,\n config_revision_id TEXT,\n decision TEXT NOT NULL CHECK(decision IN ('authorized','fallback')),\n decision_detail_json TEXT NOT NULL,\n predecessor_attempt_id TEXT,\n recorded_at TEXT NOT NULL\n)",
+      "tbl_name": "attempt_route_audit",
+      "type": "table"
+    },
+    {
+      "name": "attempt_route_audit_by_task",
+      "sql": "CREATE INDEX attempt_route_audit_by_task ON attempt_route_audit(task_id, recorded_at)",
+      "tbl_name": "attempt_route_audit",
+      "type": "index"
+    },
+    {
+      "name": "attempt_route_audit_by_attempt",
+      "sql": "CREATE INDEX attempt_route_audit_by_attempt ON attempt_route_audit(attempt_id)",
+      "tbl_name": "attempt_route_audit",
+      "type": "index"
+    },
+    {
+      "name": "attempt_route_audit_no_update",
+      "sql": "CREATE TRIGGER attempt_route_audit_no_update BEFORE UPDATE ON attempt_route_audit\nBEGIN SELECT RAISE(ABORT, 'immutable'); END",
+      "tbl_name": "attempt_route_audit",
+      "type": "trigger"
+    },
+    {
+      "name": "attempt_route_audit_no_delete",
+      "sql": "CREATE TRIGGER attempt_route_audit_no_delete BEFORE DELETE ON attempt_route_audit\nWHEN NOT EXISTS (\n SELECT 1 FROM pending_deletions d WHERE d.task_id=OLD.task_id\n) BEGIN SELECT RAISE(ABORT, 'immutable'); END",
+      "tbl_name": "attempt_route_audit",
+      "type": "trigger"
+    },
+    {
+      "name": "fallback_consent_records",
+      "sql": "CREATE TABLE fallback_consent_records (\n id TEXT PRIMARY KEY,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n target_connection_id TEXT NOT NULL,\n target_provider TEXT NOT NULL,\n data_scope TEXT NOT NULL,\n granted_by TEXT NOT NULL,\n granted_at TEXT NOT NULL,\n revoked_at TEXT\n)",
+      "tbl_name": "fallback_consent_records",
+      "type": "table"
+    },
+    {
+      "name": "fallback_consent_by_task",
+      "sql": "CREATE INDEX fallback_consent_by_task ON fallback_consent_records(task_id, target_connection_id)",
+      "tbl_name": "fallback_consent_records",
+      "type": "index"
+    },
+    {
+      "name": "observability_events",
+      "sql": "CREATE TABLE observability_events (\n id TEXT PRIMARY KEY,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n category TEXT NOT NULL,\n outcome TEXT NOT NULL,\n basis TEXT NOT NULL CHECK(basis IN ('observed','engine_reported','derived','estimated','unknown')),\n assignment_ref TEXT, attempt_id TEXT, engine_session_ref TEXT,\n context_generation_id TEXT, config_revision_id TEXT, connection_id TEXT,\n route_engine TEXT, source_event_ref TEXT,\n detail_json TEXT NOT NULL DEFAULT '{}',\n created_at TEXT NOT NULL\n)",
+      "tbl_name": "observability_events",
+      "type": "table"
+    },
+    {
+      "name": "observability_events_by_task",
+      "sql": "CREATE INDEX observability_events_by_task ON observability_events(task_id, created_at)",
+      "tbl_name": "observability_events",
+      "type": "index"
+    },
+    {
+      "name": "observability_events_by_attempt",
+      "sql": "CREATE INDEX observability_events_by_attempt ON observability_events(attempt_id)",
+      "tbl_name": "observability_events",
+      "type": "index"
+    },
+    {
+      "name": "observability_events_no_update",
+      "sql": "CREATE TRIGGER observability_events_no_update BEFORE UPDATE ON observability_events\nBEGIN SELECT RAISE(ABORT, 'immutable'); END",
+      "tbl_name": "observability_events",
+      "type": "trigger"
+    },
+    {
+      "name": "observability_events_no_delete",
+      "sql": "CREATE TRIGGER observability_events_no_delete BEFORE DELETE ON observability_events\nWHEN NOT EXISTS (\n SELECT 1 FROM pending_deletions d WHERE d.task_id=OLD.task_id\n) BEGIN SELECT RAISE(ABORT, 'immutable'); END",
+      "tbl_name": "observability_events",
+      "type": "trigger"
+    },
+    {
+      "name": "usage_records",
+      "sql": "CREATE TABLE usage_records (\n id TEXT PRIMARY KEY,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n attempt_id TEXT, engine_session_ref TEXT NOT NULL,\n call_sequence INTEGER NOT NULL,\n basis TEXT NOT NULL CHECK(basis IN ('observed','engine_reported','derived','estimated','unknown')),\n tokens_json TEXT NOT NULL DEFAULT '{}',\n stop_reason TEXT,\n failed INTEGER NOT NULL DEFAULT 0 CHECK(failed IN (0,1)),\n created_at TEXT NOT NULL\n)",
+      "tbl_name": "usage_records",
+      "type": "table"
+    },
+    {
+      "name": "usage_records_by_task",
+      "sql": "CREATE INDEX usage_records_by_task ON usage_records(task_id, created_at)",
+      "tbl_name": "usage_records",
+      "type": "index"
+    },
+    {
+      "name": "usage_records_by_attempt",
+      "sql": "CREATE INDEX usage_records_by_attempt ON usage_records(attempt_id, call_sequence)",
+      "tbl_name": "usage_records",
+      "type": "index"
+    },
+    {
+      "name": "usage_records_no_update",
+      "sql": "CREATE TRIGGER usage_records_no_update BEFORE UPDATE ON usage_records\nBEGIN SELECT RAISE(ABORT, 'immutable'); END",
+      "tbl_name": "usage_records",
+      "type": "trigger"
+    },
+    {
+      "name": "usage_records_no_delete",
+      "sql": "CREATE TRIGGER usage_records_no_delete BEFORE DELETE ON usage_records\nWHEN NOT EXISTS (\n SELECT 1 FROM pending_deletions d WHERE d.task_id=OLD.task_id\n) BEGIN SELECT RAISE(ABORT, 'immutable'); END",
+      "tbl_name": "usage_records",
+      "type": "trigger"
+    },
+    {
+      "name": "workspace_projects",
+      "sql": "CREATE TABLE workspace_projects (\n project_id TEXT PRIMARY KEY, project_root TEXT NOT NULL UNIQUE,\n activated_by TEXT NOT NULL, activated_at TEXT NOT NULL,\n version INTEGER NOT NULL DEFAULT 1 CHECK(version>0)\n)",
+      "tbl_name": "workspace_projects",
+      "type": "table"
+    },
+    {
+      "name": "workspace_tasks",
+      "sql": "CREATE TABLE workspace_tasks (\n sequence INTEGER PRIMARY KEY AUTOINCREMENT,\n task_id TEXT NOT NULL UNIQUE, project_id TEXT NOT NULL REFERENCES workspace_projects(project_id),\n description TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1 CHECK(version>0),\n execution_id TEXT, created_at TEXT NOT NULL\n)",
+      "tbl_name": "workspace_tasks",
+      "type": "table"
+    },
+    {
+      "name": "workspace_tasks_project",
+      "sql": "CREATE INDEX workspace_tasks_project ON workspace_tasks(project_id,sequence)",
+      "tbl_name": "workspace_tasks",
+      "type": "index"
+    },
+    {
+      "name": "workspace_task_options",
+      "sql": "CREATE TABLE workspace_task_options (\n task_id TEXT PRIMARY KEY REFERENCES workspace_tasks(task_id), options_json TEXT NOT NULL\n)",
+      "tbl_name": "workspace_task_options",
+      "type": "table"
+    },
+    {
+      "name": "workspace_executions",
+      "sql": "CREATE TABLE workspace_executions (\n execution_id TEXT PRIMARY KEY,\n task_id TEXT NOT NULL REFERENCES workspace_tasks(task_id),\n runtime_task_id TEXT NOT NULL UNIQUE, acp_session_id TEXT NOT NULL UNIQUE,\n owner_epoch INTEGER NOT NULL CHECK(owner_epoch>0),\n version INTEGER NOT NULL DEFAULT 1 CHECK(version>0), bound_at TEXT NOT NULL\n)",
+      "tbl_name": "workspace_executions",
+      "type": "table"
+    },
+    {
+      "name": "workspace_starts",
+      "sql": "CREATE TABLE workspace_starts (\n execution_id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE REFERENCES workspace_tasks(task_id),\n project_id TEXT NOT NULL REFERENCES workspace_projects(project_id),\n actor_id TEXT NOT NULL, request_id TEXT NOT NULL,\n source_origin TEXT NOT NULL, source_event_id TEXT NOT NULL UNIQUE,\n state TEXT NOT NULL CHECK(state IN ('prepare','claimed','dispatched','unknown')),\n version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL,\n UNIQUE(project_id,actor_id,request_id)\n)",
+      "tbl_name": "workspace_starts",
+      "type": "table"
+    },
+    {
+      "name": "workspace_requests",
+      "sql": "CREATE TABLE workspace_requests (\n project_id TEXT NOT NULL REFERENCES workspace_projects(project_id),\n actor_id TEXT NOT NULL, request_id TEXT NOT NULL, operation TEXT NOT NULL,\n digest TEXT NOT NULL, receipt_json TEXT NOT NULL,\n PRIMARY KEY(project_id,actor_id,request_id)\n)",
+      "tbl_name": "workspace_requests",
+      "type": "table"
+    },
+    {
+      "name": "workspace_outbox_state",
+      "sql": "CREATE TABLE workspace_outbox_state (\n project_id TEXT PRIMARY KEY REFERENCES workspace_projects(project_id),\n high_watermark INTEGER NOT NULL DEFAULT 0 CHECK(high_watermark>=0),\n retained_floor INTEGER NOT NULL DEFAULT 0 CHECK(retained_floor>=0 AND retained_floor<=high_watermark)\n)",
+      "tbl_name": "workspace_outbox_state",
+      "type": "table"
+    },
+    {
+      "name": "workspace_outbox",
+      "sql": "CREATE TABLE workspace_outbox (\n project_id TEXT NOT NULL REFERENCES workspace_projects(project_id),\n sequence INTEGER NOT NULL CHECK(sequence>0),\n event_id TEXT NOT NULL UNIQUE, entity_id TEXT NOT NULL,\n kind TEXT NOT NULL, entity_version INTEGER NOT NULL CHECK(entity_version>0),\n recorded_at TEXT NOT NULL, payload_digest TEXT NOT NULL,\n PRIMARY KEY(project_id,sequence)\n)",
+      "tbl_name": "workspace_outbox",
+      "type": "table"
+    }
+  ],
+  "outbox_writers": {
+    "acp_host_sessions": [
+      "session",
+      "session_id"
+    ],
+    "acp_session_access_defaults": [
+      "session",
+      "session_id"
+    ],
+    "host_transcript": [
+      "session",
+      "session_id"
+    ],
+    "host_updates": [
+      "session",
+      "session_id"
+    ],
+    "pending_question_late_answers": [
+      "runtime",
+      "task_id"
+    ],
+    "pending_questions": [
+      "runtime",
+      "task_id"
+    ],
+    "runtime_events": [
+      "runtime",
+      "task_id"
+    ],
+    "runtime_nodes": [
+      "runtime",
+      "task_id"
+    ],
+    "runtime_tasks": [
+      "runtime",
+      "task_id"
+    ],
+    "task_events": [
+      "runtime",
+      "task_id"
+    ],
+    "task_language": [
+      "runtime",
+      "task_id"
+    ],
+    "task_orchestration": [
+      "runtime",
+      "task_id"
+    ],
+    "task_owners": [
+      "runtime",
+      "task_id"
+    ],
+    "task_stopped": [
+      "runtime",
+      "task_id"
+    ],
+    "tasks": [
+      "runtime",
+      "id"
+    ]
+  },
+  "schema_sha256": "e4ffb8ffa8343e1170956725e24571dc047c30787133341f6c536b9a53beb7e8",
+  "source_sha256": {
+    "src/cortex_runtime/acp/questions_store.py": "d42dc219e8dc027cd3a8daf7d2e066a3e93d46aba8d25200f4f023cc6ada7138",
+    "src/cortex_runtime/acp/replay_store.py": "1dc3a6793aa239656c0df75db18511e616d08d63a83711ceacf7008efae87dcf",
+    "src/cortex_runtime/catalog/store.py": "7a4135c33ff212d2d9016dc9aaead5ef7801673df89b4c4a1e08d5f73459fdf5",
+    "src/cortex_runtime/configuration/store.py": "10c94bb9060e9adc1bbb7b4358e40db1a654df19b79ee9e737abd8864c91dc8a",
+    "src/cortex_runtime/connections/registry.py": "6c96df2025a2b3e73d81dbcfabb57f2d9fcd233c167b19b5684163c4986a1ce5",
+    "src/cortex_runtime/delegation/capacity_store.py": "35fe041c01b421dfe5c0fa27abe56bf5257c18f7d443e3bb2760757a12d82bdb",
+    "src/cortex_runtime/delegation/events_store.py": "5fa3a6ccd38872b3b2d98afd900ae532cb8be91404eb05be5e7bdd5c7c8ece7a",
+    "src/cortex_runtime/delegation/evidence_store.py": "26c7bc74dfca0d548c66a24f72112eb448f776eb24c8ee3449702ec8bfaa7d8b",
+    "src/cortex_runtime/delegation/generations_store.py": "f00e8953327b0527b3bb7e315e879a2eee91742e7288428ec3a8dc7b7f7e5275",
+    "src/cortex_runtime/delegation/store.py": "da16d0284387a7514b90fedfc33eb2919ffbf2804190ec07b11333621e754bcd",
+    "src/cortex_runtime/delegation/work_graph.py": "9b8717bd1f380f6accef8228f63956d871610676347e29813c5c9861a3831551",
+    "src/cortex_runtime/observability/store.py": "37fc658362b99a948b8fb527473e3921afa5c4b6bf93d01c26ee0e3fd30a254a",
+    "src/cortex_runtime/orchestration/state.py": "4525951cbc660de671e8f458e3bd4763861a525c11644bcfe7d64454e734416e",
+    "src/cortex_runtime/recovery/budget_store.py": "35c8e241772e6b181324603b1fbc81d38ea4a93c0aad2ef7944b0fe16634524a",
+    "src/cortex_runtime/recovery/large_output_store.py": "a3b89f01f4102aaf9c26b2981f459028c7eeb17f31fa824edce4cc979c5ff6f1",
+    "src/cortex_runtime/recovery/registry.py": "7fd91ef617c47a1f93baad6fb0c48e2462f73ec13f032bedb57cebd0b9ec6486",
+    "src/cortex_runtime/routing/store.py": "e5e3573cd267ea35c9e243d7d61a9aaf35b44d67d8c13b1aa2e82b4cd7a05153",
+    "src/cortex_runtime/store.py": "7f5cfcaeea82986a4e9cc3e60538a5a17753e039b0be2819931a58b71981c688",
+    "src/cortex_runtime/trusted_channel.py": "a36d695c4a47054fabf5e94eeef756c3b8cd167e0ce79ec0d12fc3a7c901f4ce",
+    "src/cortex_runtime/workspace_api/storage.py": "40b729517dff43950ee046474845bcd9833e10743bb17189554ad330127b3dde"
+  },
+  "user_version": 12
+}

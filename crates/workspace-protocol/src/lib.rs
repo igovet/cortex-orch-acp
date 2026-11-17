@@ -5,17 +5,20 @@ use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 pub mod channel;
+pub mod core;
 pub mod directories;
+pub mod events;
+mod generated;
+pub mod read;
 pub mod terminal;
 pub mod voice;
-mod generated;
 pub use generated::*;
 
 fn schema() -> &'static Value {
     static SCHEMA: OnceLock<Value> = OnceLock::new();
     SCHEMA.get_or_init(|| {
         serde_json::from_str(include_str!(
-            "../../../src/cortex_runtime/workspace_contract/schema.json"
+            "../schema/workspace.json"
         ))
         .expect("checked canonical schema")
     })

@@ -13,11 +13,13 @@ export function boardPhase(state: WorkspaceState, taskId: string) {
   if (task.conflict === "conflict" || task.conflict === "failed") return "needs_you";
   return task.status;
 }
+const percent = (n: number | null) => n !== null && Number.isFinite(n) && n >= 0 && n <= 100 ? n : null;
+/** Only connected Codex and Claude rows; a percentage outside 0 to 100 is unknown, never clamped. Claude keeps each weekly window by itself. */
 export function weeklyUsage(rows: EngineUsageInput[]): EngineWeeklyUsage[] {
   return rows.flatMap(row => {
     if (!row.connected || (row.engine !== "codex" && row.engine !== "claude")) return [];
-    const usedPercent = row.usedPercent !== null && Number.isFinite(row.usedPercent) && row.usedPercent >= 0 && row.usedPercent <= 100 ? row.usedPercent : null;
-    return [{ ...row, engine: row.engine, usedPercent, window: "weekly" as const }];
+    const windows = row.windows?.filter(w => /^seven_day(_[a-z0-9]+)*$/.test(w.name)).map(w => ({ ...w, usedPercent: percent(w.usedPercent) }));
+    return [{ ...row, engine: row.engine, usedPercent: percent(row.usedPercent), window: "weekly" as const, ...(windows ? { windows } : {}) }];
   });
 }
 /** A short label for a description, for a place that needs one before a title exists. It is not a generated title. */

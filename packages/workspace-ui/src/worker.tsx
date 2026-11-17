@@ -1,5 +1,5 @@
 import { createComputed, createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show, Switch, untrack, type Accessor, type Setter } from "solid-js";
-import { createOpenState, Fold, OutputBox, StepRow, type OpenState } from "./feed";
+import { createOpenState, DiffBox, Fold, OutputBox, StepRow, type OpenState } from "./feed";
 import { FEATURES, type Activity, type Check, type Message, type Worker } from "@cortex/workspace-domain";
 import { reportHeight } from "./autogrow";
 import { AttachChips, createAttachments, createDictation, MessageComposer } from "./composer";
@@ -8,7 +8,7 @@ import { createBodyMark, createTicker, createUnsent } from "./freshness";
 import { A, Count, createFollow, I, Loading, MenuItem, Modal, Pop } from "./kit";
 import { ActionBar, Toolbar } from "./layout";
 import type { Route } from "./router";
-import { clock } from "./selectors";
+import { clock, refusalReason } from "./selectors";
 import { displayStep, feedOf, isHiddenActivity, oneRowPerCall, stepFailed, viewOfActivity, type FeedItem, type FeedRun } from "./tool-names";
 import { contextLine, duration, elapsedOf, isFinished, recordedCoordinatorRoute, tokens, verificationFace, workerState, type SessionModel } from "./session-model";
 
@@ -26,6 +26,10 @@ export function WorkingIndicator(props: { activity?: Activity[] }) {
     return "Working…";
   };
   return <div class="ws-working" role="status" aria-live="polite"><I n="loader" s={12} class="spin" /><span>{label()}</span></div>;
+}
+/** The same last line while the task waits for the owner's answer and nothing runs: the header's state, not a spinner. */
+export function WaitingIndicator() {
+  return <div class="ws-working ws-waiting" role="status" aria-live="polite"><I n="question" s={12} class="st-warn" /><span>Waiting for you</span></div>;
 }
 
 export const CHECK_ICON: Record<Check["outcome"], { icon: string; tone: string }> = {
@@ -111,7 +115,7 @@ function StepExtra(props: { a: Activity; w: Worker; onStopCommand: (a: Activity)
       <Show when={a().output}>{out => <><div class="ev-dh">Output</div><OutputBox label="Output">{out()}</OutputBox></>}</Show>
     </div></Show>
     <Show when={a().rows}>{rows => <div class="card2"><div class="toolrows"><For each={rows()}>{r => <div><I n={r.icon} s={12} class="faint" /><code>{r.code}</code><span class="r">{r.note}</span></div>}</For></div></div>}</Show>
-    <Show when={!detail() && a().diff}>{d => <OutputBox label="Diff" class="diff"><For each={d().lines}>{line => <div class={line.startsWith("@@") ? "h" : line.startsWith("+") ? "a" : line.startsWith("-") ? "d" : undefined}>{line}</div>}</For></OutputBox>}</Show>
+    <Show when={!detail() && a().diff}>{d => <DiffBox label="Diff" lines={d().lines} />}</Show>
     <Show when={!detail() && (a().command?.tail || a().command?.state === "running")}>
       <OutputBox label="Command output" class="tail">{a().command!.tail || "Waiting for output…"}</OutputBox>
     </Show>
@@ -124,11 +128,13 @@ function ActivityStep(props: { a: Activity; w: Worker; state: OpenState; onStopC
   const a = () => props.a;
   const view = createMemo(() => viewOfActivity(a()));
   const failed = () => stepFailed(a());
-  const hasExtra = () => !!a().rows || a().command?.state === "running" || (!displayStep(a().args) && !!(hasInput(a().args) || a().output || a().diff || a().command?.tail));
+  // An edit with no recorded lines is its path and counts on one plain row: it opens on nothing.
+  const hasExtra = () => !!a().rows || a().command?.state === "running" || (!displayStep(a().args) && !!(hasInput(a().args) || a().output || a().diff?.lines.length || a().command?.tail));
   const status = () => a().command ? commandStatus(a()) : null;
   return <StepRow view={view()} taskId={props.w.taskId} tone={failed() ? "st-bad" : a().command?.state === "running" ? "st-run" : undefined} icon={failed() ? "alert" : undefined} hasExtra={hasExtra()} state={props.state} stateKey={`step:${a().sequence}`} extra={<StepExtra a={a()} w={props.w} onStopCommand={props.onStopCommand} />}
     status={<>
       <Show when={a().note}><span class="st st-ok"><I n="check-circle" s={12} />{a().note}</span></Show>
+      <Show when={a().refusal}>{code => <span class="st st-bad">Refused: {refusalReason(code())}</span>}</Show>
       <Show when={a().diff}>{d => <span class="tnum"><span class="add">+{d().add}</span> <span class="del">−{d().del}</span></span>}</Show>
       <Show when={status()?.text}><span class={`st ${status()!.tone}`}><Show when={status()!.icon}><I n={status()!.icon!} s={12} class={status()!.spin ? "spin" : undefined} /></Show>{status()!.text}</span></Show>
     </>} />;
@@ -180,6 +186,7 @@ function WorkerComposer(props: { model: Accessor<SessionModel>; w: Worker }) {
   // The worker's recorded model and effort: read-only, because a message never changes a worker's route.
   const route = () => ws.route(props.w.route);
   return <MessageComposer label={`Message ${props.w.role}`} placeholder={direct() ? `Message ${props.w.role} directly…` : `Message ${props.w.role}…`} text={text()} onText={write} files={files} mic={mic} off={closed()}
+    attachOff={direct() && !ws.can(FEATURES.workerAttachments) ? "Files can't be sent to one worker. Attach them to a message about the task instead." : undefined}
     effect={direct() ? `To ${props.w.role}, this attempt only. It does not widen scope or access.` : `To the coordinator about ${props.w.role}. It decides how to pass it on and does not widen scope or access.`}
     route={<div class="c-route"><Show when={route()}>{r => <span class="sel mc-fixed" role="note" aria-label={`Recorded model: ${r()}`}><I n="cpu" s={14} /><span class="sel-t">{r()}</span></span>}</Show></div>}
     delivery={<Show when={direct()}>
@@ -253,7 +260,7 @@ function joinStreamedText(list: Activity[]): Activity[] {
 }
 
 /** Everything a worker did, newest at the bottom. New events never move the reader; Follow and the pill bring them back. */
-function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: boolean }) {
+function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: boolean; onAsk?: () => void }) {
   const ws = useWs();
   const [finding, setFinding] = createSignal(false);
   const [needle, setNeedle] = createSignal("");
@@ -295,6 +302,15 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
   const [height, setHeight] = createSignal(0);
   let dock!: HTMLDivElement;
   reportHeight(() => dock, setHeight);
+  // A row or block the reader opens stays in view: following the end would otherwise scroll it up and away as it grows.
+  // A plain listener, not a click target of its own: it only watches the rows' own toggles, after they have run.
+  const keepOpenedInView = (e: MouseEvent) => {
+    const toggle = (e.target as Element | null)?.closest?.("button[aria-expanded]");
+    if (!toggle || !scroller?.contains(toggle)) return;
+    queueMicrotask(() => {
+      if (toggle.isConnected && toggle.getAttribute("aria-expanded") === "true") follow.reveal(toggle.closest(".step, .fold-block") ?? toggle, height() + 16);
+    });
+  };
   const nextCursor = () => cursor() === undefined ? props.w.activityCursor : cursor();
   const loadOlder = async () => {
     const next = nextCursor();
@@ -328,7 +344,7 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
   // Rows keep their keys through a streaming update, so a new event only appends.
   const keys = createMemo(() => shown().map(x => x.key), undefined, { equals: (a, b) => a.length === b.length && a.every((k, i) => k === b[i]) });
   // Each row reads its own entry, which is told only when that entry changed: an update to one row of a long feed wakes
-  // that row, not every row (test/scroll-perf.py, `-live`).
+  // that row, not every row (test/scroll-perf.driver.mjs, `-live`).
   const slots = new Map<string, { get: Accessor<FeedItem<Activity> | undefined>; set: Setter<FeedItem<Activity> | undefined> }>();
   const slot = (key: string) => {
     let held = slots.get(key);
@@ -361,32 +377,47 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
       <button class="ib" aria-label="Find in this activity" aria-pressed={finding()} onClick={() => { if (finding()) setNeedle(""); setFinding(!finding()); }}><I n="search" s={14} /></button>
       <Show when={!isFinished(props.w)}><label class="sw-l"><span class="sw"><input type="checkbox" aria-label="Follow new activity" checked={follow.following()} onChange={e => follow.set(e.currentTarget.checked)} /><i></i></span>Follow</label></Show>
     </>} />
-    <div class="stream" ref={scroller} style={{ "--dock-clear": `${height() + 16}px` }} onScroll={follow.onScroll}><div class="stream-in">
+    <div class="stream" ref={el => { scroller = el; el.addEventListener("click", keepOpenedInView); }} style={{ "--dock-clear": `${height() + 16}px` }} onScroll={follow.onScroll}><div class="stream-in">
       {rows()}
-      <Show when={isFinished(props.w) && !props.readOnly}><Finished w={props.w} /></Show>
+      <Show when={isFinished(props.w) && !props.readOnly}><Finished w={props.w} onAsk={props.onAsk} /></Show>
     </div></div>
     <div class="dock-w" ref={dock}><Pill follow={follow} /><Show when={!isFinished(props.w) && !props.readOnly}><WorkerComposer model={props.model} w={props.w} /></Show></div>
     <StopCommand target={command()} onClose={() => setCommand(null)} />
   </>;
 }
+/** The follow pill stands in its own opaque band above the composer, a row the timeline reserves below its content: it never
+ *  lies over an option, a result footer or any other control, which scroll behind the band as they do behind the composer. */
 export const Pill = (props: { follow: ReturnType<typeof createFollow> }) => <Show when={!props.follow.following()}>
-  <button class="new-pill ws-pill" onClick={() => props.follow.jump()}><I n="arrow-down" s={12} />{props.follow.missed() ? `${props.follow.missed()} new` : "Latest"}</button>
+  <div class="pill-band"><button class="new-pill ws-pill" onClick={() => props.follow.jump()}><I n="arrow-down" s={12} />{props.follow.missed() ? `${props.follow.missed()} new` : "Latest"}</button></div>
 </Show>;
 
 type TaskRoute = Extract<Route, { name: "task" }>;
+/** A goal longer than this shows its first lines with a way to read the rest, so the activity below keeps its room. */
+const GOAL_FOLD_CHARS = 280, GOAL_FOLD_LINES = 4;
+export const longGoal = (goal: string) => goal.length > GOAL_FOLD_CHARS || goal.split("\n").length > GOAL_FOLD_LINES;
 function Head(props: { w: Worker; now: number; onStop: () => void }) {
   const ws = useWs();
+  const [goalOpen, setGoalOpen] = createSignal(false);
+  createEffect(on(() => props.w.id, () => setGoalOpen(false)));
+  const folds = () => longGoal(props.w.goal);
   return <div class="d-h">
     <div class="d-title">{props.w.role}<Face w={props.w} />
       <span class="act">
         <Show when={props.w.status === "working" || props.w.status === "waiting_you"}><button class="btn btn-line btn-sm" {...ws.needs("stop_worker")} onClick={() => { if (!ws.gate("stop_worker")) props.onStop(); }}>Stop worker…</button></Show>
       </span></div>
-    <div class="d-goal"><ResultText breaks text={props.w.goal} /></div>
+    <div class={`d-goal${folds() ? goalOpen() ? " ws-goal-open" : " ws-goal-folded" : ""}`} id={`goal-${props.w.id}`}><ResultText breaks text={props.w.goal} /></div>
+    <Show when={folds()}><button class="lnk ws-goal-toggle" aria-expanded={goalOpen() ? "true" : "false"} aria-controls={`goal-${props.w.id}`} onClick={() => setGoalOpen(!goalOpen())}>{goalOpen() ? "Show less of the goal" : "Show the whole goal"}</button></Show>
     <Grid w={props.w} now={props.now} />
   </div>;
 }
 
-function Finished(props: { w: Worker }) {
+/** The one-line reason a worker with no result ended, from what the runtime recorded. */
+const noResult = (ended: Worker["endedReason"]) => ended === "stopped_by_owner" ? "You stopped this worker before it reported a result."
+  : ended === "cancelled_by_coordinator" ? "The coordinator cancelled this worker (the plan changed) before it reported a result."
+  : ended === "worker_lost" ? "This worker was lost (the service restarted or its engine session ended) before it reported a result."
+  : "This worker reported no result.";
+
+function Finished(props: { w: Worker; onAsk?: () => void }) {
   const ws = useWs();
   const r = () => props.w.result;
   const face = () => workerState(props.w);
@@ -433,8 +464,9 @@ function Finished(props: { w: Worker }) {
       </div>
     </Modal>
     <div class="rcard ws-worker-result">
-      <div class="rcard-h"><I n={face().icon} s={14} class={face().tone === "st-idle" ? "faint" : face().tone} />Worker result<Show when={r()?.reportId}><span class="r"><button class="btn btn-line btn-sm" onClick={() => void read()}>Open report</button></span></Show></div>
-      <div class="rcard-b"><ResultText text={r()?.summary ?? "This worker reported no result."} /></div>
+      <div class="rcard-h"><I n={face().icon} s={14} class={face().tone === "st-idle" ? "faint" : face().tone} />{r()?.outcome === "failed" ? "Reported failure" : "Worker result"}<Show when={r()?.reportId}><span class="r"><button class="btn btn-line btn-sm" onClick={() => void read()}>Open report</button></span></Show></div>
+      <div class="rcard-b"><ResultText text={r()?.summary ?? noResult(props.w.endedReason)} />
+        <Show when={props.w.resultRefusals}>{x => <div class="cap st-bad ws-mt4">{`Its result was refused ${x().count === 1 ? "once" : `${x().count} times`}: ${refusalReason(x().code)}.`}</div>}</Show></div>
       <div class="res-sec"><div class="res-h">Checks</div>
         <Show when={(r()?.checks.length ?? 0) > 0} fallback={<div class="cap muted">No checks reported.</div>}>
           <For each={r()!.checks}>{c => <div class="chk"><I n={CHECK_ICON[c.outcome].icon} s={14} class={CHECK_ICON[c.outcome].tone} /><span>{c.name}<Show when={c.outcome === "not_run" || c.outcome === "unverified" || c.outcome === "failed"}> <span class="faint">{c.detail}</span></Show></span><span class="src">{checkSource(c, ws.t("unsourcedCheck"))}</span></div>}</For>
@@ -448,6 +480,8 @@ function Finished(props: { w: Worker }) {
         <div class="res-sec"><div class="res-h">Attempts</div>
           <For each={r()!.attempts}>{a => <div class="chk"><I n={a.ok ? "check-circle" : "x-circle"} s={14} class={a.ok ? "st-ok" : "st-bad"} /><span>Attempt {a.n} <span class="faint">{a.detail}</span></span><span class="src">{a.at === null ? "" : clock(a.at)}</span></div>}</For></div>
       </Show>
+      {/* On the result card itself, never floating over it: a floating button covered the result's last lines (its checks). */}
+      <Show when={props.onAsk}><div class="res-sec ws-worker-ask"><button class="btn btn-line btn-sm" onClick={() => props.onAsk?.()}>Ask about this worker</button></div></Show>
     </div>
   </>;
 }
@@ -527,8 +561,7 @@ export function WorkerPane(props: { model: Accessor<SessionModel>; pick: string;
     return <>
       <Head w={w()} now={props.now} onStop={() => setStopping(w())} />
       <Show when={w().status === "waiting_you"}><div class="res-sec">Answer the open question in Conversation.</div></Show>
-      <Stream model={props.model} w={w()} />
-      <Show when={isFinished(w())}><div class="d-dock"><button class="btn btn-line" onClick={() => ask(w())}>Ask about this worker</button></div></Show>
+      <Stream model={props.model} w={w()} onAsk={() => ask(w())} />
     </>;
   };
   // A pane rebuilds only when it shows a different worker or kind of worker: the composer and scroll position must survive new events.

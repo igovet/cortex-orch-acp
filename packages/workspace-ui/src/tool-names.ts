@@ -3,10 +3,10 @@
  * the screen says "Read" or "Read skill", the same words the Paseo plugin uses. Bookkeeping that is not work, such as
  * context-window updates or thinking, is left out of the activity. Nothing is deleted: this is presentation only.
  */
-import { presentToolSemantics } from "../../../integrations/paseo/shared/tool-presentation";
-import { chatToolIcon, nativeRow, summarizeToolRun } from "../../../integrations/paseo/client/worker-panel-groups";
-import { isHiddenOperation } from "../../../integrations/paseo/shared/timeline-visibility";
-// Which calls appear and every name come directly from Paseo's shared modules, so both clients show the same rows.
+import { presentToolSemantics } from "@cortex/workspace-domain/tool-presentation";
+import { chatToolIcon, nativeRow, summarizeToolRun } from "@cortex/workspace-domain/worker-panel-groups";
+import { isHiddenOperation } from "@cortex/workspace-domain/timeline-visibility";
+// Framework-free domain presentation keeps both clients' rows consistent without importing a host plugin.
 const MCP = /^(?:mcp__(.+?)__|mcp\.([^.\s]+)\.)([A-Za-z0-9_-]+)\s*(.*)$/s;
 
 /** The call's own name without its server, or null when the text is not a tool name. */
@@ -36,28 +36,55 @@ export function isHiddenStep(text: string): boolean {
   return isHiddenOperation(name);
 }
 
-export type DisplayStep = { title?: string; callId?: string; kind?: string; status?: string; path?: string; command?: string; query?: string; ref?: string; oldText?: string; newText?: string; output?: string; notice?: string };
+/** Native activity names the role before the engine's own title ("orchestrator: mcp__cortex__plan_submit", "worker-frontend-dev:
+ * Edit a.ts"). The row is the call's, so its name and kind come from the title after it. */
+const ROLE = /^(?:orchestrator|worker-[a-z0-9]+(?:-[a-z0-9]+)*):\s+(?=\S)/;
+export const bareTitle = (title: string) => title.replace(ROLE, "");
+export type DisplayStep = { title?: string; callId?: string; kind?: string; status?: string; path?: string; command?: string; query?: string; ref?: string; oldText?: string; newText?: string; output?: string; notice?: string; failure?: string };
 export const STEP_PREFIX = "Workspace step: ";
 /** Only the helper's selected presentation fields, never raw protocol JSON. */
 export function displayStep(text?: string): DisplayStep | null {
   if (!text) return null;
   const body = text.startsWith(STEP_PREFIX) ? text.slice(STEP_PREFIX.length) : text;
   // Only an object is a step. Anything else would throw in JSON.parse, and a long feed asks this of every row on every
-  // streamed update: thousands of thrown errors were most of an update's cost (test/scroll-perf.py, `-live`).
+  // streamed update: thousands of thrown errors were most of an update's cost (test/scroll-perf.driver.mjs, `-live`).
   if (body.trimStart()[0] !== "{") return null;
   try {
     const value = JSON.parse(body);
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     const out: DisplayStep = {};
-    for (const key of ["title","callId","kind","status","path","command","query","ref","oldText","newText","output","notice"] as const)
-      if (typeof value[key] === "string") out[key] = value[key];
+    for (const key of ["title","callId","kind","status","path","command","query","ref","oldText","newText","output","notice","failure"] as const)
+      if (typeof value[key] === "string") out[key] = key === "title" ? bareTitle(value[key]) : value[key];
     return out;
   } catch { return null; }
 }
-/** Whether opening a step shows something its row does not: what was sent, what came back, or a diff. A path or a query alone is already on the row. */
-export const stepHasContent = (d: DisplayStep) => !!(d.command || d.output || d.newText || d.oldText);
+/** Whether opening a step shows something its row does not: what was sent, what came back, a diff or why it was refused. A
+ *  path or a query alone is already on the row. */
+export const stepHasContent = (d: DisplayStep) => !!(d.command || d.output || editDiff(d) || d.failure?.trim());
 
-/** The kinds and icons of the Paseo plugin's rows (integrations/paseo/client/worker-panel-groups.ts): eye for reads, pencil for edits, a terminal for commands. */
+export type EditDiff = { add: number; del: number; lines: string[] };
+const textLines = (text?: string) => text ? text.replace(/\r?\n$/, "").split(/\r?\n/) : [];
+/**
+ * An edit as the lines it changed, with up to three unchanged lines around them: the step's recorded old and new text (an
+ * edit's replaced and replacement text, or a write's whole text), or null when nothing changed or nothing was recorded. Lines
+ * read `+`, `-` or ` ` as in a unified diff, so the Conversation and a worker's page draw them the same way.
+ */
+export function editDiff(d: Pick<DisplayStep, "oldText" | "newText">): EditDiff | null {
+  const old = textLines(d.oldText), next = textLines(d.newText);
+  let head = 0;
+  while (head < old.length && head < next.length && old[head] === next[head]) head++;
+  let tail = 0;
+  while (tail < old.length - head && tail < next.length - head && old[old.length - 1 - tail] === next[next.length - 1 - tail]) tail++;
+  const removed = old.slice(head, old.length - tail), added = next.slice(head, next.length - tail);
+  if (!removed.length && !added.length) return null;
+  const before = old.slice(Math.max(0, head - 3), head), after = old.slice(old.length - tail, old.length - tail + 3);
+  return { add: added.length, del: removed.length, lines: [...before.map(l => ` ${l}`), ...removed.map(l => `-${l}`), ...added.map(l => `+${l}`), ...after.map(l => ` ${l}`)] };
+}
+/** The project folder itself, as a read names it (`.`): it reads as words, never as a one-character link. */
+export const isProjectRoot = (path?: string) => path !== undefined && /^\.?\/?$/.test(path.trim());
+export const PROJECT_ROOT = "project root";
+
+/** The kinds and icons of the Paseo plugin's rows (workspace-domain/worker-panel-groups.ts): eye for reads, pencil for edits, a terminal for commands. */
 export type StepKind = "read" | "edit" | "shell" | "search" | "other";
 type PresentedEvent = Parameters<typeof nativeRow>[0];
 export type StepView = { kind: StepKind; icon: string; label: string; target: string; detail: DisplayStep | null; event?: PresentedEvent };
@@ -71,7 +98,8 @@ export function viewOfDetail(d: DisplayStep): StepView {
     tool_kind: d.kind, raw_input: { path: d.path, command: d.command, query: d.query, report_id: d.ref, skill: d.ref } };
   const row = nativeRow(event), icon = chatToolIcon(event);
   const kind: StepKind = icon === "Eye" ? "read" : icon === "Pencil" ? "edit" : icon === "SquareTerminal" ? "shell" : icon === "Search" ? "search" : "other";
-  return { ...view(kind, row.label, row.summary ?? (kind === "search" ? d.query ?? "" : ""), d), event };
+  const target = row.summary ?? (kind === "search" ? d.query ?? "" : "");
+  return { ...view(kind, row.label, kind === "read" && isProjectRoot(target) ? PROJECT_ROOT : target, d), event };
 }
 /** A step named in words: its first word still tells a read from an edit. */
 function named(text: string, detail: DisplayStep | null = null): StepView {
@@ -85,7 +113,8 @@ function named(text: string, detail: DisplayStep | null = null): StepView {
 /** A Conversation step: a recorded detail or a name already in words. */
 export function viewOfText(text: string): StepView {
   const detail = displayStep(text);
-  return detail ? viewOfDetail(detail) : isToolName(text) ? viewOfDetail({title:text}) : named(toolLabel(text));
+  const bare = bareTitle(text);
+  return detail ? viewOfDetail(detail) : isToolName(bare) ? viewOfDetail({title:bare}) : named(toolLabel(bare));
 }
 export const stepLabel = (s: DisplayStep) => viewOfDetail(s).label;
 
@@ -113,12 +142,14 @@ type Step = { sequence: number; text: string; kind: string; at: number | null; e
 /** One recorded activity as a step row. */
 export function viewOfActivity(a: Step): StepView {
   const detail = displayStep(a.args) ?? displayStep(a.text);
-  if (detail) return viewOfDetail({...detail, title: isToolName(a.text) ? a.text : detail.title});
-  const raw = isToolName(a.text) ? a.text : a.code && isToolName(a.code) ? a.code : null;
+  const text = bareTitle(a.text);
+  if (detail) return viewOfDetail({...detail, title: isToolName(text) ? text : detail.title});
+  const raw = isToolName(text) ? text : a.code && isToolName(a.code) ? a.code : null;
   if (raw) return viewOfDetail({title:raw});
   if (a.command) return view("shell", "Shell", a.text);
-  if (a.kind === "edit") return view("edit", "Edit", a.code ?? a.text);
-  const step = named(a.text);
+  // A recorded edit names its file, so its row opens that file in Code like any edit row.
+  if (a.kind === "edit") return view("edit", "Edit", a.code ?? a.text, a.code ? { path: a.code } : null);
+  const step = named(text);
   return { ...step, target: a.code && !IDENTIFIER.test(a.code.trim()) ? a.code : step.target };
 }
 // Recorded activity is never changed in place, so what was decided about a record holds for as long as the record lives.
@@ -133,7 +164,9 @@ export const isHiddenActivity = (a: Pick<Step, "text" | "code" | "args">) => {
   return out;
 };
 export const isFoldedStep = (a: Pick<Step, "kind" | "text" | "code">) => ["tool", "tools", "edit", "command"].includes(a.kind) || (a.kind === "note" && (isToolName(a.text) || IDENTIFIER.test(a.text.trim()) || (!!a.code && isToolName(a.code))));
-export const stepFailed = (a: Pick<Step, "error" | "args" | "command">) => a.error === true || a.command?.state === "failed" || displayStep(a.args)?.status === "failed";
+/** A recorded step that failed or was refused: a refusal's reason marks it as one even when the engine called it completed. */
+export const detailFailed = (d: DisplayStep | null) => d?.status === "failed" || !!d?.failure?.trim();
+export const stepFailed = (a: Pick<Step, "error" | "args" | "command">) => a.error === true || a.command?.state === "failed" || detailFailed(displayStep(a.args));
 
 export type FeedRun<A> = { items: A[]; views: StepView[]; text: string; loading: boolean };
 export type FeedItem<A> = { key: string; item: A } | { key: string; run: FeedRun<A> };
@@ -165,7 +198,7 @@ export function oneRowPerCall<A extends Step>(list: readonly A[]): A[] {
  * the bounded live window or older steps load above it. Without it a growing block would be a new block on every update.
  * `previous` is the last result: an entry that would say the same again is that object, built no second time, so a streamed
  * update costs and redraws only the rows it changed. (Rebuilding every row's views on every update dropped frames in a long
- * feed; test/scroll-perf.py measures it with `-live`.)
+ * feed; test/scroll-perf.driver.mjs measures it with `-live`.)
  */
 export function feedOf<A extends Step>(list: readonly A[], runIds?: Map<number, string>, previous?: ReadonlyMap<string, FeedItem<A>>): FeedItem<A>[] {
   const out: FeedItem<A>[] = [], used = new Set<string>();

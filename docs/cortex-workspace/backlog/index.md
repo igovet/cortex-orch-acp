@@ -1,5 +1,7 @@
 # Planned implementation backlog
 
+> Source and test references in these items name modules, scripts and tests of the former Python runtime (removed on 2026-11-16); they appear as "the former ..." and are history that the item still has to be re-grounded against the Rust runtime. Commands in acceptance sections that name removed Python tools are not current commands: use `scripts/cortex-xtask.sh` and `scripts/cortex-paseo-tools.sh` equivalents (see the verification page).
+
 Gate D passed on 2026-11-05: the owner accepted the clickable browser prototype, whose phases P0 to P6 are built as mock-only, unqualified code. CW-D05 is closed; CW-D08 is not built. Existing first-round mocks are historical. Mobile is deferred by the owner decision of 2026-11-05: CW-M03 (Gate M) gates only the Android and phone-only items and the items that depend on them, and desktop items no longer depend on it. The mock screens for CW-U01 to CW-U15 exist in the prototype to the extent recorded in CW-D02; every production CW-U item remains Planned. The local desktop slice (CW-S01 to CW-S12) is the first implementation; the other milestones follow the [roadmap](../roadmap.md). P05 is post-v1. See [format](format.md) and [roadmap](../roadmap.md).
 
 Each backlog file appears exactly once: 114 active items, 2 archived explorations and 7 retired split parents. The 19 split successors are listed as separate active items (CW-C02a/b, CW-F02a/b, CW-G05a/b, CW-I04a/b/c, CW-Q01a/b, CW-Q02a/b, CW-Q03a/b, CW-Q04a/b, CW-Q06a/b). CW-C02 and CW-F02 remain as S-size roll-up records that depend on their successors. The 12 local slice items CW-S01 to CW-S12 were added on 2026-11-05; the S family is new because the slice crosses the C, F, H, I and U families.
@@ -14,7 +16,7 @@ Owner decisions of 2026-11-05 that change backlog items: attachments by drag and
 | [CW-A02](CW-A02.md) | Android decision detail, discussion and desktop-synchronized outcomes | 3+ | CW-A01, CW-C03, CW-C08, CW-P02 | L | Planned |
 | [CW-A03](CW-A03.md) | Android result screens and file-edit WebView host | 3+ | CW-A02, CW-C07, CW-I05 | L | Planned |
 | [CW-A04](CW-A04.md) | Android credential storage and measured background connection | 3+ | CW-A01, CW-N03, CW-N04 | M | Planned |
-| [CW-C01](CW-C01.md) | Versioned schemas, capabilities and generated TS/Python contract fixtures | 3+ | CW-F04 | L | Planned |
+| [CW-C01](CW-C01.md) | Versioned schemas, capabilities and generated TS/Rust contract fixtures | 3+ | CW-F04 | L | Planned |
 | [CW-C02](CW-C02.md) | Roll-up: public project outbox and atomic snapshot cursor | 3+ | CW-C02a, CW-C02b | S | Planned |
 | [CW-C02a](CW-C02a.md) | Public project outbox appended in the same transaction as runtime state changes | 3+ | CW-C01 | M | Planned |
 | [CW-C02b](CW-C02b.md) | Atomic snapshot cursor, bounded replay, gap detection and resync | 3+ | CW-C02a | L | Planned |

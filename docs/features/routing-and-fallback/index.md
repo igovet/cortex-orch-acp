@@ -1,9 +1,50 @@
 # Automatic routing, mixed teams, and authorized fallback
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 > **Current contract:** former built-in name/family/position-based model rules described in historical sections below are removed. Current automatic and coordinator routing requires explicit version-2 owner settings and observed catalog identities. See [settings-only routing](#settings-only-routing).
+
+The additive Rust host now serves the native route menu and plan model-hint
+previews and performs settings-based worker selection with retained consent.
+Its static legacy consent matrices and preview/dispatch checks are described in
+[native incoming ACP](../../project/native-incoming-acp.md#native-routing-and-retained-consent).
+They cover request/selection grammar, source-bound effort and root instruction
+requirements; they do not qualify live accounts or installed-client cutover.
+
+Workspace's explicit model-list refresh has a
+[read-only native prelaunch subset](../../configuration.md#native-prelaunch-catalog-refresh).
+With an existing private owner lock and qualified cached projection, an empty
+registry, wholly null/empty/relative launch commands, or qualified
+[OpenCode pre-probe rejections](../../configuration.md#opencode-pre-probe-rejection)
+return failed attempts and the cached catalog without starting an engine or
+publishing snapshots. The additional
+[launch-capable producer](../../configuration.md#native-launch-capable-catalog-producer)
+observes Codex/Claude direct commands, qualified two-argument Codex/Claude installs
+and native-account/API-key secret-file connections. It publishes immutable
+snapshots under the shared owner lock and revision fences. The exact-hash Codex
+2.3.0 bundle is patched and observed natively. Potentially usable OpenCode
+installs, unqualified Codex/Claude candidates, unsafe names/roots, missing locks
+and unqualified projections refuse the whole request before effects. OS-keyring
+API-key launches also refuse: the Rust host has no native OS keyring backend. Qualified
+Codex npm installs resolve nested/hoisted dependencies and overlay offline
+debug-model efforts after real ACP observation. Their catalog launcher uses the
+compiled Rust service as a native Linux shebang interpreter, not a shell or any
+other interpreter. Safe legacy artifacts migrate atomically without replay.
+Unsupported interpreter paths refuse; unqualified output refuses without replay.
+Keyring validation follows the same rule: stale-revision refusals remain native,
+and valid requests refuse. The comparisons that earlier covered this paragraph
+(62 and 39 and 32 recorded captures of the former Python provider) were frozen
+as golden outcomes; the Python provider can no longer be run. Installer/onboarding
+requests that were refused before any effect (unsupported or OpenCode
+`install_engine`; missing opt-in, invalid revision or name for `onboard_opencode`)
+are native. Pinned Codex/Claude installation (Settings **Download engine**) is
+native too; so is OpenCode onboarding when no OpenCode binary candidate exists
+(owner lock, revision check, then `opencode_not_found`). With a candidate,
+OpenCode discovery and onboarding refuse with `config_api_unavailable`, because
+the version probe must run in the OpenCode network-less namespace sandbox, which
+the Rust host does not provide. This neither completes Settings migration nor
+changes route authorization.
 
 The Paseo Routing editor keeps stored pins, automatic memberships, tiers and
 preferences when a model is switched off. They are configuration, not proof that
@@ -36,7 +77,7 @@ The runtime-created mandatory review node has no plan hint. When a user message
 names a model for review or audit ("Ревью делай через sonnet", "за аудит отвечает
 Opus"), that model is its hint and routes as an explicit user request, ahead of pins
 and preferences (`auto_route.user_purpose_model_request`, applied in
-`orchestration.state.attempt_routing` to every node without an exact hint, by the
+`attempt_routing` to every node without an exact hint, by the
 role's purpose: review/audit, design/UI/UX, tests/QA, docs, security, accessibility,
 backend, frontend, devops/deploy, debugging, architecture, refactoring, planning). The
 newest user sentence naming that purpose decides; a refusal there, or two models for
@@ -71,17 +112,16 @@ deny/provider authorization, unconfigured identities, engine unavailability and
 exhausted quota, which refuse visibly (`user_requested_route_unavailable`)
 without substitution (`auto_route.project_instruction_model_request` and
 `auto_route.project_instruction_route`, applied in
-`orchestration.state.attempt_routing` and the plan preview).
+`attempt_routing` and the plan preview).
 The runtime-created mandatory reviewer has no plan hint, but receives this same
 requirement. It overrides the opposite-provider review preference too. The live
 adapter resolves it at engine-open time, before capacity reservation or engine
-manager creation (`delegation.live_adapters.EngineSessionManagerAdapter.open`
+manager creation (the runtime
 and `_resolve_runtime_route`); an unavailable required model refuses rather than
 starting a different reviewer and relying on it to request replanning.
 
 - **Sources.** Only `AGENTS.md` and `CLAUDE.md` at the project root, the files the
-  runtime already hands workers as project rules
-  (`delegation.live_adapters.PROJECT_RULE_FILES`): regular, non-symlink UTF-8
+  runtime already hands workers as project rules: regular, non-symlink UTF-8
   files, read to the same 64 000-character bound. Nested copies, README files,
   reports, tool output and coordinator `model_reason` never count.
 - **Only the owner's version counts.** A task's own writing workers can edit these
@@ -182,9 +222,10 @@ rule naming a dotted identity, `All audits and reviews must use
 codex-acp/gpt-6.1-sol.`, still granted nothing and the mandatory reviewer ran
 on another model: the period inside `gpt-6.1-sol` split the rule into fragments
 that named no model. Labels without dots (Sol, Luna) were unaffected.
-Before a run, `python3 -B scripts/cortex_paseo_dev.py route-preflight --route
-ENGINE/MODEL[:EFFORT]` reads only the dev profile's routing policy and exits 1
-with a visible refusal for the following policy mismatches:
+The former dev-wrapper `route-preflight` (removed on 2026-11-16 without replacement) read only
+the dev profile's routing policy and refused for the following policy mismatches, which
+a requested run must still check by hand against the owner-selected settings
+before it starts:
 
 - `review_route_not_pinned`: no pin applies to the reviewer;
 - `review_route_pin_mismatch` or `review_effort_mismatch`: the applicable pin
@@ -194,9 +235,8 @@ with a visible refusal for the following policy mismatches:
 - `selected_effort_conflicts_with_policy`: execution or reviewer effort is
   outside configured policy even when the pin text matches.
 
-It never refreshes quota or connection data, never grants consent and never
-writes. Availability, quota and a task's ceiling are checked again at dispatch
-(`src/cortex_runtime/routing/stage_preflight.py`).
+The check never refreshed quota or connection data, never granted consent and never
+wrote. Availability, quota and a task's ceiling are checked again at dispatch.
 
 ### Explicit effort preservation
 
@@ -210,7 +250,7 @@ replaces the earlier selection; a newer model refusal revokes it. Conflicting
 efforts for the same model in one source refuse as ambiguous. State one exact
 model-and-effort selection rather than relying on distant prose.
 
-`routing.auto_route.user_model_request` binds the effort to the existing
+`user_model_request` binds the effort to the existing
 `source_ref`; no plan effort field is needed. `choose` preserves it within
 observed support and the configured model policy, including quality retries,
 infrastructure retries and review fixes. Deep-tier `high` is an automatic
@@ -240,7 +280,7 @@ policy, refusing `selected_effort_conflicts_with_policy` even when the reviewer
 pin text matches the requested route. It does **not** inspect live engine
 support, grant a user request, configure a coordinator, or prove specialist
 readiness. Check exact native confirmations at each stage; see
-[dev preflight](../../project/dev-environment.md#route-preflight-before-a-paid-cli-run).
+[removed qualification tooling](../../project/dev-environment.md#removed-python-era-qualification-tooling).
 
 Critical roles require qualified instruction delivery for the exact engine
 version. Dispatch excludes unregistered Claude versions before engine launch.
@@ -249,7 +289,7 @@ unavailability and fences that task's engine/version across models and
 connections, rather than escalating to a different model on the same unusable
 adapter. An updated qualified version does not inherit the refusal. Existing
 authorization, pins and user-requested identities still apply; an unavailable
-pin is refused, not substituted. See [exact Claude support](../claude-engine/index.md#current-support-0880-2026-10-08). The owner-requested Desktop run on 0.88.0 (2026-10-08) is bounded evidence, not clean qualification: Desktop evidence.
+pin is refused, not substituted. See [exact Claude support](../claude-engine/index.md#previous-support-0880-2026-10-08). The owner-requested Desktop run on 0.88.0 (2026-10-08) is bounded evidence, not clean qualification: Desktop evidence.
 
 This automatic worker selection is separate from configured coordinator routes
 and from the explicitly authorized fallback path described below. Legacy
@@ -326,7 +366,7 @@ See [affinity-bound frontend design](#affinity-bound-frontend-design) and the
 
 ## Affinity-bound frontend design
 
-`implementation_frontend_design` is affinity-bound in `routing.auto_route`.
+`implementation_frontend_design` is affinity-bound in `auto_route`.
 Initial attempts, quality retries, escalations and review fixes use the inherited
 work kind and only the effective affinity engine (Claude in the current preset).
 On that engine, eligible `preferred_for` routes remain preferred independently of
@@ -388,10 +428,10 @@ No-prompt ACP configuration success does not establish paid model execution.
 
 ## Route profile: the authorized route set
 
-`configuration.policy.RouteProfile` (persisted per configuration revision
+`RouteProfile` (persisted per configuration revision
 in the new `configuration_route_extras` table — see
-`routing.store.insert_route_extras_tx`, written in the same transaction as
-`configuration.service.ConfigurationService.propose`'s own revision
+`insert_route_extras_tx`, written in the same transaction as
+the runtime's own revision
 insert) is one of:
 
 - **Default (single-route inheritance)** — `RouteProfile()`
@@ -407,14 +447,14 @@ insert) is one of:
   coordinator route when absent; an empty set
   for a role means that role may never be dispatched at all.
 
-`routing.authorization.allowed_routes_for_role` additionally narrows
+`allowed_routes_for_role` additionally narrows
 whatever the profile grants by the effective `PolicyCeiling.allowed_routes`
 at the same layer — a profile can name a route the ceiling has since
 tightened away, but it is never actually authorized. `propose()` itself
 also rejects, atomically, any profile that names a route outside the
 ceiling being written.
 
-`configuration.service.ConfigurationService.resolve_worker` is the
+`resolve_worker` is the
 authoritative role→route resolver: an `explicit_override` is only ever
 accepted when the override's route id is a member of the active
 revision's own stored route profile (narrowed by ceiling) — never a bare
@@ -423,20 +463,20 @@ revision's own stored route profile (narrowed by ceiling) — never a bare
 ## Per-attempt audit
 
 Every attempt — coordinator, worker, or fallback — that
-`delegation.live_adapters.EngineSessionManagerAdapter.open` actually opens
+the runtime actually opens
 is durably audited in the new `attempt_route_audit` table
-(`routing.store.record_attempt_audit`, called from `open`'s own
+(`record_attempt_audit`, called from `open`'s own
 `_record_route_audit`) with: `engine`, `connection_id`, `model` (the
 route's real model string — `configuration_route_extras.route_model`,
 never derivable from the opaque `route_id` fingerprint alone), a stable
-`params_fingerprint` (`routing.authorization.fingerprint_params`, a
+`params_fingerprint` (`fingerprint_params`, a
 sha256 over the sorted effort/mode/model-config/summarizer/other
 parameters), the `config_revision_id` this attempt used, a
 `decision` (`'authorized'` or `'fallback'`) plus a small JSON detail, and
 — only for a fallback attempt — `predecessor_attempt_id`, the attempt it
 replaces. Rows are append-only (`attempt_route_audit_no_update`/
 `_no_delete` triggers; deleted only via the existing task-retention path,
-see `cleanup.finish_deletions`). `routing.store.list_audit_for_task`/
+see `cleanup.finish_deletions`). `list_audit_for_task`/
 `list_audit_for_attempt` are the read side; a future capsule/audit-read
 surface is the natural next consumer — not added here to
 stay within their own scope.
@@ -447,14 +487,14 @@ routing decision key on, and it is never replaced. Alongside it,
 `_record_route_audit` calls the new
 `live_adapters._resolve_route_model_name(connection_id, model, environ)`,
 which reads this connection's latest cached catalog snapshot
-(`catalog.store.latest_connection_entries`) and resolves the identical
-real, engine-observed display name `acp.config_options.presented_entries`
-would show for a fresh `session/new` (`catalog.labels.presented_model_name`:
+ and resolves the identical
+real, engine-observed display name `presented_entries`
+would show for a fresh `session/new` (`presented_model_name`:
 the engine's own named `configOptions` entry, `default`'s own resolved
 description, or a deterministically decodable versioned id such as
 `claude-opus-5-5[1m]` → `Opus 5.5 (1M)`). When resolved, it is written into
 the audit's own `detail["model_name"]`; every display reader
-(`acp.orchestrating_runtime._delegation_route_label` for worker cards/ACP
+(`_delegation_route_label` for worker cards/ACP
 titles, and Paseo's `worker-history.ts`/`worker-display.ts` for the
 worker detail panel) prefers this resolved name over the bare id and,
 when it is absent (no cached snapshot, no matching entry, or no evidence
@@ -480,7 +520,7 @@ authorizes an automatic alternate. Empty allowlists grant nothing; null/absent
 sets do not restrict their layer. Automated coverage is not live qualification.
 
 `EngineSessionManagerAdapter.open` calls `_authorize_dispatch` (via
-`routing.authorization.authorize_dispatch`) **before** `_reserve_capacity_
+`authorize_dispatch`) **before** `_reserve_capacity_
 blocking` (the atomic per-connection concurrency gate) and before
 any engine process is launched. It refuses, with a concrete
 `PortableError.code`, before any allocation/dispatch:
@@ -494,10 +534,10 @@ any engine process is launched. It refuses, with a concrete
   bundle.
 - `attempt_budget_exhausted` — `PolicyCeiling.limits['attempts']`, when
   tracked, has already been reached for the assignment
-  (`routing.store.count_task_attempts`, counted from the audit table
+  (`count_task_attempts`, counted from the audit table
   itself — every past attempt, authorized or fallback, counts).
 
-`delegation.capacity.reserve` atomically enforces a four-worker cap per chat
+the runtime atomically enforces a four-worker cap per chat
 session (the ACP session and task it drives), counting reservations across all
 engines and connections. The connection's `max_concurrent_sessions` limit
 (default 4, configurable from 1 through 64) can further restrict that session's
@@ -509,12 +549,12 @@ ready nodes `pending` instead of claiming them as running.
 Only `PolicyCeiling.limits['attempts']` is enforced anywhere in the runtime
 (both pre-dispatch, via `authorize_dispatch`, and pre-fallback, via
 `authorize_fallback` — a fallback attempt is still an attempt, counted by
-the same `routing.store.count_task_attempts`). The `calls` and `tokens`
+the same `count_task_attempts`). The `calls` and `tokens`
 dimensions exist on `PolicyCeiling.limits` but are **not metered by
 anything in this codebase**: no counter anywhere increments them, so a
 ceiling naming them has no enforceable effect today. This is a precise,
 intentional gap, not a silent no-op disguised as coverage. The
-summarizer/budget tracking (`recovery.token_budget`/`budget_store`) is a
+summarizer/budget tracking (`token_budget`/`budget_store`) is a
 different, session-scoped context-window accounting mechanism, not a
 per-task dispatch/call counter, and is never conflated with these two
 ceiling dimensions. Introducing a real `calls`/`tokens` counter (and wiring
@@ -523,11 +563,11 @@ future work.
 
 ## Authorized fallback
 
-`routing.authorization.authorize_fallback` is the single fallback gate.
+`authorize_fallback` is the single fallback gate.
 It refuses, before anything is dispatched or reconciled:
 
 - **Hard denylist** — `cancellation`/`refusal`/`authorization_loss`/
-  `provider_restriction` (`configuration.policy.FALLBACK_HARD_DENYLIST`)
+  `provider_restriction`
   can never trigger fallback, regardless of any policy.
 - **Unknown failure class** — only `engine_failure` and
   `capacity_unavailable` (`configuration.policy.
@@ -546,17 +586,16 @@ It refuses, before anything is dispatched or reconciled:
 - **Cross-provider consent** — when the target connection's `provider`
   differs from the current one, a durable, unrevoked
   `fallback_consent_records` row for that exact target connection/provider
-  (`routing.store.record_consent`/`has_active_consent`) must already exist
+  (`record_consent`/`has_active_consent`) must already exist
   *in addition to* the `data_recipient_consent` policy flag — the boolean
   flag alone is necessary but never sufficient. Naming a data scope on
   that record is mandatory; no fallback ever infers scope from the fact
   that consent exists.
 - **Budget** — `fallback_policy.budget`, when set, counts only
-  `decision='fallback'` audit rows for the task
-  (`routing.store.count_fallback_attempts`); exhausting it refuses further
+  `decision='fallback'` audit rows for the task; exhausting it refuses further
   fallback attempts.
 
-`delegation.live_adapters.EngineSessionManagerAdapter.attempt_fallback` is
+`attempt_fallback` is
 the only production call site that ever opens a different route/connection
 for a task than its active configuration currently selects. It re-derives
 the active revision's ceiling/route-profile/current-connection fresh,
@@ -564,20 +603,20 @@ calls `authorize_fallback`, and — only on success — opens the new attempt
 via `open(..., launch={"route_override": {...}, "fallback_of":
 old_attempt_id, "fallback_failure_class": ...})`, which is audited with
 `decision='fallback'` and the predecessor link. Reconciling the old
-attempt (`recovery.coordinator_recovery`/
-`recovery.worker_reconciliation`) and rebuilding context canonically
+attempt (`coordinator_recovery`/
+`worker_reconciliation`) and rebuilding context canonically
 (recovery capsules — never vendor-opaque provider memory) remain the
 caller's own responsibility around this call, exactly as for any other
 replacement.
 
 ### Automatic trigger: `OrchestratingRuntime._attempt_worker_route_fallback`
 
-`acp.orchestrating_runtime.OrchestratingRuntime` wires the actual decision
+`OrchestratingRuntime` wires the actual decision
 point: a worker's own `EngineTurnFailed` (the classified
 `transport_eof`/`timeout_alive`/`poisoned`/generic engine-error kinds —
 never refusal, which is a `PromptOutcome.stop_reason`, not an exception), or a
 `capacity_timeout` `PortableError` from
-`delegation.provisioning.ProvisioningService.delegate`, can call
+the runtime, can call
 `_attempt_worker_route_fallback`, unless the failure is a runtime teardown. A worker whose engine a teardown killed (a host disconnect, daemon shutdown, or the cleanup of a coordinator turn that ended with an unhandled error) is recorded as transport loss for recovery and receives no fallback. That handler:
 
 1. Reads the active configuration revision's ceiling/route-profile/route-
@@ -588,18 +627,18 @@ never refusal, which is a `PromptOutcome.stop_reason`, not an exception), or a
    `fallback_policy.allowed_target_routes`, excluding the current route
    and any route this revision never recorded resolvable details for).
 3. Reconciles the old attempt first (
-   `recovery.worker_reconciliation._best_effort_terminate`/
+   `_best_effort_terminate`/
    `_revoke_worker_channel` — best-effort process termination and trusted-
    channel revocation) and issues a **fresh worker channel** bound to the
    new attempt id (a channel is never valid for a different attempt;
    A prior finding: cross-connection fallback needs its own
    channel-issuance path, closed here via `trusted_channel.issue_channel_tx`,
-   the same primitive `delegation.provisioning._step_channel` uses for a
+   the same primitive `_step_channel` uses for a
    first-time delegation).
 4. Calls `SessionRuntime.attempt_fallback` (`authorize_fallback` runs
    inside it); on success, updates `delegation_provisioning.attempt_id`/
    `engine_session_ref` for this delegation's idempotency key so
-   `delegation.completion.gate`'s existing coordinator-ref↔attempt-id
+   the runtime's existing coordinator-ref↔attempt-id
    bridge resolves the fallback attempt's own worker-facing events
    (`worker_result`/`worker_question`, always keyed by attempt id) exactly
    as it would for the original attempt — never a second, parallel
@@ -619,8 +658,7 @@ configuration behind it), the caller's own plain
 `engine_failure:<kind>` message is the only one written, preserving every
 pre-existing failure-reporting behavior byte-for-byte.
 
-See `tests/test_orchestrating_runtime_routing_fallback.py` for the
-fake-engine, real-`ConfigurationService`-revision coverage: an authorized
+The former Python fake-engine, real-configuration-revision coverage (not ported) covered: an authorized
 engine-failure fallback opening a second route with both attempts audited
 and linked; refusal never triggering fallback (open-call count asserted);
 cross-provider fallback refused before any session for the target
@@ -630,7 +668,7 @@ coordinator's own selection changes mid-task.
 
 ## Automatic worker routing: tiers, model hints, and ranking
 
-`routing.auto_route.choose` picks the role's tier (`ROLE_TIERS`, shifted by
+the runtime picks the role's tier (`ROLE_TIERS`, shifted by
 the planned `complexity` and by escalation), then a model of that tier (the
 nearest other tier when none is usable), then an effort.
 
@@ -696,8 +734,7 @@ readable.
 
 Every name-keyed rule in this section -- the family and line tier tables, the
 Haiku and optional-engine exclusions, the flagship effort ceiling, the Luna
-rule and the Russian request spellings -- is only a built-in default
-(`routing.model_policy`). The owner overrides it per engine and per exact
+rule and the Russian request spellings -- is only a built-in default. The owner overrides it per engine and per exact
 model id with the `models` key of `routing.json` (reference:
 [configuration](../../configuration.md#routing-rules)); with no `models` key
 every routing decision is the same as before rank version 8.
@@ -743,7 +780,7 @@ per kind), `role_work_kinds`, `preferred` (only auto-eligible routes per
 `stretch` (each light model with a stretch rule: `effort_floor`, `efforts` by
 work, `standard_work_kinds`, `standard_candidate_roles`). The `plan_submit`
 node schema and the orchestrator's `worker-routing` reference name no model
-or engine preference; `tests/test_no_hardcoded_model_names.py` guards that.
+or engine preference; the former Python guard test for this was removed.
 An exact hint may name a route whose model id holds `/` or `,`
 (`opencode/<provider>/<model>`; a model id can also contain `,`).
 
@@ -777,7 +814,7 @@ configured tier**, not just flagship. Planned exact-route nodes carry the exact
 model hint; a request for a role's purpose can also cover an unhinted node,
 including mandatory review. Model-authored text is never consent. Authorization
 comes only from user-authored text the runtime itself recorded for the same
-task (`routing.auto_route.user_model_request`):
+task:
 
 - every `source_revisions` body of the task -- the initial request and each
   later user message or steer the host delivered (`list_sources` entries,
@@ -993,7 +1030,7 @@ An exact stretch-model hint serves standard work only when the configured
 work-kind allowance permits it, both at plan submission and dispatch.
 
 Only the newest version of each model family per engine is routed
-automatically (`routing.auto_route.superseded_routes`). Family and version
+automatically. Family and version
 come from the engine-confirmed model id (`gpt-6-luna` → luna 6,
 `claude-opus-4-8` → opus 4.8). For a versionless alias, they come from the
 engine's display name for the same family (`opus[1m]`, "Opus 5.5" → opus 5.5).
@@ -1036,6 +1073,23 @@ reports both outcomes before dispatch: `preview_status`
 `ignored:unavailable`, `ignored:escalated`, `ignored:owner_preferred`, and
 `ignored:pinned`; the audit includes the reason and status. Older audit rows
 may carry `ignored:engine_overused` from the removed count balance.
+
+### Escalation scope and runtime-created nodes (native)
+
+A node is routed as escalated only when the same node id was already dispatched in
+the same plan revision (a retry); `NATIVE_ROUTE_SELECTED` records the `revision`, and
+an earlier revision that reused the id, or a later review cycle (the cycle is part of
+the `_review_N` and `_fix_N_*` ids), starts with ordinary routing. Fix and review
+nodes never appear among the plan's tasks, so the runtime stores their routing fields
+beside the accepted plan (`plan_json.routing`, replaced with every accepted plan): a
+fix node inherits `complexity`, `work_kind`, `provider`, `model` and `model_reason`
+from the node it fixes, and a review node routes as `review` work at the highest
+complexity of the nodes it reviews, with no provider or model hint.
+
+A reviewer's route avoids the models of the execution nodes it judges (and prefers
+another engine) whenever the usable routes offer one; see
+[orchestration](../orchestration/index.md#coordinator-return-budget) for the recorded
+independence facts and the warning when no other model is available.
 
 ### Within-tier rank order
 
@@ -1176,7 +1230,7 @@ render. These fields are evidence of runtime decisions, not proof of
 the exact observed live surface.
 
 The worker card title and each `pipeline.md` assignment line show a one-line
-summary of the recorded decision (`routing.decision_display`): engine, model,
+summary of the recorded decision: engine, model,
 effort, tier (`light→standard` when the routed model's tier differs from the
 task's), hint status when a hint was given, `by <decided_by>`, and the chosen
 plan's usage (`usage 42%` or `usage unknown`). On a card the line is at most
@@ -1248,20 +1302,20 @@ cannot establish an explicitly requested effort match. A dispatch audit is not
 native configuration confirmation.
 
 Notices are recorded once per attempt as `MODEL_HINT_IGNORED_SHOWN` by
-`orchestration.route_notices`, under the existing transaction and recovery
+`route_notices`, under the existing transaction and recovery
 boundary. Duplicate audit rows and repeated controller calls do not duplicate
 notices; no previous audit or notice is rewritten. This presentation changes
 neither route choice nor authorization, eligibility or effort floors.
 
 ## Automatic worker routing: unavailable routes
 
-Automatic worker routing (`routing.auto_route.choose`, called from
+Automatic worker routing (the runtime, called from
 `EngineSessionManagerAdapter._resolve_runtime_route` for every worker attempt
 that no mixed-team profile or fallback has already routed) skips any route
-that `routing.availability` records as unavailable. This is separate from the
+that the runtime records as unavailable. This is separate from the
 fallback above: nothing here re-opens a *running* attempt on another
 route. A failed worker's node is retried through the ordinary
-`orchestration.recovery.retry_lost` path, and its **next** attempt is routed
+`retry_lost` path, and its **next** attempt is routed
 without the failed route.
 
 What is recorded, and only from real evidence:
@@ -1274,7 +1328,7 @@ What is recorded, and only from real evidence:
 | worker `open()` | `WorkerModeNotConfirmed` (see `claude-agent-acp-adapter.md`) | `configuration_not_confirmed` | that model |
 | worker `open()`, engine launch/`initialize`/`session/new` | `EngineTransportClosed`, `EngineTimeout` or `OSError` | `engine_start_failed` | whole connection |
 
-`engine.failure_classification.route_failure` decides the first three rows
+`route_failure` decides the first three rows
 from the structured fields alone. Message text such as "You've hit your
 usage limit" is never matched, so an unrelated error can't read as
 exhaustion. A cancellation, a capacity wait, a policy refusal, an
@@ -1292,7 +1346,7 @@ see an exhausted account.
 Expiry works like this:
 
 - For quota and rate limits, the reset time the engine itself reported is used
-  (`connections.quota.resets_at`: the most-used open window's `resets_at`).
+  (`resets_at`: the most-used open window's `resets_at`).
   Codex reads it from its rollouts; Claude merges its adapter's
   `rate_limit_event` with a lazy, zero-cost read of the Claude Code CLI's own
   local `/usage` command (see `docs/features/token-and-plan-usage/index.md`'s "Claude
@@ -1334,7 +1388,7 @@ Choosing and refusing:
     (possibly excluded) route -- that fallback only applies when nothing is
     engine-confirmed at all.
 
-Retries (`orchestration.recovery.retry_lost`):
+Retries:
 
 - A routing refusal (`no_available_route`, `pinned_route_unavailable`,
   `invalid_routing_overrides`, `route_denied`) is never retried. It becomes the
@@ -1350,7 +1404,7 @@ Retries (`orchestration.recovery.retry_lost`):
   id, not by error text) is retried with `route_failure=true` on the
   `ASSIGNMENT_RETRIED` event. Such a retry:
   - does not use up the two ordinary retries (`MAX_ATTEMPT_RETRIES`);
-  - does not escalate the model tier (`orchestration.state.attempt_routing`),
+  - does not escalate the model tier,
     because no model fell short;
   - is bounded by `MAX_ROUTE_RETRIES` (6).
 - A retry whose failure class is `engine_failure`, `transport_failure` or
@@ -1360,8 +1414,7 @@ Retries (`orchestration.recovery.retry_lost`):
   minutes (see [transient engine failures](../failures-and-cancellation/index.md#transient-engine-failures)).
 - A retry whose failure class is `engine_failure` or `transport_failure` (a crash,
   EOF or poisoned session) does not raise the model tier either. Only quality
-  causes, or retries with no failure class, escalate, as before
-  (`orchestration.state.attempt_routing`, `_INFRASTRUCTURE_RETRY_CLASSES`).
+  causes, or retries with no failure class, escalate, as before.
 
 Known limits:
 
@@ -1374,16 +1427,16 @@ Known limits:
   nothing here reads.
 - A Claude usage-limit turn whose SDK reports no error kind carries no
   `errorKind`, so it is not recorded. The adapter's `rate_limit_event` with
-  `status: rejected` still sets that window to 100% (`connections.quota.observe`),
+  `status: rejected` still sets that window to 100%,
   which already keeps the account from being chosen; the CLI-read `/usage`
   windows (above) also converge on the same 100% within their own TTL.
 - Records are per project store: another project's first attempt on an
   exhausted account still fails once before it records the route.
 
-See `tests/test_route_availability.py` (classification, expiry, retry
-accounting, named refusals), `tests/test_auto_route.py` (exclusion without
+The former Python suites (not ported) covered classification, expiry, retry
+accounting, named refusals, exclusion without
 tier movement, cross-provider pick, the reset of the most-used window,
-`providers` validation and filtering) and `tests/test_auto_route_delegation.py`
+`providers` validation and filtering and
 (real provisioning over fake engines: exhausted provider skipped, a dispatch
 failure recorded and the next delegation opened on the other provider, a
 codex-shaped `usageLimitExceeded` turn recorded until its engine-reported
@@ -1410,9 +1463,8 @@ with each route named, deny/pin/providers interaction, expiry).
   never overwritten or deleted outside the standard task-retention path);
   the pre-fallback route stays visible in the same task's audit history.
 
-See `tests/test_routing_policy.py` (pure policy/store unit coverage) and
-`tests/test_delegation_routing_dispatch.py` (real
-`EngineSessionManagerAdapter` + fake-engine-subprocess integration: mixed
+The former Python suites (not ported) covered pure policy/store units and a
+fake-engine-subprocess integration: mixed
 engines in one task, the same model name on two connections with no
 credential crossover, a live selection change mid-task leaving the
 running attempt's audited route unchanged, an unauthorized/unavailable

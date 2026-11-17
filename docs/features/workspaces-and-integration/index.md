@@ -1,6 +1,6 @@
 # Project scope and filesystem effects
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 The ACP client's canonical project root is the destination for all worker changes.
@@ -15,8 +15,19 @@ serialized, while review-stage nodes and READ_ONLY roles do not participate in
 scope-overlap conflicts. A finished worker keeps its session slot until its
 engine is confirmed gone and the reservation is released or safely reclaimed.
 A finished, failed or cancelled worker's write scope is likewise held until
-its engine's reservation is released on a confirmed exit, in every task of the
-project, so a dead worker of an abandoned task never blocks new work.
+its engine's reservation is released on a confirmed exit (or every delegation
+row of its attempt is terminated with no reservation left unreleased). A node
+of a finished (completed, cancelled or failed) task, or of a task being
+deleted, holds no files at all, whatever rows its attempt left: its channels
+are revoked and its nodes never run again. Rows written by earlier builds are
+read the same way (`holdings_tx` in `crates/cortex-core/src/scheduler/policy.rs`),
+so a dead worker of an abandoned task never blocks new work. A dependency-ready
+writing step whose files another unfinished task's worker still holds waits
+for that holding, with one `NATIVE_WRITE_CONFLICT_WAITING` record naming the
+holder task, the step and the overlapping paths
+(`crates/workspace-service/src/native_runtime.rs`), instead of stopping its task
+with `native_continuation_unavailable`. A stop that does name that code reads
+"no planned step could be started" to the owner, never the raw code.
 Terminal task and unexpected prompt-error cleanup also stop owned engines
 without requiring manual stop. Partial-launch writer locks remain held through
 shutdown and stay quarantined when exit cannot be confirmed; a leader exit alone
@@ -29,8 +40,7 @@ Native-tool disabling is engine-specific, not a uniform guarantee: Claude's nati
 `disallowedTools` (see [claude-engine](../claude-engine/index.md)), so its project
 reads and writes stay fully observable through the gateway. Codex disables native
 `shell_tool`, but native `apply_patch` remains available, and the installed Codex
-CLI exposes no supported switch to turn off `unified_exec` either
-(`src/cortex_runtime/engine/process.py:649-669`); both stay native actions, visible
+CLI exposes no supported switch to turn off `unified_exec` either; both stay native actions, visible
 only through partial ACP tool-call events rather than the gateway (see
 [codex-engine](../codex-engine/index.md)'s current runtime gateway policy).
 Coordinator, consultant and review roles are read-only; other
@@ -81,16 +91,15 @@ pre-existing edits and is not an authorship claim. Model commands cannot read `.
 # Snapshot workspaces, candidates and integration
 
 The sections below describe the isolated snapshot workspaces, candidate staging
-and the integration entry point under `src/cortex_runtime/delegation/`
-(`workspace_isolation.py`, `candidates.py`, `integration.py`). Their claims are
-not yet re-verified line by line against source; the introduction above says there are no candidate copies, while `candidates.py` implements candidate staging; this conflict is open and must be resolved by review against source.
+and the integration entry point. Their claims are
+not yet re-verified line by line against source; the introduction above says there are no candidate copies, while the former implementation included candidate staging; this conflict is open and must be resolved by review against source.
 
 ## Workspace model
 
 Every mutating assignment's attempt gets a `WorkspaceBinding` (see
-`delegation.provisioning.WorkspaceProvisioner`, `portable.identity
+`WorkspaceProvisioner`, `portable.identity
 .WorkspaceBinding`): a workspace id, a root path, a known base artifact
-revision (`delegation.revision.capture_revision`), a resource owner
+revision, a resource owner
 (the attempt), a change-transfer method, and a logical `.cortex` binding
 that always resolves to the *main* project's own store (see below).
 
@@ -99,7 +108,7 @@ that always resolves to the *main* project's own store (see below).
 `delegation.workspace_isolation.IsolatedSnapshotWorkspaceProvisioner
 .create(attempt_id)` makes **two** owner-private copies of the project tree
 under this project's own `.cortex/workspaces/<attempt_id>/`, excluding the
-top-level `.git`/`.cortex` directories (matching `delegation.revision`'s
+top-level `.git`/`.cortex` directories (matching the runtime's
 own exclusion):
 
 - `base/` — a pristine, read-only-for-the-rest-of-the-attempt's-lifetime
@@ -113,23 +122,22 @@ as they are on disk, never reset or stashed. A manifest (`{relpath:
 {kind, sha256|target, mode}}`) and a revision observation of `work/`
 are recorded in the additive `workspace_snapshots` table (`user_version`
 unchanged at 11). Caps (50k entries / 512 MiB total / 64 MiB per file / 20s
-wall-clock — the same numbers `delegation.revision` already uses) make an
+wall-clock — the same numbers the runtime already uses) make an
 oversized or unreadable tree fail the whole snapshot atomically (never a
 partial, silently-incomplete copy).
 
 Two attempts delegated concurrently each get their own independent pair of
 copies: a write into one is never observable from, or able to overwrite,
 the other's copy or the real project tree — only an explicit, later
-`delegation.integration.integrate` call ever touches the main tree.
+the runtime call ever touches the main tree.
 
 ### Snapshot location vs. `fs_bridge`/`terminal_bridge` containment
 
 The snapshot's `work` directory lives *under* the main project's own
 `.cortex/workspaces/<attempt_id>/work` — a descendant of the very
-`.cortex` directory `engine.fs_bridge.FsBridge`/
-`engine.terminal_bridge.TerminalBridge` refuse a path/`cwd` for containing
-a `.git`/`.cortex` *component*. Verified (see
-`tests/test_workspace_fs_bridge_containment.py`): both
+`.cortex` directory `FsBridge`/
+`TerminalBridge` refuse a path/`cwd` for containing
+a `.git`/`.cortex` *component*. Verified: both
 bridges' checks are always computed *relative to* the bound
 `ResourceBinding.workspace_root`, never by walking workspace_root's own
 ancestor path components — a path inside the snapshot's `work` dir
@@ -183,16 +191,16 @@ re-applies or re-decides).
 ### Coordinator MCP operation
 
 A coordinator channel calls the `integrate(assignment_ref, request_key)`
-MCP operation (`delegation.contracts.COORDINATOR_OPERATIONS`,
-`delegation.mcp_tools._coordinator_integrate`). Matching every other
-delegation operation's process-boundary rule (see `delegation.mcp_tools`
+MCP operation (`COORDINATOR_OPERATIONS`,
+`_coordinator_integrate`). Matching every other
+delegation operation's process-boundary rule (see `mcp_tools`
 module docstring), the MCP-subprocess-side handler only records a durable
 `progress` event (`payload["kind"] == "integration_requested"`) — it never
 touches the project tree itself. The *main* process's
-`acp.orchestrating_runtime.OrchestratingRuntime._process_new_events` picks
+`_process_new_events` picks
 up that event on its next pass (the same polling seam `delegation_requested`/
 `assignment_cancel_requested` already use), calls
-`delegation.integration.integrate` for real, and appends the outcome as its
+the runtime for real, and appends the outcome as its
 own coordinator-visible `progress` event —
 `payload["kind"] == "integration_applied"` (status `applied`/`noop`, with
 `applied_paths`/`integrated_head`/`integrated_dirty_digest`) or
@@ -201,7 +209,7 @@ carried as `progress` rows rather than a new `task_events.event_type`
 because that column has a DB-level `CHECK` constraint fixed at table
 creation — widening it would need a destructive rebuild for every existing
 store, which the runtime does not do (see
-`delegation.events.INTEGRATION_PROGRESS_KINDS`). `list_events` and the
+`INTEGRATION_PROGRESS_KINDS`). `list_events` and the
 continuation-text renderer both surface these two kinds explicitly.
 
 Algorithm:
@@ -236,7 +244,7 @@ report (`{relpath: {reason, ...}}`) to the caller instead.
 
 `host_fs_checker(relpath) -> bytes | None` is an optional, caller-supplied
 read of the *host's* own negotiated buffer for one project-relative path
-(see `engine.fs_bridge.HostFsForwarder`, only ever active for a
+(see `HostFsForwarder`, only ever active for a
 host-visible coordinator binding). When it returns content that differs
 from the path's current on-disk bytes, that path is refused
 (`unsaved_host_buffer`) — an old engine-side result is never allowed to
@@ -244,35 +252,33 @@ silently overwrite newer, unsaved editor content.
 
 `OrchestratingRuntime` accepts an optional constructor-level
 `host_fs_requester` — the exact same `(method, params) -> dict` shape as
-`acp.host_requests.HostRequester`, following the identical "`None` means
+`HostRequester`, following the identical "`None` means
 not negotiated/available, never guessed" convention as the existing
 `host_elicitor` — supplied only once a real incoming ACP connection
 has actually negotiated an `fs` capability. When present,
 `_make_host_fs_checker` builds the per-path check by reusing the existing
-`engine.fs_bridge.HostFsForwarder`/`RevisionLog` abstraction directly
+`HostFsForwarder`/`RevisionLog` abstraction directly
 (never a bespoke second wire protocol), and every recorded integration's
 `host_buffer_state` is `"checked"`. When no requester is supplied (the
 host never negotiated fs, or no live connection is wired to this runtime
 yet), `host_buffer_state` is durably recorded as `"unknown"` — a visible
 limitation, not silently treated the same as "checked, no conflict" (now closed for the case where a host connection is
 actually wired). Live wiring of a real ACP host's negotiated `fs`
-capability into `cortex_acp.py`'s own construction of
-`OrchestratingRuntime` is not covered by the automated suite. The production seam
-(constructor parameter through to the `HostFsForwarder` call) is tested with a
-fake forwarder function standing in for the real host connection.
+capability into the ACP entry's own runtime construction is not covered by the automated suite. The production seam
+is tested with a fake forwarder function standing in for the real host connection.
 
 ## Revision binding and re-verification
 
-`acp.orchestrating_runtime.OrchestratingRuntime._capture_result_revisions`
+`_capture_result_revisions`
 now resolves each worker_result's own isolated `work/` root (via
-`delegation.workspace_isolation.resolve_attempt_root`) when the attempt
+`resolve_attempt_root`) when the attempt
 used isolation, instead of always the task's shared project root. Because
 the tree digest is computed over *relative* paths/content, a
 worker's isolated final tree and the main project root after a clean,
 non-conflicting integration of that exact tree are byte-for-byte
 comparable: identical digest if nothing else changed, a different digest
 the instant integration merges in a concurrent main-root change or any
-later drift. `delegation.completion.gate`'s existing `stale_verification`
+later drift. The runtime's existing `stale_verification`
 comparison therefore already refuses to let a revision-A report
 certify a differing revision B, with zero changes needed to the gate logic
 itself — only to what revision worker_result binds to.
@@ -293,14 +299,14 @@ durably recorded for it or the assignment was cancelled outright.
 
 ## Tests
 
-`tests/test_workspace_isolation.py`, `tests/test_workspace_integration.py`,
-`tests/test_workspace_fs_bridge_containment.py`,
-`tests/test_workspace_mcp_integration.py`.
-Covers: two workers editing the same file in isolated workspaces (second
+The statements below were carried over from the former Python test suite
+(`workspace_isolation`, `workspace_integration`, `workspace_fs_bridge_containment` and
+`workspace_mcp_integration`), which was removed; the current Rust coverage is in
+`crates/workspace-service/tests` and `crates/cortex-core/tests/workspace.rs`.
+Covered then: two workers editing the same file in isolated workspaces (second
 integration conflicts, first worker's applied content never overwritten) --
-both at the `delegation.integration.integrate` function level and, in
-`test_workspace_mcp_integration.py`, end to end over the real coordinator
-`integrate` MCP operation and `OrchestratingRuntime` (idempotent dispatch,
+both at the function level and end to end over the real coordinator
+`integrate` MCP operation (idempotent dispatch,
 coordinator-only enforcement, applied/conflict outcomes appearing as
 durable `progress` events); a non-overlapping concurrent main-root change
 merging cleanly; a conflicting overlapping edit surfaced, never

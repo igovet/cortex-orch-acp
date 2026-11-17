@@ -1,4 +1,4 @@
-// One rule for every boxed label, shared by the layout gate (layout-fit.py) and the page captures (pages-shots.py), which receive
+// One rule for every boxed label, shared by the layout gate (layout-fit.driver.mjs) and the page captures (pages-shots.driver.mjs), which receive
 // it from their .mjs launcher. A label is the text of a control, tab, chip, badge, status word or table head that stands on one
 // line in its own box. It must not wrap, and the middle of its capitals must sit in the middle of its box, within 1 px: the line
 // box alone is not enough, since a face whose ascent exceeds its descent draws its letters above the middle of that box.

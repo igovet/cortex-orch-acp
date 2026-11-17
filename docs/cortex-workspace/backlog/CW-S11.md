@@ -19,9 +19,9 @@ CW-R12 (Ubuntu first) and CW-R13 (accepted desktop direction). See [requirements
 ## Deliverables
 
 - `packaging/systemd/user/cortex-workspace.service`: foreground service, `Restart=on-failure` with a bounded restart delay, `KillMode=control-group`, a 30-second stop timeout, and no linger or boot-survival promise.
-- `.deb` inputs with fixed channel-derived paths, including the application, service, complete stamped ACP payload and Workspace host. Runtime dependencies include Python 3.11+, Git, Node.js 20+, npm, bubblewrap, systemd, the user session bus and ELF-derived libraries; development packages are not direct dependencies.
+- `.deb` inputs with fixed channel-derived paths, including the application, service, complete stamped ACP payload and Workspace host. Runtime dependencies include Git, Node.js 20+, npm, bubblewrap, systemd, the user session bus and ELF-derived libraries; development packages are not direct dependencies.
 - Installing the package ships a `default.target.wants` symlink for every user's next login. On first launch in an existing session, the native bridge runs only absolute `/usr/bin/systemctl --user daemon-reload` and `start` for its fixed channel unit, with bounded waits and retry. It never replays a failed Workspace mutation. Maintainer scripts reload and try-restart active user units on upgrade, best effort, and stop on removal without deleting user data. No linger is enabled.
-- Payload hash regenerated with `python3 -B scripts/cortex_package.py stamp` after any payload edit, before release-sensitive checks. Version 1.0.6 is retained.
+- Payload hash regenerated with `scripts/cortex-xtask.sh package stamp` after any payload edit, before release-sensitive checks. Version 1.0.6 is retained.
 - Release handoff: `.github/workflows/workspace-desktop-release.yml` runs only through Run workflow on `main` or `dev`. It builds in the shared container and publishes `v<debian-version>` as Latest for production, or `dev-v<debian-version>` as a dev prerelease excluded from Latest. Both channels appear in one release list; dev installs manually without in-app updates. Publication requires the channel's tag to be absent. A tag lookup error other than not-found stops the release. The workflow has not been run on GitHub.
 - Channel isolation and the settings clone are specified in [CW-S12](CW-S12.md).
 
@@ -45,7 +45,7 @@ Negative:
 ## Validation
 
 - Targeted no-paid tests for the unit file and the install paths.
-- `python3 -B scripts/cortex_package.py stamp`, then package, profile and test checks run sequentially in the same checkout.
+- `scripts/cortex-xtask.sh package stamp`, then package, profile and test checks run sequentially in the same checkout.
 - `systemd` checks are unverified unless a user manager is reachable. Record that; do not substitute a fabricated receipt.
 
 ## Documentation impact

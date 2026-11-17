@@ -25,6 +25,64 @@ The rows below are proposals from backlog items. They are not measurements and a
 | Git status, diff and log, warm read on a 5,000-commit fixture | 100 ms each, with zero Git subprocess spawns during the call loop | in-process timing on recorded hardware | [CW-G01](backlog/CW-G01.md) |
 | Android small-file editor bridge | 256 KiB bound per load or save | payload size and load timing on a physical device | [CW-I05](backlog/CW-I05.md) |
 
+## Native read-path diagnostic (2026-11-11)
+
+On the reference Intel Core i5-14600K (20 logical CPUs), Linux 7.0.0-42,
+Rust 1.99.1 debug test build and Python 3.12.13, a disposable format-12 store
+contained 1,000 saved tasks (one bound RECOVERING execution) and 100,000 retained
+history update rows. No owner store or running application was opened.
+
+The executable experiment is
+`cargo test --locked -p cortex-core --test read_latency -- --ignored --nocapture`.
+It alternates 10 warmups and 100 measured calls per route on the same fixture.
+The old route is a persistent Python stdio child calling the real WorkspaceAPI;
+its startup is excluded. Native measures the reusable Rust provider plus reply
+serialization, **excluding service socket, Tauri, UI rendering and polling delay**.
+This is not a like-for-like desktop end-to-end speedup or a release gate.
+
+| Read | Python p50 / p95 / p99 ms | Native p50 / p95 / p99 ms |
+|---|---|---|
+| First 50-task page | 5.721 / 8.639 / 10.069 | 4.376 / 7.147 / 8.588 |
+| Bound task detail/state | 1.576 / 2.245 / 2.770 | 0.292 / 0.523 / 0.695 |
+
+The measured median reductions are about 1.3× and 5.4× respectively. The fixture
+represents populated storage, not 1,000 simultaneously executing agents. History
+content rendering and cold startup were not timed. Native task-page byte budgeting
+is additive, avoiding repeated serialization of each growing page prefix.
+The service currently polls opened Core readers every 250 ms; that delay is not
+included above. Delta handling avoids a task-list or machine-facts refetch but
+still rereads related bounded history/decision/result pages for changed tasks.
+No installed desktop, rendered GUI, paid live run or zero-Python qualification
+is established by these measurements.
+
+## Cold board diagnostic (2026-11-11)
+
+An authorized SQLite backup of a populated format-12 project was opened read-only:
+2,864,820,224 source database bytes, 68 saved tasks, five executions, 703,052
+runtime events and 52,726 host updates. Its two saved sprints had 36 and 31
+members. The project task-page index was present; its first 51 identities took
+0.032 ms in a Python SQLite probe. No migration, index installation or owner
+store mutation was needed.
+
+The shared Rust task-projection implementation read all 68 task DTOs (74,221
+serialized bytes) in 8.548 ms. The former eager dependency, including full
+conversation replay for all executed tasks, took 786.590 ms total, 32 history
+pages and 2,667 visible rows on that same copy. This is a single diagnostic sample,
+not p95, a physical cold-disk test, or process-launch-to-paint measurement.
+It excludes socket, bridge, Python product/worker helpers and rendering.
+
+The executable read-only diagnostic requires an explicit authorized database copy:
+
+```sh
+CORTEX_BENCH_COPY=/absolute/path/to/copy.sqlite3 cargo test --locked --offline -p cortex-core --lib copied_store_board_and_eager_history -- --ignored --nocapture
+```
+
+Batched native boards now separate placement and saved sprint membership from
+conversation/worker enrichment. Existing bounded task pages remain available;
+the board batch refuses more than 1,000 tasks or a reply above 768 KiB instead
+of silently truncating membership. A persisted display-only board provides the
+first view on subsequent launches; see [recovery](consistency-and-recovery.md#confirmed-board-on-launch).
+
 ## Idle and background work
 
 With nothing changing, CPU is effectively zero; with work running, cost follows real updates.
@@ -37,7 +95,7 @@ With nothing changing, CPU is effectively zero; with work running, cost follows 
 | Review actions in a product read | once per task version, at most 30 s old | kept in the machine's state directory; accepting a result still reads it fresh |
 | Event journal poll in the service | 500 ms after activity, doubling to 4 s while empty | any request to the project's child resets it |
 | Facts poll in a window | every 30 s, doubling to 120 s while unchanged, stopped while hidden, immediately on return to the window | only Git and machine facts rely on it; a project's facts reach the screens only when they differ, as data, from what the screens last received (from the poll or the full read), and a project whose facts did not change keeps its records in place |
-| Machine facts | every 5 minutes | same visibility rule |
+| Machine facts | every 5 minutes | same visibility rule; the machine overview joins this poll only after a screen that shows it has asked for it, and is never read at startup |
 | Conversation history | on task or execution change, relevant journal events, or owner input | complete pages reused in the window; incomplete reads never cached |
 | Working indicators | animated only while something is pending | a pressed control's bar sweeps by `transform` after 150 ms; a loader icon turns in 12 steps (0.9 s a turn while waiting for a reply or a page, 2.4 s for a long-running working status); all are removed when the work settles and paused in a parked tab or a hidden window; reduced motion pulses opacity every 2 s instead |
 | Refresh on machine events | first event at once, the rest coalesced to one per 2 s, or 15 s while hidden | only the projects the events came from are reread |
@@ -68,7 +126,7 @@ The production window later exited without intervention. With no window, the sam
 
 - Full conversation replay: four executed tasks, 1,105 visible rows in 22 pages on the **same private database copy** took 1197.3164510000001 ms CPU with installed history code versus 302.5701240000001 ms with checkout code. This is measured CPU per complete read, not a process-percent prediction. The copy passed SQLite quick-check; source file stamps moved during copying, so it is diagnostic data, not an exact live snapshot. A separate stable copy also passed quick-check. Profiling attributed 2.524 of 2.973 seconds to repeated validation of growing page prefixes. Construction now validates single rows and the final page with additive UTF-8 byte accounting. Cursor, identity, unavailable-content and page-size checks remain.
 - The window previously replayed every task's history on every refresh. Complete histories are reused until the task or execution changes, relevant journal events arrive, or the owner sends input. If the journal cannot be read completely, changed project history is reread conservatively; incomplete history reads are not cached.
-- Slow Git completion previously emitted a full-refresh request. If the refresh outlasted the Git cache, it spawned another slow Git read and repeated. Completion now publishes facts, not another full task/history read. A failed or superseded completion keeps the last confirmed facts until the regular poll.
+- Slow Git completion previously emitted a full-refresh request. If the refresh outlasted the Git cache, it spawned another slow Git read and repeated. Completion now publishes facts, not another full task/history read. A superseded completion keeps the last confirmed facts until the regular poll. A failed repository read also keeps them, but while a window is open it is retried on its own after 3 s, doubling up to 30 s, and a success publishes facts the same way; so a cause fixed outside the app (a folder's permissions, a Git lock) clears without a restart, an event or the slow facts poll. A refusal with an owner-readable reason (for example an unsafe private folder) is shown as the review's unavailable reason.
 - Permanent status animations consumed frames with no progress. In the same 29,120-node fake worker view on private Xvfb, two `spin` animations produced 52.199276486711554% WebKit CPU, 18.7997394243329% GTK host CPU and 14.19980318220889% Xvfb CPU over 5.000069302999691 s. Disabling motion in that window reduced these to 5.999922910590467%, 0.3999948607060311%, 0 ticks. After static-indicator CSS, a fresh unmodified fixture measured 0.3999948493462252%, 0.1999974246731126%, 0 ticks respectively. The status words/icons remain; the busy control retains a delayed static underline. Actual streamed updates still paint.
 - Static indicators made the window look frozen: a pressed control showed a still bar and a waiting page showed only words. Motion is back, bounded to what is pending. A loader exists in the page only while its work is pending, moves by `transform` or `opacity` alone on a small element, and turns in 12 discrete steps, so the page draws about 5 (working status) or 13 (reply wait) frames a second instead of 60. A parked tab and a hidden window (`html[data-hidden]`, set from `visibilitychange`) pause every loader, including the bar on the control's `::after`. `test/interface-rules.test.ts` fails any repeating animation outside these loaders or any loader keyframe that changes more than `transform` and `opacity`.
 
@@ -87,7 +145,7 @@ The older per-call queue measurements remain useful historical diagnostics: 365 
 | Hot path | Before | After | Method |
 |---|---|---|---|
 | Split-tool activity lookup | 2.4357 ms | 0.00352 ms | Median of 21 queries over 10,000 synthetic task events; old query/no activity index versus new query/index, no ANALYZE |
-| Helper startup plus logs.folder | 85.88 ms | 55.28 ms | Median of nine fresh `python3 -I -B crates/workspace-service/machine_tools.py` invocations with private temporary state, before/after deferring the attachment import |
+| Helper startup plus logs.folder | 85.88 ms | 55.28 ms | Median of nine fresh invocations of the former Python machine helper (since removed) with private temporary state, before/after deferring the attachment import; recorded history, not reproducible today |
 | Acknowledgement plus local confirmed rename | Previously awaited a full refresh (not timed in this fixture) | 0.1614 ms | One Node/jsdom store measurement with an immediately acknowledged fake command and unresolved facts; **not input-to-paint or real IPC** |
 | Normal project facts helper count | product.read + workers + repo.snapshot | product.facts + repo.snapshot | Contract/count regression: product and workers compose in one process, while repository inspection overlaps |
 
@@ -95,8 +153,7 @@ A writable Store open adds `task_events_by_activity_ref` and `runtime_requests_b
 
 The UI now settles action replies independently of reconciliation. Known task/sprint/checkout actions reread only their project, without capabilities or machine settings. Registry changes still reread those contracts. A newer reply fences older in-flight reads and requeues their scope, on success or error. An interrupted unscoped read retries with a full snapshot and matching facts, bypassing event-scope narrowing even if the adapter consumed the earlier invalidations. Synchronization stays pending through that replacement read. Facts notifications suppressed during any coherent read queue a follow-up read of their project; duplicate notifications coalesce. The notification contents are not replayed over newer facts, and unchanged later polls need not notify again. If a queued event refresh is combined with explicit project scopes, it reads all projects rather than consuming those scopes through event narrowing. Ordinary non-overlapping event and action reads remain project-scoped; requested changes are never applied on refusal or unknown outcome. Confirmed renames and sprint queue controls display locally; Updating confirmed state distinguishes the subsequent read from action submission. Errors retain the last confirmed view and retry without replaying the command. Sprint routing uses already-read product identities rather than spawning sequential product reads across the registry. Planning/settings actions that depend on current sprint contents still reread that one product before changing it. Product reads compute repository presence, branch and common directory once per call (a 40-task regression requires three Git queries total, not per task).
 
-Reproduce the isolated SQL/initialization/count checks with:
-`timeout 180 .venv/bin/python -B -m pytest --timeout=60 -q -s tests/test_workspace_performance.py`.
+The isolated SQL/initialization/count checks were the former Python test `test_workspace_performance` (removed; not reproducible today).
 UI receipt, pre-reply-read, refusal, scope and helper-count checks:
 `npm --prefix packages/workspace-ui test -- test/store.test.ts test/real-port.test.ts`.
 
@@ -133,7 +190,7 @@ With WebKit's compositing left on, as the desktop window runs it, the same run (
 
 ## Scrolling, recorded
 
-These are recorded facts from the scroll gate, not a qualification: `node packages/workspace-ui/test/scroll-perf.mjs <label> [surface…]`. It builds the static bundle with the layout gate's fake data made long (`scroll` in `test/layout-fit-fixture.tsx`) and runs `test/scroll-perf.py` in the `cortex-workspace-rendered:ubuntu26.04` container: WebKitGTK 2.52.6 at 1440×900 with **compositing on, as the desktop window runs it**, software GL on a private Xvfb, not the owner's GPU or the Tauri window. On each surface it finds every element that scrolls more than 300 px and scrolls it three times: a scrollbar drag from one end to the other in 120 frames and back in 60 (twice: the first pass is the first look at never-painted content), and the real mouse wheel turned 24 notches each way through X (`xdotool`). A script installed before the page's own records frame intervals, the forced style/layout time at the start of each frame, the time of every scroll and wheel handler and ResizeObserver callback, and every DOM change. WebKitGTK gives page script no style-recalc or layout counters and its inspector server did not start in this build, so layout is measured as that forced-flush time. Page timers count whole milliseconds. `idle` instead watches pages untouched for 70 s; the `-live` surfaces scroll while the task streams one update every 400 ms, five times the service's coalesced pace. Limits are p95 ≤ 22 ms, no frame over 50 ms, at most 3 % of frames over 25 ms, scroll and wheel handlers ≤ 4 ms, an update taken in ≤ 8 ms; what does not meet them yet is listed in the script's `KNOWN` table as a ratchet, printed on every run, and fails the run if it gets worse. Evidence goes to the git-ignored `.design-evidence/conversation/scroll-perf/<label>`.
+These are recorded facts from the scroll gate, not a qualification: `node packages/workspace-ui/test/scroll-perf.mjs <label> [surface…]`. It builds the static bundle with the layout gate's fake data made long (`scroll` in `test/layout-fit-fixture.tsx`) and runs `test/scroll-perf.driver.mjs` in the `cortex-workspace-rendered:ubuntu26.04` container: WebKitGTK 2.52.6 at 1440×900 with **compositing on, as the desktop window runs it**, software GL on a private Xvfb, not the owner's GPU or the Tauri window. On each surface it finds every element that scrolls more than 300 px and scrolls it three times: a scrollbar drag from one end to the other in 120 frames and back in 60 (twice: the first pass is the first look at never-painted content), and the real mouse wheel turned 24 notches each way through X (`xdotool`). A script installed before the page's own records frame intervals, the forced style/layout time at the start of each frame, the time of every scroll and wheel handler and ResizeObserver callback, and every DOM change. WebKitGTK gives page script no style-recalc or layout counters and its inspector server did not start in this build, so layout is measured as that forced-flush time. Page timers count whole milliseconds. `idle` instead watches pages untouched for 70 s; the `-live` surfaces scroll while the task streams one update every 400 ms, five times the service's coalesced pace. Limits are p95 ≤ 22 ms, no frame over 50 ms, at most 3 % of frames over 25 ms, scroll and wheel handlers ≤ 4 ms, an update taken in ≤ 8 ms; what does not meet them yet is listed in the script's `KNOWN` table as a ratchet, printed on every run, and fails the run if it gets worse. Evidence goes to the git-ignored `.design-evidence/conversation/scroll-perf/<label>`.
 
 What was found, measured before and after on 2026-11-10 (fake data: 60-task sprint, 77-card project board, a 200-task sprint, 31 projects in the sidebar, a 300-turn conversation, a 1,500-note worker feed, a 4,000-line file, 400 commits, 40 changed files of 300 lines, 900 lines of terminal output):
 

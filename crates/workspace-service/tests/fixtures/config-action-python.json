@@ -1,0 +1,1291 @@
+{
+  "sources": {
+    "crates/workspace-service/machine_tools.py": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+    "src/cortex_runtime/configuration/management.py": "f035019940568b7b2881c7548e29f53a8e1ce0433eb5b7b1d2fc12e70f6ae8a2",
+    "src/cortex_runtime/connections/registry.py": "6c96df2025a2b3e73d81dbcfabb57f2d9fcd233c167b19b5684163c4986a1ce5",
+    "src/cortex_runtime/connections/model.py": "94d5fbb6fe33b126cae1ea57e6453414d7ed40c7ba9752da57d7b1f16806e97e",
+    "crates/workspace-service/tests/generate_config_action_fixture.py": "044f027f0070ea29d5607fbce72a76357574c53583e049df52fb20f64789ca43"
+  },
+  "now": "2026-11-14T01:02:03.456789+00:00",
+  "processOrNetworkAttempts": 0,
+  "cases": [
+    {
+      "name": "rename",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "rename",
+        "name": "Renamed",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0"
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "connections",
+          "revision": "sha256:1472e6cd333eb4a61e4c45b08025c06af060e2e4231866a187d279d317573aa6",
+          "exists": true,
+          "connections": [
+            {
+              "id": "cn_abcdef012345",
+              "name": "Other",
+              "engine": "claude-agent-acp",
+              "provider": "openai",
+              "auth_mode": "native_account",
+              "key_kind": null,
+              "endpoint": null,
+              "launch_command": [
+                "/fake/node",
+                "/fake/adapter.js"
+              ],
+              "credential": {
+                "kind": "engine_native_dir",
+                "owned": false
+              },
+              "state": "configured",
+              "qualified": true,
+              "max_concurrent_sessions": 4,
+              "optional_engine": false,
+              "created_at": "2026-01-01T00:00:00+00:00",
+              "updated_at": "old"
+            },
+            {
+              "id": "cn_0123456789ab",
+              "name": "Renamed",
+              "engine": "codex-acp",
+              "provider": "openai",
+              "auth_mode": "native_account",
+              "key_kind": null,
+              "endpoint": null,
+              "launch_command": [
+                "/fake/node",
+                "/fake/adapter.js"
+              ],
+              "credential": {
+                "kind": "os_keyring"
+              },
+              "state": "configured",
+              "qualified": true,
+              "max_concurrent_sessions": 4,
+              "optional_engine": false,
+              "created_at": "2026-01-01T00:00:00+00:00",
+              "updated_at": "2026-11-14T01:02:03.456789+00:00"
+            }
+          ],
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "onboarding": "discovery_or_setup",
+              "auth_modes": {
+                "native_account": true,
+                "api_key": true,
+                "gateway": false
+              },
+              "qualified_versions": [
+                "1.12.0",
+                "1.13.0",
+                "2.0.1",
+                "2.1.1",
+                "2.3.0",
+                "2.6.0"
+              ],
+              "connection_ids": [
+                "cn_0123456789ab"
+              ]
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "onboarding": "discovery_or_setup",
+              "auth_modes": {
+                "native_account": true,
+                "api_key": true,
+                "gateway": false
+              },
+              "qualified_versions": [
+                "0.78.0",
+                "0.87.0",
+                "0.88.0",
+                "0.97.0",
+                "0.107.0"
+              ],
+              "connection_ids": [
+                "cn_abcdef012345"
+              ]
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "onboarding": "explicit_opt_in",
+              "auth_modes": {
+                "native_account": true
+              },
+              "qualified_versions": [
+                "2.x.x"
+              ],
+              "connection_ids": []
+            }
+          ],
+          "operations": [
+            "rename",
+            "set_max_concurrent_sessions",
+            "validate",
+            "remove"
+          ],
+          "max_concurrent_sessions_limit": 64,
+          "changed": true,
+          "notes": []
+        }
+      },
+      "after": "{\"auto_connect_disabled\":[\"codex-acp\",\"opencode\"],\"connections\":{\"cn_0123456789ab\":{\"approved_fingerprint\":\"unchanged\",\"auth_mode\":\"native_account\",\"created_at\":\"2026-01-01T00:00:00+00:00\",\"credential_ref\":{\"account\":\"fixture\",\"kind\":\"os_keyring\",\"service\":\"fake\"},\"endpoint\":null,\"engine\":\"codex-acp\",\"id\":\"cn_0123456789ab\",\"key_kind\":null,\"launch_command\":[\"/fake/node\",\"/fake/adapter.js\"],\"max_concurrent_sessions\":4,\"name\":\"Renamed\",\"provider\":\"openai\",\"qualified\":true,\"state\":\"configured\",\"updated_at\":\"2026-11-14T01:02:03.456789+00:00\"},\"cn_abcdef012345\":{\"approved_fingerprint\":\"unchanged\",\"auth_mode\":\"native_account\",\"created_at\":\"2026-01-01T00:00:00+00:00\",\"credential_ref\":{\"kind\":\"engine_native_dir\",\"owned\":false,\"path\":\"/fake/native\"},\"endpoint\":null,\"engine\":\"claude-agent-acp\",\"id\":\"cn_abcdef012345\",\"key_kind\":null,\"launch_command\":[\"/fake/node\",\"/fake/adapter.js\"],\"max_concurrent_sessions\":4,\"name\":\"Other\",\"provider\":\"openai\",\"qualified\":true,\"state\":\"configured\",\"updated_at\":\"old\"}},\"override_history\":{\"cn_0123456789ab\":[{\"approved_at\":\"2026-01-01\",\"approved_by_user\":true,\"endpoint\":null,\"engine\":\"codex-acp\",\"fingerprint\":\"fake\",\"launch_command\":[\"/fake/node\"],\"previous_fingerprint\":\"older\",\"provider\":\"openai\"}]},\"schema_version\":1}",
+      "mode": 384
+    },
+    {
+      "name": "no-op",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "rename",
+        "name": "Fixture",
+        "expected_revision": "sha256:cf848d0b67c3891d3ba808dc080e068eb319b53291558e947901fbb8ff4af0f8"
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"2026-11-14T01:02:03.456789+00:00\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "connections",
+          "revision": "sha256:cf848d0b67c3891d3ba808dc080e068eb319b53291558e947901fbb8ff4af0f8",
+          "exists": true,
+          "connections": [
+            {
+              "id": "cn_abcdef012345",
+              "name": "Other",
+              "engine": "claude-agent-acp",
+              "provider": "openai",
+              "auth_mode": "native_account",
+              "key_kind": null,
+              "endpoint": null,
+              "launch_command": [
+                "/fake/node",
+                "/fake/adapter.js"
+              ],
+              "credential": {
+                "kind": "engine_native_dir",
+                "owned": false
+              },
+              "state": "configured",
+              "qualified": true,
+              "max_concurrent_sessions": 4,
+              "optional_engine": false,
+              "created_at": "2026-01-01T00:00:00+00:00",
+              "updated_at": "old"
+            },
+            {
+              "id": "cn_0123456789ab",
+              "name": "Fixture",
+              "engine": "codex-acp",
+              "provider": "openai",
+              "auth_mode": "native_account",
+              "key_kind": null,
+              "endpoint": null,
+              "launch_command": [
+                "/fake/node",
+                "/fake/adapter.js"
+              ],
+              "credential": {
+                "kind": "os_keyring"
+              },
+              "state": "configured",
+              "qualified": true,
+              "max_concurrent_sessions": 4,
+              "optional_engine": false,
+              "created_at": "2026-01-01T00:00:00+00:00",
+              "updated_at": "2026-11-14T01:02:03.456789+00:00"
+            }
+          ],
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "onboarding": "discovery_or_setup",
+              "auth_modes": {
+                "native_account": true,
+                "api_key": true,
+                "gateway": false
+              },
+              "qualified_versions": [
+                "1.12.0",
+                "1.13.0",
+                "2.0.1",
+                "2.1.1",
+                "2.3.0",
+                "2.6.0"
+              ],
+              "connection_ids": [
+                "cn_0123456789ab"
+              ]
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "onboarding": "discovery_or_setup",
+              "auth_modes": {
+                "native_account": true,
+                "api_key": true,
+                "gateway": false
+              },
+              "qualified_versions": [
+                "0.78.0",
+                "0.87.0",
+                "0.88.0",
+                "0.97.0",
+                "0.107.0"
+              ],
+              "connection_ids": [
+                "cn_abcdef012345"
+              ]
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "onboarding": "explicit_opt_in",
+              "auth_modes": {
+                "native_account": true
+              },
+              "qualified_versions": [
+                "2.x.x"
+              ],
+              "connection_ids": []
+            }
+          ],
+          "operations": [
+            "rename",
+            "set_max_concurrent_sessions",
+            "validate",
+            "remove"
+          ],
+          "max_concurrent_sessions_limit": 64,
+          "changed": true,
+          "notes": []
+        }
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"2026-11-14T01:02:03.456789+00:00\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "unicode",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "rename",
+        "name": "  Café 🙂  ",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0"
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "connections",
+          "revision": "sha256:221ebb7952a0dd2c37cf1ecf7082ccb4d654a8a3233fe73e28b7654a449af7ae",
+          "exists": true,
+          "connections": [
+            {
+              "id": "cn_abcdef012345",
+              "name": "Other",
+              "engine": "claude-agent-acp",
+              "provider": "openai",
+              "auth_mode": "native_account",
+              "key_kind": null,
+              "endpoint": null,
+              "launch_command": [
+                "/fake/node",
+                "/fake/adapter.js"
+              ],
+              "credential": {
+                "kind": "engine_native_dir",
+                "owned": false
+              },
+              "state": "configured",
+              "qualified": true,
+              "max_concurrent_sessions": 4,
+              "optional_engine": false,
+              "created_at": "2026-01-01T00:00:00+00:00",
+              "updated_at": "old"
+            },
+            {
+              "id": "cn_0123456789ab",
+              "name": "  Café 🙂  ",
+              "engine": "codex-acp",
+              "provider": "openai",
+              "auth_mode": "native_account",
+              "key_kind": null,
+              "endpoint": null,
+              "launch_command": [
+                "/fake/node",
+                "/fake/adapter.js"
+              ],
+              "credential": {
+                "kind": "os_keyring"
+              },
+              "state": "configured",
+              "qualified": true,
+              "max_concurrent_sessions": 4,
+              "optional_engine": false,
+              "created_at": "2026-01-01T00:00:00+00:00",
+              "updated_at": "2026-11-14T01:02:03.456789+00:00"
+            }
+          ],
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "onboarding": "discovery_or_setup",
+              "auth_modes": {
+                "native_account": true,
+                "api_key": true,
+                "gateway": false
+              },
+              "qualified_versions": [
+                "1.12.0",
+                "1.13.0",
+                "2.0.1",
+                "2.1.1",
+                "2.3.0",
+                "2.6.0"
+              ],
+              "connection_ids": [
+                "cn_0123456789ab"
+              ]
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "onboarding": "discovery_or_setup",
+              "auth_modes": {
+                "native_account": true,
+                "api_key": true,
+                "gateway": false
+              },
+              "qualified_versions": [
+                "0.78.0",
+                "0.87.0",
+                "0.88.0",
+                "0.97.0",
+                "0.107.0"
+              ],
+              "connection_ids": [
+                "cn_abcdef012345"
+              ]
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "onboarding": "explicit_opt_in",
+              "auth_modes": {
+                "native_account": true
+              },
+              "qualified_versions": [
+                "2.x.x"
+              ],
+              "connection_ids": []
+            }
+          ],
+          "operations": [
+            "rename",
+            "set_max_concurrent_sessions",
+            "validate",
+            "remove"
+          ],
+          "max_concurrent_sessions_limit": 64,
+          "changed": true,
+          "notes": []
+        }
+      },
+      "after": "{\"auto_connect_disabled\":[\"codex-acp\",\"opencode\"],\"connections\":{\"cn_0123456789ab\":{\"approved_fingerprint\":\"unchanged\",\"auth_mode\":\"native_account\",\"created_at\":\"2026-01-01T00:00:00+00:00\",\"credential_ref\":{\"account\":\"fixture\",\"kind\":\"os_keyring\",\"service\":\"fake\"},\"endpoint\":null,\"engine\":\"codex-acp\",\"id\":\"cn_0123456789ab\",\"key_kind\":null,\"launch_command\":[\"/fake/node\",\"/fake/adapter.js\"],\"max_concurrent_sessions\":4,\"name\":\"  Café 🙂  \",\"provider\":\"openai\",\"qualified\":true,\"state\":\"configured\",\"updated_at\":\"2026-11-14T01:02:03.456789+00:00\"},\"cn_abcdef012345\":{\"approved_fingerprint\":\"unchanged\",\"auth_mode\":\"native_account\",\"created_at\":\"2026-01-01T00:00:00+00:00\",\"credential_ref\":{\"kind\":\"engine_native_dir\",\"owned\":false,\"path\":\"/fake/native\"},\"endpoint\":null,\"engine\":\"claude-agent-acp\",\"id\":\"cn_abcdef012345\",\"key_kind\":null,\"launch_command\":[\"/fake/node\",\"/fake/adapter.js\"],\"max_concurrent_sessions\":4,\"name\":\"Other\",\"provider\":\"openai\",\"qualified\":true,\"state\":\"configured\",\"updated_at\":\"old\"}},\"override_history\":{\"cn_0123456789ab\":[{\"approved_at\":\"2026-01-01\",\"approved_by_user\":true,\"endpoint\":null,\"engine\":\"codex-acp\",\"fingerprint\":\"fake\",\"launch_command\":[\"/fake/node\"],\"previous_fingerprint\":\"older\",\"provider\":\"openai\"}]},\"schema_version\":1}",
+      "mode": 384
+    },
+    {
+      "name": "max-one",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "set_max_concurrent_sessions",
+        "name": "Renamed",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0",
+        "max_concurrent_sessions": 1
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "connections",
+          "revision": "sha256:61c724233d17bc9b38cc1f7752b4625eb9452b063427011d4141b21306d5d31f",
+          "exists": true,
+          "connections": [
+            {
+              "id": "cn_abcdef012345",
+              "name": "Other",
+              "engine": "claude-agent-acp",
+              "provider": "openai",
+              "auth_mode": "native_account",
+              "key_kind": null,
+              "endpoint": null,
+              "launch_command": [
+                "/fake/node",
+                "/fake/adapter.js"
+              ],
+              "credential": {
+                "kind": "engine_native_dir",
+                "owned": false
+              },
+              "state": "configured",
+              "qualified": true,
+              "max_concurrent_sessions": 4,
+              "optional_engine": false,
+              "created_at": "2026-01-01T00:00:00+00:00",
+              "updated_at": "old"
+            },
+            {
+              "id": "cn_0123456789ab",
+              "name": "Fixture",
+              "engine": "codex-acp",
+              "provider": "openai",
+              "auth_mode": "native_account",
+              "key_kind": null,
+              "endpoint": null,
+              "launch_command": [
+                "/fake/node",
+                "/fake/adapter.js"
+              ],
+              "credential": {
+                "kind": "os_keyring"
+              },
+              "state": "configured",
+              "qualified": true,
+              "max_concurrent_sessions": 1,
+              "optional_engine": false,
+              "created_at": "2026-01-01T00:00:00+00:00",
+              "updated_at": "2026-11-14T01:02:03.456789+00:00"
+            }
+          ],
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "onboarding": "discovery_or_setup",
+              "auth_modes": {
+                "native_account": true,
+                "api_key": true,
+                "gateway": false
+              },
+              "qualified_versions": [
+                "1.12.0",
+                "1.13.0",
+                "2.0.1",
+                "2.1.1",
+                "2.3.0",
+                "2.6.0"
+              ],
+              "connection_ids": [
+                "cn_0123456789ab"
+              ]
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "onboarding": "discovery_or_setup",
+              "auth_modes": {
+                "native_account": true,
+                "api_key": true,
+                "gateway": false
+              },
+              "qualified_versions": [
+                "0.78.0",
+                "0.87.0",
+                "0.88.0",
+                "0.97.0",
+                "0.107.0"
+              ],
+              "connection_ids": [
+                "cn_abcdef012345"
+              ]
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "onboarding": "explicit_opt_in",
+              "auth_modes": {
+                "native_account": true
+              },
+              "qualified_versions": [
+                "2.x.x"
+              ],
+              "connection_ids": []
+            }
+          ],
+          "operations": [
+            "rename",
+            "set_max_concurrent_sessions",
+            "validate",
+            "remove"
+          ],
+          "max_concurrent_sessions_limit": 64,
+          "changed": true,
+          "notes": []
+        }
+      },
+      "after": "{\"auto_connect_disabled\":[\"codex-acp\",\"opencode\"],\"connections\":{\"cn_0123456789ab\":{\"approved_fingerprint\":\"unchanged\",\"auth_mode\":\"native_account\",\"created_at\":\"2026-01-01T00:00:00+00:00\",\"credential_ref\":{\"account\":\"fixture\",\"kind\":\"os_keyring\",\"service\":\"fake\"},\"endpoint\":null,\"engine\":\"codex-acp\",\"id\":\"cn_0123456789ab\",\"key_kind\":null,\"launch_command\":[\"/fake/node\",\"/fake/adapter.js\"],\"max_concurrent_sessions\":1,\"name\":\"Fixture\",\"provider\":\"openai\",\"qualified\":true,\"state\":\"configured\",\"updated_at\":\"2026-11-14T01:02:03.456789+00:00\"},\"cn_abcdef012345\":{\"approved_fingerprint\":\"unchanged\",\"auth_mode\":\"native_account\",\"created_at\":\"2026-01-01T00:00:00+00:00\",\"credential_ref\":{\"kind\":\"engine_native_dir\",\"owned\":false,\"path\":\"/fake/native\"},\"endpoint\":null,\"engine\":\"claude-agent-acp\",\"id\":\"cn_abcdef012345\",\"key_kind\":null,\"launch_command\":[\"/fake/node\",\"/fake/adapter.js\"],\"max_concurrent_sessions\":4,\"name\":\"Other\",\"provider\":\"openai\",\"qualified\":true,\"state\":\"configured\",\"updated_at\":\"old\"}},\"override_history\":{\"cn_0123456789ab\":[{\"approved_at\":\"2026-01-01\",\"approved_by_user\":true,\"endpoint\":null,\"engine\":\"codex-acp\",\"fingerprint\":\"fake\",\"launch_command\":[\"/fake/node\"],\"previous_fingerprint\":\"older\",\"provider\":\"openai\"}]},\"schema_version\":1}",
+      "mode": 384
+    },
+    {
+      "name": "max-limit",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "set_max_concurrent_sessions",
+        "name": "Renamed",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0",
+        "max_concurrent_sessions": 64
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "connections",
+          "revision": "sha256:ca2e6b5d5cf3b76cd1692fbf33f5bf805c3cc72ba22fb01ff45c0a025af28432",
+          "exists": true,
+          "connections": [
+            {
+              "id": "cn_abcdef012345",
+              "name": "Other",
+              "engine": "claude-agent-acp",
+              "provider": "openai",
+              "auth_mode": "native_account",
+              "key_kind": null,
+              "endpoint": null,
+              "launch_command": [
+                "/fake/node",
+                "/fake/adapter.js"
+              ],
+              "credential": {
+                "kind": "engine_native_dir",
+                "owned": false
+              },
+              "state": "configured",
+              "qualified": true,
+              "max_concurrent_sessions": 4,
+              "optional_engine": false,
+              "created_at": "2026-01-01T00:00:00+00:00",
+              "updated_at": "old"
+            },
+            {
+              "id": "cn_0123456789ab",
+              "name": "Fixture",
+              "engine": "codex-acp",
+              "provider": "openai",
+              "auth_mode": "native_account",
+              "key_kind": null,
+              "endpoint": null,
+              "launch_command": [
+                "/fake/node",
+                "/fake/adapter.js"
+              ],
+              "credential": {
+                "kind": "os_keyring"
+              },
+              "state": "configured",
+              "qualified": true,
+              "max_concurrent_sessions": 64,
+              "optional_engine": false,
+              "created_at": "2026-01-01T00:00:00+00:00",
+              "updated_at": "2026-11-14T01:02:03.456789+00:00"
+            }
+          ],
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "onboarding": "discovery_or_setup",
+              "auth_modes": {
+                "native_account": true,
+                "api_key": true,
+                "gateway": false
+              },
+              "qualified_versions": [
+                "1.12.0",
+                "1.13.0",
+                "2.0.1",
+                "2.1.1",
+                "2.3.0",
+                "2.6.0"
+              ],
+              "connection_ids": [
+                "cn_0123456789ab"
+              ]
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "onboarding": "discovery_or_setup",
+              "auth_modes": {
+                "native_account": true,
+                "api_key": true,
+                "gateway": false
+              },
+              "qualified_versions": [
+                "0.78.0",
+                "0.87.0",
+                "0.88.0",
+                "0.97.0",
+                "0.107.0"
+              ],
+              "connection_ids": [
+                "cn_abcdef012345"
+              ]
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "onboarding": "explicit_opt_in",
+              "auth_modes": {
+                "native_account": true
+              },
+              "qualified_versions": [
+                "2.x.x"
+              ],
+              "connection_ids": []
+            }
+          ],
+          "operations": [
+            "rename",
+            "set_max_concurrent_sessions",
+            "validate",
+            "remove"
+          ],
+          "max_concurrent_sessions_limit": 64,
+          "changed": true,
+          "notes": []
+        }
+      },
+      "after": "{\"auto_connect_disabled\":[\"codex-acp\",\"opencode\"],\"connections\":{\"cn_0123456789ab\":{\"approved_fingerprint\":\"unchanged\",\"auth_mode\":\"native_account\",\"created_at\":\"2026-01-01T00:00:00+00:00\",\"credential_ref\":{\"account\":\"fixture\",\"kind\":\"os_keyring\",\"service\":\"fake\"},\"endpoint\":null,\"engine\":\"codex-acp\",\"id\":\"cn_0123456789ab\",\"key_kind\":null,\"launch_command\":[\"/fake/node\",\"/fake/adapter.js\"],\"max_concurrent_sessions\":64,\"name\":\"Fixture\",\"provider\":\"openai\",\"qualified\":true,\"state\":\"configured\",\"updated_at\":\"2026-11-14T01:02:03.456789+00:00\"},\"cn_abcdef012345\":{\"approved_fingerprint\":\"unchanged\",\"auth_mode\":\"native_account\",\"created_at\":\"2026-01-01T00:00:00+00:00\",\"credential_ref\":{\"kind\":\"engine_native_dir\",\"owned\":false,\"path\":\"/fake/native\"},\"endpoint\":null,\"engine\":\"claude-agent-acp\",\"id\":\"cn_abcdef012345\",\"key_kind\":null,\"launch_command\":[\"/fake/node\",\"/fake/adapter.js\"],\"max_concurrent_sessions\":4,\"name\":\"Other\",\"provider\":\"openai\",\"qualified\":true,\"state\":\"configured\",\"updated_at\":\"old\"}},\"override_history\":{\"cn_0123456789ab\":[{\"approved_at\":\"2026-01-01\",\"approved_by_user\":true,\"endpoint\":null,\"engine\":\"codex-acp\",\"fingerprint\":\"fake\",\"launch_command\":[\"/fake/node\"],\"previous_fingerprint\":\"older\",\"provider\":\"openai\"}]},\"schema_version\":1}",
+      "mode": 384
+    },
+    {
+      "name": "ignored-unforwarded-fields",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "rename",
+        "name": "Changed",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0",
+        "root": "/ignored",
+        "engine": "ignored"
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "connections",
+          "revision": "sha256:21d01d4e6bce66b6a52eb7bcaf683fb23a25fcd8f41f7e599a440f6b66debdd6",
+          "exists": true,
+          "connections": [
+            {
+              "id": "cn_abcdef012345",
+              "name": "Other",
+              "engine": "claude-agent-acp",
+              "provider": "openai",
+              "auth_mode": "native_account",
+              "key_kind": null,
+              "endpoint": null,
+              "launch_command": [
+                "/fake/node",
+                "/fake/adapter.js"
+              ],
+              "credential": {
+                "kind": "engine_native_dir",
+                "owned": false
+              },
+              "state": "configured",
+              "qualified": true,
+              "max_concurrent_sessions": 4,
+              "optional_engine": false,
+              "created_at": "2026-01-01T00:00:00+00:00",
+              "updated_at": "old"
+            },
+            {
+              "id": "cn_0123456789ab",
+              "name": "Changed",
+              "engine": "codex-acp",
+              "provider": "openai",
+              "auth_mode": "native_account",
+              "key_kind": null,
+              "endpoint": null,
+              "launch_command": [
+                "/fake/node",
+                "/fake/adapter.js"
+              ],
+              "credential": {
+                "kind": "os_keyring"
+              },
+              "state": "configured",
+              "qualified": true,
+              "max_concurrent_sessions": 4,
+              "optional_engine": false,
+              "created_at": "2026-01-01T00:00:00+00:00",
+              "updated_at": "2026-11-14T01:02:03.456789+00:00"
+            }
+          ],
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "onboarding": "discovery_or_setup",
+              "auth_modes": {
+                "native_account": true,
+                "api_key": true,
+                "gateway": false
+              },
+              "qualified_versions": [
+                "1.12.0",
+                "1.13.0",
+                "2.0.1",
+                "2.1.1",
+                "2.3.0",
+                "2.6.0"
+              ],
+              "connection_ids": [
+                "cn_0123456789ab"
+              ]
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "onboarding": "discovery_or_setup",
+              "auth_modes": {
+                "native_account": true,
+                "api_key": true,
+                "gateway": false
+              },
+              "qualified_versions": [
+                "0.78.0",
+                "0.87.0",
+                "0.88.0",
+                "0.97.0",
+                "0.107.0"
+              ],
+              "connection_ids": [
+                "cn_abcdef012345"
+              ]
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "onboarding": "explicit_opt_in",
+              "auth_modes": {
+                "native_account": true
+              },
+              "qualified_versions": [
+                "2.x.x"
+              ],
+              "connection_ids": []
+            }
+          ],
+          "operations": [
+            "rename",
+            "set_max_concurrent_sessions",
+            "validate",
+            "remove"
+          ],
+          "max_concurrent_sessions_limit": 64,
+          "changed": true,
+          "notes": []
+        }
+      },
+      "after": "{\"auto_connect_disabled\":[\"codex-acp\",\"opencode\"],\"connections\":{\"cn_0123456789ab\":{\"approved_fingerprint\":\"unchanged\",\"auth_mode\":\"native_account\",\"created_at\":\"2026-01-01T00:00:00+00:00\",\"credential_ref\":{\"account\":\"fixture\",\"kind\":\"os_keyring\",\"service\":\"fake\"},\"endpoint\":null,\"engine\":\"codex-acp\",\"id\":\"cn_0123456789ab\",\"key_kind\":null,\"launch_command\":[\"/fake/node\",\"/fake/adapter.js\"],\"max_concurrent_sessions\":4,\"name\":\"Changed\",\"provider\":\"openai\",\"qualified\":true,\"state\":\"configured\",\"updated_at\":\"2026-11-14T01:02:03.456789+00:00\"},\"cn_abcdef012345\":{\"approved_fingerprint\":\"unchanged\",\"auth_mode\":\"native_account\",\"created_at\":\"2026-01-01T00:00:00+00:00\",\"credential_ref\":{\"kind\":\"engine_native_dir\",\"owned\":false,\"path\":\"/fake/native\"},\"endpoint\":null,\"engine\":\"claude-agent-acp\",\"id\":\"cn_abcdef012345\",\"key_kind\":null,\"launch_command\":[\"/fake/node\",\"/fake/adapter.js\"],\"max_concurrent_sessions\":4,\"name\":\"Other\",\"provider\":\"openai\",\"qualified\":true,\"state\":\"configured\",\"updated_at\":\"old\"}},\"override_history\":{\"cn_0123456789ab\":[{\"approved_at\":\"2026-01-01\",\"approved_by_user\":true,\"endpoint\":null,\"engine\":\"codex-acp\",\"fingerprint\":\"fake\",\"launch_command\":[\"/fake/node\"],\"previous_fingerprint\":\"older\",\"provider\":\"openai\"}]},\"schema_version\":1}",
+      "mode": 384
+    },
+    {
+      "name": "stale",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "rename",
+        "name": "Renamed",
+        "expected_revision": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "revision_conflict",
+        "message": "The connections configuration changed after it was read (expected revision sha256:0000000000000000000000000000000000000000000000000000000000000000, current sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0); nothing was written. Re-read it and apply the change again."
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "missing-revision",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "rename",
+        "name": "Renamed",
+        "expected_revision": null
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "invalid_expected_revision",
+        "message": "expected_revision must be the exact revision a read returned ('absent' or 'sha256:<64 hex>')."
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "bad-revision",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "rename",
+        "name": "Renamed",
+        "expected_revision": true
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "invalid_expected_revision",
+        "message": "expected_revision must be the exact revision a read returned ('absent' or 'sha256:<64 hex>')."
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "bad-id",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "../private",
+        "operation": "rename",
+        "name": "Renamed",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0"
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "invalid_connection_id",
+        "message": "connection_id must be cn_<12 hex>."
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "unknown-id",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_000000000000",
+        "operation": "rename",
+        "name": "Renamed",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0"
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "unknown_connection",
+        "message": "connection_id names no registered connection."
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "bad-operation",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "enable",
+        "name": "Renamed",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0"
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "unsupported_operation",
+        "message": "operation must be one of rename, set_max_concurrent_sessions, validate, remove."
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "empty-name",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "rename",
+        "name": "",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0"
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "invalid_configuration",
+        "message": "Correct the invalid setting(s); nothing was written. name: must be 1-120 printable characters"
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "long-name",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "rename",
+        "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0"
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "invalid_configuration",
+        "message": "Correct the invalid setting(s); nothing was written. name: must be 1-120 printable characters"
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "control-name",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "rename",
+        "name": "x",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0"
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "invalid_configuration",
+        "message": "Correct the invalid setting(s); nothing was written. name: must be 1-120 printable characters"
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "null-name",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "rename",
+        "name": null,
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0"
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "invalid_configuration",
+        "message": "Correct the invalid setting(s); nothing was written. name: must be 1-120 printable characters"
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "bad-limit-0",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "set_max_concurrent_sessions",
+        "name": "Renamed",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0",
+        "max_concurrent_sessions": 0
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "invalid_configuration",
+        "message": "Correct the invalid setting(s); nothing was written. max_concurrent_sessions: must be an integer from 1 through 64"
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "bad-limit-65",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "set_max_concurrent_sessions",
+        "name": "Renamed",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0",
+        "max_concurrent_sessions": 65
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "invalid_configuration",
+        "message": "Correct the invalid setting(s); nothing was written. max_concurrent_sessions: must be an integer from 1 through 64"
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "bad-limit-True",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "set_max_concurrent_sessions",
+        "name": "Renamed",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0",
+        "max_concurrent_sessions": true
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "invalid_configuration",
+        "message": "Correct the invalid setting(s); nothing was written. max_concurrent_sessions: must be an integer from 1 through 64"
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "bad-limit-1.0",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "set_max_concurrent_sessions",
+        "name": "Renamed",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0",
+        "max_concurrent_sessions": 1.0
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "invalid_configuration",
+        "message": "Correct the invalid setting(s); nothing was written. max_concurrent_sessions: must be an integer from 1 through 64"
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "bad-limit-'2'",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "set_max_concurrent_sessions",
+        "name": "Renamed",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0",
+        "max_concurrent_sessions": "2"
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "invalid_configuration",
+        "message": "Correct the invalid setting(s); nothing was written. max_concurrent_sessions: must be an integer from 1 through 64"
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "bad-limit-None",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "set_max_concurrent_sessions",
+        "name": "Renamed",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0",
+        "max_concurrent_sessions": null
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "invalid_configuration",
+        "message": "Correct the invalid setting(s); nothing was written. max_concurrent_sessions: must be an integer from 1 through 64"
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    },
+    {
+      "name": "bad-limit--1",
+      "params": {
+        "action": "connection_update",
+        "connection_id": "cn_0123456789ab",
+        "operation": "set_max_concurrent_sessions",
+        "name": "Renamed",
+        "expected_revision": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0",
+        "max_concurrent_sessions": -1
+      },
+      "initial": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "reply": {
+        "ok": false,
+        "code": "invalid_configuration",
+        "message": "Correct the invalid setting(s); nothing was written. max_concurrent_sessions: must be an integer from 1 through 64"
+      },
+      "after": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "mode": 384
+    }
+  ],
+  "explicitlyUnavailable": [
+    {
+      "params": {
+        "action": "apply_default_preset"
+      },
+      "pythonReply": {
+        "fake": "preset.apply"
+      },
+      "fakeCalls": [
+        "preset.apply"
+      ]
+    },
+    {
+      "params": {
+        "action": "reset_default_preset"
+      },
+      "pythonReply": {
+        "fake": "preset.reset"
+      },
+      "fakeCalls": [
+        "preset.reset"
+      ]
+    },
+    {
+      "params": {
+        "action": "refresh"
+      },
+      "pythonReply": {
+        "fake": "catalog.refresh"
+      },
+      "fakeCalls": [
+        "catalog.refresh"
+      ]
+    },
+    {
+      "params": {
+        "action": "install_engine"
+      },
+      "pythonReply": {
+        "fake": "engine.install"
+      },
+      "fakeCalls": [
+        "engine.install"
+      ]
+    },
+    {
+      "params": {
+        "action": "onboard_opencode"
+      },
+      "pythonReply": {
+        "fake": "opencode.onboard"
+      },
+      "fakeCalls": [
+        "opencode.onboard"
+      ]
+    },
+    {
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "pythonReply": {
+        "fake": "profile.read"
+      },
+      "fakeCalls": [
+        "profile.read"
+      ]
+    },
+    {
+      "params": {
+        "action": "profile",
+        "verb": "create"
+      },
+      "pythonReply": {
+        "fake": "profile.mutate"
+      },
+      "fakeCalls": [
+        "profile.mutate"
+      ]
+    },
+    {
+      "params": {
+        "action": "profile",
+        "verb": "save"
+      },
+      "pythonReply": {
+        "fake": "profile.mutate"
+      },
+      "fakeCalls": [
+        "profile.mutate"
+      ]
+    },
+    {
+      "params": {
+        "action": "profile",
+        "verb": "update"
+      },
+      "pythonReply": {
+        "fake": "profile.mutate"
+      },
+      "fakeCalls": [
+        "profile.mutate"
+      ]
+    },
+    {
+      "params": {
+        "action": "profile",
+        "verb": "delete"
+      },
+      "pythonReply": {
+        "fake": "profile.mutate"
+      },
+      "fakeCalls": [
+        "profile.mutate"
+      ]
+    },
+    {
+      "params": {
+        "action": "profile",
+        "verb": "activate"
+      },
+      "pythonReply": {
+        "fake": "profile.mutate"
+      },
+      "fakeCalls": [
+        "profile.mutate"
+      ]
+    },
+    {
+      "params": {
+        "action": "profile",
+        "verb": "deactivate"
+      },
+      "pythonReply": {
+        "fake": "profile.mutate"
+      },
+      "fakeCalls": [
+        "profile.mutate"
+      ]
+    },
+    {
+      "params": {
+        "action": "connection_update",
+        "operation": "validate",
+        "connection_id": "cn_0123456789ab",
+        "expected_revision": "absent"
+      },
+      "pythonReply": {
+        "fake": "connection.effect"
+      },
+      "fakeCalls": [
+        "connection.effect"
+      ]
+    },
+    {
+      "params": {
+        "action": "connection_update",
+        "operation": "remove",
+        "connection_id": "cn_0123456789ab",
+        "expected_revision": "absent"
+      },
+      "pythonReply": {
+        "fake": "connection.effect"
+      },
+      "fakeCalls": [
+        "connection.effect"
+      ]
+    }
+  ]
+}

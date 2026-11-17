@@ -12,7 +12,7 @@ export function scriptedPort(options: { mode?: "real" | "demo"; capabilities?: P
     mode: options.mode ?? "real",
     query<O extends QueryOperation>(operation: O, _parameters: QueryParameters[O]): Promise<QueryResults[O]> {
       if (options.failQuery) return Promise.reject(options.failQuery);
-      const answer: QueryResults = { "capabilities.get": options.capabilities ?? { everything: false, operations: ["tasks.create", "tasks.start", "decisions.answer"] }, "project.snapshot": [], "project.facts": [], "machine.facts": [] };
+      const answer: QueryResults = { "capabilities.get": options.capabilities ?? { everything: false, operations: ["tasks.create", "tasks.start", "decisions.answer"] }, "project.snapshot": [], "project.facts": [], "machine.facts": [], "machine.overview": [] };
       return Promise.resolve(answer[operation]);
     },
     command(envelope) {

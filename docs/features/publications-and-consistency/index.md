@@ -1,6 +1,6 @@
 # Publications and consistency
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 There is one project-local `.cortex/cortex.sqlite3` metadata index. Published
@@ -43,13 +43,11 @@ never replaces receipt evidence. A new result needs a fresh
 The worker copies `write_report.report_id` alone into `result_submit.report`, not
 the draft id or a command receipt. New rejected `result_submit` calls attempt
 to retain only their error code and safe field path in `submission_rejection`
-observability events, never the rejected arguments or report body. That
-includes `situational_skill_required`: a worker whose observed changes pair
-attributable documentation with behavior files (own declared scope or successful
-channel writes, excluding siblings' reserved paths) without a retained `read_skill` of
-`documentation-sync` is refused before any request, report or result is
-recorded, and may retry with the same key after reading it (see
+observability events, never the rejected arguments or report body. 
+The native runtime issues no `situational_skill_required` refusal: it does not gate a result on skill reads (see
 [roles and delegation](../roles-and-delegation/index.md)).
+
+A `result_submit.report` value is a report reference only when it is exactly `r_` followed by twelve lowercase hexadecimal digits; any other text, including prose that starts with `r_`, is an inline report. A reference must still be this principal's own publication.
 
 An inline report is bound to the result's request key: its draft and publication
 use store delivery keys derived from the channel and that key, and the retained

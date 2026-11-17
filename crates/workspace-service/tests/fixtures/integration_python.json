@@ -1,0 +1,3721 @@
+{
+  "oracle": "machine_tools.integrate",
+  "gitEnv": {
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_AUTHOR_NAME": "Fixture",
+    "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+    "GIT_COMMITTER_NAME": "Fixture",
+    "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z"
+  },
+  "sources": {
+    "crates/workspace-service/machine_tools.py": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+    "crates/workspace-service/task_git.py": "0fa78d3dd9be542b0dd22cdf19949173229cdfdc63a3bc5ce72771384e6be0db",
+    "crates/workspace-service/same_branch.py": "f10efbeda8ef9dca6adfd3a158d09e63a3f7bbb8f7db36680602451757e3f095",
+    "src/cortex_runtime/workspace_api/projections.py": "2a12388eff6c93b2d4d6a19a1d250908c45f186a8de5880ba1556e2fb9d56109"
+  },
+  "cases": [
+    {
+      "name": "confirmation-null",
+      "store": false,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": null,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [],
+      "expected": {
+        "ok": false,
+        "code": "confirmation_required",
+        "message": "Confirm this Git action first."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "confirmation-false",
+      "store": false,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": false,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [],
+      "expected": {
+        "ok": false,
+        "code": "confirmation_required",
+        "message": "Confirm this Git action first."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "confirmation-0",
+      "store": false,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": 0,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [],
+      "expected": {
+        "ok": false,
+        "code": "confirmation_required",
+        "message": "Confirm this Git action first."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "confirmation-1",
+      "store": false,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": 1,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [],
+      "expected": {
+        "ok": false,
+        "code": "confirmation_required",
+        "message": "Confirm this Git action first."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "confirmation-\"yes\"",
+      "store": false,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": "yes",
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [],
+      "expected": {
+        "ok": false,
+        "code": "confirmation_required",
+        "message": "Confirm this Git action first."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "confirmation-[]",
+      "store": false,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": [],
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [],
+      "expected": {
+        "ok": false,
+        "code": "confirmation_required",
+        "message": "Confirm this Git action first."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "confirmation-{}",
+      "store": false,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": {},
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [],
+      "expected": {
+        "ok": false,
+        "code": "confirmation_required",
+        "message": "Confirm this Git action first."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "stale-None-null",
+      "store": true,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": null,
+            "acceptance": null
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "Review and accept the current result before finishing."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "stale-None-{}",
+      "store": true,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": null,
+            "acceptance": {}
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "Review and accept the current result before finishing."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "stale-None-{\"digest\": \"old\"}",
+      "store": true,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": null,
+            "acceptance": {
+              "digest": "old"
+            }
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "Review and accept the current result before finishing."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "stale-done-null",
+      "store": true,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "done",
+            "acceptance": null
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "Review and accept the current result before finishing."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "stale-done-{}",
+      "store": true,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "done",
+            "acceptance": {}
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "Review and accept the current result before finishing."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "stale-done-{\"digest\": \"old\"}",
+      "store": true,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "done",
+            "acceptance": {
+              "digest": "old"
+            }
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "Review and accept the current result before finishing."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "stale-ready-null",
+      "store": true,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready",
+            "acceptance": null
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "Review and accept the current result before finishing."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "stale-ready-{}",
+      "store": true,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready",
+            "acceptance": {}
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "Review and accept the current result before finishing."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "stale-ready-{\"digest\": \"old\"}",
+      "store": true,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready",
+            "acceptance": {
+              "digest": "old"
+            }
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "Review and accept the current result before finishing."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "stale-ready_to_merge-null",
+      "store": true,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": null
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "Review and accept the current result before finishing."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "stale-ready_to_merge-{}",
+      "store": true,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {}
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "Review and accept the current result before finishing."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "stale-ready_to_merge-{\"digest\": \"old\"}",
+      "store": true,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "old"
+            }
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "Review and accept the current result before finishing."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "missing-task",
+      "store": true,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "missing",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "Review and accept the current result before finishing."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "missing-task-id",
+      "store": true,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": null,
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "Review and accept the current result before finishing."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "empty-record",
+      "store": true,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {}
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "Review and accept the current result before finishing."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "absent-store",
+      "store": false,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Activate Cortex and review its runtime result first."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "no-execution",
+      "store": true,
+      "runtime": null,
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "state-CREATED",
+      "store": true,
+      "runtime": "CREATED",
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "CREATED",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "state-PLANNING",
+      "store": true,
+      "runtime": "PLANNING",
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "PLANNING",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "state-PLAN_READY",
+      "store": true,
+      "runtime": "PLAN_READY",
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "PLAN_READY",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "state-EXECUTING",
+      "store": true,
+      "runtime": "EXECUTING",
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "EXECUTING",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "state-REVIEWING",
+      "store": true,
+      "runtime": "REVIEWING",
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "REVIEWING",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "state-VERIFYING",
+      "store": true,
+      "runtime": "VERIFYING",
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "VERIFYING",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "state-RECONCILING",
+      "store": true,
+      "runtime": "RECONCILING",
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "RECONCILING",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "state-ANSWER_READY",
+      "store": true,
+      "runtime": "ANSWER_READY",
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "ANSWER_READY",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "state-WAITING_USER",
+      "store": true,
+      "runtime": "WAITING_USER",
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "WAITING_USER",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "state-RECOVERING",
+      "store": true,
+      "runtime": "RECOVERING",
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "RECOVERING",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "state-BLOCKED",
+      "store": true,
+      "runtime": "BLOCKED",
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "BLOCKED",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "state-FAILED",
+      "store": true,
+      "runtime": "FAILED",
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "FAILED",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "state-CANCELLED",
+      "store": true,
+      "runtime": "CANCELLED",
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "CANCELLED",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "state-PAUSED",
+      "store": true,
+      "runtime": "PAUSED",
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "PAUSED",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "launch-prepare",
+      "store": true,
+      "runtime": "EXECUTING",
+      "git": null,
+      "changes": [
+        [
+          "INSERT INTO workspace_starts VALUES ('e1','t1','p1','fixture','q1','fixture','source1',?,1,'now')",
+          [
+            "prepare"
+          ]
+        ],
+        [
+          "DELETE FROM runtime_tasks WHERE task_id='r1'",
+          []
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "EXECUTING",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO workspace_starts VALUES ('e1','t1','p1','fixture','q1','fixture','source1',?,1,'now')",
+          [
+            "prepare"
+          ]
+        ],
+        [
+          "DELETE FROM runtime_tasks WHERE task_id='r1'",
+          []
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "launch-claimed",
+      "store": true,
+      "runtime": "EXECUTING",
+      "git": null,
+      "changes": [
+        [
+          "INSERT INTO workspace_starts VALUES ('e1','t1','p1','fixture','q1','fixture','source1',?,1,'now')",
+          [
+            "claimed"
+          ]
+        ],
+        [
+          "DELETE FROM runtime_tasks WHERE task_id='r1'",
+          []
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "EXECUTING",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO workspace_starts VALUES ('e1','t1','p1','fixture','q1','fixture','source1',?,1,'now')",
+          [
+            "claimed"
+          ]
+        ],
+        [
+          "DELETE FROM runtime_tasks WHERE task_id='r1'",
+          []
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "launch-dispatched",
+      "store": true,
+      "runtime": "EXECUTING",
+      "git": null,
+      "changes": [
+        [
+          "INSERT INTO workspace_starts VALUES ('e1','t1','p1','fixture','q1','fixture','source1',?,1,'now')",
+          [
+            "dispatched"
+          ]
+        ],
+        [
+          "DELETE FROM runtime_tasks WHERE task_id='r1'",
+          []
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "EXECUTING",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO workspace_starts VALUES ('e1','t1','p1','fixture','q1','fixture','source1',?,1,'now')",
+          [
+            "dispatched"
+          ]
+        ],
+        [
+          "DELETE FROM runtime_tasks WHERE task_id='r1'",
+          []
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "launch-unknown",
+      "store": true,
+      "runtime": "EXECUTING",
+      "git": null,
+      "changes": [
+        [
+          "INSERT INTO workspace_starts VALUES ('e1','t1','p1','fixture','q1','fixture','source1',?,1,'now')",
+          [
+            "unknown"
+          ]
+        ],
+        [
+          "DELETE FROM runtime_tasks WHERE task_id='r1'",
+          []
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "EXECUTING",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO workspace_starts VALUES ('e1','t1','p1','fixture','q1','fixture','source1',?,1,'now')",
+          [
+            "unknown"
+          ]
+        ],
+        [
+          "DELETE FROM runtime_tasks WHERE task_id='r1'",
+          []
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "completed-invalid-owner",
+      "store": true,
+      "runtime": "COMPLETED",
+      "git": null,
+      "changes": [
+        [
+          "UPDATE task_owners SET epoch=2 WHERE task_id='r1'",
+          []
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE task_owners SET epoch=2 WHERE task_id='r1'",
+          []
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "completed-invalid-missing-owner",
+      "store": true,
+      "runtime": "COMPLETED",
+      "git": null,
+      "changes": [
+        [
+          "DELETE FROM task_owners WHERE task_id='r1'",
+          []
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "DELETE FROM task_owners WHERE task_id='r1'",
+          []
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "completed-invalid-session",
+      "store": true,
+      "runtime": "COMPLETED",
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,NULL,'{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "completed-invalid-missing-session",
+      "store": true,
+      "runtime": "COMPLETED",
+      "git": null,
+      "changes": [
+        [
+          "DELETE FROM acp_host_sessions WHERE session_id='s1'",
+          []
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "DELETE FROM acp_host_sessions WHERE session_id='s1'",
+          []
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "completed-invalid-session-root",
+      "store": true,
+      "runtime": "COMPLETED",
+      "git": null,
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "/unrelated"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "completed-invalid-revision",
+      "store": true,
+      "runtime": "COMPLETED",
+      "git": null,
+      "changes": [
+        [
+          "UPDATE runtime_tasks SET revision=-1 WHERE task_id='r1'",
+          []
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET revision=-1 WHERE task_id='r1'",
+          []
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "completed-invalid-blocker",
+      "store": true,
+      "runtime": "COMPLETED",
+      "git": null,
+      "changes": [
+        [
+          "UPDATE runtime_tasks SET blocker='unfinished' WHERE task_id='r1'",
+          []
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET blocker='unfinished' WHERE task_id='r1'",
+          []
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "completed-invalid-unknown",
+      "store": true,
+      "runtime": "COMPLETED",
+      "git": null,
+      "changes": [
+        [
+          "INSERT INTO workspace_starts VALUES ('e1','t1','p1','fixture','q1','fixture','source1','unknown',1,'now')",
+          []
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO workspace_starts VALUES ('e1','t1','p1','fixture','q1','fixture','source1','unknown',1,'now')",
+          []
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "completed-invalid-execution-pointer",
+      "store": true,
+      "runtime": "COMPLETED",
+      "git": null,
+      "changes": [
+        [
+          "UPDATE workspace_tasks SET execution_id=NULL WHERE task_id='t1'",
+          []
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE workspace_tasks SET execution_id=NULL WHERE task_id='t1'",
+          []
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Only a completed runtime result can be accepted."
+      },
+      "gitCommands": [],
+      "files": []
+    },
+    {
+      "name": "git-same",
+      "store": false,
+      "runtime": null,
+      "git": "same",
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Activate Cortex and review its runtime result first."
+      },
+      "gitCommands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ],
+        [
+          "add",
+          "."
+        ],
+        [
+          "-c",
+          "core.hooksPath=/dev/null",
+          "commit",
+          "-m",
+          "Base"
+        ],
+        [
+          "rev-parse",
+          "HEAD"
+        ]
+      ],
+      "files": [
+        {
+          "path": ".gitignore",
+          "content": ".cortex/\n.cortex-dev/\n"
+        },
+        {
+          "path": "a.txt",
+          "content": "original\n"
+        }
+      ]
+    },
+    {
+      "name": "git-contained",
+      "store": false,
+      "runtime": null,
+      "git": "contained",
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched",
+            "checkout": {
+              "kind": "worktree",
+              "path": "$BASE/worktree",
+              "branch": "task"
+            },
+            "targetBranch": "main",
+            "baseRevision": "db08d8700ae1850e83f37ddfe5c29cc1ade34bb8"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [],
+      "expected": {
+        "ok": false,
+        "code": "already_in_target",
+        "message": "Already in main. Confirm Close task instead; no Git operation is needed."
+      },
+      "gitCommands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ],
+        [
+          "add",
+          "."
+        ],
+        [
+          "-c",
+          "core.hooksPath=/dev/null",
+          "commit",
+          "-m",
+          "Base"
+        ],
+        [
+          "rev-parse",
+          "HEAD"
+        ],
+        [
+          "-c",
+          "core.hooksPath=/dev/null",
+          "worktree",
+          "add",
+          "-b",
+          "task",
+          "$BASE/worktree"
+        ]
+      ],
+      "files": [
+        {
+          "path": ".gitignore",
+          "content": ".cortex/\n.cortex-dev/\n"
+        },
+        {
+          "path": "a.txt",
+          "content": "original\n"
+        }
+      ]
+    },
+    {
+      "name": "git-pending",
+      "store": false,
+      "runtime": null,
+      "git": "pending",
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched",
+            "checkout": {
+              "kind": "worktree",
+              "path": "$BASE/worktree",
+              "branch": "task"
+            },
+            "targetBranch": "main",
+            "baseRevision": "db08d8700ae1850e83f37ddfe5c29cc1ade34bb8"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Activate Cortex and review its runtime result first."
+      },
+      "gitCommands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ],
+        [
+          "add",
+          "."
+        ],
+        [
+          "-c",
+          "core.hooksPath=/dev/null",
+          "commit",
+          "-m",
+          "Base"
+        ],
+        [
+          "rev-parse",
+          "HEAD"
+        ],
+        [
+          "-c",
+          "core.hooksPath=/dev/null",
+          "worktree",
+          "add",
+          "-b",
+          "task",
+          "$BASE/worktree"
+        ]
+      ],
+      "files": [
+        {
+          "path": ".gitignore",
+          "content": ".cortex/\n.cortex-dev/\n"
+        },
+        {
+          "path": "a.txt",
+          "content": "original\n"
+        }
+      ]
+    },
+    {
+      "name": "git-invalid-target",
+      "store": false,
+      "runtime": null,
+      "git": "invalid-target",
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "-bad"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Activate Cortex and review its runtime result first."
+      },
+      "gitCommands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ],
+        [
+          "add",
+          "."
+        ],
+        [
+          "-c",
+          "core.hooksPath=/dev/null",
+          "commit",
+          "-m",
+          "Base"
+        ],
+        [
+          "rev-parse",
+          "HEAD"
+        ]
+      ],
+      "files": [
+        {
+          "path": ".gitignore",
+          "content": ".cortex/\n.cortex-dev/\n"
+        },
+        {
+          "path": "a.txt",
+          "content": "original\n"
+        }
+      ]
+    },
+    {
+      "name": "git-missing-worktree",
+      "store": false,
+      "runtime": null,
+      "git": "missing-worktree",
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched",
+            "checkout": {
+              "kind": "worktree",
+              "path": "$ROOT/missing",
+              "branch": "task"
+            },
+            "targetBranch": "main"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task"
+      },
+      "rows": [],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Activate Cortex and review its runtime result first."
+      },
+      "gitCommands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ],
+        [
+          "add",
+          "."
+        ],
+        [
+          "-c",
+          "core.hooksPath=/dev/null",
+          "commit",
+          "-m",
+          "Base"
+        ],
+        [
+          "rev-parse",
+          "HEAD"
+        ]
+      ],
+      "files": [
+        {
+          "path": ".gitignore",
+          "content": ".cortex/\n.cortex-dev/\n"
+        },
+        {
+          "path": "a.txt",
+          "content": "original\n"
+        }
+      ]
+    },
+    {
+      "name": "git-override-target",
+      "store": false,
+      "runtime": null,
+      "git": "override-target",
+      "changes": [],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "reviewed"
+            },
+            "keep": "untouched",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "reviewed",
+        "method": "squash",
+        "message": "Save task",
+        "targetBranch": "other"
+      },
+      "rows": [],
+      "expected": {
+        "ok": false,
+        "code": "result_unavailable",
+        "message": "Activate Cortex and review its runtime result first."
+      },
+      "gitCommands": [
+        [
+          "init",
+          "-b",
+          "main"
+        ],
+        [
+          "add",
+          "."
+        ],
+        [
+          "-c",
+          "core.hooksPath=/dev/null",
+          "commit",
+          "-m",
+          "Base"
+        ],
+        [
+          "rev-parse",
+          "HEAD"
+        ],
+        [
+          "branch",
+          "other"
+        ]
+      ],
+      "files": [
+        {
+          "path": ".gitignore",
+          "content": ".cortex/\n.cortex-dev/\n"
+        },
+        {
+          "path": "a.txt",
+          "content": "original\n"
+        }
+      ]
+    }
+  ]
+}

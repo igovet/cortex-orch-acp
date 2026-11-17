@@ -1,0 +1,1536 @@
+//! Native machine parity at the service boundary. All Git remotes are local bare fixtures.
+#[path = "support/hermetic.rs"]
+mod hermetic;
+use serde_json::{json, Value};
+use std::{
+    fs,
+    os::unix::fs::{symlink, PermissionsExt},
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
+use workspace_service::{Config, LaunchSpec, Service};
+static NEXT: AtomicU64 = AtomicU64::new(0);
+struct Fixture {
+    base: PathBuf,
+    repo: PathBuf,
+    state: PathBuf,
+    service: Arc<Service>,
+    id: String,
+}
+impl Fixture {
+    async fn new() -> Self {
+        let base = std::env::temp_dir().join(format!(
+            "cw-native-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&base).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        let repo = base.join("repo");
+        fs::create_dir(&repo).unwrap();
+        let state = base.join("state");
+        // No engine is activated. Native calls must still work.
+        let service = Service::bind(Config {
+            runtime_dir: base.join("runtime"),
+            state_dir: state.clone(),
+            allowed_root: base.clone(),
+            launch: LaunchSpec::bare(),
+            request_timeout: Duration::from_secs(30),
+            shutdown_timeout: Duration::from_millis(100),
+            event_capacity: 16,
+        })
+        .await
+        .unwrap();
+        let id = service.register(&repo, "Fixture").await.unwrap()["projectId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let f = Self {
+            base,
+            repo,
+            state,
+            service,
+            id,
+        };
+        f.git(&["init", "-b", "main"]);
+        f.git(&["config", "user.name", "Owner"]);
+        f.git(&["config", "user.email", "owner@example.invalid"]);
+        f.git(&["config", "commit.gpgsign", "false"]);
+        f.git(&[
+            "config",
+            "core.hooksPath",
+            f.base.join("hooks").to_str().unwrap(),
+        ]);
+        f.write("a.txt", b"one\ntwo\n");
+        f.git(&["add", "a.txt"]);
+        f.git(&["commit", "-m", "first"]);
+        f
+    }
+    fn store(&self) -> cortex_core::Store {
+        let key = cortex_core::ProjectKey::new(
+            &self.repo,
+            if workspace_protocol::channel::current().is_dev() {
+                cortex_core::StoreChannel::Dev
+            } else {
+                cortex_core::StoreChannel::Release
+            },
+        )
+        .unwrap();
+        let store = cortex_core::Store::open(key, cortex_core::OpenMode::Initialize).unwrap();
+        store
+            .write(|db| {
+                db.execute(
+                    "INSERT OR IGNORE INTO workspace_projects VALUES (?,?,?,?,1)",
+                    (
+                        &self.id,
+                        self.repo.to_str().unwrap(),
+                        "fixture",
+                        cortex_core::now(),
+                    ),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        store
+    }
+    fn write(&self, name: &str, data: &[u8]) {
+        let p = self.repo.join(name);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, data).unwrap();
+    }
+    fn git(&self, a: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(a)
+            .current_dir(&self.repo)
+            .env("HOME", &self.base)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "fixture Git failed: {a:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+    async fn call(&self, op: &str, p: Value) -> Value {
+        self.service
+            .machine(
+                serde_json::from_value(json!({"op":op,"projectId":self.id,"params":p})).unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+    async fn ok(&self, op: &str, p: Value) -> Value {
+        let reply = self.call(op, p).await;
+        assert_eq!(reply["ok"], true, "{reply}");
+        reply["result"].clone()
+    }
+    async fn action(&self, p: Value) -> Value {
+        self.ok("git", p).await
+    }
+    async fn snapshot(&self) -> Value {
+        self.ok("repo.snapshot", json!({})).await
+    }
+    fn remote(&self) -> PathBuf {
+        let path = self.base.join("remote.git");
+        self.git(&["init", "--bare", path.to_str().unwrap()]);
+        self.git(&["remote", "add", "origin", path.to_str().unwrap()]);
+        path
+    }
+    async fn stop(&self) {
+        self.service.stop().await.unwrap();
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.base);
+    }
+}
+#[tokio::test]
+async fn explicit_workflows_and_maintenance_reads_need_no_activation() {
+    let f = Fixture::new().await;
+    let _store = f.store();
+    for action in ["harvest", "harvest-refresh", "skill-management"] {
+        let v = f
+            .ok(
+                "workflow.describe",
+                json!({"action":action,"scope":"  source-backed Rust docs  "}),
+            )
+            .await;
+        assert!(v["description"]
+            .as_str()
+            .unwrap()
+            .contains("source-backed Rust docs"));
+        assert!(v["description"].as_str().unwrap().contains("read_skill"));
+    }
+    assert_eq!(
+        f.call(
+            "workflow.describe",
+            json!({"action":"skill-management","scope":" "})
+        )
+        .await["code"],
+        "description_required"
+    );
+    assert_eq!(
+        f.call(
+            "workflow.describe",
+            json!({"action":"harvest","scope":false})
+        )
+        .await["code"],
+        "invalid_workflow"
+    );
+    assert_eq!(
+        f.call(
+            "workflow.describe",
+            json!({"action":"harvest","scope":"я".repeat(30001)})
+        )
+        .await["code"],
+        "invalid_workflow"
+    );
+    let bounded = f
+        .ok(
+            "workflow.describe",
+            json!({"action":"harvest","scope":"я".repeat(30000)}),
+        )
+        .await;
+    assert!(bounded["description"]
+        .as_str()
+        .unwrap()
+        .contains("я".repeat(30000).as_str()));
+    assert_eq!(
+        f.ok("maintenance", json!({"action":"voice.status"})).await["phase"],
+        "not_downloaded"
+    );
+    assert_eq!(
+        f.call("maintenance", json!({"action":"read","id":"../bad"}))
+            .await["code"],
+        "invalid_job"
+    );
+    assert_eq!(
+        f.call("maintenance", json!({"action":"read","id":"0".repeat(32)}))
+            .await["code"],
+        "unknown_job"
+    );
+    let id = "a".repeat(32);
+    let folder = f.state.join("maintenance").join(&id);
+    fs::create_dir_all(&folder).unwrap();
+    fs::set_permissions(folder.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        folder.join("status.json"),
+        json!({"id":id,"kind":"install","phase":"starting","updated":0}).to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        f.ok("maintenance", json!({"action":"read","id":id})).await["phase"],
+        "unknown"
+    );
+    assert_eq!(
+        f.call("maintenance", json!({"action":"cancel","id":id}))
+            .await["code"],
+        "install_in_progress"
+    );
+    assert_eq!(
+        f.call("maintenance", json!({"action":"acknowledge","id":id}))
+            .await["code"],
+        "confirmation_required"
+    );
+    let v = f
+        .ok(
+            "maintenance",
+            json!({"action":"acknowledge","id":id,"confirmed":true}),
+        )
+        .await;
+    assert_eq!(v["phase"], "unknown");
+    assert_eq!(v["acknowledged"], true);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn cleanup_and_sprint_deletion_use_native_temp_store_with_start_fences() {
+    let f = Fixture::new().await;
+    let store = f.store();
+    let sprint = f
+        .ok(
+            "product.sprint",
+            json!({"action":"create","description":"Retire this sprint"}),
+        )
+        .await["sprintId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    store.write(|db|{
+        for task in ["member","other"] {
+            db.execute("INSERT INTO workspace_tasks(task_id,project_id,description,created_at) VALUES (?,?,'fixture',?)",
+                (task,&f.id,cortex_core::now()))?;
+            db.execute("INSERT INTO workspace_task_options VALUES (?,'{}')",[task])?;
+        }
+        Ok(())
+    }).unwrap();
+    f.ok(
+        "product.sprint",
+        json!({"action":"patch","sprintId":sprint,"patch":{"taskIds":["member"]}}),
+    )
+    .await;
+    assert_eq!(
+        f.call(
+            "product.sprint",
+            json!({"action":"delete_prepare","sprintId":sprint})
+        )
+        .await["code"],
+        "confirmation_required"
+    );
+    let prepared = f
+        .ok(
+            "product.sprint",
+            json!({"action":"delete_prepare","sprintId":sprint,"confirmed":true}),
+        )
+        .await;
+    assert_eq!(prepared["done"], false);
+    assert_eq!(prepared["executionIds"], json!([]));
+    store
+        .read(|db| {
+            let raw: String = db.query_row(
+                "SELECT options_json FROM workspace_task_options WHERE task_id='member'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(
+                serde_json::from_str::<Value>(&raw)?["deletingSprint"],
+                sprint
+            );
+            Ok(())
+        })
+        .unwrap();
+    let start = json!({"protocol":{"major":1,"minor":8},"requestId":"start-deleted-sprint","projectId":f.id,"actorId":"fixture",
+        "operation":"tasks.start","target":"member","expectedVersion":"1","ownerEpoch":null,"payload":{}});
+    assert_eq!(
+        cortex_core::workspace::start_native(&store, &f.id, "fixture", &start)
+            .unwrap_err()
+            .code(),
+        "sprint_deleting"
+    );
+    let result = f
+        .ok(
+            "product.sprint",
+            json!({"action":"delete_finish","sprintId":sprint,"confirmed":true}),
+        )
+        .await;
+    assert_eq!(result["done"], true);
+    assert_eq!(result["taskIds"], json!(["member"]));
+    assert_eq!(
+        f.ok(
+            "product.sprint",
+            json!({"action":"delete","sprintId":sprint,"confirmed":true})
+        )
+        .await,
+        result
+    );
+    store
+        .read(|db| {
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM workspace_tasks WHERE task_id='other'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                1
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT count(*) FROM workspace_tasks WHERE task_id='member'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?,
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+    let path = f.state.join("product").join(format!("{}.json", f.id));
+    let mut product: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    product["tasks"]["other"] = json!({"status":"done","doneAt":1,"archive":{"at":1,"previousStatus":"done"},"work":"merged"});
+    fs::write(&path, product.to_string()).unwrap();
+    let cleanup = f.ok("cleanup.run", json!({})).await;
+    assert_eq!(cleanup["removed"], 1);
+    assert_eq!(cleanup["skipped"], 0);
+    assert_eq!(f.ok("overview", json!({})).await["cleanup"], cleanup);
+    store
+        .read(|db| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM workspace_tasks", [], |r| r
+                    .get::<_, i64>(0))?,
+                0
+            );
+            Ok(())
+        })
+        .unwrap();
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn built_native_maintenance_worker_clones_and_refuses_replay() {
+    let f = Fixture::new().await;
+    let _store = f.store();
+    let bare = f.base.join("source.git");
+    f.git(&["init", "--bare", bare.to_str().unwrap()]);
+    let id = "5".repeat(32);
+    let job = f.state.join("maintenance").join(&id);
+    fs::create_dir_all(&job).unwrap();
+    for p in [&job, job.parent().unwrap()] {
+        fs::set_permissions(p, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let destination = f.base.join("cloned");
+    fs::write(
+        job.join("request.json"),
+        json!({"kind":"clone","url":bare,"destination":destination}).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        job.join("status.json"),
+        json!({"kind":"clone","phase":"starting","updated":0}).to_string(),
+    )
+    .unwrap();
+    let run = || {
+        let mut c = tokio::process::Command::new(env!("CARGO_BIN_EXE_workspace-service"));
+        c.args([
+            "--native-maintenance-worker",
+            f.state.to_str().unwrap(),
+            &id,
+        ])
+        .env_clear()
+        .env("HOME", &f.base)
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+        c
+    };
+    let first = tokio::time::timeout(Duration::from_secs(10), run().status())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(first.success());
+    assert!(destination.join(".git").is_dir());
+    let status: Value =
+        serde_json::from_slice(&fs::read(job.join("status.json")).unwrap()).unwrap();
+    assert_eq!(status["phase"], "done");
+    assert!(
+        !run().status().await.unwrap().success(),
+        "a retained job identity cannot replay"
+    );
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn native_retention_keeps_dirty_work_and_unconfirmed_executions() {
+    let f = Fixture::new().await;
+    let store = f.store();
+    store.write(|db|{
+        db.execute("INSERT INTO workspace_tasks(task_id,project_id,description,created_at) VALUES ('dirty',?,'fixture',?)",
+            (&f.id,cortex_core::now()))?;
+        db.execute("INSERT INTO workspace_task_options VALUES ('dirty','{}')",[])?;
+        Ok(())
+    }).unwrap();
+    let sprint = f
+        .ok(
+            "product.sprint",
+            json!({"action":"create","description":"fixture"}),
+        )
+        .await["sprintId"]
+        .clone();
+    let file = f.state.join("product").join(format!("{}.json", f.id));
+    let mut value: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    value["tasks"]["dirty"] =
+        json!({"status":"done","work":"unmerged","doneAt":1,"archive":{"at":1}});
+    fs::write(&file, value.to_string()).unwrap();
+    let cleanup = f.ok("cleanup.run", json!({})).await;
+    assert_eq!(cleanup["removed"], 0);
+    assert_eq!(cleanup["skipped"], 1);
+    assert_eq!(cleanup["asked"], 1);
+    let value: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert_eq!(value["tasks"]["dirty"]["archiveQuestion"], true);
+    assert!(value["tasks"]["dirty"]["archive"].is_null());
+    assert!(value["tasks"]["dirty"]["purgeBlocker"].is_string());
+    // A runtime binding that cannot prove quiet is not permission to delete the draft.
+    store.write(|db|{
+        db.execute("INSERT INTO workspace_executions VALUES ('unknown','dirty','missing','session',1,1,?)",[cortex_core::now()])?;
+        db.execute("UPDATE workspace_tasks SET execution_id='unknown' WHERE task_id='dirty'",[])?;
+        Ok(())
+    }).unwrap();
+    f.ok(
+        "product.sprint",
+        json!({"action":"patch","sprintId":sprint,"patch":{"taskIds":["dirty"]}}),
+    )
+    .await;
+    let prepared = f
+        .ok(
+            "product.sprint",
+            json!({"action":"delete_prepare","sprintId":sprint,"confirmed":true}),
+        )
+        .await;
+    assert_eq!(prepared["executionIds"], json!(["unknown"]));
+    let finish = f
+        .ok(
+            "product.sprint",
+            json!({"action":"delete_finish","sprintId":sprint,"confirmed":true}),
+        )
+        .await;
+    assert_eq!(finish["done"], false);
+    let reason = finish["reason"].as_str().unwrap();
+    // Owner-readable: the task title, never its id or the raw refusal code.
+    assert!(reason.contains("“fixture” no longer belongs"), "{reason}");
+    assert!(!reason.contains("unauthorized") && !reason.contains("dirty:"), "{reason}");
+    store
+        .read(|db| {
+            assert_eq!(
+                db.query_row("SELECT count(*) FROM workspace_tasks", [], |r| r
+                    .get::<_, i64>(0))?,
+                1
+            );
+            Ok(())
+        })
+        .unwrap();
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn status_diff_history_and_nested_untracked_follow_git_ignore_rules() {
+    let f = Fixture::new().await;
+    f.write("a.txt", b"one\nchanged\n");
+    f.write("b.txt", b"new\n");
+    let s = f.snapshot().await;
+    assert_eq!(s["openBranch"], "main");
+    assert_eq!(s["defaultBranch"], "main");
+    assert_eq!(s["tree"], json!(["a.txt", "b.txt"]));
+    assert_eq!(s["commits"][0]["message"], "first");
+    let file = &s["checkouts"][0]["files"][0];
+    assert_eq!(file["stage"], "unstaged");
+    assert_eq!(file["add"], 1);
+    assert_eq!(file["del"], 1);
+    assert_eq!(
+        file["hunks"][0]["lines"],
+        json!([{"kind":"ctx","old":1,"new":1,"text":"one"},{"kind":"del","old":2,"new":null,"text":"two"},{"kind":"add","old":null,"new":2,"text":"changed"}])
+    );
+    let paths = [
+        "new/deep/file.txt",
+        "app/node_modules/.vite/results.json",
+        ".venv/new.txt",
+        "nested/__pycache__/new.txt",
+    ];
+    for name in paths {
+        f.write(name, b"new\n");
+    }
+    f.write("ignored/cache", b"ignored");
+    f.write(".cortex/private", b"private");
+    f.write(".gitignore", b"ignored/\n");
+    f.git(&["add", ".gitignore"]);
+    let s = f.snapshot().await;
+    let files = s["checkouts"][0]["files"].as_array().unwrap();
+    for name in paths {
+        assert!(files
+            .iter()
+            .any(|r| r["path"] == name && r["stage"] == "untracked"));
+    }
+    assert!(!files
+        .iter()
+        .any(|r| r["path"] == "ignored/cache" || r["path"] == ".cortex/private"));
+    f.stop().await;
+}
+#[tokio::test]
+async fn large_untracked_tree_collapses_and_one_auto_add_commits_every_visible_path() {
+    let f = Fixture::new().await;
+    f.write("app/package.json", b"{}");
+    f.git(&["add", "app/package.json"]);
+    f.git(&["commit", "-m", "app"]);
+    for i in 0..2100 {
+        f.write(&format!("app/node_modules/pkg{i}/index.js"), b"new\n");
+    }
+    for name in ["new.txt", "cache/.vite/TAG", "cache/.vitest-cache/metadata"] {
+        f.write(name, b"new\n");
+    }
+    let s = f.snapshot().await;
+    let files = s["checkouts"][0]["files"].as_array().unwrap();
+    assert_eq!(files.len(), 4);
+    assert!(files
+        .iter()
+        .any(|r| r["path"] == "app/node_modules" && r["hunks"] == json!([])));
+    assert_eq!(s["treeTruncated"], false);
+    assert!(!s["tree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n.as_str().unwrap().starts_with("app/node_modules")));
+    // A hook verifies exactly one add by looking at all selected paths at commit time.
+    f.action(json!({"action":"commit","message":"everything"}))
+        .await;
+    assert_eq!(f.git(&["ls-files"]).lines().count(), 2105);
+    f.stop().await;
+}
+#[tokio::test]
+async fn staging_revert_commit_amend_and_private_index() {
+    let f = Fixture::new().await;
+    f.write("a.txt", b"selected");
+    f.write("unselected", b"keep unstaged");
+    f.action(json!({"action":"stage","path":"a.txt","staged":true}))
+        .await;
+    f.action(json!({"action":"stage","path":"a.txt","staged":false}))
+        .await;
+    assert!(f.git(&["diff", "--cached", "--name-only"]).is_empty());
+    f.action(json!({"action":"stage","path":"a.txt","staged":true}))
+        .await;
+    f.action(json!({"action":"commit","message":"selected only"}))
+        .await;
+    assert_eq!(
+        f.git(&["show", "--format=", "--name-only", "HEAD"]),
+        "a.txt"
+    );
+    f.write("a.txt", b"broken");
+    assert_eq!(
+        f.call("git", json!({"action":"revert","path":"a.txt"}))
+            .await["code"],
+        "confirmation_required"
+    );
+    f.action(json!({"action":"revert","path":"a.txt","confirmed":true}))
+        .await;
+    assert_eq!(fs::read(f.repo.join("a.txt")).unwrap(), b"selected");
+    f.action(json!({"action":"revert","path":"unselected","confirmed":true}))
+        .await;
+    assert!(!f.repo.join("unselected").exists());
+    f.action(json!({"action":"commit","message":"new title","amend":true}))
+        .await;
+    assert_eq!(f.git(&["rev-list", "--count", "HEAD"]), "2");
+    assert_eq!(f.git(&["log", "-1", "--format=%s"]), "new title");
+    f.write(".cortex-workspace.json", b"{}");
+    f.git(&["add", ".cortex-workspace.json"]);
+    assert_eq!(
+        f.call("git", json!({"action":"commit","message":"private"}))
+            .await["code"],
+        "private_index"
+    );
+    f.stop().await;
+}
+#[tokio::test]
+async fn commit_literal_names_and_no_remote_needs_no_configuration() {
+    let f = Fixture::new().await;
+    f.write("[x].txt", b"brackets");
+    f.write("x.txt", b"another");
+    f.write(".cortex-dev/private", b"private");
+    f.action(json!({"action":"commit","message":"local only"}))
+        .await;
+    assert_eq!(f.git(&["ls-files"]), "[x].txt\na.txt\nx.txt");
+    assert_eq!(
+        f.call(
+            "git",
+            json!({"action":"push","remote":"origin","branch":"main","confirmed":true})
+        )
+        .await["code"],
+        "unknown_remote"
+    );
+    assert_eq!(
+        f.call("git", json!({"action":"pull"})).await["code"],
+        "upstream_required"
+    );
+    f.stop().await;
+}
+#[tokio::test]
+async fn first_request_push_by_name_and_display_url_fetch_and_pull() {
+    for by_name in [true, false] {
+        let f = Fixture::new().await;
+        let remote = f.remote();
+        f.git(&["push", "-u", "origin", "main"]);
+        f.write("a.txt", b"second");
+        f.git(&["commit", "-am", "second"]);
+        let s = f.snapshot().await;
+        assert_eq!(s["checkouts"][0]["ahead"], 1);
+        f.action(json!({"action":"push","remote":if by_name{json!("origin")}else{s["remote"].clone()},"branch":"main","confirmed":true})).await;
+        assert_eq!(f.snapshot().await["checkouts"][0]["ahead"], 0);
+        f.git(&["checkout", "-b", "incoming"]);
+        f.write("a.txt", b"incoming");
+        f.git(&["commit", "-am", "incoming"]);
+        f.git(&["push", "origin", "incoming:main"]);
+        f.git(&["checkout", "main"]);
+        f.action(json!({"action":"fetch"})).await;
+        assert_eq!(f.snapshot().await["checkouts"][0]["behind"], 1);
+        f.action(json!({"action":"pull"})).await;
+        assert_eq!(fs::read(f.repo.join("a.txt")).unwrap(), b"incoming");
+        assert_eq!(f.snapshot().await["checkouts"][0]["behind"], 0);
+        assert!(remote.is_dir());
+        f.stop().await;
+    }
+}
+#[tokio::test]
+async fn stale_ambiguous_unconfigured_remotes_and_confirmation_are_refused() {
+    let f = Fixture::new().await;
+    let remote = f.remote();
+    let url = remote.to_string_lossy();
+    assert_eq!(
+        f.call("git", json!({"action":"push","remote":url,"branch":"main"}))
+            .await["code"],
+        "confirmation_required"
+    );
+    f.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        f.base.join("changed").to_str().unwrap(),
+    ]);
+    assert_eq!(
+        f.call(
+            "git",
+            json!({"action":"push","remote":url,"branch":"main","confirmed":true})
+        )
+        .await["code"],
+        "unknown_remote"
+    );
+    f.git(&["remote", "set-url", "origin", &url]);
+    f.git(&["remote", "add", "duplicate", &url]);
+    assert_eq!(
+        f.call(
+            "git",
+            json!({"action":"push","remote":url,"branch":"main","confirmed":true})
+        )
+        .await["code"],
+        "ambiguous_remote"
+    );
+    assert_eq!(
+        f.call(
+            "git",
+            json!({"action":"push","remote":"not configured","branch":"main","confirmed":true})
+        )
+        .await["code"],
+        "unknown_remote"
+    );
+    f.stop().await;
+}
+#[tokio::test]
+async fn push_never_forces_non_fast_forward_or_accepts_an_option_as_branch() {
+    let f = Fixture::new().await;
+    f.remote();
+    f.git(&["push", "-u", "origin", "main"]);
+    f.git(&["checkout", "-b", "incoming"]);
+    f.write("a.txt", b"incoming");
+    f.git(&["commit", "-am", "incoming"]);
+    f.git(&["push", "origin", "incoming:main"]);
+    f.git(&["checkout", "main"]);
+    f.write("a.txt", b"divergent");
+    f.git(&["commit", "-am", "divergent"]);
+    for branch in ["main", "--force"] {
+        assert_eq!(
+            f.call(
+                "git",
+                json!({"action":"push","remote":"origin","branch":branch,"confirmed":true})
+            )
+            .await["code"],
+            "git_failed"
+        );
+    }
+    let out = Command::new("git")
+        .arg("--git-dir")
+        .arg(f.base.join("remote.git"))
+        .args(["log", "-1", "--format=%s", "main"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "incoming");
+    f.stop().await;
+}
+#[tokio::test]
+async fn hunks_stage_unstage_and_revert_independently() {
+    let f = Fixture::new().await;
+    let original = (0..40).map(|n| format!("{n}\n")).collect::<String>();
+    f.write("long", &original.as_bytes());
+    f.git(&["add", "long"]);
+    f.git(&["commit", "-m", "long"]);
+    let edited = original
+        .replacen("1\n", "first\n", 1)
+        .replacen("35\n", "second\n", 1);
+    f.write("long", edited.as_bytes());
+    f.action(json!({"action":"stage","path":"long","staged":true,"hunk":0}))
+        .await;
+    let s = f.snapshot().await;
+    let files = s["checkouts"][0]["files"].as_array().unwrap();
+    assert!(files
+        .iter()
+        .any(|r| r["stage"] == "staged" && r["add"] == 1));
+    assert!(files
+        .iter()
+        .any(|r| r["stage"] == "unstaged" && r["add"] == 1));
+    f.action(json!({"action":"stage","path":"long","staged":false,"hunk":0}))
+        .await;
+    f.action(json!({"action":"revert","path":"long","hunk":0,"confirmed":true}))
+        .await;
+    let text = fs::read_to_string(f.repo.join("long")).unwrap();
+    assert!(!text.contains("first"));
+    assert!(text.contains("second"));
+    assert_eq!(
+        f.call(
+            "git",
+            json!({"action":"stage","path":"long","staged":true,"hunk":99})
+        )
+        .await["code"],
+        "stale_hunk"
+    );
+    f.stop().await;
+}
+#[tokio::test]
+async fn plain_folder_snapshot_init_and_file_operations() {
+    let f = Fixture::new().await;
+    fs::remove_dir_all(f.repo.join(".git")).unwrap();
+    let s = f.snapshot().await;
+    assert_eq!(s["hasGit"], false);
+    assert_eq!(s["tree"], json!(["a.txt"]));
+    assert_eq!(
+        f.ok("repo.file", json!({"file":"a.txt"})).await["text"],
+        "one\ntwo\n"
+    );
+    assert_eq!(
+        f.ok("repo.locate", json!({"file":"a.txt"})).await["path"],
+        json!(f.repo.join("a.txt"))
+    );
+    f.ok("git_init", json!({})).await;
+    assert_eq!(f.snapshot().await["commits"], json!([]));
+    assert_eq!(
+        f.call("git_init", json!({})).await["code"],
+        "repository_exists"
+    );
+    f.stop().await;
+}
+#[tokio::test]
+async fn branches_worktree_identity_dirty_deletion_and_revert_commit() {
+    let f = Fixture::new().await;
+    assert_eq!(
+        f.call("git", json!({"action":"branch","name":"--force"}))
+            .await["code"],
+        "invalid_branch"
+    );
+    f.action(json!({"action":"branch","name":"work"})).await;
+    let work = f.base.join("work");
+    f.git(&["worktree", "add", work.to_str().unwrap(), "work"]);
+    let s = f.snapshot().await;
+    let id = s["checkouts"][1]["id"].clone();
+    assert_eq!(s["checkouts"][1]["kind"], "worktree");
+    fs::write(work.join("new"), b"new").unwrap();
+    assert_eq!(
+        f.call(
+            "git",
+            json!({"action":"delete_worktree","checkoutId":id,"confirmed":true})
+        )
+        .await["code"],
+        "dirty_worktree"
+    );
+    fs::remove_file(work.join("new")).unwrap();
+    f.action(json!({"action":"delete_worktree","checkoutId":id,"confirmed":true}))
+        .await;
+    assert!(!work.exists());
+    f.write("a.txt", b"changed");
+    f.git(&["commit", "-am", "second"]);
+    let sha = f.git(&["rev-parse", "HEAD"]);
+    f.action(json!({"action":"revert_commit","sha":sha,"confirmed":true}))
+        .await;
+    assert_eq!(fs::read(f.repo.join("a.txt")).unwrap(), b"one\ntwo\n");
+    f.stop().await;
+}
+#[tokio::test]
+async fn inspection_of_required_missing_filters_is_raw_and_writes_keep_policy() {
+    let f = Fixture::new().await;
+    f.write(".gitattributes", b"*.dat filter=missing\n");
+    f.write("managed.dat", b"raw");
+    f.git(&["add", ".gitattributes", "managed.dat"]);
+    f.git(&["commit", "-m", "managed"]);
+    f.git(&[
+        "config",
+        "filter.missing.clean",
+        "/definitely/not/a/program",
+    ]);
+    f.git(&["config", "filter.missing.required", "true"]);
+    f.write("managed.dat", b"new raw");
+    let before = fs::read(f.repo.join(".git/config")).unwrap();
+    let s = f.snapshot().await;
+    let files = s["checkouts"][0]["files"].as_array().unwrap();
+    assert!(files.iter().any(|r| r["path"] == "managed.dat"
+        && r["filter"] == "missing"
+        && r["hunks"] == json!([])));
+    assert!(
+        f.ok("repo.file", json!({"file":"managed.dat"})).await["reason"]
+            .as_str()
+            .unwrap()
+            .contains("filter")
+    );
+    assert_eq!(
+        f.call(
+            "git",
+            json!({"action":"stage","path":"managed.dat","staged":true})
+        )
+        .await["code"],
+        "git_failed"
+    );
+    assert_eq!(fs::read(f.repo.join(".git/config")).unwrap(), before);
+    f.stop().await;
+}
+#[tokio::test]
+async fn file_revision_conflicts_absent_save_exact_bytes_mode_and_concurrent_saves() {
+    let f = Fixture::new().await;
+    let read = f.ok("repo.file", json!({"file":"a.txt"})).await;
+    assert_eq!(read["readOnly"], Value::Null);
+    assert_eq!(read["writer"], Value::Null);
+    let base = read["revision"].clone();
+    f.write("a.txt", b"worker");
+    assert_eq!(
+        f.ok(
+            "repo.file.save",
+            json!({"file":"a.txt","text":"owner","revision":base})
+        )
+        .await["outcome"],
+        "conflict"
+    );
+    fs::remove_file(f.repo.join("a.txt")).unwrap();
+    assert_eq!(
+        f.ok(
+            "repo.file.save",
+            json!({"file":"a.txt","text":"owner","revision":base})
+        )
+        .await["revision"],
+        Value::Null
+    );
+    let saved = f
+        .ok(
+            "repo.file.save",
+            json!({"file":"a.txt","text":"owner","revision":null}),
+        )
+        .await;
+    assert_eq!(saved["outcome"], "saved");
+    let mut jobs = Vec::new();
+    for i in 0..6 {
+        let service = f.service.clone();
+        let id = f.id.clone();
+        let base = saved["revision"].clone();
+        jobs.push(tokio::spawn(async move {
+            service
+                .machine(
+                    serde_json::from_value(json!({"op":"repo.file.save","projectId":id,
+            "params":{"file":"a.txt","text":format!("writer {i}"),"revision":base}}))
+                    .unwrap(),
+                )
+                .await
+                .unwrap()
+        }));
+    }
+    let mut won = 0;
+    for job in jobs {
+        if job.await.unwrap()["result"]["outcome"] == "saved" {
+            won += 1;
+        }
+    }
+    assert_eq!(won, 1);
+    f.write("run.sh", b"#!/bin/sh\r\necho hi\r\n");
+    fs::set_permissions(f.repo.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+    let base = f.ok("repo.file", json!({"file":"run.sh"})).await["revision"].clone();
+    f.ok(
+        "repo.file.save",
+        json!({"file":"run.sh","text":"#!/bin/sh\r\necho bye\r\n\u{feff}","revision":base}),
+    )
+    .await;
+    assert_eq!(
+        fs::metadata(f.repo.join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    assert_eq!(
+        fs::read(f.repo.join("run.sh")).unwrap(),
+        "#!/bin/sh\r\necho bye\r\n\u{feff}".as_bytes()
+    );
+    f.stop().await;
+}
+#[tokio::test]
+async fn files_refuse_escapes_symlinks_binary_oversize_and_missing_base() {
+    let f = Fixture::new().await;
+    for name in [
+        "../outside",
+        "/etc/passwd",
+        ".git/config",
+        ".cortex/db",
+        "a/../../b",
+        "sub/.git/config",
+        "sub/.cortex/x",
+    ] {
+        assert_eq!(
+            f.call(
+                "repo.file.save",
+                json!({"file":name,"text":"x","revision":null})
+            )
+            .await["code"],
+            "invalid_path"
+        );
+    }
+    fs::create_dir(f.base.join("outside")).unwrap();
+    fs::write(f.base.join("outside/secret"), b"secret").unwrap();
+    symlink(f.base.join("outside"), f.repo.join("dir-link")).unwrap();
+    symlink("a.txt", f.repo.join("inner-link")).unwrap();
+    for name in ["dir-link/new", "inner-link"] {
+        assert_eq!(
+            f.call(
+                "repo.file.save",
+                json!({"file":name,"text":"x","revision":null})
+            )
+            .await["code"],
+            "symlink_refused"
+        );
+    }
+    let read = f.ok("repo.file", json!({"file":"inner-link"})).await;
+    assert_eq!(read["text"], "one\ntwo\n");
+    assert!(read["readOnly"].as_str().unwrap().contains("link"));
+    assert_eq!(
+        f.call("repo.file", json!({"file":"dir-link/secret"})).await["code"],
+        "invalid_path"
+    );
+    assert_eq!(
+        f.call("repo.file.save", json!({"file":"a.txt","text":"x"}))
+            .await["code"],
+        "invalid_request"
+    );
+    assert_eq!(
+        f.call(
+            "repo.file.save",
+            json!({"file":"a.txt","text":"x".repeat(512*1024+1),"revision":null})
+        )
+        .await["code"],
+        "file_too_large"
+    );
+    assert_eq!(
+        f.call(
+            "repo.file.save",
+            json!({"file":"a.txt","text":"x\0y","revision":null})
+        )
+        .await["code"],
+        "binary_file"
+    );
+    f.write("blob", b"x\0y");
+    f.write("latin", b"caf\xe9\n");
+    f.write("big", &vec![b'x'; 512 * 1024 + 1]);
+    assert_eq!(
+        f.ok("repo.file", json!({"file":"blob"})).await["text"],
+        Value::Null
+    );
+    let read = f.ok("repo.file", json!({"file":"latin"})).await;
+    assert!(read["readOnly"].as_str().unwrap().contains("UTF-8"));
+    assert_eq!(
+        f.call(
+            "repo.file.save",
+            json!({"file":"latin","text":"cafe","revision":read["revision"]})
+        )
+        .await["code"],
+        "not_text"
+    );
+    assert_eq!(
+        f.call(
+            "repo.file.save",
+            json!({"file":"big","text":"x","revision":null})
+        )
+        .await["code"],
+        "file_too_large"
+    );
+    assert!(
+        f.call(
+            "repo.file",
+            json!({"checkoutId":"foreign:main","file":"a.txt"})
+        )
+        .await["ok"]
+            == false
+    );
+    f.stop().await;
+}
+#[tokio::test]
+async fn settings_validation_private_logs_and_diagnostics() {
+    let f = Fixture::new().await;
+    for patch in [
+        json!({"retentionDays":0}),
+        json!({"retentionDays":true}),
+        json!({"unknown":1}),
+        json!({"worktreeRoot":"relative"}),
+        json!({"worktreeRoot":f.repo}),
+    ] {
+        assert_eq!(
+            f.call("machine.update", json!({"patch":patch})).await["ok"],
+            false
+        );
+    }
+    let root = f.base.join("trees");
+    f.ok(
+        "machine.update",
+        json!({"patch":{"retentionDays":14,"worktreeRoot":root,"name":"Desk"}}),
+    )
+    .await;
+    let view = f.ok("overview", json!({})).await;
+    assert_eq!(view["retentionDays"], 14);
+    assert_eq!(view["name"], "Desk");
+    assert_eq!(view["worktreeRoot"], json!(root));
+    assert!(
+        f.ok("diagnostics.run", json!({})).await["checks"]
+            .as_u64()
+            .unwrap()
+            >= 5
+    );
+    let logs = f.ok("logs.folder", json!({})).await["folder"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        fs::metadata(&logs).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    fs::write(Path::new(&logs).join("service.log"), vec![b' '; 65536]).unwrap();
+    f.ok("logs.folder", json!({})).await;
+    assert!(Path::new(&logs).join("service.log.1").exists());
+    let row = fs::read_to_string(Path::new(&logs).join("service.log")).unwrap();
+    for line in row.lines() {
+        let v: Value = serde_json::from_str(line).unwrap();
+        assert_eq!(v.as_object().unwrap().len(), 2);
+        assert_eq!(v["event"], "helper_ok");
+    }
+    f.stop().await;
+}
+#[tokio::test]
+async fn concurrent_git_reads_need_no_helper_launch() {
+    let f = Fixture::new().await;
+    let mut jobs = Vec::new();
+    for _ in 0..8 {
+        let s = f.service.clone();
+        let id = f.id.clone();
+        jobs.push(tokio::spawn(async move {
+            s.machine(serde_json::from_value(json!({"op":"repo.snapshot","projectId":id})).unwrap())
+                .await
+                .unwrap()
+        }));
+    }
+    for j in jobs {
+        assert_eq!(j.await.unwrap()["ok"], true);
+    }
+    assert!(f
+        .service
+        .machine(serde_json::from_value(json!({"op":"unknown"})).unwrap())
+        .await
+        .is_err());
+    f.stop().await;
+}
+#[tokio::test]
+async fn private_queue_comments_sprints_and_drafts_are_durable_without_core() {
+    let f = Fixture::new().await;
+    let message = |id: &str, task: &str| {
+        json!({"id":id,"taskId":task,"workerId":null,"text":id,"mode":"queue",
+        "delivery":"queued","at":1,"deliveredAt":null,"failure":null})
+    };
+    for (id, task) in [("one", "task"), ("two", "task"), ("foreign", "other")] {
+        f.ok(
+            "product.message",
+            json!({"action":"add","message":message(id,task)}),
+        )
+        .await;
+    }
+    f.ok(
+        "product.message",
+        json!({"action":"add","message":message("one","task")}),
+    )
+    .await;
+    f.ok(
+        "product.message",
+        json!({"action":"move","messageId":"two","before":"one"}),
+    )
+    .await;
+    let path = f.state.join("product").join(format!("{}.json", f.id));
+    let product = || serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(product()["messages"][0]["id"], "two");
+    assert_eq!(product()["messages"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        f.call(
+            "product.message",
+            json!({"action":"move","messageId":"two","before":"foreign"})
+        )
+        .await["code"],
+        "unknown_message"
+    );
+    assert_eq!(
+        f.call(
+            "product.message",
+            json!({"action":"add","message":{"id":"one","text":"changed","delivery":"queued"}})
+        )
+        .await["code"],
+        "payload_conflict"
+    );
+    f.ok(
+        "product.message",
+        json!({"action":"edit","messageId":"two","text":"edited"}),
+    )
+    .await;
+    f.ok(
+        "product.message",
+        json!({"action":"remove","messageId":"one"}),
+    )
+    .await;
+    let comment = json!({"id":"c","path":"a.txt","line":2,"text":"Please fix","sent":false});
+    f.ok(
+        "product.comment",
+        json!({"action":"add","taskId":"task","comment":comment}),
+    )
+    .await;
+    f.ok(
+        "product.comment",
+        json!({"action":"mark_sent","taskId":"task","ids":["c"]}),
+    )
+    .await;
+    assert_eq!(
+        f.call(
+            "product.comment",
+            json!({"action":"edit","taskId":"task","commentId":"c","text":"no"})
+        )
+        .await["code"],
+        "already_sent"
+    );
+    let sp = f
+        .ok(
+            "product.sprint",
+            json!({"action":"create","description":"Plan work"}),
+        )
+        .await["sprintId"]
+        .clone();
+    f.ok(
+        "product.sprint",
+        json!({"action":"note","sprintId":sp,"text":"note"}),
+    )
+    .await;
+    // A planner question keeps its choices as selectable options (Python parity).
+    f.ok(
+        "product.sprint",
+        json!({"action":"note","sprintId":sp,"kind":"question","text":"Which database?","options":["SQLite","Postgres"]}),
+    )
+    .await;
+    for (kind, options) in [
+        ("note", json!(["A"])),
+        ("question", json!([" "])),
+        ("question", json!("A")),
+    ] {
+        assert_eq!(
+            f.call(
+                "product.sprint",
+                json!({"action":"note","sprintId":sp,"kind":kind,"text":"Q","options":options})
+            )
+            .await["code"],
+            "invalid_options"
+        );
+    }
+    let asked = &product()["sprints"][0]["conversation"][1];
+    assert_eq!(asked["kind"], "question");
+    assert_eq!(asked["text"], "Which database?");
+    assert_eq!(asked["options"], json!(["SQLite", "Postgres"]));
+    f.ok(
+        "product.sprint",
+        json!({"action":"patch","sprintId":sp,"patch":{"title":"Plan","queueState":"paused"}}),
+    )
+    .await;
+    assert_eq!(
+        f.call(
+            "product.sprint",
+            json!({"action":"patch","sprintId":sp,"patch":{"unknown":1}})
+        )
+        .await["code"],
+        "invalid_sprint"
+    );
+    f.ok("git", json!({"action":"draft","message":"saved draft"}))
+        .await;
+    assert_eq!(f.snapshot().await["checkouts"][0]["draft"], "saved draft");
+    f.ok(
+        "product.sprint",
+        json!({"action":"close","sprintId":sp,"confirmed":true}),
+    )
+    .await;
+    assert_eq!(
+        f.call(
+            "product.sprint",
+            json!({"action":"note","sprintId":sp,"text":"no"})
+        )
+        .await["code"],
+        "sprint_closed"
+    );
+    assert_eq!(product()["sprints"][0]["title"], "Plan");
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn private_conversations_validate_attachment_bytes_and_canonical_encoding() {
+    let f = Fixture::new().await;
+    for data in ["!bad", "YQ=", "YR==", "YQ==junk", "YQ==YQ=="] {
+        assert_eq!(
+            f.call(
+                "product.comment",
+                json!({"action":"add","taskId":"t","comment":{"id":"c","text":"x",
+            "attachments":[{"name":"x.txt","mimeType":"text/plain","data":data}]}})
+            )
+            .await["code"],
+            "invalid_attachments"
+        );
+    }
+    f.ok(
+        "product.comment",
+        json!({"action":"add","taskId":"t","comment":{"id":"c","text":"x",
+        "attachments":[{"name":"x.txt","mimeType":"text/plain","data":"YQ=="}]}}),
+    )
+    .await;
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn git_receipt_replay_never_repeats_commit_and_different_payload_conflicts() {
+    let f = Fixture::new().await;
+    f.write("a.txt", b"second");
+    let p = json!({"action":"commit","message":"second","requestId":"commit-once"});
+    f.action(p.clone()).await;
+    let head = f.git(&["rev-parse", "HEAD"]);
+    f.write("a.txt", b"third");
+    f.action(p.clone()).await;
+    assert_eq!(f.git(&["rev-parse", "HEAD"]), head);
+    assert_eq!(fs::read(f.repo.join("a.txt")).unwrap(), b"third");
+    assert_eq!(
+        f.call(
+            "git",
+            json!({"action":"commit","message":"different","requestId":"commit-once"})
+        )
+        .await["code"],
+        "payload_conflict"
+    );
+    for entry in fs::read_dir(f.state.join("operations")).unwrap() {
+        let entry = entry.unwrap();
+        let data = fs::read_to_string(entry.path()).unwrap();
+        let record: Value = serde_json::from_str(&data).unwrap();
+        assert_eq!(record["state"], "finished");
+        assert!(record.get("params").is_none());
+        assert!(record.get("message").is_none());
+        assert_eq!(
+            fs::metadata(entry.path()).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    f.stop().await;
+}
+#[tokio::test]
+async fn unavailable_repository_is_not_a_plain_folder_and_loose_untracked_overflow_is_explicit() {
+    let f = Fixture::new().await;
+    for i in 0..2001 {
+        f.write(&format!("loose-{i}"), b"x");
+    }
+    assert_eq!(
+        f.call("repo.snapshot", json!({})).await["code"],
+        "repo_too_large"
+    );
+    fs::write(f.repo.join(".git/HEAD"), b"invalid HEAD").unwrap();
+    assert_eq!(
+        f.call("repo.snapshot", json!({})).await["code"],
+        "git_failed"
+    );
+    f.stop().await;
+}
+#[tokio::test]
+async fn snapshot_gets_sqlite_only_task_baselines() {
+    let f = Fixture::new().await;
+    let head = f.git(&["rev-parse", "HEAD"]);
+    let store = f.store();
+    store.write(|db| {
+        db.execute("INSERT INTO workspace_tasks(task_id,project_id,description,created_at) VALUES ('task',?,'Fixture',?)",
+            (&f.id,cortex_core::now()))?;
+        db.execute("INSERT INTO workspace_task_options VALUES ('task',?)",
+            [json!({"checkout":{"kind":"main"},"baseRevision":head}).to_string()])?;
+        Ok(())
+    }).unwrap();
+    f.write("a.txt", b"changed\n");
+    let snapshot = f.snapshot().await;
+    assert_eq!(snapshot["taskDiffs"]["task"]["files"][0]["path"], "a.txt");
+    assert!(
+        !f.state
+            .join("product")
+            .join(format!("{}.json", f.id))
+            .exists(),
+        "Core task metadata must not need a duplicate private JSON record"
+    );
+    f.stop().await;
+}
+#[tokio::test]
+async fn core_context_editor_and_attachments_work() {
+    let f = Fixture::new().await;
+    let store = f.store();
+    store.write(|db| {
+        db.execute("INSERT INTO workspace_tasks(task_id,project_id,description,created_at) VALUES ('task',?,'Fixture',?)",
+            (&f.id,cortex_core::now()))?;
+        db.execute("INSERT INTO workspace_task_options VALUES ('task',?)",
+            [json!({"checkout":{"kind":"main"},"draftTitle":"Saved title","settings":{"mode":"guarded"},
+                "attachments":[{"name":"a.txt","mimeType":"text/plain","data":"YQ=="}]}).to_string()])?;
+        Ok(())
+    }).unwrap();
+    let product = f.ok("repo.context", json!({})).await;
+    assert_eq!(product["tasks"]["task"]["title"], "Saved title");
+    assert_eq!(product["tasks"]["task"]["checkout"]["branch"], "main");
+    assert_eq!(
+        f.ok("product.read", json!({"attachments":true,"taskId":"task"}))
+            .await[0]["data"],
+        "YQ=="
+    );
+    assert_eq!(
+        f.call(
+            "product.read",
+            json!({"attachments":true,"taskId":"missing"})
+        )
+        .await["code"],
+        "unknown_task"
+    );
+    let base = f.ok("repo.file", json!({"file":"a.txt"})).await["revision"].clone();
+    store.write(|db| {
+        db.execute("UPDATE workspace_tasks SET execution_id='held' WHERE task_id='task'",[])?;
+        db.execute("INSERT INTO workspace_executions VALUES ('held','task','unconfirmed','display',1,1,?)",[cortex_core::now()])?;
+        Ok(())
+    }).unwrap();
+    let busy = f.ok("repo.file", json!({"file":"a.txt"})).await;
+    assert_eq!(busy["writer"], "task");
+    assert!(busy["readOnly"].is_string());
+    assert_eq!(
+        f.call(
+            "repo.file.save",
+            json!({"file":"a.txt","text":"not saved","revision":base})
+        )
+        .await["code"],
+        "checkout_busy"
+    );
+    assert_eq!(fs::read(f.repo.join("a.txt")).unwrap(), b"one\ntwo\n");
+    store
+        .write(|db| {
+            db.execute(
+                "UPDATE workspace_tasks SET execution_id=NULL WHERE task_id='task'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        f.ok(
+            "repo.file.save",
+            json!({"file":"a.txt","text":"saved","revision":base})
+        )
+        .await["outcome"],
+        "saved"
+    );
+    drop(store);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn core_context_reads_do_not_initialize_and_overview_resolves_linked_store() {
+    let f = Fixture::new().await;
+    let key = cortex_core::ProjectKey::new(
+        &f.repo,
+        if workspace_protocol::channel::current().is_dev() {
+            cortex_core::StoreChannel::Dev
+        } else {
+            cortex_core::StoreChannel::Release
+        },
+    )
+    .unwrap();
+    let entries = || {
+        let mut paths = fs::read_dir(key.directory())
+            .into_iter()
+            .flatten()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    };
+    let before = entries();
+    assert!(!key.database().exists());
+    f.ok("repo.context", json!({})).await;
+    assert!(
+        !key.database().exists(),
+        "A context read must not initialize a missing database"
+    );
+    assert_eq!(
+        entries(),
+        before,
+        "A context read must not create locks or sidecars"
+    );
+    let linked = f.base.join("linked");
+    f.git(&["worktree", "add", "--detach", linked.to_str().unwrap()]);
+    f.service.register(&linked, "Linked").await.unwrap();
+    fs::create_dir_all(key.directory()).unwrap();
+    fs::set_permissions(key.directory(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(key.directory().join("fixture.bin"), vec![0u8; 1048576]).unwrap();
+    let overview = f.ok("overview", json!({})).await;
+    assert!(
+        overview["storage"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["label"] == "Linked" && s["mb"].as_f64().unwrap_or(0.0) >= 1.0),
+        "{overview}"
+    );
+    assert!(!key.database().exists());
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn core_context_rejects_unreadable_store_instead_of_assuming_no_writer() {
+    let f = Fixture::new().await;
+    let store = f.store();
+    let database = store.key().database();
+    drop(store);
+    fs::write(&database, b"not a database").unwrap();
+    for op in [
+        "repo.context",
+        "repo.snapshot",
+        "repo.file",
+        "repo.file.save",
+    ] {
+        let reply = f
+            .call(op, json!({"file":"a.txt","text":"unsafe","revision":null}))
+            .await;
+        assert_eq!(reply["ok"], false, "{op}: {reply}");
+    }
+    assert_eq!(fs::read(f.repo.join("a.txt")).unwrap(), b"one\ntwo\n");
+    f.stop().await;
+}
+
+/// Every repository read starts Git with the channel's private settings folders. One
+/// created group-writable by `mkdir -p` under a 002 umask is made private instead of
+/// failing each read with a generic filesystem error; a folder no check can trust is
+/// named in the refusal, and repository reads recover in the same service once the
+/// owner fixes it.
+#[tokio::test]
+async fn repository_reads_repair_or_name_an_unsafe_private_settings_folder() {
+    let f = Fixture::new().await;
+    if !workspace_protocol::channel::current().is_dev() {
+        f.stop().await;
+        return;
+    }
+    f.snapshot().await;
+    let settings = f.state.join("config");
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&settings), 0o700);
+    fs::set_permissions(&settings, fs::Permissions::from_mode(0o775)).unwrap();
+    f.ok("repo.context", json!({})).await;
+    f.snapshot().await;
+    assert_eq!(mode(&settings), 0o700);
+    fs::set_permissions(&settings, fs::Permissions::from_mode(0o777)).unwrap();
+    for op in ["repo.context", "repo.snapshot"] {
+        let reply = f.call(op, json!({})).await;
+        assert_eq!(reply["ok"], false, "{op}: {reply}");
+        assert_eq!(reply["code"], "private_directory_unsafe", "{op}: {reply}");
+        let message = reply["message"].as_str().unwrap();
+        assert!(message.contains(settings.to_str().unwrap()), "{message}");
+        assert!(message.contains("writable by every account"), "{message}");
+    }
+    assert_eq!(mode(&settings), 0o777);
+    fs::set_permissions(&settings, fs::Permissions::from_mode(0o700)).unwrap();
+    f.snapshot().await;
+    f.stop().await;
+}

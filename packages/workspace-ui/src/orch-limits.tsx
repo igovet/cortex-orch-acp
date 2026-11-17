@@ -1,5 +1,5 @@
 import { createMemo, For, Show } from "solid-js";
-import { CONNECTION_ENGINE, allRoutes, ceilingProblems, ceilingState, coordinatorEfforts, coordinatorResolution, effectiveCeiling, effortLabel, engineLabel, ENGINE_KEYS, ENGINES, FAILURE_CLASSES, HARD_DENIALS, modelLabel, LANGUAGES, ACCESS_MODES, routeIdOf, SURFACE_LABELS, type Ceiling, type CeilingFieldState, type EngineKey } from "@cortex/workspace-domain";
+import { CONNECTION_ENGINE, denyTokens, allRoutes, ceilingProblems, ceilingState, coordinatorEfforts, coordinatorResolution, effectiveCeiling, effortLabel, engineLabel, ENGINE_KEYS, ENGINES, FAILURE_CLASSES, HARD_DENIALS, modelLabel, LANGUAGES, ACCESS_MODES, routeIdOf, SURFACE_LABELS, type Ceiling, type CeilingFieldState, type EngineKey } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { A, I } from "./kit";
 import { HELP } from "./orch-help";
@@ -12,16 +12,17 @@ export function Coordinator() {
   const ws = useWs();
   const d = useDefaults(), off = useReadOnly();
   const v = () => d.value(), m = () => ws.machine(), c = () => m().config, set = (patch: Partial<ReturnType<typeof v>>) => d.set({ ...v(), ...patch });
-  const models = createMemo(() => ENGINE_KEYS.flatMap(e => c().surfaces.routing.engines[e].enabled.map(id => ({ id: `${e}|${id}`, label: modelLabel(c().catalogue, e, id), sub: `${engineLabel(e)}, ${id}` }))));
+  const available = (e: EngineKey, id: string) => c().setup[e].status === "connected" && !c().catalogue[e].failed && c().catalogue[e].models.some(m => m.id === id) && c().surfaces.routing.engines[e].enabled.includes(id) && denyTokens(c().surfaces.routing, e, id).length === 0;
+  const models = createMemo(() => ENGINE_KEYS.flatMap(e => c().surfaces.routing.engines[e].enabled.filter(id => available(e, id)).map(id => ({ id: `${e}|${id}`, label: modelLabel(c().catalogue, e, id), sub: `${engineLabel(e)}, ${id}` }))));
   const coord = () => v().coordinator;
   const efforts = () => coord() ? coordinatorEfforts(c().catalogue, coord()!.engine, coord()!.model) : { levels: [], observed: true };
   const pick = (value: string) => { const [engine, model] = value.split("|") as [EngineKey, string]; const levels = coordinatorEfforts(c().catalogue, engine, model).levels, was = coord()?.effort ?? "medium"; set({ coordinator: { engine, model, effort: levels.includes(was) ? was : levels[0], parameters: coord()?.parameters ?? {} } }); };
   const bound = createMemo(() => coordinatorResolution({ ...m(), config: { ...c(), surfaces: { ...c().surfaces, user_defaults: v() } } }));
-  const routes = createMemo(() => ENGINE_KEYS.flatMap(e => c().catalogue[e].models.map(x => ({ id: x.routeId ?? routeIdOf(e, x.id), label: x.label, sub: engineLabel(e), engine: e, model: x.id }))));
+  const routes = createMemo(() => ENGINE_KEYS.flatMap(e => c().catalogue[e].models.filter(x => available(e, x.id)).map(x => ({ id: x.routeId ?? routeIdOf(e, x.id), label: x.label, sub: engineLabel(e), engine: e, model: x.id }))));
   const first = () => { const e = coord()?.engine ?? "claude-agent-acp", id = coord()?.model ?? c().surfaces.routing.engines[e].enabled[0]; return { routeId: routes().find(r => r.engine === e && r.model === id)?.id ?? routeIdOf(e, id), connectionId: m().connections.find(x => CONNECTION_ENGINE[x.engine] === e)?.detail.connectionId ?? "", model: id, parameters: {} }; };
   const route = () => v().routeDefault;
   // A saved route the engines no longer offer still shows, by its model, so it can be seen and replaced.
-  const routeChoices = () => routes().some(r => r.id === route()?.routeId) ? routes() : [{ id: route()?.routeId ?? "", label: route()?.model || "No longer offered", sub: "Not offered now" }, ...routes()];
+  const routeChoices = () => routes().some(r => r.id === route()?.routeId) ? routes() : [{ id: route()?.routeId ?? "", label: route()?.model || "No longer offered", sub: "Not offered now", off: "Unavailable — choose another route" }, ...routes()];
   const connectionChoices = () => { const list = m().connections.map(x => ({ id: x.detail.connectionId, label: x.label })), now = route()?.connectionId ?? ""; return list.some(x => x.id === now) ? list : [{ id: now, label: "No longer registered" }, ...list]; };
   const patchRoute = (x: Partial<NonNullable<ReturnType<typeof route>>>) => set({ routeDefault: { ...route()!, ...x } });
   return <Shell title="Coordinator" lead="What a new task on this machine starts with. You can still change each one in the composer for a single task." bar={<Bar d={d} />}>

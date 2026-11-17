@@ -1,10 +1,11 @@
 import { render } from "solid-js/web";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { emptyWorkspace, LOCAL_MACHINE_ID, type Sprint, type Worker } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
 import { buildIndex, inScope, sprintView } from "../src/selectors";
-import { capabilitiesWire, flush, projection, scriptedPort, scriptedTransport, withTask } from "./support";
+import { capabilitiesWire, flush, projection, scriptedPort, scriptedTransport, withTask, wireTask } from "./support";
 import { createRealPort } from "../src/port/real";
+import { writeBoards } from "../src/port/board-cache";
 
 let dispose: (() => void) | undefined;
 beforeEach(() => { localStorage.clear(); sessionStorage.clear(); });
@@ -87,6 +88,24 @@ it("shows a worker's role and actual state without claiming it is unassigned", a
   expect(document.body.textContent).not.toMatch(/not assigned/i);
 });
 
+it("keeps a sprint whose queue is complete in the sidebar, as Done, until it is closed into the Archive", async () => {
+  const s = world();
+  // Four tasks ready to finish, as in the live run: the sprint row must not be the one pushed out of the five.
+  s.tasks = ["t", "u", "v", "w"].map(id => ({ ...s.tasks[0], id, title: `Work ${id}`, status: "ready_to_merge" as const, sprintId: "sp" }));
+  const sprint: Sprint = { id: "sp", projectId: "p", title: "Release", description: "Release", runMode: "automatic", targetBranch: null, planning: "created", conversation: [], plan: null, materializedVersion: 1, taskIds: ["t", "u", "v", "w"], queueState: "complete", pauseReason: null };
+  s.sprints = [sprint];
+  await mount(s, `/m/${LOCAL_MACHINE_ID}`);
+  const row = () => [...document.querySelectorAll<HTMLAnchorElement>(".sidebar .task-row")].find(r => r.textContent?.includes("Sprint: Release"));
+  expect(row()?.querySelector(".sig")?.textContent).toBe("Done");
+  expect(row()?.getAttribute("href")).toContain("/p/p/s/sp/board");
+  expect(document.querySelectorAll(".sidebar .tasks .task-row:not(.all)")).toHaveLength(5);
+  // Closed into the Archive, it leaves the sidebar.
+  dispose?.(); document.body.innerHTML = "";
+  s.sprints = [{ ...sprint, archivedAt: Date.now() }];
+  await mount(s, `/m/${LOCAL_MACHINE_ID}`);
+  expect(row()).toBeUndefined();
+});
+
 it("uses the editor's sprint membership for the scoped board and grouping", async () => {
   const s = world();
   const sprint: Sprint = { id: "sp", projectId: "p", title: "Release", description: "Release", runMode: "manual", targetBranch: null, planning: "created", conversation: [], plan: null, materializedVersion: 1, taskIds: ["t"], queueState: "idle", pauseReason: null };
@@ -99,8 +118,47 @@ it("uses the editor's sprint membership for the scoped board and grouping", asyn
   expect(document.querySelector('.card[data-task="t"]')).not.toBeNull();
 });
 
-it("reports missing sprint task details instead of pretending the sprint has no tasks", async () => {
+it("renders a retained 31-task sprint immediately while first reads fail and refreshes without startup error copy", async () => {
+  const items=Array.from({length:31},(_,i)=>wireTask({taskId:"saved-"+i,description:"Retained task "+i}));
+  const product={tasks:{},sprints:[{id:"sp",projectId:"p",description:"Retained sprint",runMode:"automatic" as const,
+    planning:"created" as const,taskIds:items.map(t=>t.taskId),queueState:"running" as const,pauseReason:null,
+    targetBranch:null,conversation:[],plan:null,materializedVersion:1}]};
+  writeBoards(localStorage,"owner",[{project:{projectId:"p",name:"Project",repository:"/p",openBranch:"main",defaultBranch:"main",activated:true},items,product}]);
+  let cold=true;
+  const s=scriptedTransport({
+    "service.capabilities":()=>({methods:["native.query","native.board","projects.status"],machine:true}),
+    "projects.list":()=>[{projectId:"p",displayName:"Project",canonicalRoot:"/p",activation:{}}],
+    "capabilities.get":()=>capabilitiesWire(["capabilities.get","project.snapshot"]),
+    "projects.status":()=>({ready:false,state:"starting",reason:null}),
+    "native.board":()=>{if(cold) throw Error("snapshot_expired");return {protocol:{major:2,mapping:2},projectId:"p",generation:"g",version:"2",highWatermark:"3",
+      data:{type:"board",value:{items,nextCursor:null,highWatermark:"3"}}};},
+    "machine.call":raw=>{const op=(raw as {op:string}).op;return {ok:true,result:op==="overview"?{name:"This machine"}:op==="config.read"?{config:{projects:{},revisions:{}},connections:[],tokens:{}}:op==="project.config.read"?{value:{},tokens:{}}:op==="repo.snapshot"?null:product};},
+  });
+  history.replaceState(null,"",`/m/${LOCAL_MACHINE_ID}/p/p/s/sp/board`);
+  const root=document.createElement("div");document.body.append(root);
+  dispose=render(()=><Workspace port={createRealPort({transport:s.transport,actorId:"owner",registry:true,boardStorage:localStorage})}/>,root);
+  const clean=()=>{
+    expect(root.querySelectorAll(".card[data-task]")).toHaveLength(31);
+    expect(root.textContent).not.toMatch(/data is loading|Task details unavailable|could not be loaded|Queue paused|Waiting for sprint task details|This project is starting/);
+  };
+  // The retained board is shown with the rest of the first screen, once the machine's own settings are in.
+  await settle(); clean();
+  cold=false;s.send({type:"refresh"});
+  await vi.waitFor(()=>expect(s.calls.filter(c=>c.operation==="native.board").length).toBeGreaterThan(1));
+  await settle();clean();
+});
+
+it("does not describe pending sprint details as a read failure on the summary tab", async () => {
+  const s=world();
+  s.sprints=[{id:"sp",projectId:"p",description:"Pending sprint",runMode:"automatic",planning:"created",taskIds:["missing"],
+    queueState:"paused",pauseReason:"Service pause",targetBranch:null,conversation:[],plan:null,materializedVersion:1}];
+  await mount(s,`/m/${LOCAL_MACHINE_ID}/p/p/s/sp/summary`);
+  expect(document.body.textContent).not.toMatch(/Task details unavailable|could not be loaded|Queue paused/);
+});
+
+it("reports persistently missing sprint task details instead of pretending the sprint has no tasks", async () => {
   const s = world();
+  s.projects[0].issue = "The project failed repeated reads.";
   s.sprints = [{ id: "sp", projectId: "p", title: "Release", description: "Release", runMode: "manual", targetBranch: null, planning: "created", conversation: [], plan: null, materializedVersion: 1, taskIds: ["missing"], queueState: "idle", pauseReason: null }];
   await mount(s, `/m/${LOCAL_MACHINE_ID}/p/p/s/sp/board`);
   expect(sprintView(buildIndex(s, Date.now()), s.sprints[0]).state).not.toContain("0 of 0");

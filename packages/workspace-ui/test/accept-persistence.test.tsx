@@ -44,7 +44,7 @@ it.skipIf(!socket)("persisted source drift is actionable; a reviewer search is m
       expect(root.textContent).toContain("Check manually");
       expect(button("Rerun check")).toBeUndefined();
       button("Accept v1")!.click();
-      expect(root.querySelector('dialog[aria-label="Accept with open checks"]')?.hasAttribute("open")).not.toBe(true);
+      expect(root.querySelector('dialog[data-dialog="Accept with open checks"]')?.hasAttribute("open")).not.toBe(true);
       await until(()=>root.textContent?.includes("Accepted v1")===true);
       const saved=(await rpc("machine.call",{op:"product.read",projectId:f.projectId})).result.tasks[f.taskId];
       expect(saved.acceptance).toBeDefined();

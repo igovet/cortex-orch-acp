@@ -1,24 +1,47 @@
 //! Linux desktop notifications, using the session bus, never a shell command.
-use gtk::{gio, glib};
 use glib::variant::ToVariant;
+use gtk::{gio, glib};
 
 fn parameters(label: &str) -> glib::Variant {
-    let label: String = label.chars().filter(|c| !c.is_control()).take(200).collect();
+    let label: String = label
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(200)
+        .collect();
     // Notification bodies can be markup. Titles from a project are plain text.
     let body = glib::markup_escape_text(&label);
-    ("Cortex Workspace", 0u32, "dialog-question", "Question waiting",
-     body.as_str(), Vec::<String>::new(),
-     std::collections::HashMap::<String, glib::Variant>::new(), -1i32).to_variant()
+    (
+        "Cortex Workspace",
+        0u32,
+        "dialog-question",
+        "Question waiting",
+        body.as_str(),
+        Vec::<String>::new(),
+        std::collections::HashMap::<String, glib::Variant>::new(),
+        -1i32,
+    )
+        .to_variant()
 }
 
 pub(crate) fn send(label: &str) -> Result<(), String> {
     let bus = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)
         .map_err(|_| "Desktop notification service unavailable.")?;
-    let reply = bus.call_sync(Some("org.freedesktop.Notifications"),
-        "/org/freedesktop/Notifications", "org.freedesktop.Notifications", "Notify",
-        Some(&parameters(label)), None, gio::DBusCallFlags::NONE, 2000, gio::Cancellable::NONE)
+    let reply = bus
+        .call_sync(
+            Some("org.freedesktop.Notifications"),
+            "/org/freedesktop/Notifications",
+            "org.freedesktop.Notifications",
+            "Notify",
+            Some(&parameters(label)),
+            None,
+            gio::DBusCallFlags::NONE,
+            2000,
+            gio::Cancellable::NONE,
+        )
         .map_err(|_| "Desktop notification delivery failed.")?;
-    if reply.get::<(u32,)>().is_none() { return Err("Desktop notification reply invalid.".into()); }
+    if reply.get::<(u32,)>().is_none() {
+        return Err("Desktop notification reply invalid.".into());
+    }
     Ok(())
 }
 
@@ -28,7 +51,10 @@ mod tests {
     #[test]
     #[ignore = "run only in a disposable container under dbus-run-session"]
     fn delivery_to_private_bus() {
-        assert_eq!(std::env::var("CORTEX_NOTIFICATION_TEST_BUS").as_deref(), Ok("private-container"));
+        assert_eq!(
+            std::env::var("CORTEX_NOTIFICATION_TEST_BUS").as_deref(),
+            Ok("private-container")
+        );
         let (ready, wait) = std::sync::mpsc::channel();
         let (observed, received) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
@@ -59,9 +85,15 @@ mod tests {
                     gio::DBusCallFlags::NONE, 2000, gio::Cancellable::NONE).unwrap();
             }).unwrap();
         });
-        wait.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        wait.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
         send("Fixture question").unwrap();
-        assert_eq!(received.recv_timeout(std::time::Duration::from_secs(5)).unwrap(), "Fixture question");
+        assert_eq!(
+            received
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            "Fixture question"
+        );
         server.join().unwrap();
         assert!(send("Service unavailable").is_err());
     }
@@ -70,7 +102,17 @@ mod tests {
     fn bounded_plain_text_notification_has_the_native_signature() {
         let params = parameters("<task>\n & description");
         assert_eq!(params.type_().as_str(), "(susssasa{sv}i)");
-        assert_eq!(params.child_value(4).get::<String>().unwrap(), "&lt;task&gt; &amp; description");
-        assert_eq!(parameters(&"x".repeat(500)).child_value(4).get::<String>().unwrap().len(), 200);
+        assert_eq!(
+            params.child_value(4).get::<String>().unwrap(),
+            "&lt;task&gt; &amp; description"
+        );
+        assert_eq!(
+            parameters(&"x".repeat(500))
+                .child_value(4)
+                .get::<String>()
+                .unwrap()
+                .len(),
+            200
+        );
     }
 }

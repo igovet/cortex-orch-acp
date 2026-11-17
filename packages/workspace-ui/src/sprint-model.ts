@@ -36,7 +36,7 @@ export function planningThread(sprint: Sprint, session: TaskSession | undefined)
 }
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-type Word = { text: string; tone: string; icon: string; spin?: boolean; group: "ready" | "working" | "next" | "blocked" | "merged" | "closed" };
+type Word = { text: string; tone: string; icon: string; spin?: boolean; group: "ready" | "working" | "needs" | "next" | "blocked" | "merged" | "closed" };
 /** One word for a task inside a sprint. A dependency that has not unlocked reads as blocked, never as queued. */
 function wordOf(view: TaskView, next: boolean, index: WorkspaceIndex): Word {
   const t = view.task;
@@ -44,13 +44,14 @@ function wordOf(view: TaskView, next: boolean, index: WorkspaceIndex): Word {
   if (view.unknown) return { text: view.fact.text, tone: "st-idle", icon: "help", group: "working" };
   switch (t.status) {
     case "working": return { text: "Working", tone: "st-run", icon: "loader", spin: true, group: "working" };
-    case "paused": return { text: "Paused", tone: "st-idle", icon: "pause", group: "working" };
+    // Only running work counts as Working; what waits on the owner (paused, a question, a result, an ended run) is Needs you.
+    case "paused": return { text: "Paused", tone: "st-idle", icon: "pause", group: "needs" };
     case "stopping": return { text: "Stopping", tone: "st-warn", icon: "hourglass", group: "working" };
-    case "needs_you": return { text: "Needs you", tone: "st-warn", icon: "question", group: "working" };
-    case "review": return { text: "Review", tone: "st-idle", icon: "eye", group: "working" };
+    case "needs_you": return { text: "Needs you", tone: "st-warn", icon: "question", group: "needs" };
+    case "review": return { text: "Review", tone: "st-idle", icon: "eye", group: "needs" };
     case "ready_to_merge": return { text: readyLabel(t, view.target), tone: "st-merge", icon: "merge", group: "ready" };
-    case "failed": return { text: "Run failed", tone: "st-bad", icon: "x-circle", group: "working" };
-    case "cancelled": return { text: "Run cancelled", tone: "st-idle", icon: "x-circle", group: "working" };
+    case "failed": return { text: "Run failed", tone: "st-bad", icon: "x-circle", group: "needs" };
+    case "cancelled": return { text: "Run cancelled", tone: "st-idle", icon: "x-circle", group: "needs" };
     case "done": return t.integration?.method === "commit" ? { text: `Committed to ${t.integration.targetBranch}`, tone: "st-idle", icon: "check", group: "closed" } : t.work === "merged" ? { text: "Merged", tone: "st-merge", icon: "merge", group: "merged" }
       : { text: t.closedAs === "external" ? "Done outside the app" : t.closedAs === "cancel" ? "Cancelled" : "Closed as is", tone: "st-idle", icon: t.closedAs === "cancel" ? "x-circle" : "circle", group: "closed" };
     case "draft": {
@@ -170,7 +171,7 @@ export function sprintSummary(index: WorkspaceIndex, sprint: Sprint) {
     return { view, word, checks: checksOf(view.task, word, index), branch: view.task.checkout.branch };
   });
   const count = (group: Word["group"]) => list.filter(r => r.word.group === group).length;
-  return { rows: list, planRows: rows, ready: count("ready"), working: count("working"), next: count("next"), blocked: count("blocked"), merged: count("merged"), closed: count("closed") };
+  return { rows: list, planRows: rows, ready: count("ready"), working: count("working"), needs: count("needs"), next: count("next"), blocked: count("blocked"), merged: count("merged"), closed: count("closed") };
 }
 export const createLabel = (n: number, version: number) => `Create ${plural(n, "task")} from Plan v${version}`;
 
@@ -181,6 +182,7 @@ export const createLabel = (n: number, version: number) => `Create ${plural(n, "
 export function sprintGap(index: WorkspaceIndex, sprint: Sprint): { title: string; text: string; retry: boolean } | null {
   const loaded = sprint.taskIds.filter(id => index.byId.has(id)).length, missing = sprint.taskIds.length - loaded;
   if (sprint.planning !== "created") return { title: "No tasks yet", text: sprint.plan ? "The plan is ready. Create its tasks on the Planning tab; nothing runs until you start them." : "Tasks appear here once planning proposes them and you create them.", retry: false };
+  if (missing > 0 && !index.state.projects.find(p => p.id === sprint.projectId)?.issue) return null;
   if (missing > 0) return { title: "Task details unavailable", text: `${missing} of ${plural(sprint.taskIds.length, "sprint task")} could not be loaded. The sprint keeps them, and Retry reads them again without creating anything.`, retry: true };
   if (!sprint.taskIds.length) return { title: "This sprint has no tasks", text: "Add one with New task. It is saved as a draft and starts only when you start it.", retry: false };
   return null;

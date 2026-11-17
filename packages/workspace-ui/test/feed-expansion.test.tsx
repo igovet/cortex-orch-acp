@@ -1,8 +1,8 @@
 import { render } from "solid-js/web";
 import { afterEach, expect, it } from "vitest";
 import { emptySession, emptyWorkspace, LOCAL_MACHINE_ID, type Activity, type Worker } from "@cortex/workspace-domain";
-import { KNOWN_CORTEX_TOOL_NAMES } from "../../../integrations/paseo/shared/tool-presentation";
-import { isHiddenWorkerEvent } from "../../../integrations/paseo/shared/timeline-visibility";
+import { KNOWN_CORTEX_TOOL_NAMES } from "@cortex/workspace-domain/tool-presentation";
+import { isHiddenWorkerEvent } from "@cortex/workspace-domain/timeline-visibility";
 import { Workspace } from "../src";
 import { feedOf, isHiddenActivity, oneRowPerCall, STEP_PREFIX, toolLabel, viewOfActivity, viewOfText } from "../src/tool-names";
 import { flush, projection, scriptedPort, withTask } from "./support";

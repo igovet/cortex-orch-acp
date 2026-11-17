@@ -27,7 +27,7 @@ CW-R13 (accepted direction), CW-R15 (explicit activation and the public adapter)
 
 Positive:
 
-- The full journey completes against a fake engine through the real Python runtime.
+- The full journey completes against a fake engine through the native Rust runtime.
 - Closing and reopening the window during a question, and during streaming, keeps the state and allows the answer.
 
 Negative:
@@ -42,7 +42,7 @@ Negative:
 
 ## Validation
 
-- Vitest for the view models; a scripted fake peer for the screens; then the real Python runtime backed by fake engines. No paid call.
+- Vitest for the view models; a scripted fake peer for the screens; then the native Rust runtime backed by fake engines. No paid call.
 - Rendered WebKitGTK walk-through on Ubuntu, recorded as structured outcomes. Browser results do not qualify it.
 
 ## Documentation impact

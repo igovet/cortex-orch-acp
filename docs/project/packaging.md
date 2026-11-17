@@ -11,26 +11,20 @@ details this page's setup step delegates to.
 
 ## Install
 
-There is no separate "install" step: `src/cortex_acp.py`
-runs directly, as plain `python3`, from this checkout:
+There is no separate "install" step. The ACP entry is the Rust `cortex-acp` binary built from this checkout (see [default launch](native-incoming-acp.md#default-launch)); the product contains no Python and needs no interpreter at runtime:
 
 ```
-python3 -B /absolute/path/to/src/cortex_acp.py
+umask 022 && ~/.cargo/bin/cargo build --locked --offline -p cortex-acp -p cortex-paseo-tools
+CORTEX_ACP_RUNTIME_ROOT=/absolute/path/to/checkout /absolute/path/to/checkout/target/debug/cortex-acp
 ```
 
-`cortex_runtime` (everything under `src/cortex_runtime/`)
-is standard-library only — nothing to `pip install` for the agent itself.
-`cortex_acp.py` never spawns a plugin host and writes only JSON-RPC lines
-to stdout. Startup schedules the owned pinned-adapter download and native-account
-setup in a background thread, never on the protocol path (every log
-goes to stderr) — see `tests/test_acp_entrypoint_packaging.py` and
-`tests/test_acp_stdout_purity.py`.
+`cortex-acp` writes only JSON-RPC lines to stdout; every log goes to stderr. Startup schedules the owned pinned-adapter download and native-account setup in a background thread, never on the protocol path.
 
 Worker role instructions are maintained in canonical `skills/worker-*/SKILL.md`
 sources and composed with shared protocol text. The package no longer includes
 redundant `agents/*.toml` worker profiles or generated copies under
 `agents/references/`; `profiles.json` maps role entries to Markdown sources, and
-`python3 -B scripts/generate_agent_profiles.py check` validates generated
+`scripts/cortex-xtask.sh profiles check` validates generated
 instruction artifacts. The 23 role instructions remain; the duplicate TOML
 serialization format does not.
 
@@ -38,17 +32,22 @@ serialization format does not.
 
 | Variable | Used by | Status |
 |---|---|---|
-| `HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME` | `cortex_runtime.connections.registry` and everything built on it (connections, catalog, user defaults) | ACP path, stays |
-| `CORTEX_OBSERVATION_DIR` | `cortex_runtime.observability`/diagnostics logging sink | ACP path, stays |
+| `HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME` | the runtime and everything built on it (connections, catalog, user defaults) | ACP path, stays |
+| `CORTEX_OBSERVATION_DIR` | the runtime/diagnostics logging sink | ACP path, stays |
 | `CODEX_HOME` | Native codex-acp/codex CLI isolation directory | ACP path (isolation) |
 
 ## Local desktop Debian builds
 
-Run either script from any working directory (Python 3.11+ and Docker, or Podman,
+Run either script from any working directory (the Rust toolchain from `rust-toolchain.toml` and Docker, or Podman,
 must be available; the container downloads its locked build dependencies).
 The desktop shares Paseo presentation types, so the builder also installs Paseo’s
 locked development dependencies, without lifecycle scripts, before typechecking.
-These build-time dependencies are not copied from the host:
+These build-time dependencies are not copied from the host. The source snapshot
+resolves Rust workspace members from the root `Cargo.toml` (including member
+globs and exclusions), rather than maintaining a separate crate list. It copies
+`Cargo.lock` unchanged and includes SQL schema assets used by the Rust core.
+Missing or linked member manifests fail before the container build; hidden
+files, symlinks and dependency/build caches remain excluded:
 
 
 ```sh
@@ -58,7 +57,7 @@ These build-time dependencies are not copied from the host:
 ./scripts/build-dev-deb.sh --engine podman
 ```
 
-Both wrap `scripts/build_workspace_desktop.py` and print the final absolute
+Both wrap `cargo run --locked -p cortex-xtask -- build-deb` (the `cortex-xtask build-deb` driver; `--release`, `--local-release`, `--ci-dev` and `--resume` are reserved by the wrappers) and print the final absolute
 archive paths. Copies and their build manifest land in the git-ignored
 `.workspace-build/local-dev/build-*/` or `.workspace-build/local-prod/build-*/`.
 Original inputs, caches and artifacts remain under `.workspace-build/build-*/`.
@@ -76,8 +75,10 @@ The owner runs the prod wrapper explicitly; it neither publishes
 nor installs anything. It uses production package/service/state identities:
 installing it can replace an existing production package, so test only in a
 disposable environment. The official `--release` clean-main GitHub gate is
-unchanged. These scripts do not perform or replace the installed desktop
-handoff gate below; release-channel installed acceptance remains unsupported.
+unchanged. These scripts do not replace the installed desktop
+handoff gate below; pass `--check-installed --prior-archive /absolute/path/to/prior.deb`
+to run it after building. Both dev and release channels are supported by the gate.
+A local-release build remains non-official even after passing it.
 
 ## Manual Workspace releases
 
@@ -118,24 +119,39 @@ The exact archive must pass on both X11 and Wayland after clean installation and
 ordinary `apt install` upgrade from the previous owner archive. Run sequentially:
 
 ```sh
-python3 -B scripts/build_workspace_desktop.py --check-installed --prior-archive /absolute/path/to/previous-owner.deb
+scripts/cortex-xtask.sh build-deb --check-installed --prior-archive /absolute/path/to/previous-owner.deb
 # Or check an already-built, unchanged archive:
-python3 -B packaging/container/check_installed.py --archive /absolute/path/to/candidate.deb --prior-archive /absolute/path/to/previous-owner.deb --evidence .workspace-build/installed-new
+scripts/cortex-xtask.sh installed-gate --archive /absolute/path/to/candidate.deb --prior-archive /absolute/path/to/previous-owner.deb --evidence .workspace-build/installed-new
+# Release channel (both candidate and exact prior archive must be cortex-workspace):
+scripts/cortex-xtask.sh installed-gate --channel release --archive /absolute/path/to/candidate-release.deb --prior-archive /absolute/path/to/previous-release.deb --evidence .workspace-build/installed-release-new
 ```
 
 The evidence path must not exist. Keep its complete output and `result.json`;
 `accepted: true` must bind to the SHA-256 of the actual archive handed over.
 The builder records `owner_handoff_eligible: false` without this gate.
-A failed, incomplete or single-display run never qualifies. The current harness
-supports the dev Debian channel and Docker only; release-channel handoff remains
-blocked until it has the equivalent installed check. No workflow publication or
-host installation is performed by this gate.
+A failed, incomplete or single-display run never qualifies. The harness requires
+Docker. `--channel dev` (the default) checks `cortex-workspace-dev`; `--channel release`
+checks `cortex-workspace`. Mixed-channel archives are rejected before any container
+launch. Both use the same four scenarios and all existing real-input checks, with
+channel-specific service, socket, store, config and state paths. Release checks run
+only inside disposable containers, never against the installed production app.
+
+Every scenario seeds synthetic orchestration files before installation. They contain
+six profiles, active `default`, and an exact user-default coordinator route with
+`thought_level: medium`, not real accounts or secrets. The gate compares byte and
+semantic SHA-256 values after install, before/after upgrade where applicable, and
+after the first GUI launch. Settings must render the six profiles with `default`
+active and the coordinator model and effort, including with an unreadable registered
+project. The synthetic files are retired only after those checks, before unrelated
+fake-engine journeys. No workflow publication or host installation is performed.
+
+### Native service startup
+
+Both shipped user units invoke `workspace-service <allowed-root> <runtime-root>` (the installed binaries `cortex-workspace-service` and `cortex-workspace-service-dev`, allowed root `/`). The runtime root is a trusted absolute source checkout or this channel's installed `/usr/lib/<package>/runtime` directory. The only other accepted forms are the one-argument MCP relay and the internal maintenance-worker mode: the former three- and five-argument forms, `--fixture-launcher`, the retained/legacy ACP child and `CORTEX_WORKSPACE_NATIVE=0` were removed with the Python runtime. Binding the socket and serving native operations requires no interpreter or helper files, and the `.deb` depends on no `python3` and ships no `src/` or `.py` files. Native setup/login bundle discovery and Node voice assets derive from the trusted runtime root. Requests that only the former Python helper could answer are refused with `config_api_unavailable` or their native refusal code, never forwarded. See [the startup boundary](../cortex-workspace/local-task-execution.md#python-independent-native-service-startup). The installed-archive real-input gate above remains mandatory before handoff; source/socket tests do not establish rendered desktop or installed-upgrade results.
 
 ## Offline Workspace engines
 
-The ACP content identity includes every shipped Workspace Python helper, including
-maintenance, engine onboarding and owner workflows. Changing those helpers requires
-restamping before packaging; the generated Python module inventory must match `src/`.
+The package content identity (`package-identity.json`, written by `scripts/cortex-xtask.sh package stamp` and validated by `package check`) covers the exact shipped runtime file set listed in `runtime-payload.json` (`scripts/cortex-xtask.sh runtime-payload list`). That set contains no Python and no `src/` tree. Changing a payload file requires restamping before packaging.
 
 Both Debian channels bundle the qualified adapters, their dependency tree and Node
 under `/usr/lib/<package>/engines`. The container installs using the committed
@@ -145,7 +161,7 @@ The package build fails if any inventoried file is missing or modified, or the
 lock differs from `pinned-dependencies.json`. Nodejs/npm are not Debian dependencies.
 
 Discovery uses only the bundle belonging to this runtime's channel, prefers it to
-user npm installs, and retains canonical-path/verify_install and exact instruction
+user npm installs, and retains canonical-path install verification and exact instruction
 registration checks. The Codex patch is already prepared in private connection
 state and links read-only dependencies; nothing writes under `/usr/lib`.
 Same-version connections may relocate to the bundle, but never downgrade.
@@ -158,7 +174,7 @@ remains optional. Installation without network does not make model use offline.
 The no-paid real launch check is:
 
 ```sh
-python3 -B packaging/container/check_bundled_engines.py --archive /absolute/path/to/package.deb
+scripts/cortex-xtask.sh check-bundled-engines --archive /absolute/path/to/package.deb
 ```
 
 It prepares apt libraries in a clean Ubuntu 26.04 image, then installs the archive
@@ -172,59 +188,42 @@ This does not qualify sandbox policy, systemd startup or rendered desktop behavi
 
 `./pinned-dependencies.json` is the single manifest for:
 
-- the Python version floor (currently 3.11+, matching
-  the Python version declared by the current runtime environment);
-- this package's own portable contract version
-  (`cortex_runtime.portable.version.CONTRACT_VERSION`);
-- the vendored ACP schema fixture's pinned sha256
-  (`tests/fixtures/acp/schema-1.4.0.json`);
+- this package's own portable contract version;
+- the vendored ACP schema fixture's pinned sha256 (the manifest path field still reads
+  `tests/fixtures/acp/schema-1.4.0.json`; the vendored schema used by the Rust tests is
+  `crates/cortex-acp/tests/fixtures/acp/schema-1.4.0.json`);
 - each supported engine adapter's pinned version, the current qualified
-  adapter (codex-acp 2.3.0, whose `@openai/codex` dependency is `^0.164.0`;
-  claude-agent-acp 0.97.0). Settings' **Download engine** and the background
-  updater (`connections.engine_update`) both install exactly this pin; see
+  adapter (codex-acp 2.6.0, whose `@openai/codex` dependency is `^0.166.0`;
+  claude-agent-acp 0.107.0). Settings' **Download engine** and the background
+  updater both install exactly this pin; see
   [codex-acp-adapter.md](../features/codex-engine/index.md) and
   [claude-agent-acp-adapter.md](../features/claude-engine/index.md) for the
   verified-digest install-record mechanism and the other qualified versions.
 
-`cortex_runtime.packaging.pinned.verify_all()`/`verify_launch_critical()`
-re-check every one of those *fresh* on every call and report a
-`Finding(status="ok"|"mismatch"|"missing", repair_action=...)` — never a
-cached verdict, never an auto-upgrade. `cortex_acp.py` runs
-`verify_launch_critical()` (Python floor + contract version — the two
-checks cheap and safe enough for every ordinary launch) before it ever
-constructs the production runtime, and exits 1 with a concrete stderr
-message on any mismatch. `scripts/cortex_diagnose.py` runs the full
-`verify_all()` set, including the schema fixture digest and the engine pin
-listing.
+`cortex-acp` reads the manifest at startup (portable contract version and manifest schema) before it
+constructs the runtime, and exits 1 with a concrete stderr message on any mismatch; stdout stays
+empty. No interpreter floor exists. `scripts/cortex-xtask.sh check-pins` verifies the reviewed
+Rust/CLI dependency pins without a build or network.
 
 ## First-run setup
 
-`scripts/cortex_acp_setup.py` has four independent, idempotent,
-non-destructive steps (`status`, the default, only reads):
+`scripts/cortex-paseo-tools.sh` (the `cortex-paseo-tools` binary) has independent, idempotent, non-destructive steps (`status` only reads). Every command prints one JSON document with sorted keys; a refusal prints `error: ...` on stderr and exits 1:
 
 ```
-python3 -B scripts/cortex_acp_setup.py status
-python3 -B scripts/cortex_acp_setup.py init-storage
-python3 -B scripts/cortex_acp_setup.py add-connection \
-    --name work --engine codex-acp --provider openai \
-    --auth-mode api_key --key-kind openai_api_key \
-    --api-key-file /path/to/key.txt \
-    --install-record /path/to/codex-install-record.json  # never inline secrets on argv
-python3 -B scripts/cortex_acp_setup.py validate-connection \
-    --connection cn_xxxxxxxxxxxx
-python3 -B scripts/cortex_acp_setup.py pin-route \
-    --connection cn_xxxxxxxxxxxx --model gpt-5-codex
-python3 -B scripts/cortex_acp_setup.py record-observation \
-    --connection cn_xxxxxxxxxxxx --model gpt-5-codex \
-    --config-options-file /path/to/observed-config-options.json
-python3 -B scripts/cortex_acp_setup.py print-client-recipes
-python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
+scripts/cortex-paseo-tools.sh status
+scripts/cortex-paseo-tools.sh init-storage
+scripts/cortex-paseo-tools.sh install-engine --engine codex-acp
+scripts/cortex-paseo-tools.sh add-connection --engine codex-acp
+scripts/cortex-paseo-tools.sh validate-connection --connection cn_xxxxxxxxxxxx
+scripts/cortex-paseo-tools.sh pin-route --connection cn_xxxxxxxxxxxx --model gpt-5-codex
+scripts/cortex-paseo-tools.sh refresh-catalog [--workspace /path/to/project]
+scripts/cortex-paseo-tools.sh print-client-recipes
+scripts/cortex-paseo-tools.sh install-paseo-plugin
 ```
 
 - **`init-storage`** creates/verifies the owner-private
   `$XDG_CONFIG_HOME/cortex`/`$XDG_STATE_HOME/cortex` roots (`0700`,
-  symlink-refusing — the same primitives
-  `cortex_runtime.connections.registry` already uses). It never touches
+  symlink-refusing) and installs the absent default preset (it calls the native settings API's `apply_default_preset`). It never touches
   any project's own `.cortex` store.
 - **Default preset seeding.** `init-storage` creates absent `routing.json`,
   `defaults.json` and `mcp-servers.json` files, plus one applied `default` profile in
@@ -233,95 +232,44 @@ python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
   not downloaded or launched executables. All paths are `/path/to/...` placeholders.
   See [Default preset](../configuration.md#default-preset).
   An existing file is never replaced. Every Cortex agent start repeats this absent-only seeding.
-- **`add-connection`** registers (or reuses) one connection through the
-  existing `connections.onboarding` API. An API-key secret is always read
-  from a file path or stdin — never a plain CLI argument — and is written
-  straight to the connection's private secret file; nothing here ever
-  logs or prints it. A native-account connection instead prints
-  non-secret instructions (the isolated directory + env var name) for the
-  user's own login flow, run entirely outside Cortex; Cortex never
-  collects or stores that credential itself. `--install-record` is required
-  and is verified for the selected engine before the registry is mutated;
-  it must contain the exact JSON fields for that engine and never contains
-  credentials.
-- **`add-opencode-connection [--binary PATH]`** onboards the optional
-  OpenCode v2 engine, which is never discovered at startup. It finds a
-  trusted `opencode` binary and reads its version in a network-less sandbox,
-  refusing versions outside `2.x.x`. It then registers a connection that
-  references the owner's own `~/.local/share/opencode` login (never copied)
-  and prints the next step: `opencode auth login`, `chmod 700` of that
-  directory, or `refresh-catalog`. See the
-  [OpenCode adapter](../features/opencode-engine/index.md#onboarding).
-- **`validate-connection`** recomputes one connection's current state and
-  prints only its id, engine, state, and qualification flag. It never prints
+- **`install-engine --engine ENGINE`** installs the manifest-pinned adapter into Cortex's owned engine root (an explicit opt-in).
+- **`add-connection --engine ENGINE`** registers (or reuses) one native-account connection through the
+  native settings API (`onboard_connection`, with an explicit opt-in and the current registry revision). It
+  never collects or stores a credential: the engine's own login runs entirely outside Cortex.
+  The former API-key route is gone: `--api-key-file`, `--api-key-stdin` and `--install-record` are refused with an explanatory error.
+- **`add-opencode-connection [--binary PATH] [--name NAME]`** onboards the optional
+  OpenCode v2 engine, which is never discovered at startup. Its version probe must run in the
+  OpenCode network-less sandbox, which the Rust host does not provide, so it currently refuses with
+  `config_api_unavailable` (see the [OpenCode adapter](../features/opencode-engine/index.md#onboarding)).
+- **`validate-connection --connection ID`** recomputes one connection's current state (the settings API's `validate` update, revision-checked)
+  and prints only its id, engine, state, and qualification flag. It never prints
   credential paths or values.
-- **`pin-route`** declares one hand-picked, already-qualified
-  `(engine, auth_mode, model)` combination (never a live engine probe —
-  see `catalog.discovery.ManualDeclaration`; only a documented/qualified
-  combination is ever accepted) and persists it as the same plain
-  user-default route/parameters an in-session `/cortex-model` choice
-  would write (`configuration.store.write_user_defaults`). A fresh task's
-  first prompt then adopts this default automatically — see
-  `acp.agent.Agent._propose_pending_selection_for_new_task` — with no
-  further per-task action. `tests/test_acp_setup_fresh_session.py` proves
-  this end to end (fake downstream engine subprocess, real production
-  `Agent`/`OrchestratingRuntime` code).
-- **`record-observation`** replaces a `pin-route`'d route with one built
-  from a *real* engine-observed `configOptions` payload (the same
-  `session/new`-shaped JSON array a live engine actually returned — a
-  Zed devtools capture, or the result of an explicitly authorized
-  `scripts/cortex_codex_probe.py` qualification run; this step itself
-  never contacts an engine). Unlike `pin-route`'s `ManualDeclaration`
-  (only ever accepted with **no** parameters, since nothing confirmed
-  what it actually supports), this goes through
-  `catalog.discovery.parse_observation`/`build_catalog` — the same
-  DISCOVERY-provenance path automatic discovery would use — so the saved
-  route's `ExecutionRoute.supported_parameters` are the engine's real
-  advertised values (every value in each `mode`/`thought_level`
-  select's own `options`, not only whichever was current when observed),
-  and re-pins it as the user default exactly like `pin-route` does. This
-  is what lets a real reasoning-effort choice (e.g. "high") actually
-  appear as a selectable `thought_level` config option in a client's
-  message panel — see `acp.config_options.build_thought_level_option`
-  and `tests/test_cortex_acp_setup.py`'s `test_record_observation_*`
-  tests.
-- **`print-client-recipes`** delegates entirely to the existing
-  `scripts/cortex_acp_client_config.py` (dry-run by default; a real write
-  needs `--settings PATH --apply --i-consent-to-write`) plus the codeg
-  recipe text — this script never re-implements or duplicates that write
-  path.
+- **`pin-route --connection ID --model MODEL`** persists an observed catalogue route as the user-default route
+  (native catalogue only: the route exists once a real engine session observed it, see `refresh-catalog`). A fresh task's
+  first prompt then adopts this default automatically, with no further per-task action.
+- **`refresh-catalog [--workspace PROJECT]`** refreshes the model catalogue through the settings API (`route_catalog` `refresh`); it replaces the removed manual `record-observation` step.
+- **`print-client-recipes`** prints the Zed entry and the codeg recipe text; it is a dry run by default and a real
+  write needs `--settings PATH --apply --i-consent-to-write` (see [Zed](../features/zed-agent/index.md)).
+- **`install-paseo-plugin`** and **`configure-paseo-plugin-launch`** are described under [Paseo provider plugin](#paseo-provider-plugin).
 
 ## Diagnostics
 
-`scripts/cortex_diagnose.py` checks storage layout/permissions, the
-pinned-dependency manifest, connection/route availability, an optional
-client-registration presence check (`--zed-settings PATH`, read-only),
-adapter capability/qualification status, and (`--project PATH`) a
-project's own policy-ceiling configuration — all offline, all read-only,
-**never** a model call:
+The Python diagnostics report (`cortex_diagnose`) was removed on 2026-11-16 without replacement. Read-only checks that remain, none of which makes a model call:
 
 ```
-python3 -B scripts/cortex_diagnose.py                      # JSON, exit 0/1/2
-python3 -B scripts/cortex_diagnose.py --format text
-python3 -B scripts/cortex_diagnose.py --zed-settings ~/.config/zed/settings.json
+scripts/cortex-paseo-tools.sh status                  # roots, connections, discovered engines
+scripts/cortex-xtask.sh check-pins                    # reviewed dependency pins, no build, no network
+scripts/cortex-xtask.sh prerequisite-probe            # inventory of native-build prerequisites
+scripts/cortex-xtask.sh package check                 # package identity stamp
+scripts/cortex-paseo-tools.sh acp-smoke               # startup smoke in disposable HOME/XDG roots
 ```
 
-Exit code distinguishes `ok` (0) / `degraded` (1, at least one repairable
-gap) / `failed` (2, a hard/unsafe condition); every non-`ok` check names a
-concrete `repair_action`.
-
-`cortex_diagnose.py` never imports, execs, or subprocesses a paid-probe
-script. The opt-in, explicitly-authorized live probes
-(`scripts/cortex_codex_probe.py`, `scripts/cortex_claude_probe.py`) stay
-entirely separate: they refuse to run at all without both
-`--i-authorize-paid-call` and `--approval-ref`, and diagnostics has no
-code path that reaches them — see `tests/test_cortex_diagnose.py`'s static
-and dynamic (no-subprocess) guards.
+The paid probes (`probe-codex`, `probe-claude`) stay entirely separate: they refuse to run at all without both `--i-authorize-paid-call` and `--approval-ref`, and none of the commands above reaches them.
 
 ## Retention maintenance
 
 Use `/cortex-clear` in an idle ACP session to preview old task deletion from
-this project. It is advertised in the ACP command picker and handled by the
+this project. The native host does not yet delete: a confirmed `/cortex-clear` that would delete something refuses and writes nothing (see [known limits](native-incoming-acp.md#known-limits)); the confirmed-deletion behavior below is the contract carried from the former implementation. It is advertised in the ACP command picker and handled by the
 runtime without a coordinator turn or engine/model call; `/clear` is not an
 alias because hosts reserve it.
 
@@ -374,44 +322,19 @@ transaction while the exclusive lock remains held. Output reports vacuum status,
 `reclaimed_bytes` and `db_bytes_before`/`db_bytes_after` when measured.
 VACUUM may need substantial temporary disk space. A reclamation failure is
 reported separately: **deletion remains committed**, not rolled back.
-The manual `src/cortex_clear.py` CLI emits JSON with `deleted_tasks`,
-`retention_days`, `skipped_protected`, `cutoff`, `force`,
-`deleted_orphan_sessions`, `vacuum_status` and `reclaimed_bytes`; when a
-VACUUM runs it adds `db_bytes_before` and `db_bytes_after`, or `vacuum_error`
-on failure. `--dry-run` adds `would_delete_tasks` and
-`would_delete_orphan_sessions`.
-
-The CLI is still owner-run, never coordinator/worker-run:
-
-```
-python3 -B src/cortex_clear.py --project-root <path> --days N [--keep-thread <id>] [--force] [--dry-run]
-```
-
-Its canonical `--project-root`, `--days` (0..36500), and repeatable
-`--keep-thread` flags retain their manual retention semantics. Unlike chat,
-it deletes directly unless `--dry-run` is given and only protects explicitly
-named threads: it already ignores active protection without `--force`.
-The optional force flag explicitly marks stale live-state records
-released/terminated before deletion, but never overrides kept threads.
-Run it only when the project runtime is idle. Activity selection remains the
-maximum of task creation and published report/pipeline edition update times.
-Cleanup removes project task directories and unambiguously associated drafts;
-transactional `pending_deletions` intents remain recoverable after interruption.
-Pending committed deletions are included in preview/deletion counts without
-being replayed during a dry run. CLI JSON is counts/settings and reclamation
-metadata only; it includes the same orphan cleanup and vacuum behavior.
+The manual `cortex_clear` CLI (a Python script that deleted directly with `--days`, `--keep-thread`, `--force` and `--dry-run`, run only by the owner while the project runtime was idle) was removed on 2026-11-16 without replacement. There is no supported out-of-chat retention command today; do not delete task directories or `pending_deletions` rows by hand. Retention semantics (activity is the maximum of task creation and published report/pipeline edition update times; cleanup removes project task directories and unambiguously associated drafts; transactional `pending_deletions` intents remain recoverable after interruption) are those of the chat command above.
 
 ## Uninstall
 
-`scripts/cortex_uninstall.py` is dry-run by default (prints exactly what
+`scripts/cortex-paseo-tools.sh uninstall` is dry-run by default (prints exactly what
 would be removed, deletes nothing). Real deletion needs an explicit
 `--remove-user-scope` and/or `--remove-project-store --project PATH`,
 together with `--i-confirm-removal`:
 
 ```
-python3 -B scripts/cortex_uninstall.py                                   # dry run
-python3 -B scripts/cortex_uninstall.py --remove-user-scope --i-confirm-removal
-python3 -B scripts/cortex_uninstall.py --project /path/to/project \
+scripts/cortex-paseo-tools.sh uninstall                                   # dry run
+scripts/cortex-paseo-tools.sh uninstall --remove-user-scope --i-confirm-removal
+scripts/cortex-paseo-tools.sh uninstall --project /path/to/project \
     --remove-project-store --i-confirm-removal
 ```
 
@@ -420,16 +343,14 @@ It deletes only `$XDG_CONFIG_HOME/cortex`, `$XDG_STATE_HOME/cortex`, and
 each re-verified as an owner-private, non-symlinked real directory
 immediately before deletion. It never touches engine installs, real
 credentials outside those Cortex-owned roots, user history, project files
-other than `.cortex`, or Git branches/working changes —
-`tests/test_cortex_uninstall.py` plants unrelated files, a fake "engine
-install" directory, and an uncommitted Git branch/working change
-alongside a project's `.cortex` store and asserts all of them survive.
+other than `.cortex`, or Git branches/working changes
+(the `owner_tools` unit tests in `crates/cortex-paseo-tools` check the removal refusals and the project-store removal).
 
 ## Zed and codeg registration
 
 See [zed-custom-agent.md](../features/zed-agent/index.md) and
 [codeg-custom-agent.md](../features/codeg-agent/index.md) for the full
-recipes; `scripts/cortex_acp_setup.py print-client-recipes` prints both
+recipes; `scripts/cortex-paseo-tools.sh print-client-recipes` prints both
 without writing anything unless explicitly told to.
 
 ### Paseo provider plugin
@@ -437,7 +358,7 @@ without writing anything unless explicitly told to.
 Run one explicit setup command:
 
 ```bash
-python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
+scripts/cortex-paseo-tools.sh install-paseo-plugin
 ```
 
 The plugin registers a Cortex Settings screen for supported owner/project configuration. Its values are stored by the Cortex runtime (JSON files or the existing project SQLite configuration row), not in Paseo's settings document. A live Paseo 0.10.0 check did not find the screen in the rendered Settings navigation or command palette, so do not assume it is reachable in that host version. See [configuration management](../configuration.md#manage-settings-in-paseo) for scope, revision conflicts, redaction and the OpenCode opt-in. Its Connections section can also download Cortex's pinned `codex-acp` or `claude-agent-acp` adapter and add a native-account connection after an explicit opt-in; see [Engine install records](../configuration.md#engine-install-records).
@@ -446,9 +367,12 @@ The plugin registers a Cortex Settings screen for supported owner/project config
 
 The plugin lives below the repository root, so include the Paseo subdirectory
 suffix. Paseo stages the full Git checkout and runs the manifest's supported
-`build` command before activation. The manifest calls
-`scripts/cortex_acp_setup.py bootstrap-paseo-git-install`, which prepares the
-private runtime and launch record. It runs `init-storage` itself, so the default preset
+`build` command before activation. The manifest
+(`integrations/paseo/paseo-plugin.json`) runs
+`cargo build --release --locked -p cortex-acp -p cortex-paseo-tools` and then
+`cortex-paseo-tools bootstrap-paseo-git-install`, which prepares the
+private runtime (the non-code payload, the load shim and the two built binaries) and launch record. The record names the staged
+Rust `cortex-acp`. It runs `init-storage` itself, so the default preset
 files are seeded when absent. No separate `init-storage` or
 `configure-paseo-plugin-launch` command is needed for this Git install; the
 hook does not log in to an engine or copy credentials.
@@ -465,7 +389,7 @@ Select a branch, tag, or commit with `--ref`:
 paseo plugin install github:igovet/cortex-orch-acp:integrations/paseo --ref dev
 ```
 
-Paseo stages the complete repository, including `src/cortex_acp.py`; the
+Paseo stages the complete repository; the
 `:integrations/paseo` suffix selects the plugin entry directory. The build
 step retains the launch-critical runtime under
 `$XDG_STATE_HOME/cortex/paseo-runtime/` and writes a `0600` launch record at
@@ -505,11 +429,15 @@ that path is qualified in a live dev Paseo run, update between active tasks.
 The managed local-checkout setup remains available while Paseo is running:
 
 ```bash
-python3 -B scripts/cortex_acp_setup.py install-paseo-plugin
+cargo build --locked --offline -p cortex-acp -p cortex-paseo-tools
+scripts/cortex-paseo-tools.sh install-paseo-plugin
 ```
 
 It validates and installs/reloads the repository-owned provider, then verifies
-that it is running. This is the supported explicit local setup workflow.
+that it is running. This is the supported explicit local setup workflow. Its
+launch record names this checkout's built Rust `target/debug/cortex-acp` by
+default and refuses before any daemon change when it or `cortex-paseo-tools` is
+not built; `--rust-binary` names another binary and `--source-root` another checkout.
 
 `install-paseo-plugin` is the single explicit Cortex-on-Paseo installation
 step. It validates the repository-owned `integrations/paseo` source and its
@@ -518,7 +446,7 @@ only for this explicit setup action, installs or reloads the `cortex-acp`
 provider, and verifies that the daemon reports it as `running`. It is
 idempotent and preserves unrelated Paseo plugins and configuration keys.
 Setup also writes the owner-private `paseo-plugin-launch.json` record with the
-absolute Cortex entrypoint and the non-secret `HOME`, `XDG_CONFIG_HOME`, and
+absolute Cortex entry (the Rust binary by default) and the non-secret `HOME`, `XDG_CONFIG_HOME`, and
 `XDG_STATE_HOME` roots used by setup. The record lives in the Cortex config
 root of that environment: `$XDG_CONFIG_HOME/cortex/` when `XDG_CONFIG_HOME` is
 set to a directory other than `~/.config`, otherwise `~/.config/cortex/`. The
@@ -559,8 +487,7 @@ never adapter output. A stopped pass retries at the next start;
 [configuration](../configuration.md#approved-adapter-following-and-rollback). After installation,
 Paseo exposes the native Cortex provider; no separate generic ACP provider
 registration is required for Paseo. The source hash is regenerated by
-`python3 -B scripts/cortex_package.py stamp` and checked by package
-validation. Paseo plugin code is trusted, unsandboxed daemon code, so this
+`scripts/cortex-xtask.sh package stamp` and checked by `package check`. Paseo plugin code is trusted, unsandboxed daemon code, so this
 explicit setup command is the required installation boundary.
 
 The plugin manifest is named `cortex-acp`, but its registered Paseo provider
@@ -579,7 +506,7 @@ project intended for the qualification run.
 
 ### Paseo update and existing MCP registries
 
-`scripts/update-paseo-plugin.sh` calls `install-paseo-plugin`, which validates the
+`scripts/update-paseo-plugin.sh` builds the Rust entries (`cargo build --locked --offline -p cortex-acp -p cortex-paseo-tools`), stamps the package and calls `install-paseo-plugin` (the built Rust entry is required; set `CORTEX_PASEO_CLI` when `paseo` is not on `PATH`), which validates the
 owner MCP registry before changing the daemon or launch record. A malformed or
 pre-gateway entry without exact `allowed_tools` fails the update preflight with
 its server name and required field. No missing grant is converted into wildcard
@@ -598,19 +525,10 @@ The public policy/model-settings-default.json is an installation-only, schema-va
 
 For an existing installation, derive a candidate from owner settings preserving explicit denies, providers, preferences and dormant policy. Run preview, review the diff/diagnostics and source/candidate digests, then apply only with explicit consent and the exact preview revision/digest. The tool verifies a private backup before replacement, verifies new bytes and attempts exact rollback on failure; rollback failure is explicit. Migrate each saved profile separately from that profile's own candidate. Do not apply a working-settings candidate to inactive profiles. Portable coordinator binding is accepted only for one exact currently selectable catalog identity and requested parameter set; unavailable or multiple matches require owner resolution, never automatic substitution.
 
-Checkout commands:
+The former command-line tools for this flow (`cortex_model_policy_migrate preview/apply` and `cortex_routing_preview_check`) were Python and were removed on 2026-11-16 without replacement. The supported route is the settings API (`cortex-paseo-tools config` and the Paseo Settings screen), which revision-checks every write and reports the diff and diagnostics. Applying a candidate is a configuration mutation and requires explicit owner authorization. The retained narrative below describes the former tools and is history. Apply is a configuration mutation and requires explicit owner authorization. Saved-profile deletion is separate and revision-checked: confirmation identifies the exact profile; cancel changes nothing; deleting the selected profile clears its linkage without resetting materialized settings; deleting the last profile is permitted. Errors preserve profile/settings and require explicit reload before retry.
 
-    python3 -B scripts/cortex_model_policy_migrate.py preview --candidate /path/to/owner-candidate.json
-    python3 -B scripts/cortex_model_policy_migrate.py apply --candidate /path/to/owner-candidate.json --expected-revision sha256:<preview-source-digest> --candidate-sha256 <preview-candidate-digest> --i-consent
+### Routing-only assertion preview (removed tool)
 
-Apply is a configuration mutation and requires explicit owner authorization. Saved-profile deletion is separate and revision-checked: confirmation identifies the exact profile; cancel changes nothing; deleting the selected profile clears its linkage without resetting materialized settings; deleting the last profile is permitted. Errors preserve profile/settings and require explicit reload before retry.
-
-### Routing-only assertion preview
-
-For a bounded, nonmutating check of current owner routing/default files:
-
-    python3 -B scripts/cortex_routing_preview_check.py --config-root /absolute/config/cortex
-
-This utility checks owner-private regular non-symlink files, a bounded allowlisted non-secret routing schema and coordinator/parameter shape; completes only missing fields from reviewed public installation data; asserts preservation and agreement between the migration API and real CLI preview; and verifies exact before/after bytes. It reads only routing/default files, not profiles, registry, accounts or logs. Unknown top-level routing keys refuse this narrow utility rather than being copied into a candidate; the general migration tool retains unknown owner fields and requires a purpose-specific owner candidate. Existing tier/list ordering is retained. The temporary candidate is private and deleted on exit; the output contains full hashes and assertion outcomes, not private identifiers or settings bodies. No apply is performed.
+The former bounded, nonmutating check of current owner routing/default files (`cortex_routing_preview_check`, removed) checked owner-private regular non-symlink files, a bounded allowlisted non-secret routing schema and coordinator/parameter shape; completes only missing fields from reviewed public installation data; asserts preservation and agreement between the migration API and real CLI preview; and verifies exact before/after bytes. It reads only routing/default files, not profiles, registry, accounts or logs. Unknown top-level routing keys refuse this narrow utility rather than being copied into a candidate; the general migration tool retains unknown owner fields and requires a purpose-specific owner candidate. Existing tier/list ordering is retained. The temporary candidate is private and deleted on exit; the output contains full hashes and assertion outcomes, not private identifiers or settings bodies. No apply is performed.
 
 The apply command above holds the owner-private `connections.lock`, creates and verifies a new 0600 backup under `.migration-backups/`, and atomically replaces routing with 0600 bytes. Defaults and saved profiles are outside a routing-only apply. Source or candidate drift requires a new preview. Automatic failure rollback verifies the original bytes; there is no public CLI action for restoring a backup after a successful migration. Such a later restore needs a separately authorized, lock-protected operation with current-source and backup-digest preconditions; do not use migration apply to bypass preservation checks. A preview does not qualify production adoption, live quota labels or an installed runtime/plugin.

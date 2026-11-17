@@ -29,19 +29,70 @@ export function mapCheckOutcome(outcome: WireCheck["outcome"]): CheckOutcome {
   if (outcome === "passed" || outcome === "failed" || outcome === "not_run") return outcome;
   return outcome === "not_applicable" ? "not_run" : "unverified";
 }
-export const readableCheckReason = (reason: string) => /git_configuration_protected/.test(reason)
-  ? "Git settings are protected from agent changes. Choose the checkout in Workspace, or create it yourself with Git, then ask Cortex to retry the check."
-  : /(?:command[_ -]run|receipt).*(?:complete|completeness)|(?:complete|completeness).*receipt/i.test(reason)
-  ? "The command's full result was not recorded. Ask Cortex to rerun the check and record its result."
-  : reason === "verification_executable_unavailable"
-  ? "The recorded check tool is not available on this machine. Install it to rerun, or use Accept with the acknowledgement checkbox."
-  : reason === "verification_command_unavailable"
-  ? "No executable command was recorded for this check. Request a new check, or use Accept with the acknowledgement checkbox."
-  : /^[a-z0-9_]+(?::[A-Za-z0-9_]+)?$/.test(reason)
-  ? "This check could not start because a required tool or service is unavailable. Restore it and rerun, or use Accept with acknowledgement."
-  : /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/.test(reason.replace(/\br_[a-f0-9]{12}\b/g, "the recorded report"))
-  ? "This check could not be confirmed because a required tool or service was unavailable. Ask Cortex to rerun it and explain any remaining blocker."
-  : reason.replace(/\br_[a-f0-9]{12}\b/g, "the recorded report");
+/**
+ * Every reason code the service and runtime record for a check, as [what it says on its own, the words that stand in for the
+ * code inside a sentence]. Evidence gaps (`cortex_core::lifecycle::worker_checks`, and the codes retained stores still carry)
+ * are facts about the cited command run; command failures come from the native command supervisor; the rest are check and
+ * sandbox blockers. Only a code that names a missing tool says a tool is missing.
+ */
+const REASON_CODES: Record<string, readonly [string, string]> = {
+  revision_mismatch: ["The worker ran this check before the files reached the state this result reports, so that run does not count for it.", "a run on an earlier version of the files"],
+  trivial_command: ["The command cited for this check only shows or prints something; it does not test the claim, so it does not count as a check.", "a command that only shows something and does not test the claim"],
+  tool_call_ref_missing: ["The worker named no recorded command run for this check.", "no cited command run"],
+  tool_call_ref_unknown: ["The command run the worker cited was not recorded.", "an unrecorded command run"],
+  foreign_attempt: ["The command run cited here belongs to another worker attempt, so it does not count for this one.", "a command run of another attempt"],
+  ref_already_cited: ["The command run cited here is already cited by another check, so it does not count twice.", "a command run another check already cites"],
+  not_a_command: ["What this check cites is not a command run.", "a citation that is not a command run"],
+  engine_command_unverifiable: ["This check cites a command the engine ran itself; its exit code and output were not recorded, so it cannot confirm the check.", "an engine command whose result was not recorded"],
+  receipt_missing: ["No receipt was recorded for the command run cited here.", "a missing command receipt"],
+  ambiguous_ref: ["The command run cited here matches more than one recorded run.", "an ambiguous command run"],
+  call_incomplete: ["The command run cited here did not finish recording its result.", "an unfinished command run"],
+  result_missing: ["The command run cited here has no recorded result.", "a command run without a recorded result"],
+  result_truncated: ["Only part of the cited command's output was kept, so its result is not confirmed.", "a command run whose output was cut short"],
+  command_unrecorded: ["The command run cited here has no recorded command line.", "a command run without a recorded command line"],
+  status_variable_unproven: ["The cited command reports success through a status it prints itself, which does not prove the check passed.", "a command whose printed status proves nothing"],
+  later_run_unresolved: ["A later run of the same command did not finish, so this pass is not confirmed.", "a later run that did not finish"],
+  later_run_failed: ["A later run of the same command failed.", "a later failed run"],
+  nonzero_exit: ["The command run cited here did not exit successfully.", "a command that did not exit successfully"],
+  zero_exit: ["This check is reported as failed, but the command it cites exited successfully.", "a failure claim whose command succeeded"],
+  spawn_failed: ["The command could not be started.", "a command that could not start"],
+  spawn_or_capture_failed: ["The command could not be started, or its output could not be captured.", "a command that could not start or be captured"],
+  wait_failed: ["The command started, but how it ended could not be observed.", "a command whose end was not observed"],
+  owner_stopped: ["The command was stopped by you before it finished.", "a command you stopped"],
+  timeout: ["The command ran past its time limit and was stopped.", "a command that ran past its time limit"],
+  interrupted_or_timeout: ["The command was interrupted or ran past its time limit.", "an interrupted command"],
+  output_incomplete: ["The command's output was not recorded completely, so its result is not confirmed.", "incomplete command output"],
+  authority_changed: ["The task's access changed while the command ran, so it was stopped.", "a change of access during the command"],
+  deletion_not_confirmed: ["The command was not run because a deletion it needed was not confirmed.", "an unconfirmed deletion"],
+  verification_review_revision_changed: ["The files changed after this check ran, so it no longer covers the version under review.", "files that changed after the check"],
+  verification_executable_unavailable: ["The recorded check tool is not available on this machine. Install it to rerun, or use Accept with the acknowledgement checkbox.", "a check tool that is not installed here"],
+  verification_command_unavailable: ["No executable command was recorded for this check. Request a new check, or use Accept with the acknowledgement checkbox.", "no recorded executable command"],
+  bubblewrap_missing: ["The command sandbox (bubblewrap) is not installed on this machine, so the check could not run.", "a missing command sandbox"],
+  bubblewrap_launch_failed: ["The command sandbox could not be started, so the check did not run.", "a sandbox that could not start"],
+  namespace_or_mount_setup_failed: ["The command sandbox could not be set up, so the check did not run.", "a sandbox that could not be set up"],
+  setup_timeout: ["Preparing the command sandbox took too long, so the check did not run.", "a sandbox setup that took too long"],
+  write_grant_outside_project: ["The command asked to write outside the project, which is not allowed.", "a write outside the project"],
+};
+/** The plain words of one bare code, or undefined. `Object.hasOwn` keeps names like `constructor` from reading the prototype. */
+const codeWords = (code: string) => Object.hasOwn(REASON_CODES, code) ? REASON_CODES[code] : undefined;
+const evidenceGap = (reason: string): string | undefined => {
+  const gap = /^Runtime kept this passed claim unverified: ([a-z_]+)\.?$/.exec(reason.trim())?.[1] ?? reason.trim();
+  return codeWords(gap)?.[0];
+};
+const CODE = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
+/** Why a check is not a pass, in a person's words. A reason never claims a tool or service is missing unless its code says so. */
+export const readableCheckReason = (reason: string) => {
+  const text = reason.replace(/\br_[a-f0-9]{12}\b/g, "the recorded report");
+  const bare = /^([a-z0-9_]+)(?::[A-Za-z0-9_]+)?$/.exec(text.trim())?.[1];
+  return evidenceGap(text) ?? (/git_configuration_protected/.test(text)
+    ? "Git settings are protected from agent changes. Choose the checkout in Workspace, or create it yourself with Git, then ask Cortex to retry the check."
+    : /(?:command[_ -]run|receipt).*(?:complete|completeness)|(?:complete|completeness).*receipt/i.test(text)
+    ? "The command's full result was not recorded. Ask Cortex to rerun the check and record its result."
+    : bare !== undefined
+    ? codeWords(bare)?.[0] ?? `The runtime did not confirm this check (recorded reason: ${bare.replace(/_+/g, " ")}). Ask Cortex to rerun it.`
+    // A written reason keeps its words; a known code inside it reads as what it means, and anything else (a path, a name) stays as written.
+    : text.replace(CODE, word => codeWords(word)?.[1] ?? word));
+};
 const mapCheck = (check: WireCheck): Check => ({ name: check.name, outcome: mapCheckOutcome(check.outcome), detail: typeof check.detail === "string" && check.detail ? readableCheckReason(check.detail) : check.evidenceRef ? "Recorded evidence available" : "", source: "runtime", kind: check.kind === "manual" || check.kind === "policy" ? check.kind : "automated", command: Array.isArray(check.command) ? check.command.filter((s): s is string => typeof s === "string") : undefined, cwd: typeof check.cwd === "string" ? check.cwd : undefined, rerunnable: check.rerunnable === true, output: typeof check.output === "string" ? check.output : undefined, exitCode: typeof check.exitCode === "number" ? check.exitCode : undefined, technicalReason: typeof check.technicalReason === "string" ? readableCheckReason(check.technicalReason) : undefined });
 
 const wholeNumber = (decimal: string) => { const n = Number(decimal); return Number.isSafeInteger(n) ? n : 0; };
@@ -69,15 +120,22 @@ function phaseOf(task: WireTask): string {
 const lastConfirmed = (at: string | null) => { const ms = at === null ? NaN : Date.parse(at); return Number.isNaN(ms) ? null : ms; };
 
 export function mapTask(task: WireTask, context: { projectId: string }, result?: WireResult): Task {
-  const phase = phaseOf(task), mapped = result ? mapResult(result) : null;
-  const known = phase !== "unknown" && task.phase !== "recovery";
-  const status = STATUS_OF_PHASE[phase] ?? (task.executionId ? "working" : "draft");
+  // A cancelled turn, or a recovery whose reason the runtime recorded, waits in RECOVERING for the next
+  // owner message, Stop or Close. This is not generic recovery or proof that every engine process has stopped;
+  // a recovery without a stated reason stays unconfirmed.
+  const interrupted = task.executionId !== null && task.phase === "recovery" && task.runtimeState === "RECOVERING"
+    && task.executionState === "recovering" && typeof task.waitReason === "string" && task.waitReason.trim() !== ""
+    && !task.warnings.includes("contradictory_evidence");
+  const phase = interrupted ? "recovery" : phaseOf(task), mapped = result ? mapResult(result) : null;
+  const known = interrupted || (phase !== "unknown" && task.phase !== "recovery");
+  const ownerResolved = phase === "stopped" && task.runtimeState === "CANCELLED" && task.warnings.includes("owner_resolved_without_certification") && !task.warnings.includes("contradictory_evidence");
+  const status = ownerResolved ? "done" : interrupted ? "needs_you" : STATUS_OF_PHASE[phase] ?? (task.executionId ? "working" : "draft");
   return {
     id: task.taskId, projectId: context.projectId, sprintId: null, description: task.description, sourceVersion: task.version,
     title: task.title ?? descriptionLabel(task.description), titleState: task.title === null ? "pending" : "generated",
     checkout: { kind: "main", branch: "" }, targetBranch: null, dependencies: [], status, resumeStatus: "working",
     observedPhase:phase, coordinatorRoute: task.coordinatorRoute ?? null, warnings:task.warnings, issue: task.waitReason, executionId: task.executionId, result: mapped, workspaceDigest: mapped?.digest ?? null, acceptance: null,
-    conflict: "none", merge: null, resolvedBy: null, integration: null, closedAs: null, notVerifiedByCortex: false, doneAt: null,
+    conflict: "none", merge: null, resolvedBy: null, integration: null, closedAs: ownerResolved ? "as_is" : null, notVerifiedByCortex: ownerResolved, doneAt: ownerResolved ? lastConfirmed(task.lastConfirmedAt) : null,
     archive: null, archiveQuestion: false, archiveAskAfter: null, work: "unmerged",
     process: !known ? "unknown" : status === "working" || status === "needs_you" ? "live" : "stopped",
     unexpectedChanges: false, purgeBlocker: null, settings: { model: "", effort: "", mode: "guarded", language: "auto" }, lastConfirmedAt: lastConfirmed(task.lastConfirmedAt),

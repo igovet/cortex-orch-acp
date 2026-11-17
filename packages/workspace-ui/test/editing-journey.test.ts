@@ -25,7 +25,7 @@ it.skipIf(!socket || !project)("saves and edits through the production port, the
       reply.result.config.catalogue["codex-acp"].models=[{id:"fixture-route",routeId:"fixture-route",label:"Fixture engine",efforts:[],observed:true}];
       return reply;
     }
-    return rpc(["service.capabilities","projects.list","projects.status","machine.call","executions.control"].includes(operation)?operation:"workspace",message);
+    return rpc(["service.capabilities","projects.list","projects.status","native.query","native.board","machine.call","executions.control"].includes(operation)?operation:"workspace",message);
   },subscribe:() => () => {}};
   const port = createRealPort({transport,actorId:"owner",registry:true});
   const command = (payload: WorkspaceCommand) => port.command({requestId:"edit-flow-"+(++sequence),operation:payload.type,expectedVersion:null,payload});

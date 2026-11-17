@@ -1,14 +1,58 @@
 //! Same-user, Unix-only local service. Cortex alone owns its store and public projections.
 #[cfg(not(target_os = "linux"))]
 compile_error!("workspace-service requires Linux peer credentials and parent-death supervision");
-mod child;
+pub mod config_read_dispatch;
+pub mod config_read_model;
+pub mod config_refresh;
+mod core_host;
 mod directories;
+mod directory_search;
+#[cfg(test)]
+#[path = "../tests/support/hermetic.rs"]
+mod hermetic;
+pub mod incoming;
+pub mod incoming_history;
+pub mod incoming_prompt;
+mod launch;
 mod local;
 mod machine;
+pub use machine::{settings_api, update_user_defaults};
+/// Trusted same-binary maintenance worker, not a socket or model operation.
+#[doc(hidden)]
+pub async fn maintenance_worker(state: &Path, id: &str) -> io::Result<()> {
+    machine::maintenance::worker(state, id)
+        .await
+        .map_err(|e| io::Error::other(e.code))
+}
+mod native_access;
+mod native_activity;
+mod native_attachments;
+#[doc(hidden)]
+pub mod native_codex_runtime;
+mod native_command_handles;
+mod native_command_sandbox;
+#[doc(hidden)]
+pub mod native_command_supervisor;
+mod native_commands;
+mod native_controls;
+mod native_documents;
+mod native_driver;
+mod native_effects;
+mod native_instructions;
+pub mod native_mcp;
+mod native_owner_controls;
+mod native_project;
+mod native_recovery;
+mod native_results;
+pub mod native_routes;
+pub mod native_runtime;
+mod native_sandbox;
+pub mod native_sessions;
+mod native_sources;
 mod project_guard;
 mod terminal;
 mod voice;
-pub use child::LaunchSpec;
+pub use launch::LaunchSpec;
 use local::{canonical_directory, failure, uid};
 pub use local::{connect, read_frame, write_frame};
 use serde::{Deserialize, Serialize};
@@ -43,6 +87,9 @@ pub struct Config {
     pub event_capacity: usize,
 }
 impl Config {
+    pub fn launch_config_root(&self) -> Option<PathBuf> {
+        self.launch.dev_config.clone()
+    }
     /// Production/native-host defaults; test instances may supply disposable paths.
     /// Missing XDG_RUNTIME_DIR fails closed, never falling back to a public /tmp socket.
     pub fn for_user(allowed_root: PathBuf, mut launch: LaunchSpec) -> io::Result<Self> {
@@ -85,11 +132,6 @@ pub struct Project {
     display_name: String,
     activation: Option<Activation>,
 }
-struct Running {
-    child: Arc<child::Child>,
-    capabilities: Value,
-    recovery: &'static str,
-}
 /// Why an activated project has no working child, and when the service tries again.
 struct Failure {
     reason: String,
@@ -98,24 +140,28 @@ struct Failure {
 }
 struct State {
     projects: Vec<Project>,
-    running: BTreeMap<String, Running>,
-    /// A child being started. The registry stays available while its handshake runs.
+    /// A runtime being started. The registry stays available while it opens.
     activating: BTreeSet<String>,
     failures: BTreeMap<String, Failure>,
+    native: BTreeMap<String, Arc<native_runtime::Runtime>>,
 }
 /// How often the service looks for an activated project with no working child.
 const SUPERVISE_EVERY: Duration = Duration::from_secs(1);
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 const RETRY_MOST: Duration = Duration::from_secs(60);
+/// Concurrent socket connections the service serves at once; later callers wait to be accepted.
+pub const CONNECTION_LIMIT: usize = 64;
 pub struct Service {
     endpoint: local::Endpoint,
     config: Config,
     state: Mutex<State>,
+    native_activation: tokio::sync::RwLock<()>,
     stopping: AtomicBool,
     shutdown: watch::Sender<bool>,
     events: broadcast::Sender<Value>,
     helper: machine::Helper,
     searches: directories::Searches,
+    core: Arc<core_host::Registry>,
     terminals: Mutex<terminal::Manager>,
     voice: Mutex<voice::Manager>,
 }
@@ -130,12 +176,13 @@ fn identity() -> io::Result<String> {
 fn actor() -> String {
     format!("uid:{}", uid())
 }
-fn failure_of(reason: String) -> io::Error {
-    io::Error::other(reason)
-}
 fn project_path(root: &Path, path: &Path) -> io::Result<PathBuf> {
     let path = canonical_directory(path).map_err(folder_failure)?;
-    if !path.starts_with(root) || path.components().any(|p| p.as_os_str() == ".cortex" || p.as_os_str() == ".cortex-dev") {
+    if !path.starts_with(root)
+        || path
+            .components()
+            .any(|p| p.as_os_str() == ".cortex" || p.as_os_str() == ".cortex-dev")
+    {
         return Err(failure("project_path_refused"));
     }
     Ok(path)
@@ -204,15 +251,17 @@ impl Service {
             config,
             state: Mutex::new(State {
                 projects,
-                running: BTreeMap::new(),
                 activating: BTreeSet::new(),
                 failures: BTreeMap::new(),
+                native: BTreeMap::new(),
             }),
+            native_activation: tokio::sync::RwLock::new(()),
             stopping: AtomicBool::new(false),
             shutdown,
             events,
             helper: machine::Helper::default(),
             searches: directories::Searches::default(),
+            core: Arc::new(core_host::Registry::default()),
             terminals: Mutex::new(terminal::Manager::default()),
             voice: Mutex::new(voice::Manager::default()),
         });
@@ -271,9 +320,7 @@ impl Service {
         Value::Object(statuses)
     }
     pub async fn status(&self) -> Value {
-        let state = self.state.lock().await;
-        json!({"stopping":self.stopping.load(Ordering::SeqCst),"children":state.running.values()
-            .filter(|r|!r.child.exited.load(Ordering::SeqCst)).count(),"actorId":actor(),
+        json!({"stopping":self.stopping.load(Ordering::SeqCst),"actorId":actor(),
             "channel":workspace_protocol::channel::current().name,"application":workspace_protocol::channel::current().title,
             "engines":self.engine_setup(),"transport":"unix","protocol":{"major":1,"minor":0}})
     }
@@ -282,20 +329,19 @@ impl Service {
         if !state.projects.iter().any(|p| p.project_id == id) {
             return Err(failure("project_not_found"));
         }
+        if state.native.contains_key(id) {
+            return Ok(
+                json!({"ready":true,"state":"ready","recovery":"fresh","executionHost":"rust",
+                "capabilities":native_runtime::capabilities()?}),
+            );
+        }
         let failed = state.failures.get(id).map(|f| f.reason.as_str());
-        Ok(match state.running.get(id) {
-            None if state.activating.contains(id) => {
-                json!({"ready":false,"state":"starting","recovery":"unknown","reason":failed})
-            }
-            Some(r) => {
-                let ready = r.child.ready.load(Ordering::SeqCst) && r.child.valid.load(Ordering::SeqCst);
-                json!({"ready":ready,"state":if ready {"ready"} else {"recovering"},
-                "exited":r.child.exited.load(Ordering::SeqCst),"recovery":r.recovery,"capabilities":r.capabilities})
-            }
-            None => match failed {
-                Some(reason) => json!({"ready":false,"state":"failed","recovery":"unknown","reason":reason}),
-                None => json!({"ready":false,"state":"inactive","recovery":"unknown","reason":"project_inactive_or_activation_unavailable"}),
-            },
+        Ok(if state.activating.contains(id) {
+            json!({"ready":false,"state":"starting","recovery":"unknown","reason":failed})
+        } else if let Some(reason) = failed {
+            json!({"ready":false,"state":"failed","recovery":"unknown","reason":reason})
+        } else {
+            json!({"ready":false,"state":"inactive","recovery":"unknown","reason":"project_inactive_or_activation_unavailable"})
         })
     }
     fn home_path(&self, path: &Path) -> io::Result<PathBuf> {
@@ -315,7 +361,9 @@ impl Service {
         !candidate.starts_with(&self.config.allowed_root)
             || candidate.starts_with(&self.config.state_dir)
             || candidate.starts_with(self.endpoint.path.parent().unwrap_or(Path::new("/")))
-            || candidate.components().any(|p| p.as_os_str() == ".cortex" || p.as_os_str() == ".cortex-dev")
+            || candidate
+                .components()
+                .any(|p| p.as_os_str() == ".cortex" || p.as_os_str() == ".cortex-dev")
     }
     /// The real folder a request names. Links are followed here, once, so everything later
     /// works on one exact root; the private stores and read-only trees stay out of reach.
@@ -323,14 +371,24 @@ impl Service {
         let path = self.home_path(path)?;
         let refused = |candidate: &Path| self.private_path(candidate);
         if create && !path.exists() {
-            if path.components().any(|p| matches!(p, std::path::Component::ParentDir)) {
+            if path
+                .components()
+                .any(|p| matches!(p, std::path::Component::ParentDir))
+            {
                 return Err(failure("invalid_path"));
             }
             let mut existing = path.as_path();
             while !existing.exists() {
-                existing = existing.parent().ok_or_else(|| failure("project_folder_missing"))?;
+                existing = existing
+                    .parent()
+                    .ok_or_else(|| failure("project_folder_missing"))?;
             }
-            if refused(&existing.canonicalize().map_err(folder_failure)?.join(path.strip_prefix(existing).unwrap_or(Path::new("")))) {
+            if refused(
+                &existing
+                    .canonicalize()
+                    .map_err(folder_failure)?
+                    .join(path.strip_prefix(existing).unwrap_or(Path::new(""))),
+            ) {
                 return Err(failure("project_path_refused"));
             }
             std::fs::create_dir_all(&path).map_err(folder_failure)?;
@@ -351,8 +409,14 @@ impl Service {
     /// parent's links are resolved once, like any other project path.
     fn new_folder(&self, path: &Path) -> io::Result<PathBuf> {
         let path = self.home_path(path)?;
-        let (parent, name) = path.parent().zip(path.file_name()).ok_or_else(|| failure("invalid_path"))?;
-        if path.components().any(|p| matches!(p, std::path::Component::ParentDir)) {
+        let (parent, name) = path
+            .parent()
+            .zip(path.file_name())
+            .ok_or_else(|| failure("invalid_path"))?;
+        if path
+            .components()
+            .any(|p| matches!(p, std::path::Component::ParentDir))
+        {
             return Err(failure("invalid_path"));
         }
         let parent = parent.canonicalize().map_err(folder_failure)?;
@@ -376,12 +440,18 @@ impl Service {
     pub async fn register(&self, path: &Path, name: &str) -> io::Result<Value> {
         self.register_folder(path, name, false).await
     }
-    pub async fn register_folder(&self, path: &Path, name: &str, create: bool) -> io::Result<Value> {
+    pub async fn register_folder(
+        &self,
+        path: &Path,
+        name: &str,
+        create: bool,
+    ) -> io::Result<Value> {
         self.accepting()?;
         if name.is_empty() || name.chars().count() > 256 {
             return Err(failure("invalid_display_name"));
         }
-        self.register_root(self.project_folder(path, create)?, name).await
+        self.register_root(self.project_folder(path, create)?, name)
+            .await
     }
     pub async fn register_new_folder(&self, path: &Path, name: &str) -> io::Result<Value> {
         self.accepting()?;
@@ -414,7 +484,10 @@ impl Service {
         let detached = local::read_registry(&self.config.state_dir.join("removed-projects.json"))?;
         let previous = detached.iter().find(|p| p.canonical_root == canonical_root);
         let p = Project {
-            project_id: match previous { Some(p) => p.project_id.clone(), None => identity()? },
+            project_id: match previous {
+                Some(p) => p.project_id.clone(),
+                None => identity()?,
+            },
             canonical_root,
             display_name: name.into(),
             activation: None,
@@ -432,7 +505,10 @@ impl Service {
         }
         let mut state = self.state.lock().await;
         let mut updated = state.projects.clone();
-        let project = updated.iter_mut().find(|p| p.project_id == id).ok_or_else(|| failure("project_not_found"))?;
+        let project = updated
+            .iter_mut()
+            .find(|p| p.project_id == id)
+            .ok_or_else(|| failure("project_not_found"))?;
         project.display_name = name.into();
         let renamed = json!(project);
         local::save_registry(&self.config.state_dir.join("projects.json"), &updated)?;
@@ -441,29 +517,45 @@ impl Service {
     }
     pub async fn remove(&self, id: &str) -> io::Result<Value> {
         self.accepting()?;
-        let child = {
+        {
             let mut state = self.state.lock().await;
-            if !state.projects.iter().any(|p| p.project_id == id) { return Err(failure("project_not_found")); }
-            let mut detached = local::read_registry(&self.config.state_dir.join("removed-projects.json"))?;
-            if !detached.iter().any(|p| p.project_id == id) {
-                detached.push(state.projects.iter().find(|p| p.project_id == id).unwrap().clone());
-                local::save_registry(&self.config.state_dir.join("removed-projects.json"), &detached)?;
+            if !state.projects.iter().any(|p| p.project_id == id) {
+                return Err(failure("project_not_found"));
             }
-            let updated: Vec<_> = state.projects.iter().filter(|p| p.project_id != id).cloned().collect();
+            let mut detached =
+                local::read_registry(&self.config.state_dir.join("removed-projects.json"))?;
+            if !detached.iter().any(|p| p.project_id == id) {
+                detached.push(
+                    state
+                        .projects
+                        .iter()
+                        .find(|p| p.project_id == id)
+                        .unwrap()
+                        .clone(),
+                );
+                local::save_registry(
+                    &self.config.state_dir.join("removed-projects.json"),
+                    &detached,
+                )?;
+            }
+            let updated: Vec<_> = state
+                .projects
+                .iter()
+                .filter(|p| p.project_id != id)
+                .cloned()
+                .collect();
             local::save_registry(&self.config.state_dir.join("projects.json"), &updated)?;
             state.projects = updated;
             state.failures.remove(id);
-            state.running.remove(id).map(|r| r.child)
-        };
-        if let Some(child) = child { child.stop().await; }
+        }
         self.terminals.lock().await.remove(id).await;
         Ok(json!({"outcome":"removed"}))
     }
     pub async fn activate(&self, id: &str) -> io::Result<Value> {
-        self.activate_inner(id, false).await
+        self.activate_inner(id).await
     }
-    /// Claims the start of this project's child and records the owner's intent. The lock is held
-    /// only for this bookkeeping, never across a child's handshake.
+    /// Claims the start of this project's runtime and records the owner's intent. The lock is held
+    /// only for this bookkeeping, never across the runtime opening.
     async fn prepare_activation(&self, id: &str) -> io::Result<Result<PathBuf, Value>> {
         let mut state = self.state.lock().await;
         self.accepting()?;
@@ -481,11 +573,11 @@ impl Service {
                 &state.projects[index].canonical_root,
             )?;
             project_guard::check(&root)?;
-            if state.running.get(id).is_some_and(|r| r.child.healthy()) {
+            if state.native.contains_key(id) {
                 return Ok(Err(json!({"projectId":id,"alreadyActive":true})));
             }
             project_guard::activate(&root)?;
-            // Persist intent before launching, so an interrupted handshake is not mistaken for inactivity.
+            // Persist intent before opening, so an interrupted start is not mistaken for inactivity.
             if state.projects[index].activation.is_none() {
                 let mut updated = state.projects.clone();
                 updated[index].activation = Some(Activation {
@@ -507,17 +599,33 @@ impl Service {
         result
     }
     fn note_failure(state: &mut State, id: &str, reason: String) {
-        let attempts = state.failures.get(id).map_or(0, |f| f.attempts).saturating_add(1);
-        let wait = RETRY_FIRST.saturating_mul(1u32 << attempts.min(6)).min(RETRY_MOST);
-        state.failures.insert(id.into(), Failure { reason, attempts, retry_at: tokio::time::Instant::now() + wait });
+        let attempts = state
+            .failures
+            .get(id)
+            .map_or(0, |f| f.attempts)
+            .saturating_add(1);
+        let wait = RETRY_FIRST
+            .saturating_mul(1u32 << attempts.min(6))
+            .min(RETRY_MOST);
+        state.failures.insert(
+            id.into(),
+            Failure {
+                reason,
+                attempts,
+                retry_at: tokio::time::Instant::now() + wait,
+            },
+        );
     }
-    async fn activate_inner(&self, id: &str, recovering: bool) -> io::Result<Value> {
+    async fn activate_inner(&self, id: &str) -> io::Result<Value> {
         self.accepting()?;
         let root = match self.prepare_activation(id).await {
             Ok(Ok(root)) => root,
             Ok(Err(active)) => return Ok(active),
             Err(error) => {
-                if !matches!(error.to_string().as_str(), "project_activation_running" | "project_not_found" | "service_stopping") {
+                if !matches!(
+                    error.to_string().as_str(),
+                    "project_activation_running" | "project_not_found" | "service_stopping"
+                ) {
                     let mut state = self.state.lock().await;
                     Self::note_failure(&mut state, id, error.to_string());
                     drop(state);
@@ -527,64 +635,88 @@ impl Service {
             }
         };
         self.project_changed(id);
-        let stale = self.state.lock().await.running.remove(id);
-        if let Some(stale) = stale {
-            stale.child.stop().await;
-        }
-        let launched = self.launch(id, &root).await;
-        let mut state = self.state.lock().await;
-        state.activating.remove(id);
-        let gone = self.stopping.load(Ordering::SeqCst) || !state.projects.iter().any(|p| p.project_id == id);
-        let outcome = match launched {
-            Ok((child, _)) if gone => {
-                drop(state);
-                child.stop().await;
-                return Err(failure("service_stopping"));
-            }
-            Ok((child, capabilities)) => {
-                state.failures.remove(id);
-                state.running.insert(
-                    id.into(),
-                    Running {
-                        child,
-                        capabilities: capabilities.clone(),
-                        recovery: if recovering { "unknown" } else { "fresh" },
-                    },
-                );
-                Ok(json!({"projectId":id,"capabilities":capabilities,"recovery":if recovering {"unknown"} else {"fresh"}}))
-            }
-            Err(error) => {
-                if !gone {
-                    Self::note_failure(&mut state, id, error.to_string());
+        {
+            // Stop must observe every owner opened before its settlement boundary,
+            // without holding the machine state mutex over store recovery.
+            let _activation = self.native_activation.read().await;
+            self.accepting()?;
+            let opened = {
+                let id = id.to_owned();
+                let routes = self
+                    .config
+                    .launch
+                    .native_routes
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(native_runtime::UnqualifiedRoutes));
+                let maintenance_state = self.config.state_dir.clone();
+                tokio::task::spawn_blocking(move || {
+                    native_runtime::Runtime::open(&root, &id, routes)
+                        .map(|r| r.with_maintenance_state(maintenance_state))
+                })
+                .await
+                .map_err(|_| failure("storage_unavailable"))?
+                .map_err(|e| failure(e.code()))
+            };
+            let opened = match opened {
+                Ok(runtime) => {
+                    let runtime = Arc::new(runtime);
+                    match runtime.recover().await {
+                        // An answered stop question whose relaunch a restart interrupted
+                        // is resumed, never left in RECOVERING. A failure to relaunch
+                        // leaves an explicit, stoppable task, not a failed project.
+                        Ok(()) => {
+                            let _ = runtime.continue_owed_tasks().await;
+                            Ok(runtime)
+                        }
+                        Err(error) => Err(failure(error.code())),
+                    }
                 }
-                Err(error)
+                Err(error) => Err(error),
+            };
+            let mut state = self.state.lock().await;
+            state.activating.remove(id);
+            match opened {
+                Ok(runtime) => {
+                    state.native.insert(id.into(), runtime);
+                    state.failures.remove(id);
+                    drop(state);
+                    self.project_changed(id);
+                    return Ok(json!({"projectId":id,"executionHost":"rust","recovery":"fresh"}));
+                }
+                Err(e) => {
+                    Self::note_failure(&mut state, id, e.to_string());
+                    drop(state);
+                    self.project_changed(id);
+                    return Err(e);
+                }
             }
-        };
-        drop(state);
-        self.project_changed(id);
-        outcome
+        }
     }
-    /// A project gained or lost its child. Windows reread the machine, which stays connected.
+    /// A project gained or lost its runtime. Windows reread the machine, which stays connected.
     fn project_changed(&self, id: &str) {
-        let _ = self.events.send(json!({"projectId":id,"type":"project_state"}));
+        let _ = self
+            .events
+            .send(json!({"projectId":id,"type":"project_state"}));
     }
     /// Starts what an earlier activation authorized and the service does not have running: after
-    /// a restart, a crash of the child, or a folder coming back. Never a task, only its controller.
+    /// a restart or a folder coming back. Never a task, only its runtime.
     async fn recover(self: &Arc<Self>) {
         let now = tokio::time::Instant::now();
         let due: Vec<_> = {
-            let mut state = self.state.lock().await;
-            let activated: Vec<_> = state.projects.iter().filter(|p| p.activation.is_some()).map(|p| p.project_id.clone()).collect();
+            let state = self.state.lock().await;
+            let activated: Vec<_> = state
+                .projects
+                .iter()
+                .filter(|p| p.activation.is_some())
+                .map(|p| p.project_id.clone())
+                .collect();
             let mut due = vec![];
             for id in activated {
                 if state.activating.contains(&id)
-                    || state.running.get(&id).is_some_and(|r| r.child.healthy())
+                    || state.native.contains_key(&id)
                     || state.failures.get(&id).is_some_and(|f| f.retry_at > now)
                 {
                     continue;
-                }
-                if let Some(reason) = state.running.get(&id).map(|r| r.child.reason()) {
-                    Self::note_failure(&mut state, &id, reason);
                 }
                 due.push(id);
             }
@@ -593,7 +725,7 @@ impl Service {
         for id in due {
             let service = self.clone();
             tokio::spawn(async move {
-                let _ = service.activate_inner(&id, true).await;
+                let _ = service.activate_inner(&id).await;
             });
         }
     }
@@ -606,47 +738,6 @@ impl Service {
                 _ = tokio::time::sleep(SUPERVISE_EVERY) => (),
             }
         }
-    }
-    async fn launch(&self, id: &str, root: &Path) -> io::Result<(Arc<child::Child>, Value)> {
-        let child = child::Child::spawn(&self.config, root, id, &actor(), self.events.clone()).await?;
-        let result=async {
-            let init=child.request("initialize",json!({"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"cortex-workspace","version":"1.0.6"}})).await?;
-            if init["protocolVersion"]!=1 { return Err(failure("acp_version_mismatch")); }
-            let session=child.request("session/new",json!({"cwd":root,"mcpServers":[]})).await?;
-            let template=session["sessionId"].as_str().ok_or_else(||failure("session_identity_missing"))?;
-            child.sessions.lock().await.insert(template.into());
-            if !matches!(session["workspaceActivation"]["outcome"].as_str(),Some("recorded"|"stale_version")) {
-                return Err(failure("trusted_activation_unavailable"));
-            }
-            let capabilities=child.request("_cortex/workspace",Self::query(id,"capabilities.get",Value::Null)).await?;
-            let local=workspace_protocol::capabilities("workspace-service-1.0.6","1",&[
-                "capabilities.get","project.snapshot","tasks.list","tasks.get","tasks.create","tasks.start",
-                "executions.get","decisions.list","decisions.get","decisions.answer","results.get","reports.read","history.page","events.page","requests.get"
-            ]).map_err(|_|failure("invalid_capabilities"))?;
-            let mut negotiated=workspace_protocol::negotiate(&local,&capabilities).map_err(|_|failure("capability_mismatch"))?;
-            negotiated["attachments"] = json!(capabilities["attachments"] == true);
-            if negotiated["mappingVersion"]!="1" { return Err(failure("mapping_mismatch")); }
-            let snapshot=child.request("_cortex/workspace",Self::query(id,"project.snapshot",Value::Null)).await?;
-            child.install_snapshot(&snapshot).await?;
-            child.ready.store(true,Ordering::SeqCst);
-            child.start_polling().await;
-            Ok(negotiated)
-        }.await;
-        match result {
-            Ok(capabilities) => Ok((child, capabilities)),
-            Err(error) => {
-                // A process that died says more than the request it took down with it.
-                let reason = match child.failure_reason() {
-                    Some(reason) if error.to_string() == "unknown_outcome" => failure_of(reason),
-                    _ => error,
-                };
-                child.stop().await;
-                Err(reason)
-            }
-        }
-    }
-    fn query(id: &str, operation: &str, target: Value) -> Value {
-        json!({"protocol":{"major":workspace_protocol::WIRE_MAJOR,"minor":workspace_protocol::WIRE_MINOR},"requestId":"service-read","projectId":id,"operation":operation,"target":target})
     }
     pub async fn workspace(&self, mut request: Value) -> io::Result<Value> {
         self.accepting()?;
@@ -662,31 +753,30 @@ impl Service {
         let project = request["projectId"]
             .as_str()
             .ok_or_else(|| failure("invalid_project"))?;
-        let child = {
-            let state = self.state.lock().await;
-            let locator = state
-                .projects
-                .iter()
-                .find(|p| p.project_id == project)
-                .ok_or_else(|| failure("project_not_found"))?;
-            project_guard::check(&locator.canonical_root)?;
-            let running = state
-                .running
-                .get(project)
-                .ok_or_else(|| failure("project_inactive"))?;
-            if !running.child.ready.load(Ordering::SeqCst) {
-                return Err(failure("resync_required"));
+        let native = self.state.lock().await.native.get(project).cloned();
+        if let Some(native) = native {
+            if !command && request["operation"] == "history.page" {
+                // The same core projection `native.query` serves.
+                let reply = self.native_query(json!({"protocol":{"major":2,"mapping":2},
+                    "requestId":request["requestId"],"projectId":project,"operation":"history.page",
+                    "payload":{"target":request["target"],"cursor":request.get("cursor").cloned().unwrap_or(Value::Null),
+                        "limit":request.get("limit").cloned().unwrap_or(json!(100))}})).await?;
+                return Ok(reply["data"]["value"].clone());
             }
-            if !running.capabilities["operations"]
-                .as_array()
-                .unwrap()
-                .contains(&request["operation"])
-            {
-                return Err(failure("unsupported_operation"));
-            }
-            running.child.clone()
+            return native.command(project.to_owned(), request).await;
+        }
+        Err(self.inactive(project).await)
+    }
+    /// Why a project has no native runtime: unknown, or registered but not running.
+    async fn inactive(&self, project: &str) -> io::Error {
+        let state = self.state.lock().await;
+        let Some(locator) = state.projects.iter().find(|p| p.project_id == project) else {
+            return failure("project_not_found");
         };
-        child.request("_cortex/workspace", request).await
+        match project_guard::check(&locator.canonical_root) {
+            Ok(()) => failure("project_inactive"),
+            Err(error) => error,
+        }
     }
     pub async fn receive_event(
         &self,
@@ -695,95 +785,55 @@ impl Service {
         match receiver.recv().await {
             Ok(event) => Ok(event),
             Err(broadcast::error::RecvError::Lagged(_)) => {
-                self.invalidate_subscriptions().await;
                 Ok(json!({"type":"resync_required","reason":"subscription_overflow"}))
             }
             Err(_) => Err(failure("subscription_closed")),
         }
     }
-    pub async fn invalidate_subscriptions(&self) {
-        for running in self.state.lock().await.running.values() {
-            running.child.ready.store(false, Ordering::SeqCst);
-        }
-    }
-    pub async fn resynchronize(&self, id: &str) -> io::Result<Value> {
-        self.accepting()?;
-        let child = self
-            .state
-            .lock()
-            .await
-            .running
-            .get(id)
-            .ok_or_else(|| failure("project_inactive"))?
-            .child
-            .clone();
-        let snapshot = child
-            .request(
-                "_cortex/workspace",
-                Self::query(id, "project.snapshot", Value::Null),
-            )
-            .await?;
-        if !child.valid.load(Ordering::SeqCst) {
-            return Err(failure("child_unavailable"));
-        }
-        child.install_snapshot(&snapshot).await?;
-        child.ready.store(true, Ordering::SeqCst);
-        Ok(snapshot)
-    }
     pub async fn cancel_execution(&self, id: &str, execution: &str) -> io::Result<Value> {
-        let result = self
-            .workspace(Self::query(id, "executions.get", json!(execution)))
-            .await?;
-        let session = result["acpSessionId"]
-            .as_str()
-            .ok_or_else(|| failure("execution_session_unknown"))?;
-        let child = self
-            .state
-            .lock()
-            .await
-            .running
-            .get(id)
-            .ok_or_else(|| failure("project_inactive"))?
-            .child
-            .clone();
-        child
-            .notify("session/cancel", json!({"sessionId":session}))
-            .await?;
-        Ok(json!({"outcome":"cancellation_requested"}))
+        self.accepting()?;
+        let native = self.state.lock().await.native.get(id).cloned();
+        if let Some(native) = native {
+            return native.stop_execution(id.into(), execution.into()).await;
+        }
+        Err(self.inactive(id).await)
     }
     /// A message for the bound session goes down the same prompt path as the owner's first one.
     /// The reply comes when that turn ends, so what is confirmed here is delivery, not completion.
-    pub async fn prompt_execution(&self, id: &str, execution: &str, text: &str, request_id: Option<&str>, attachments: Value) -> io::Result<Value> {
-        if text.trim().is_empty() || text.chars().count() > 32_000 {
-            return Err(failure("invalid_message"));
+    pub async fn prompt_execution(
+        &self,
+        id: &str,
+        execution: &str,
+        text: &str,
+        request_id: Option<&str>,
+        attachments: Value,
+    ) -> io::Result<Value> {
+        self.accepting()?;
+        let native = self.state.lock().await.native.get(id).cloned();
+        if let Some(native) = native {
+            // Files are checked and decoded once here and travel as a trusted capture; the
+            // request itself never carries file bytes.
+            let capture = match attachments.as_array() {
+                Some(items) if items.is_empty() => None,
+                _ => Some(cortex_core::input::capture_from_wire(&attachments).map_err(|e| failure(e.code()))?),
+            };
+            return native.control_input(id.into(), json!({"projectId":id,"executionId":execution,"action":"prompt","text":text,"attachments":[],"requestId":match request_id {Some(key)=>key.to_owned(),None=>format!("owner-{}",identity()?)}}), capture).await;
         }
-        let result = self
-            .workspace(Self::query(id, "executions.get", json!(execution)))
-            .await?;
-        let session = result["acpSessionId"]
-            .as_str()
-            .ok_or_else(|| failure("execution_session_unknown"))?
-            .to_owned();
-        let child = self
-            .state
-            .lock()
-            .await
-            .running
-            .get(id)
-            .ok_or_else(|| failure("project_inactive"))?
-            .child
-            .clone();
-        let _ = session; // The adapter revalidates the durable execution/session/epoch binding.
-        child.request("_cortex/workspace_control", json!({"projectId":id,"executionId":execution,
-            "action":"prompt","text":text,"attachments":attachments,"requestId":match request_id { Some(key) => key.to_owned(), None => format!("owner-{}",identity()?) }})).await
+        Err(self.inactive(id).await)
     }
     pub async fn control_execution(&self, params: Value) -> io::Result<Value> {
-        let project = params["projectId"].as_str().ok_or_else(|| failure("invalid_project"))?;
-        let execution = params["executionId"].as_str().ok_or_else(|| failure("invalid_execution"))?;
-        self.workspace(Self::query(project, "executions.get", json!(execution))).await?;
-        let child = self.state.lock().await.running.get(project)
-            .ok_or_else(|| failure("project_inactive"))?.child.clone();
-        child.request("_cortex/workspace_control", params).await
+        self.accepting()?;
+        let project = params["projectId"]
+            .as_str()
+            .ok_or_else(|| failure("invalid_project"))?;
+        params["executionId"]
+            .as_str()
+            .ok_or_else(|| failure("invalid_execution"))?;
+        let native = self.state.lock().await.native.get(project).cloned();
+        if let Some(native) = native {
+            return native.control(project.to_owned(), params).await;
+        }
+        Err(self.inactive(project).await)
     }
     pub async fn stop(&self) -> io::Result<()> {
         if self.stopping.swap(true, Ordering::SeqCst) {
@@ -800,21 +850,11 @@ impl Service {
     async fn finish_stop(&self) -> io::Result<()> {
         self.voice.lock().await.stop().await;
         self.terminals.lock().await.stop().await;
-        let children: Vec<_> = self
-            .state
-            .lock()
-            .await
-            .running
-            .values()
-            .map(|r| r.child.clone())
-            .collect();
-        let mut stops = JoinSet::new();
-        for child in children {
-            stops.spawn(async move {
-                child.stop().await;
-            });
+        let _activations = self.native_activation.write().await;
+        let native: Vec<_> = self.state.lock().await.native.values().cloned().collect();
+        for runtime in native {
+            runtime.shutdown().await;
         }
-        while stops.join_next().await.is_some() {}
         let _ = self.shutdown.send_replace(true);
         Ok(())
     }
@@ -822,16 +862,21 @@ impl Service {
         let mut shutdown = self.shutdown.subscribe();
         let mut connections = JoinSet::new();
         let supervisor = tokio::spawn(self.clone().supervise());
+        let native_events = tokio::spawn(self.clone().native_events());
+        // Native projects have no child queue loop; this plans and runs their sprints.
+        let native_sprints = tokio::spawn(self.clone().native_sprints());
         loop {
             if *shutdown.borrow() {
                 break;
             }
             tokio::select! {
                 _=shutdown.changed()=>(),
-                accepted=self.endpoint.listener.accept()=>{
+                // At the connection bound the next caller waits in the listen backlog until a
+                // connection ends. Accepting and dropping it would read as a lost service to a
+                // client whose own busy reads hold the other connections.
+                accepted=self.endpoint.listener.accept(),if connections.len()<CONNECTION_LIMIT=>{
                     let (stream,_)=accepted?;
                     if local::authorize(&stream).is_err() { continue; }
-                    if connections.len()>=64 { continue; }
                     let service=self.clone();
                     connections.spawn(async move { let _=service.client(stream).await; });
                 }
@@ -839,8 +884,14 @@ impl Service {
             }
         }
         supervisor.abort();
+        native_events.abort();
+        native_sprints.abort();
         connections.abort_all();
         while connections.join_next().await.is_some() {}
+        // Abort requests alone do not drop task-owned Arcs or the endpoint lock.
+        // Observe both background owners before reporting the server settled.
+        let _ = supervisor.await;
+        let _ = native_events.await;
         Ok(())
     }
     async fn client(self: Arc<Self>, stream: UnixStream) -> io::Result<()> {
@@ -918,7 +969,9 @@ impl Service {
             "service.status" if params == json!({}) => Ok(self.status().await),
             "service.stop" if params == json!({}) => Ok(json!({"outcome":"stop_requested"})),
             "service.capabilities" if params == json!({}) => Ok(
-                json!({"channel":workspace_protocol::channel::current().name,"application":workspace_protocol::channel::current().title,"methods":["service.status","service.capabilities","service.subscribe","service.stop","projects.list","projects.register","projects.rename","projects.remove","projects.activate","projects.status","projects.resynchronize","workspace","executions.cancel","executions.prompt","executions.control","machine.call","directories.search","directories.cancel","terminal.open","terminal.read","terminal.write","terminal.resize","terminal.close","voice.start","voice.read","voice.stop","voice.cancel"],"machine":self.config.launch.tools().is_some(),"permissions":false,"sessionOptions":false}),
+                json!({"channel":workspace_protocol::channel::current().name,"application":workspace_protocol::channel::current().title,"methods":["native.query","native.board","service.status","service.capabilities","service.subscribe","service.stop","projects.list","projects.register","projects.rename","projects.remove","projects.activate","projects.status","workspace","executions.cancel","executions.prompt","executions.control","machine.call","directories.search","directories.cancel","terminal.open","terminal.read","terminal.write","terminal.resize","terminal.close","voice.start","voice.read","voice.stop","voice.cancel"],"machine":true,"permissions":false,"sessionOptions":false,
+                    // The native host runs every task in the project folder (no task worktrees).
+                    "taskWorktrees":false}),
             ),
             "projects.list" if params == json!({}) => Ok(self.projects().await),
             "projects.register" => {
@@ -927,7 +980,8 @@ impl Service {
                 if p.new_folder {
                     self.register_new_folder(&p.root, &p.display_name).await
                 } else {
-                    self.register_folder(&p.root, &p.display_name, p.create).await
+                    self.register_folder(&p.root, &p.display_name, p.create)
+                        .await
                 }
             }
             method if method.starts_with("directories.") => {
@@ -936,21 +990,24 @@ impl Service {
                 self.directories(request).await
             }
             "projects.rename" => {
-                let p: Rename = serde_json::from_value(params).map_err(|_| failure("invalid_params"))?;
+                let p: Rename =
+                    serde_json::from_value(params).map_err(|_| failure("invalid_params"))?;
                 self.rename(&p.project_id, &p.display_name).await
             }
             "projects.remove" => {
-                let p: Removal = serde_json::from_value(params).map_err(|_| failure("invalid_params"))?;
-                if !p.confirmed { return Err(failure("confirmation_required")); }
+                let p: Removal =
+                    serde_json::from_value(params).map_err(|_| failure("invalid_params"))?;
+                if !p.confirmed {
+                    return Err(failure("confirmation_required"));
+                }
                 self.remove(&p.project_id).await
             }
-            "projects.activate" | "projects.status" | "projects.resynchronize" => {
+            "projects.activate" | "projects.status" => {
                 let p: ProjectParam =
                     serde_json::from_value(params).map_err(|_| failure("invalid_params"))?;
                 match method {
                     "projects.activate" => self.activate(&p.project_id).await,
-                    "projects.status" => self.project_status(&p.project_id).await,
-                    _ => self.resynchronize(&p.project_id).await,
+                    _ => self.project_status(&p.project_id).await,
                 }
             }
             method if method.starts_with("voice.") => {
@@ -971,12 +1028,17 @@ impl Service {
                 // Hold registry ownership through the operation to serialize removal/open.
                 let state = self.state.lock().await;
                 let project = project.clone();
-                let root = &state.projects.iter().find(|p| p.project_id == project)
-                    .ok_or_else(|| failure("project_not_found"))?.canonical_root;
+                let root = &state
+                    .projects
+                    .iter()
+                    .find(|p| p.project_id == project)
+                    .ok_or_else(|| failure("project_not_found"))?
+                    .canonical_root;
                 let mut terminals = self.terminals.lock().await;
                 self.accepting()?;
                 terminals.call(&project, root, request).await
             }
+            "native.query" | "native.board" => self.native_query(params).await,
             "workspace" => self.workspace(params).await,
             "executions.control" => self.control_execution(params).await,
             "executions.cancel" => {
@@ -987,8 +1049,14 @@ impl Service {
             "executions.prompt" => {
                 let p: PromptParam =
                     serde_json::from_value(params).map_err(|_| failure("invalid_params"))?;
-                self.prompt_execution(&p.project_id, &p.execution_id, &p.text, p.request_id.as_deref(), p.attachments)
-                    .await
+                self.prompt_execution(
+                    &p.project_id,
+                    &p.execution_id,
+                    &p.text,
+                    p.request_id.as_deref(),
+                    p.attachments,
+                )
+                .await
             }
             "machine.call" => {
                 let call = serde_json::from_value(params).map_err(|_| failure("invalid_params"))?;
@@ -1039,7 +1107,9 @@ struct ExecutionParam {
     project_id: String,
     execution_id: String,
 }
-fn empty_attachments() -> Value { json!([]) }
+fn empty_attachments() -> Value {
+    json!([])
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PromptParam {

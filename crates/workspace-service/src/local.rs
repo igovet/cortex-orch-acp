@@ -46,14 +46,80 @@ pub fn private_directory(path: &Path) -> io::Result<PathBuf> {
         canonical_directory(path.parent().ok_or_else(|| failure("missing_parent"))?)?;
         let mut builder = fs::DirBuilder::new();
         use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700).create(path)?;
+        match builder.mode(0o700).create(path) {
+            Ok(()) => (),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(error),
+        }
+        // A concurrent native lane may have created it; validate its owner/mode and
+        // every path component below, rather than treating EEXIST as trusted success.
     }
     let path = canonical_directory(path)?;
-    let meta = fs::metadata(&path)?;
-    if meta.uid() != uid() || meta.permissions().mode() & 0o077 != 0 {
-        return Err(failure("private_directory_required"));
+    // Inspect and repair the opened directory itself, never a path that could be swapped.
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)?;
+    let meta = directory.metadata()?;
+    let unsafe_directory = |problem| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            UnsafePrivateDirectory {
+                path: path.clone(),
+                problem,
+            },
+        )
+    };
+    if meta.uid() != uid() {
+        return Err(unsafe_directory("owned by another account"));
+    }
+    let mode = meta.permissions().mode();
+    if mode & 0o077 != 0 {
+        // A folder this account owns whose extra bits never let another account write
+        // into it (for example 0775 under the account's own group from a 002 umask, or
+        // 0755) is made private in place. World-writable or another group's write
+        // access may already have let someone plant content there, so it stays refused.
+        if mode & 0o002 != 0 {
+            return Err(unsafe_directory(
+                "writable by every account on this machine",
+            ));
+        }
+        if mode & 0o020 != 0 && meta.gid() != unsafe { libc::getegid() } {
+            return Err(unsafe_directory("writable by another group"));
+        }
+        directory.set_permissions(fs::Permissions::from_mode(0o700))?;
+        if directory.metadata()?.permissions().mode() & 0o077 != 0 {
+            return Err(unsafe_directory("could not be made private"));
+        }
     }
     Ok(path)
+}
+/// One of this app's own private folders cannot be used safely. It displays as its
+/// stable code; [`UnsafePrivateDirectory::owner_message`] names the folder and the
+/// problem for the owner.
+#[derive(Debug)]
+pub struct UnsafePrivateDirectory {
+    pub path: PathBuf,
+    pub problem: &'static str,
+}
+impl std::fmt::Display for UnsafePrivateDirectory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("private_directory_required")
+    }
+}
+impl std::error::Error for UnsafePrivateDirectory {}
+impl UnsafePrivateDirectory {
+    /// The unsafe folder behind an I/O failure, if that is what it was.
+    pub fn of(error: &io::Error) -> Option<&Self> {
+        error.get_ref()?.downcast_ref::<Self>()
+    }
+    pub fn owner_message(&self) -> String {
+        format!(
+            "Cortex's private folder has unsafe permissions ({}): {}. Make it private to your account (for example chmod 700 on that folder), then try again.",
+            self.problem,
+            self.path.display()
+        )
+    }
 }
 pub fn private_tree(path: &Path) -> io::Result<PathBuf> {
     if !path.exists() {
@@ -106,8 +172,11 @@ impl Endpoint {
             Err(e) if e.kind() == io::ErrorKind::NotFound => (),
             Err(e) => return Err(e),
         }
-        // The parent was private before bind; no access window for another user.
-        let listener = UnixListener::bind(&path)?;
+        // Address the socket through a pinned directory descriptor: the actual
+        // private socket remains at `path`, even when that path exceeds SUN_LEN.
+        let dir = File::open(&runtime)?;
+        let address = PathBuf::from(format!("/proc/self/fd/{}/service.sock", dir.as_raw_fd()));
+        let listener = UnixListener::bind(&address)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         Ok(Self {
             listener,
@@ -116,9 +185,88 @@ impl Endpoint {
         })
     }
 }
+#[cfg(test)]
+mod socket_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn long_runtime_path_binds_and_connects() {
+        let root = std::env::temp_dir().join(format!(
+            "socket-{}-{}",
+            std::process::id(),
+            crate::identity().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = root.join("x".repeat(100));
+        let endpoint = Endpoint::bind(&runtime).unwrap();
+        let client = connect(&endpoint.path).await.unwrap();
+        let (_peer, _) = endpoint.listener.accept().await.unwrap();
+        drop(client);
+        drop(endpoint);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod private_directory_tests {
+    use super::*;
+
+    fn base(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "private-dir-{name}-{}-{}",
+            std::process::id(),
+            crate::identity().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        root
+    }
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// A settings folder created by `mkdir -p` under a 002 umask (0775, the account's own
+    /// group) or a 022 umask (0755) is made private instead of failing every later read.
+    #[test]
+    fn own_merely_permissive_folders_are_made_private() {
+        let root = base("repair");
+        for permissive in [0o775, 0o755, 0o750, 0o705] {
+            let folder = root.join(format!("config-{permissive:o}"));
+            fs::create_dir(&folder).unwrap();
+            fs::set_permissions(&folder, fs::Permissions::from_mode(permissive)).unwrap();
+            assert_eq!(private_directory(&folder).unwrap(), folder);
+            assert_eq!(mode(&folder), 0o700, "{permissive:o}");
+            let nested = folder.join("a/b");
+            assert_eq!(private_tree(&nested).unwrap(), nested);
+            assert_eq!(mode(&nested), 0o700);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A folder anyone could have written into stays refused, and the refusal names it.
+    #[test]
+    fn world_writable_folders_stay_refused_with_a_named_reason() {
+        let root = base("refuse");
+        let folder = root.join("config");
+        fs::create_dir(&folder).unwrap();
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o777)).unwrap();
+        let error = private_directory(&folder).unwrap_err();
+        assert_eq!(error.to_string(), "private_directory_required");
+        let unsafe_folder = UnsafePrivateDirectory::of(&error).expect("named folder");
+        assert_eq!(unsafe_folder.path, folder);
+        let message = unsafe_folder.owner_message();
+        assert!(message.contains("writable by every account"), "{message}");
+        assert!(message.contains(&folder.display().to_string()), "{message}");
+        assert_eq!(mode(&folder), 0o777, "a refused folder is left as it was");
+        fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 pub async fn connect(path: &Path) -> io::Result<UnixStream> {
     let parent = canonical_directory(path.parent().ok_or_else(|| failure("missing_parent"))?)?;
-    let m = fs::metadata(parent)?;
+    let m = fs::metadata(&parent)?;
     let socket = fs::symlink_metadata(path)?;
     if m.uid() != uid()
         || m.mode() & 0o077 != 0
@@ -128,7 +276,12 @@ pub async fn connect(path: &Path) -> io::Result<UnixStream> {
     {
         return Err(failure("unsafe_socket"));
     }
-    let stream = UnixStream::connect(path).await?;
+    let dir = File::open(parent)?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| failure("missing_socket_name"))?;
+    let address = PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd())).join(name);
+    let stream = UnixStream::connect(address).await?;
     authorize(&stream)?;
     Ok(stream)
 }

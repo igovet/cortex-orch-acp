@@ -17,6 +17,6 @@ const server=createServer(async(req,res)=>{
 });
 try {
  await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
- const child=spawn("/usr/bin/python3",["-B",root+"packages/workspace-ui/test/webkit-cpu.py","http://127.0.0.1:"+server.address().port+"/"],{stdio:"inherit"});
+ const child=spawn("timeout",["--kill-after=5","300","docker","run","--rm","--network","host","--user",process.getuid()+":"+process.getgid(),"-e","HOME=/tmp","-v",fileURLToPath(new URL(".",import.meta.url))+":/driver:ro",(process.env.CW_RENDERED_IMAGE??"cortex-workspace-rendered:ubuntu26.04"),"node","/driver/webkit-cpu.driver.mjs","http://127.0.0.1:"+server.address().port+"/"],{stdio:"inherit"});
  process.exitCode=await new Promise((resolve,reject)=>{child.on("error",reject);child.on("exit",code=>resolve(code??1));});
 } finally {await new Promise(resolve=>server.close(resolve));}

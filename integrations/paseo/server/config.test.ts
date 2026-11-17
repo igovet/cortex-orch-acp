@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { loadServerModuleForTest } from "./test-bundle.ts";
+import { initEmptyStore, installRustToolsFixture } from "./test-fixture-db.ts";
 
 // End-to-end tests of the configuration plugin RPCs: the client SDK's
 // callPluginRpc, a host step that mirrors installed Paseo 0.10.0's plugin
 // child (input parse -> handler(input, { paseo }) -> output parse), the real
-// handlers, and the real Cortex configuration API from this checkout,
+// handlers, and the real native configuration API (cortex-paseo-tools config),
 // against a disposable HOME/XDG and project.
 
 const pluginRoot = resolve(".");
@@ -78,7 +79,7 @@ function context(directories: Record<string, string>, options: { throwOnRef?: bo
   };
 }
 
-const ENV_KEYS = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "CORTEX_PASEO_SOURCE_ROOT", "CORTEX_ACP_COMMAND", "CORTEX_ROUTING", "CORTEX_PASEO_SHIM", "CORTEX_ENGINE_UPDATE"];
+const ENV_KEYS = ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "CORTEX_PASEO_SOURCE_ROOT", "CORTEX_ACP_COMMAND", "CORTEX_ROUTING", "CORTEX_PASEO_SHIM", "CORTEX_ENGINE_UPDATE", "CORTEX_ACP_RUST_BINARY", "CORTEX_ACP_RUNTIME_ROOT", "CORTEX_WORKSPACE_CHANNEL", "PATH"];
 const saved = new Map(ENV_KEYS.map((key) => [key, process.env[key]] as const));
 function restoreEnv(): void {
   for (const [key, value] of saved) {
@@ -92,16 +93,11 @@ function privateDir(path: string): string {
   return path;
 }
 
-function initProjectStore(project: string): void {
-  execFileSync("python3", ["-B", "-c", [
-    "import sys",
-    "sys.path.insert(0, sys.argv[1])",
-    "from cortex_runtime.project_storage import canonical_project, project_store_directory",
-    "from cortex_runtime.store import Store",
-    "root = canonical_project(sys.argv[2])",
-    "Store(project_store_directory(root), initialize=True, project_root=root)",
-  ].join("\n"), join(repoRoot, "src"), project], { stdio: ["ignore", "ignore", "inherit"] });
-}
+// The compiled tool owns its channel: a dev build keeps its owner files below
+// ~/.config/cortex-workspace-dev and its project store in .cortex-dev.
+let DISPLAY = "~/.config/cortex";
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\\/~]/g, (char) => "\\" + char);
+let STORE = ".cortex";
 
 function setupOwner(base: string): { home: string; configHome: string } {
   const home = privateDir(join(base, "home"));
@@ -113,7 +109,16 @@ function setupOwner(base: string): { home: string; configHome: string } {
   delete process.env.CORTEX_ACP_COMMAND;
   delete process.env.CORTEX_ROUTING;
   delete process.env.CORTEX_PASEO_SHIM;
-  return { home, configHome };
+  // The Rust launch: the tools binary sits beside a stand-in cortex-acp.
+  process.env.CORTEX_ACP_RUST_BINARY = installRustToolsFixture(repoRoot, join(base, "bin")).acp;
+  process.env.CORTEX_ACP_RUNTIME_ROOT = repoRoot;
+  process.env.CORTEX_WORKSPACE_CHANNEL = "release";
+  // No engine (or OpenCode) binary is discoverable from the tool's PATH.
+  process.env.PATH = "";
+  const host = JSON.parse(execFileSync(join(base, "bin", "cortex-paseo-tools"), ["config", "--host"], { encoding: "utf8", env: { ...process.env, PATH: "" } }));
+  DISPLAY = "~/" + relative(home, host.config_home);
+  STORE = host.store_name;
+  return { home, configHome: dirname(host.config_home) };
 }
 
 const base = mkdtempSync(join(tmpdir(), "cortex-config-rpc-"));
@@ -123,7 +128,7 @@ try {
   const { configHome } = setupOwner(base);
   process.env.CORTEX_PASEO_SOURCE_ROOT = repoRoot;
   const project = privateDir(join(base, "project"));
-  initProjectStore(project);
+  initEmptyStore(repoRoot, project, STORE);
   const bareProject = privateDir(join(base, "bare-project"));
   const ctx = context({ [WORKSPACE]: project, [MISSING_STORE_WORKSPACE]: bareProject });
   const noLeak = (value: unknown) => {
@@ -135,6 +140,16 @@ try {
   // configuration RPCs are added. Paseo's settings document is not used.
   {
     const index = await loadServerModuleForTest<{ default: (server: unknown) => () => void }>(resolve("index.server.ts"));
+    // Activation starts the native first-run setup, which writes the default
+    // preset: activate against a throwaway owner so the cases below see
+    // pristine storage, and wait for that pass to finish before cleanup.
+    const owner = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, XDG_STATE_HOME: process.env.XDG_STATE_HOME };
+    const scratch = privateDir(join(base, "activation-home"));
+    privateDir(join(scratch, ".config"));
+    privateDir(join(scratch, ".local", "state"));
+    process.env.HOME = scratch;
+    process.env.XDG_CONFIG_HOME = join(scratch, ".config");
+    process.env.XDG_STATE_HOME = join(scratch, ".local", "state");
     const names: string[] = [];
     const providers: string[] = [];
     let settings = 0;
@@ -156,6 +171,11 @@ try {
       "cortex.config.preset.read", "cortex.config.preset.apply", "cortex.config.preset.reset",
     ]);
     assert.equal(settings, 0);
+    const deadline = Date.now() + 15000;
+    while (!existsSync(join(scratch, ".config", ...(DISPLAY.includes("workspace-dev") ? ["cortex-workspace-dev"] : []), "cortex", "first-run-codex-acp.json")) && Date.now() < deadline) {
+      await new Promise((done) => setTimeout(done, 50));
+    }
+    Object.assign(process.env, owner);
   }
 
   // The contracts refuse client-chosen paths, commands, binaries, unknown
@@ -202,11 +222,11 @@ try {
   {
     const response = await call(readConfig, { surface: "all" }, ctx);
     assert.equal(response.ok, true, JSON.stringify(response));
-    assert.deepEqual(response.binding, { apiVersion: 1, configHome: "~/.config/cortex", project: null });
+    assert.deepEqual(response.binding, { apiVersion: 1, configHome: DISPLAY, project: null });
     const result = response.result;
     assert.equal(result.user_defaults.ok, true);
     assert.equal(result.user_defaults.result.revision, "absent");
-    assert.equal(result.user_defaults.result.path, "~/.config/cortex/defaults.json");
+    assert.equal(result.user_defaults.result.path, `${DISPLAY}/defaults.json`);
     assert.equal(result.routing.result.effective_source, "missing");
     assert.deepEqual(result.routing.result.precedence, ["user"]);
     assert.equal(result.mcp_servers.result.revision, "absent");
@@ -226,7 +246,7 @@ try {
     assert.equal(response.result.project_ceiling.result.project_root, "<project>");
     assert.equal(response.result.project_ceiling.result.revision, "absent");
     assert.deepEqual(response.result.routing.result.precedence, ["project", "user"]);
-    assert.equal(response.result.routing.result.sources[0].path, "<project>/.cortex/routing.json");
+    assert.equal(response.result.routing.result.sources[0].path, `<project>/${STORE}/routing.json`);
     noLeak(response);
 
     const unknown = await call(readConfig, { workspaceId: "nope", surface: "routing" }, ctx);
@@ -313,7 +333,7 @@ try {
     assert.equal(projectWrite.ok, true, JSON.stringify(projectWrite));
     assert.equal(projectWrite.result.effective_source, "project");
     assert.equal(projectWrite.result.shadowed_by, null);
-    assert.ok(existsSync(join(project, ".cortex", "routing.json")));
+    assert.ok(existsSync(join(project, STORE, "routing.json")));
     noLeak(projectWrite);
 
     const userWrite = await call(updateConfig, {
@@ -668,8 +688,8 @@ try {
     assert.equal(applied.ok, true, JSON.stringify(applied));
     assert.equal(applied.result.files.routing.status, "existing");
     assert.equal(applied.result.files.defaults.status, "existing");
-    assert.equal(applied.result.settings.routing.path, "~/.config/cortex/routing.json");
-    assert.equal(applied.result.settings.defaults.path, "~/.config/cortex/defaults.json");
+    assert.equal(applied.result.settings.routing.path, `${DISPLAY}/routing.json`);
+    assert.equal(applied.result.settings.defaults.path, `${DISPLAY}/defaults.json`);
     noLeak(applied);
     const routingBefore = readFileSync(routingPath, "utf8");
     const defaultsBefore = readFileSync(defaultsPath, "utf8");
@@ -686,9 +706,9 @@ try {
     const current = await call(readDefaultPreset, {}, ctx);
     const reset = await call(resetDefaultPreset, { expected_revision: current.result.revision, confirm: true }, ctx);
     assert.equal(reset.ok, true, JSON.stringify(reset));
-    assert.match(reset.result.backups.routing, /^~\/\.config\/cortex\/routing\.json\.cortex-backup-\d+$/);
-    assert.match(reset.result.backups.defaults, /^~\/\.config\/cortex\/defaults\.json\.cortex-backup-\d+$/);
-    assert.equal(readFileSync(join(configHome, "cortex", reset.result.backups.routing.slice("~/.config/cortex/".length)), "utf8"), routingBefore);
+    assert.match(reset.result.backups.routing, new RegExp(`^${escapeRegExp(DISPLAY)}/routing\\.json\\.cortex-backup-\\d+$`));
+    assert.match(reset.result.backups.defaults, new RegExp(`^${escapeRegExp(DISPLAY)}/defaults\\.json\\.cortex-backup-\\d+$`));
+    assert.equal(readFileSync(join(configHome, "cortex", reset.result.backups.routing.slice(`${DISPLAY}/`.length)), "utf8"), routingBefore);
     assert.notEqual(reset.result.revision, current.result.revision);
     noLeak(reset);
   }
@@ -708,7 +728,7 @@ try {
     const seeded = await call(applyDefaultPreset, {}, ctx);
     assert.equal(seeded.ok, true, JSON.stringify(seeded));
     assert.equal(seeded.result.settings.routing_profiles.status, "created");
-    assert.equal(seeded.result.settings.mcp_servers.path, "~/.config/cortex/mcp-servers.json");
+    assert.equal(seeded.result.settings.mcp_servers.path, `${DISPLAY}/mcp-servers.json`);
     assert.equal(seeded.result.files.routing_profiles.status, "existing");
     const view = await call(readConfig, { surface: "routing_profiles" }, ctx);
     assert.equal(view.ok, true, JSON.stringify(view));
@@ -742,20 +762,23 @@ try {
   const isolated = mkdtempSync(join(tmpdir(), "cortex-config-owner-"));
   try {
     setupOwner(join(isolated, "daemon"));
+    // The launch record, not the explicit-binary variable, selects the entry.
+    const recordBinary = process.env.CORTEX_ACP_RUST_BINARY!;
+    delete process.env.CORTEX_ACP_RUST_BINARY;
     delete process.env.CORTEX_PASEO_SOURCE_ROOT;
     const owner = privateDir(join(isolated, "owner"));
     privateDir(join(owner, ".config"));
     privateDir(join(owner, ".local", "state"));
     const record = privateDir(join(process.env.XDG_CONFIG_HOME!, "cortex"));
     writeFileSync(join(record, "paseo-plugin-launch.json"), JSON.stringify({
-      argv: ["python3", "-B", join(repoRoot, "src", "cortex_acp.py")],
+      argv: [recordBinary],
       env: { HOME: owner, XDG_CONFIG_HOME: join(owner, ".config"), XDG_STATE_HOME: join(owner, ".local", "state") },
       shim: join(repoRoot, "integrations", "paseo", "server", "acp-load-shim.mjs"),
     }));
     const response = await call(updateConfig, { surface: "user_defaults", expected_revision: "absent", defaults: { language: "en" } }, context({}));
     assert.equal(response.ok, true, JSON.stringify(response));
-    assert.equal(response.binding.configHome, "~/.config/cortex");
-    assert.ok(existsSync(join(owner, ".config", "cortex", "defaults.json")));
+    assert.equal(response.binding.configHome, DISPLAY);
+    assert.ok(existsSync(join(owner, DISPLAY.slice(2), "defaults.json")));
     assert.ok(!existsSync(join(record, "defaults.json")));
   } finally {
     restoreEnv();
@@ -768,12 +791,13 @@ try {
   const isolated = mkdtempSync(join(tmpdir(), "cortex-config-none-"));
   try {
     setupOwner(isolated);
+    delete process.env.CORTEX_ACP_RUST_BINARY;
     delete process.env.CORTEX_PASEO_SOURCE_ROOT;
     const response = await call(readConfig, { surface: "all" }, context({}));
     assert.equal(response.ok, false);
     assert.equal(response.binding, null);
     assert.equal(response.error.code, "config_api_unavailable");
-    // A launch that is not a Python Cortex entry point is refused too.
+    // A launch that is not the Rust cortex-acp entry is refused too.
     const foreign = server.configRuntime({ argv: ["/bin/sh", "-c", "echo"] });
     assert.equal("failure" in foreign && foreign.failure.code, "config_api_unavailable");
   } finally {

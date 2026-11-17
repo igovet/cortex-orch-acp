@@ -14,7 +14,7 @@ CW-R01 (stable user tasks separate from executions and sessions), CW-R02 (board 
 
 - [domain-model](../domain-model.md): a board phase is a projection, not a mutable runtime status.
 - [protocol](../protocol.md) and [CW-C01](CW-C01.md): envelopes, bounded summaries and explicit unknowns.
-- Existing vocabularies to map: `runtime_tasks.state`, `runtime_nodes.status` and `stage` (`src/cortex_runtime/orchestration/state.py`); `task_orchestration.state` and `wait_reason` (`src/cortex_runtime/delegation/events_store.py`).
+- Existing vocabularies to map: `runtime_tasks.state`, `runtime_nodes.status` and `stage` (the former `orchestration/state` module); `task_orchestration.state` and `wait_reason` (the former `delegation/events_store` module).
 - [performance](../performance.md): board summaries must stay compact (500-task baseline); no worker transcript payloads on the board.
 
 ## Deliverables

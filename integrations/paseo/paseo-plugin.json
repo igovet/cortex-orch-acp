@@ -4,6 +4,7 @@
     "paseo": ">=0.9.0"
   },
   "build": [
-    ["python3", "-B", "../../scripts/cortex_acp_setup.py", "bootstrap-paseo-git-install"]
+    ["cargo", "build", "--release", "--locked", "-p", "cortex-acp", "-p", "cortex-paseo-tools"],
+    ["../../target/release/cortex-paseo-tools", "bootstrap-paseo-git-install"]
   ]
 }

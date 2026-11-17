@@ -1,11 +1,11 @@
 # Cortex repository development
 
-Use `python3`. Runtime behavior belongs entirely below `./`.
+The product is Rust and contains no Python. Use the pinned Rust toolchain (`rust-toolchain.toml`) through `~/.cargo/bin/cargo` and run builds and tests under `umask 022`. Runtime behavior belongs entirely below `./`.
 Do not activate orchestration merely because this repository is named Cortex;
 only an explicit user selection activates the bundled orchestrator skill.
 
-Cortex is an incoming ACP v1 stdio agent (`src/cortex_acp.py`,
-`src/cortex_runtime/acp/`), not a plugin hosted inside another
+Cortex is an incoming ACP v1 stdio agent (the Rust binary `cortex-acp`,
+`crates/cortex-acp`), not a plugin hosted inside another
 agent's process. See `docs/project/architecture.md` for the full section map.
 The Codex-plugin/gateway harness (the MITM gateway, the pinned-dependency
 installer, native Codex profile registration, the lifecycle hook dispatcher, the
@@ -19,10 +19,10 @@ permissions, mandatory independent review, verification and completion. Models
 propose plans, analyze evidence and submit reports/results. Keep tool argument
 contracts in advertised schemas and property descriptions, never in skills or
 profile instructions. One narrow exception: the `codex-acp` tool cheat sheet
-(`src/cortex_runtime/delegation/codex_tool_cheat_sheet.py`) may restate required
+(`compose` in `crates/workspace-service/src/native_instructions.rs`) may restate required
 and optional fields, enum values, array item fields, schema-derived numeric/length
 bounds and an example call, because it is rendered mechanically from the live
-channel tool schemas (`channeled_base_tools()` plus `tool_definitions()`) at session start and appended only to `codex-acp`
+channel tool schemas (`schema::catalogue` in `crates/cortex-engine/src/schema.rs`) at session start and appended only to `codex-acp`
 sessions, whose code mode lists nested tools by name and description only. It
 is derived output, not authored prose: never hand-edit contract text into it,
 and it does not reintroduce model-driven delegation. Preserve all 23 profiles (22 specialists and the consultant)
@@ -65,18 +65,22 @@ below. Other reports are immutable real Markdown files. Both published task
 documents and the SQLite metadata/relations index live under the one
 project-local `.cortex` store (`<project>/.cortex/cortex.sqlite3`, published
 document bodies under `<project>/.cortex/` alongside it); there is no
-`.codex/cortex` anywhere. `tests/test_package.py` asserts exactly one
+`.codex/cortex` anywhere. The store layer (`crates/cortex-core/src/store`) keeps exactly one
 `.cortex/cortex.sqlite3` per project in the default/release channel. Workspace Dev uses the separate `.cortex-dev/cortex.sqlite3` beside it: exactly one store per logical project per channel, including linked worktrees. Dev never imports, reads or migrates the release store. Both the newest-first catalogue and
 report content use bounded cursor reads. Workers select relevant reports rather
 than reading everything.
 
-When a normal writable `Store(..., initialize=True)` opens a project-local
-format-11 database, it automatically performs the verified format-11 to
-format-12 migration under the exclusive access lock and retains a private
-backup in `.migration-backups/`. A non-initializing inspection open
-(`initialize=False`) must remain non-mutating and report
-`legacy_storage_migration_required`; format 10 and unknown formats remain
-fail-closed and require the explicit migration tool where supported.
+When the Rust store (`crates/cortex-core`) opens a project-local format-11
+database with `Store::open(.., OpenMode::Initialize)`, it automatically performs
+the verified format-11 to format-12 migration under the exclusive access lock
+and retains a private backup in `.migration-backups/`. An
+`OpenMode::InspectImmutable` (or `LiveReadOnly`) open must remain non-mutating
+and report `legacy_storage_migration_required`; format 10 and unknown formats
+remain fail-closed (`unsupported_storage`). No separate migration or rollback
+command ships. Initialize never opens an existing database file with a plain
+descriptor (closing it would drop the process's POSIX locks and let another
+process delete the live WAL/SHM); see `create_private_database` in
+`crates/cortex-core/src/store/locks.rs`.
 
 Read relevant `docs/project/` and `docs/features/` pages before nontrivial work; they define the current
 product contract. Also read applicable `docs/project/` and `docs/features/`
@@ -88,11 +92,12 @@ host logs out of repository documents and diagnostics. Report unrun checks.
 
 For this release use semantic version 1.0.6. After any package payload
 edit, regenerate its complete content hash with
-`python3 -B scripts/cortex_package.py stamp` before release-sensitive checks.
+`scripts/cortex-xtask.sh package stamp` before release-sensitive checks.
 Run package, profile-generation and test checks sequentially in the same
 checkout. Before handing any desktop .deb to the owner, require the exact archive to pass the installed-package real-input gate in docs/project/verification.md, sequentially on disposable virtual screens, never in the owner’s session. Use the smallest meaningful tests first. Source-only profile checks use
-`python3 -B scripts/generate_agent_profiles.py check` (the script takes one
-positional action, `check` or `write`; it has no `--check` or `--dry-run` flag).
+`scripts/cortex-xtask.sh profiles check` (it takes one positional action,
+`check` or `write`; `check-generated` runs the contract, instruction and profile
+checks together, and `package check` validates the stamp).
 
 ## Live and model-policy rules
 
@@ -105,7 +110,7 @@ Cortex XDG config/state remain disposable. Do not create test engine accounts,
 copy credentials, or run an isolated engine login. Check native login status
 without printing credentials before relying on either engine.
 
-Default verification is no-paid: targeted pytest, the Paseo plugin type-check
+Default verification is no-paid: targeted `cargo test` runs, the Paseo plugin type-check
 and `npm --prefix integrations/paseo run test:*` scripts, and the no-paid smoke
 harness. No standing approval for paid live checks exists. Run a paid live check
 only when the owner explicitly requests it for the current work and names the
@@ -125,22 +130,24 @@ remain prohibited in routine live qualification. Check native login
 status without printing credentials before relying on either engine.
 
 The no-paid default automated suite
-(`python3 -B scripts/run_tests_fast.py`, see
+(`scripts/cortex-xtask.sh test-fast`, see
 `docs/project/test-matrix.md`) cannot reach a paid engine and is not a
 substitute for live qualification. The only paid probes are
-`scripts/cortex_codex_probe.py` and `scripts/cortex_claude_probe.py`; both
+`scripts/cortex-paseo-tools.sh probe-codex` and `probe-claude`; both
 continue to require `--i-authorize-paid-call` and `--approval-ref`; run them
 only on an explicit owner request and pass a reference naming that request
-(for example `owner-request-<date>-cli`). `scripts/cortex_acp_smoke.py` is the no-paid
+(for example `owner-request-<date>-cli`). `scripts/cortex-paseo-tools.sh acp-smoke` is the no-paid
 startup smoke harness (schema-validated launch/protocol surface only, not GUI
 evidence).
 
-The default runner uses `.venv/bin/python`, eight parallel workers, batches of
-at most 32 files, a 60-second per-test deadline and GNU `timeout 180` per batch.
-Install checkout-local `pytest-xdist==3.8.0` and `pytest-timeout==2.4.0` first;
-missing dependencies fail explicitly. Do not run the old unbounded whole-suite
-pytest command. Targeted pytest commands must also use GNU `timeout` and a
-per-test deadline; keep package, profile and test checks sequential.
+The default runner runs its steps one at a time under GNU `timeout`
+(`--kill-after=5`; 900 s for build and cargo, 600 s for npm, 180 s per Paseo
+script), passes a 60-second per-test deadline to the Vitest suites, points
+`HOME`/`XDG_*` at a scratch directory and runs cargo `--locked --offline`.
+A missing prerequisite (cargo, npm, installed `node_modules`, GNU `timeout`)
+fails explicitly with exit 2. Do not run an unbounded whole-workspace test
+command. Targeted `cargo test` commands must also use GNU `timeout`; keep
+package, profile and test checks sequential.
 
 
 This release-verification obligation belongs to the owner of the Cortex
@@ -153,7 +160,7 @@ Never update, reinstall, or otherwise modify the production Paseo installation,
 ~/.paseo, or its cortex-acp plugin. All Paseo/plugin validation must use only the
 permanent dev instance at ~/.paseo-dev, its separate Electron profile
 ~/.config/Paseo-dev, a distinct daemon endpoint, and a disposable project. Refresh
-that dev home only with python3 -B scripts/cortex_paseo_clone.py while its dev daemon
+that dev home only with `scripts/cortex-paseo-tools.sh paseo-clone` while its dev daemon
 is stopped; the production home is read-only to that utility. Before using an
 isolation flag or environment variable, verify it against the installed Paseo version
 and ACP bridge. Follow [the dev Paseo environment guide](docs/project/dev-environment.md).
@@ -163,8 +170,8 @@ historical and do not qualify 0.11.2.
 A read-only `--version` check on 2026-10-16 reported installed Paseo 0.11.4, and its guarded CLI help matched the `run`, `send`, `wait` and `inspect` options recorded in the dated note of docs/project/dev-environment.md. This does not requalify 0.11.2 or the historical 0.10.x and 0.9.x observations.
 A read-only `--version` check on 2026-10-23 reported installed Paseo 0.12.0, and the guarded wrapper's `run`, `send`, `permit`, `wait` and `inspect` help each exited 0 with the options recorded in the dated note of docs/project/dev-environment.md. An owner-requested paid `cli` qualification that day, through the isolated `~/.paseo-dev` daemon and a disposable project, passed the lifecycle/review/verification, model-remark consent and question/answer resume scenarios. This qualifies CLI runtime/protocol behavior on 0.12.0 only: rendered desktop/GUI behavior was not run, and it does not requalify the 0.11.x, 0.10.x or 0.9.x observations.
 A read-only `--version` check on 2026-11-03 reported installed Paseo 0.15.0, and the guarded wrapper's `run`, `send`, `permit`, `wait` and `inspect` help each exited 0 with the options recorded in the dated note of docs/project/dev-environment.md (`send` also advertises `--behavior`, and `permit allow` supports `--input`). An owner-requested paid `cli` qualification that day, through the isolated `~/.paseo-dev` daemon and disposable projects, passed the lifecycle/review/verification, model-remark consent (on a Git-initialized fixture; an earlier non-Git fixture failure is recorded in the dated note) and question/answer resume scenarios. This qualifies CLI runtime/protocol behavior on 0.15.0 only: rendered desktop/GUI behavior was not run, and it does not requalify the 0.12.0, 0.11.x, 0.10.x or 0.9.x observations.
-Recheck the installed CLI/bridge and guarded wrapper before live use. Invoke python3 -B scripts/cortex_paseo_dev.py --
-...; it defaults to ~/.paseo-dev, rejects ~/.paseo, and blocks command-level endpoint
+Recheck the installed CLI/bridge and guarded wrapper before live use. Invoke `scripts/cortex-paseo-tools.sh paseo-dev --
+...`; it defaults to ~/.paseo-dev, rejects ~/.paseo, and blocks command-level endpoint
 overrides. If the installed build cannot be shown to isolate every required state and
 the daemon endpoint, do not launch Paseo or install the plugin; report the missing
 evidence.
@@ -203,15 +210,15 @@ so its path changes between sessions. Resolve it from the current worktree root,
 for example:
 
 ~~~bash
-python3 -B scripts/cortex_paseo_dev.py -- start --timeout 60 --json
-python3 -B scripts/cortex_paseo_dev.py -- plugin install "$PWD/integrations/paseo" --json
-python3 -B scripts/cortex_paseo_dev.py gui
+scripts/cortex-paseo-tools.sh paseo-dev -- start --timeout 60 --json
+scripts/cortex-paseo-tools.sh paseo-dev -- plugin install "$PWD/integrations/paseo" --json
+scripts/cortex-paseo-tools.sh paseo-dev gui
 ~~~
 
 For Xvfb environments use:
 
 ~~~bash
-python3 -B scripts/cortex_paseo_dev.py gui --xvfb
+scripts/cortex-paseo-tools.sh paseo-dev gui --xvfb
 ~~~
 
 The `gui` helper selects ~/.paseo-dev, the separate ~/.config/Paseo-dev Electron
@@ -225,7 +232,7 @@ worktree root to the dev daemon for the local plugin runtime. After the GUI chec
 stop the dev daemon:
 
 ~~~bash
-python3 -B scripts/cortex_paseo_dev.py -- daemon stop --timeout 15 --json
+scripts/cortex-paseo-tools.sh paseo-dev -- daemon stop --timeout 15 --json
 ~~~
 
 In Paseo Desktop, inspect the rendered timeline and the specific UI behavior under
@@ -234,9 +241,9 @@ result. Use CLI through the guarded wrapper for secondary diagnostics, with the
 plugin path explicit when installing:
 
 ~~~bash
-python3 -B scripts/cortex_paseo_dev.py -- status --json
-python3 -B scripts/cortex_paseo_dev.py -- plugin ls --json
-python3 -B scripts/cortex_paseo_dev.py -- logs <agent-id> --json
+scripts/cortex-paseo-tools.sh paseo-dev -- status --json
+scripts/cortex-paseo-tools.sh paseo-dev -- plugin ls --json
+scripts/cortex-paseo-tools.sh paseo-dev -- logs <agent-id> --json
 ~~~
 
 For retained-history checks, omit `--tail` and retain the exit status, output

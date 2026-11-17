@@ -1,0 +1,4177 @@
+{
+  "oracle": "machine_tools.task_action",
+  "sourceSha256": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+  "cases": [
+    {
+      "name": "target-plain",
+      "params": {
+        "action": "target",
+        "taskId": "t1",
+        "branch": "feature"
+      },
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "done",
+            "acceptance": {
+              "digest": "old"
+            },
+            "automaticReady": true,
+            "archive": {
+              "at": 123
+            },
+            "purgeBlocker": "old",
+            "keep": "retained"
+          }
+        }
+      },
+      "options": {},
+      "store": false,
+      "runtime": null,
+      "rows": [],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true,
+          "reclamation": null
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "old"
+            },
+            "archive": {
+              "at": 123
+            },
+            "automaticReady": true,
+            "keep": "retained",
+            "purgeBlocker": "old",
+            "status": "done",
+            "targetBranch": "feature",
+            "targetInherited": false
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": null
+    },
+    {
+      "name": "target-saved",
+      "params": {
+        "action": "target",
+        "taskId": "t1",
+        "branch": null
+      },
+      "saved": {},
+      "options": {
+        "checkout": {
+          "kind": "main"
+        },
+        "draftTitle": "Old"
+      },
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{\"checkout\": {\"kind\": \"main\"}, \"draftTitle\": \"Old\"}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true,
+          "reclamation": null
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "checkout": {
+              "branch": "",
+              "kind": "main"
+            },
+            "targetBranch": null,
+            "targetInherited": false,
+            "title": "Old",
+            "titleState": "user"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {
+              "checkout": {
+                "kind": "main"
+              },
+              "draftTitle": "Old"
+            }
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "reopen-plain",
+      "params": {
+        "action": "reopen",
+        "taskId": "t1",
+        "branch": "feature"
+      },
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "done",
+            "acceptance": {
+              "digest": "old"
+            },
+            "automaticReady": true,
+            "archive": {
+              "at": 123
+            },
+            "purgeBlocker": "old",
+            "keep": "retained"
+          }
+        }
+      },
+      "options": {},
+      "store": false,
+      "runtime": null,
+      "rows": [],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true,
+          "reclamation": null
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "archive": {
+              "at": 123
+            },
+            "keep": "retained",
+            "purgeBlocker": "old"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": null
+    },
+    {
+      "name": "reopen-saved",
+      "params": {
+        "action": "reopen",
+        "taskId": "t1",
+        "branch": null
+      },
+      "saved": {},
+      "options": {
+        "checkout": {
+          "kind": "main"
+        },
+        "draftTitle": "Old"
+      },
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{\"checkout\": {\"kind\": \"main\"}, \"draftTitle\": \"Old\"}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true,
+          "reclamation": null
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "checkout": {
+              "branch": "",
+              "kind": "main"
+            },
+            "title": "Old",
+            "titleState": "user"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {
+              "checkout": {
+                "kind": "main"
+              },
+              "draftTitle": "Old"
+            }
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "restore-plain",
+      "params": {
+        "action": "restore",
+        "taskId": "t1",
+        "branch": "feature"
+      },
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "done",
+            "acceptance": {
+              "digest": "old"
+            },
+            "automaticReady": true,
+            "archive": {
+              "at": 123
+            },
+            "purgeBlocker": "old",
+            "keep": "retained"
+          }
+        }
+      },
+      "options": {},
+      "store": false,
+      "runtime": null,
+      "rows": [],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true,
+          "reclamation": null
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "old"
+            },
+            "archive": null,
+            "automaticReady": true,
+            "keep": "retained",
+            "purgeBlocker": null,
+            "status": "done"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": null
+    },
+    {
+      "name": "restore-saved",
+      "params": {
+        "action": "restore",
+        "taskId": "t1",
+        "branch": null
+      },
+      "saved": {},
+      "options": {
+        "checkout": {
+          "kind": "main"
+        },
+        "draftTitle": "Old"
+      },
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{\"checkout\": {\"kind\": \"main\"}, \"draftTitle\": \"Old\"}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true,
+          "reclamation": null
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "archive": null,
+            "checkout": {
+              "branch": "",
+              "kind": "main"
+            },
+            "purgeBlocker": null,
+            "title": "Old",
+            "titleState": "user"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {
+              "checkout": {
+                "kind": "main"
+              },
+              "draftTitle": "Old"
+            }
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "rename-6",
+      "params": {
+        "action": "rename",
+        "taskId": "t1",
+        "title": "  Renamed task  "
+      },
+      "saved": {},
+      "options": {
+        "keep": "untouched"
+      },
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{\"keep\": \"untouched\"}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true,
+          "reclamation": null,
+          "version": "2"
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "title": "Renamed task",
+            "titleState": "user"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            2,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {
+              "draftTitle": "Renamed task",
+              "keep": "untouched"
+            }
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "name": "rename-7",
+      "params": {
+        "action": "rename",
+        "taskId": "t1",
+        "title": "ЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯ"
+      },
+      "saved": {},
+      "options": {
+        "keep": "untouched"
+      },
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{\"keep\": \"untouched\"}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true,
+          "reclamation": null,
+          "version": "2"
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "title": "ЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯ",
+            "titleState": "user"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            2,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {
+              "draftTitle": "ЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯЯ",
+              "keep": "untouched"
+            }
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "name": "rename-8",
+      "params": {
+        "action": "rename",
+        "taskId": "t1",
+        "title": ""
+      },
+      "saved": {},
+      "options": {
+        "keep": "untouched"
+      },
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{\"keep\": \"untouched\"}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "empty_title",
+        "message": "Write a title first."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {
+              "keep": "untouched"
+            }
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "rename-9",
+      "params": {
+        "action": "rename",
+        "taskId": "t1",
+        "title": "   "
+      },
+      "saved": {},
+      "options": {
+        "keep": "untouched"
+      },
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{\"keep\": \"untouched\"}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "empty_title",
+        "message": "Write a title first."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {
+              "keep": "untouched"
+            }
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "rename-10",
+      "params": {
+        "action": "rename",
+        "taskId": "t1",
+        "title": null
+      },
+      "saved": {},
+      "options": {
+        "keep": "untouched"
+      },
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{\"keep\": \"untouched\"}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true,
+          "reclamation": null,
+          "version": "2"
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "title": "None",
+            "titleState": "user"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            2,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {
+              "draftTitle": "None",
+              "keep": "untouched"
+            }
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "name": "rename-11",
+      "params": {
+        "action": "rename",
+        "taskId": "t1",
+        "title": true
+      },
+      "saved": {},
+      "options": {
+        "keep": "untouched"
+      },
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{\"keep\": \"untouched\"}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true,
+          "reclamation": null,
+          "version": "2"
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "title": "True",
+            "titleState": "user"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            2,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {
+              "draftTitle": "True",
+              "keep": "untouched"
+            }
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "name": "rename-12",
+      "params": {
+        "action": "rename",
+        "taskId": "t1",
+        "title": 42
+      },
+      "saved": {},
+      "options": {
+        "keep": "untouched"
+      },
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{\"keep\": \"untouched\"}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true,
+          "reclamation": null,
+          "version": "2"
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "title": "42",
+            "titleState": "user"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            2,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {
+              "draftTitle": "42",
+              "keep": "untouched"
+            }
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "name": "rename-started",
+      "params": {
+        "action": "rename",
+        "taskId": "t1",
+        "title": "New"
+      },
+      "saved": {},
+      "options": {},
+      "store": true,
+      "runtime": "EXECUTING",
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "EXECUTING",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true,
+          "reclamation": null,
+          "version": "2"
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "title": "New",
+            "titleState": "user"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            2,
+            "e1"
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {
+              "draftTitle": "New"
+            }
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "name": "rename-missing",
+      "params": {
+        "action": "rename",
+        "taskId": "missing",
+        "title": "New"
+      },
+      "saved": {},
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true,
+          "reclamation": null
+        }
+      },
+      "after": {
+        "tasks": {
+          "missing": {
+            "title": "New",
+            "titleState": "user"
+          },
+          "t1": {}
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "settings-valid",
+      "params": {
+        "action": "settings",
+        "taskId": "t1",
+        "settings": {
+          "model": "fixture-model",
+          "effort": "high",
+          "mode": "development",
+          "language": "en"
+        }
+      },
+      "saved": {},
+      "options": {
+        "keep": true
+      },
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{\"keep\": true}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true,
+          "reclamation": null
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {}
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            2,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {
+              "keep": true,
+              "settings": {
+                "effort": "high",
+                "language": "en",
+                "mode": "development",
+                "model": "fixture-model"
+              }
+            }
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "name": "settings-started",
+      "params": {
+        "action": "settings",
+        "taskId": "t1",
+        "settings": {
+          "model": "fixture-model",
+          "effort": "high",
+          "mode": "guarded",
+          "language": "en"
+        }
+      },
+      "saved": {},
+      "options": {},
+      "store": true,
+      "runtime": "EXECUTING",
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "EXECUTING",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "busy",
+        "message": "Change a running task through its session, not a draft."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            "e1"
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "settings-missing",
+      "params": {
+        "action": "settings",
+        "taskId": "missing",
+        "settings": {
+          "model": "fixture-model",
+          "effort": "high",
+          "mode": "auto",
+          "language": "en"
+        }
+      },
+      "saved": {},
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "busy",
+        "message": "Change a running task through its session, not a draft."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "settings-invalid",
+      "params": {
+        "action": "settings",
+        "taskId": "t1",
+        "settings": {
+          "mode": "invented"
+        }
+      },
+      "saved": {},
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "machine_tool_failed",
+        "message": "ContractError"
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "edit-success",
+      "params": {
+        "action": "edit",
+        "taskId": "t1",
+        "expectedVersion": "1",
+        "payload": {
+          "title": "  New title  ",
+          "description": "New request",
+          "checkout": {
+            "kind": "main"
+          },
+          "settings": {
+            "model": "fixture-model",
+            "effort": "high",
+            "mode": "development",
+            "language": "en"
+          },
+          "attachments": [
+            {
+              "name": "a.txt",
+              "mimeType": "text/plain",
+              "data": "YWJj"
+            }
+          ]
+        }
+      },
+      "saved": {},
+      "options": {
+        "keep": "preserved"
+      },
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{\"keep\": \"preserved\"}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true,
+          "version": "2"
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "title": "New title",
+            "titleState": "user"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "New request",
+            2,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {
+              "attachments": [
+                {
+                  "data": "YWJj",
+                  "mimeType": "text/plain",
+                  "name": "a.txt"
+                }
+              ],
+              "checkout": {
+                "kind": "main"
+              },
+              "draftTitle": "New title",
+              "keep": "preserved",
+              "settings": {
+                "effort": "high",
+                "language": "en",
+                "mode": "development",
+                "model": "fixture-model"
+              }
+            }
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            2
+          ]
+        ]
+      }
+    },
+    {
+      "name": "edit-attachment-invalid",
+      "params": {
+        "action": "edit",
+        "taskId": "t1",
+        "expectedVersion": "1",
+        "payload": {
+          "title": "  New title  ",
+          "description": "New request",
+          "checkout": {
+            "kind": "main"
+          },
+          "settings": {
+            "model": "fixture-model",
+            "effort": "high",
+            "mode": "development",
+            "language": "en"
+          },
+          "attachments": [
+            {
+              "name": "../a",
+              "mimeType": "text/plain",
+              "data": "YWJj"
+            }
+          ]
+        }
+      },
+      "saved": {},
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "invalid_attachment",
+        "message": "The task started or changed. Refresh before editing; your draft was not saved."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "rename-plain",
+      "params": {
+        "action": "rename",
+        "taskId": "t1",
+        "title": "Outside draft"
+      },
+      "saved": {},
+      "options": {},
+      "store": false,
+      "runtime": null,
+      "rows": [],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true,
+          "reclamation": null
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "title": "Outside draft",
+            "titleState": "user"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [],
+        "options": [],
+        "projects": []
+      }
+    },
+    {
+      "name": "settings-plain",
+      "params": {
+        "action": "settings",
+        "taskId": "t1",
+        "settings": {
+          "model": "fixture-model",
+          "effort": "high",
+          "mode": "development",
+          "language": "en"
+        }
+      },
+      "saved": {},
+      "options": {},
+      "store": false,
+      "runtime": null,
+      "rows": [],
+      "expected": {
+        "ok": false,
+        "code": "busy",
+        "message": "Change a running task through its session, not a draft."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [],
+        "options": [],
+        "projects": []
+      }
+    },
+    {
+      "name": "edit-stale",
+      "params": {
+        "action": "edit",
+        "taskId": "t1",
+        "expectedVersion": "2",
+        "payload": {
+          "title": "  New title  ",
+          "description": "New request",
+          "checkout": {
+            "kind": "main"
+          },
+          "settings": {
+            "model": "fixture-model",
+            "effort": "high",
+            "mode": "development",
+            "language": "en"
+          },
+          "attachments": [
+            {
+              "name": "a.txt",
+              "mimeType": "text/plain",
+              "data": "YWJj"
+            }
+          ]
+        }
+      },
+      "saved": {},
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_version",
+        "message": "The task started or changed. Refresh before editing; your draft was not saved."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "edit-started",
+      "params": {
+        "action": "edit",
+        "taskId": "t1",
+        "expectedVersion": "1",
+        "payload": {
+          "title": "  New title  ",
+          "description": "New request",
+          "checkout": {
+            "kind": "main"
+          },
+          "settings": {
+            "model": "fixture-model",
+            "effort": "high",
+            "mode": "development",
+            "language": "en"
+          },
+          "attachments": [
+            {
+              "name": "a.txt",
+              "mimeType": "text/plain",
+              "data": "YWJj"
+            }
+          ]
+        }
+      },
+      "saved": {},
+      "options": {},
+      "store": true,
+      "runtime": "EXECUTING",
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "EXECUTING",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "task_started",
+        "message": "The task started or changed. Refresh before editing; your draft was not saved."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            "e1"
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "edit-missing",
+      "params": {
+        "action": "edit",
+        "taskId": "missing",
+        "expectedVersion": "1",
+        "payload": {
+          "title": "  New title  ",
+          "description": "New request",
+          "checkout": {
+            "kind": "main"
+          },
+          "settings": {
+            "model": "fixture-model",
+            "effort": "high",
+            "mode": "development",
+            "language": "en"
+          },
+          "attachments": [
+            {
+              "name": "a.txt",
+              "mimeType": "text/plain",
+              "data": "YWJj"
+            }
+          ]
+        }
+      },
+      "saved": {},
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unknown_task",
+        "message": "The task started or changed. Refresh before editing; your draft was not saved."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "edit-empty-title",
+      "params": {
+        "action": "edit",
+        "taskId": "t1",
+        "expectedVersion": "1",
+        "payload": {
+          "title": " ",
+          "description": "New request",
+          "checkout": {
+            "kind": "main"
+          },
+          "settings": {
+            "model": "fixture-model",
+            "effort": "high",
+            "mode": "development",
+            "language": "en"
+          },
+          "attachments": [
+            {
+              "name": "a.txt",
+              "mimeType": "text/plain",
+              "data": "YWJj"
+            }
+          ]
+        }
+      },
+      "saved": {},
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "title_required",
+        "message": "The task started or changed. Refresh before editing; your draft was not saved."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "edit-empty-request",
+      "params": {
+        "action": "edit",
+        "taskId": "t1",
+        "expectedVersion": "1",
+        "payload": {
+          "title": "  New title  ",
+          "description": " ",
+          "checkout": {
+            "kind": "main"
+          },
+          "settings": {
+            "model": "fixture-model",
+            "effort": "high",
+            "mode": "development",
+            "language": "en"
+          },
+          "attachments": [
+            {
+              "name": "a.txt",
+              "mimeType": "text/plain",
+              "data": "YWJj"
+            }
+          ]
+        }
+      },
+      "saved": {},
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "description_required",
+        "message": "The task started or changed. Refresh before editing; your draft was not saved."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "edit-invalid-version",
+      "params": {
+        "action": "edit",
+        "taskId": "t1",
+        "expectedVersion": 1,
+        "payload": {
+          "title": "  New title  ",
+          "description": "New request",
+          "checkout": {
+            "kind": "main"
+          },
+          "settings": {
+            "model": "fixture-model",
+            "effort": "high",
+            "mode": "development",
+            "language": "en"
+          },
+          "attachments": [
+            {
+              "name": "a.txt",
+              "mimeType": "text/plain",
+              "data": "YWJj"
+            }
+          ]
+        }
+      },
+      "saved": {},
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "machine_tool_failed",
+        "message": "ContractError"
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "edit-invalid-payload",
+      "params": {
+        "action": "edit",
+        "taskId": "t1",
+        "expectedVersion": "1",
+        "payload": {
+          "title": "  New title  ",
+          "description": "New request",
+          "checkout": {
+            "kind": "main"
+          },
+          "settings": {
+            "model": "fixture-model",
+            "effort": "high",
+            "mode": "development",
+            "language": "en"
+          },
+          "attachments": [
+            {
+              "name": "a.txt",
+              "mimeType": "text/plain",
+              "data": "YWJj"
+            }
+          ],
+          "unexpected": true
+        }
+      },
+      "saved": {},
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "machine_tool_failed",
+        "message": "ContractError"
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "edit-done",
+      "params": {
+        "action": "edit",
+        "taskId": "t1",
+        "expectedVersion": "1",
+        "payload": {
+          "title": "  New title  ",
+          "description": "New request",
+          "checkout": {
+            "kind": "main"
+          },
+          "settings": {
+            "model": "fixture-model",
+            "effort": "high",
+            "mode": "development",
+            "language": "en"
+          },
+          "attachments": [
+            {
+              "name": "a.txt",
+              "mimeType": "text/plain",
+              "data": "YWJj"
+            }
+          ]
+        }
+      },
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "done"
+          }
+        }
+      },
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "not_editable",
+        "message": "Only a saved task that has not started can be edited."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "status": "done"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "edit-archived",
+      "params": {
+        "action": "edit",
+        "taskId": "t1",
+        "expectedVersion": "1",
+        "payload": {
+          "title": "  New title  ",
+          "description": "New request",
+          "checkout": {
+            "kind": "main"
+          },
+          "settings": {
+            "model": "fixture-model",
+            "effort": "high",
+            "mode": "development",
+            "language": "en"
+          },
+          "attachments": [
+            {
+              "name": "a.txt",
+              "mimeType": "text/plain",
+              "data": "YWJj"
+            }
+          ]
+        }
+      },
+      "saved": {
+        "tasks": {
+          "t1": {
+            "archive": {
+              "at": 123
+            }
+          }
+        }
+      },
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "not_editable",
+        "message": "Only a saved task that has not started can be edited."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "archive": {
+              "at": 123
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "invalid-task",
+      "params": {
+        "action": "rename",
+        "taskId": "../foreign",
+        "title": "No"
+      },
+      "saved": {},
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "invalid_task",
+        "message": "Unknown task."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "sprint-new",
+      "params": {
+        "action": "sprint",
+        "taskId": "t1",
+        "sprintId": "sp1"
+      },
+      "saved": {
+        "sprints": [
+          {
+            "id": "sp1",
+            "taskIds": [
+              "earlier"
+            ],
+            "queueState": "complete",
+            "targetBranch": "main"
+          }
+        ]
+      },
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "dependencies": [],
+            "planning": false,
+            "sprintId": "sp1",
+            "targetBranch": "main",
+            "targetInherited": true
+          }
+        },
+        "sprints": [
+          {
+            "id": "sp1",
+            "pauseReason": "New task added. Continue the queue when ready.",
+            "queueState": "paused",
+            "targetBranch": "main",
+            "taskIds": [
+              "earlier",
+              "t1"
+            ]
+          }
+        ],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "sprint-planning",
+      "params": {
+        "action": "sprint",
+        "taskId": "t1",
+        "sprintId": "sp1",
+        "planning": true
+      },
+      "saved": {
+        "sprints": [
+          {
+            "id": "sp1",
+            "taskIds": [
+              "earlier"
+            ],
+            "queueState": "complete",
+            "targetBranch": "main"
+          }
+        ]
+      },
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "dependencies": [],
+            "planning": true,
+            "sprintId": "sp1",
+            "targetBranch": "main",
+            "targetInherited": true
+          }
+        },
+        "sprints": [
+          {
+            "id": "sp1",
+            "queueState": "complete",
+            "targetBranch": "main",
+            "taskIds": [
+              "earlier"
+            ]
+          }
+        ],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "sprint-deps",
+      "params": {
+        "action": "sprint",
+        "taskId": "t1",
+        "sprintId": "sp1",
+        "dependencies": [
+          "earlier"
+        ]
+      },
+      "saved": {
+        "sprints": [
+          {
+            "id": "sp1",
+            "taskIds": [
+              "earlier"
+            ],
+            "queueState": "complete",
+            "targetBranch": "main"
+          }
+        ]
+      },
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "dependencies": [
+              "earlier"
+            ],
+            "planning": false,
+            "sprintId": "sp1",
+            "targetBranch": "main",
+            "targetInherited": true
+          }
+        },
+        "sprints": [
+          {
+            "id": "sp1",
+            "pauseReason": "New task added. Continue the queue when ready.",
+            "queueState": "paused",
+            "targetBranch": "main",
+            "taskIds": [
+              "earlier",
+              "t1"
+            ]
+          }
+        ],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "sprint-duplicate",
+      "params": {
+        "action": "sprint",
+        "taskId": "t1",
+        "sprintId": "sp1",
+        "dependencies": [
+          "earlier",
+          "earlier"
+        ]
+      },
+      "saved": {
+        "sprints": [
+          {
+            "id": "sp1",
+            "taskIds": [
+              "earlier"
+            ],
+            "queueState": "complete",
+            "targetBranch": "main"
+          }
+        ]
+      },
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "invalid_dependencies",
+        "message": "Dependencies must be earlier tasks in this sprint."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [
+          {
+            "id": "sp1",
+            "queueState": "complete",
+            "targetBranch": "main",
+            "taskIds": [
+              "earlier"
+            ]
+          }
+        ],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "sprint-self",
+      "params": {
+        "action": "sprint",
+        "taskId": "t1",
+        "sprintId": "sp1",
+        "dependencies": [
+          "t1"
+        ]
+      },
+      "saved": {
+        "sprints": [
+          {
+            "id": "sp1",
+            "taskIds": [
+              "earlier"
+            ],
+            "queueState": "complete",
+            "targetBranch": "main"
+          }
+        ]
+      },
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "invalid_dependencies",
+        "message": "Dependencies must be earlier tasks in this sprint."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [
+          {
+            "id": "sp1",
+            "queueState": "complete",
+            "targetBranch": "main",
+            "taskIds": [
+              "earlier"
+            ]
+          }
+        ],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "sprint-foreign-dependency",
+      "params": {
+        "action": "sprint",
+        "taskId": "t1",
+        "sprintId": "sp1",
+        "dependencies": [
+          "other"
+        ]
+      },
+      "saved": {
+        "sprints": [
+          {
+            "id": "sp1",
+            "taskIds": [
+              "earlier"
+            ],
+            "queueState": "complete",
+            "targetBranch": "main"
+          }
+        ]
+      },
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "invalid_dependencies",
+        "message": "Dependencies must be earlier tasks in this sprint."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [
+          {
+            "id": "sp1",
+            "queueState": "complete",
+            "targetBranch": "main",
+            "taskIds": [
+              "earlier"
+            ]
+          }
+        ],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "sprint-bad-dependencies",
+      "params": {
+        "action": "sprint",
+        "taskId": "t1",
+        "sprintId": "sp1",
+        "dependencies": "earlier"
+      },
+      "saved": {
+        "sprints": [
+          {
+            "id": "sp1",
+            "taskIds": [
+              "earlier"
+            ],
+            "queueState": "complete",
+            "targetBranch": "main"
+          }
+        ]
+      },
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "invalid_dependencies",
+        "message": "Dependencies must be earlier tasks in this sprint."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [
+          {
+            "id": "sp1",
+            "queueState": "complete",
+            "targetBranch": "main",
+            "taskIds": [
+              "earlier"
+            ]
+          }
+        ],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "sprint-plain",
+      "params": {
+        "action": "sprint",
+        "taskId": "t1",
+        "sprintId": "sp1"
+      },
+      "saved": {
+        "sprints": [
+          {
+            "id": "sp1",
+            "taskIds": [
+              "earlier"
+            ],
+            "queueState": "complete",
+            "targetBranch": "main"
+          }
+        ]
+      },
+      "options": {},
+      "store": false,
+      "runtime": null,
+      "rows": [],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "dependencies": [],
+            "planning": false,
+            "sprintId": "sp1",
+            "targetBranch": "main",
+            "targetInherited": true
+          }
+        },
+        "sprints": [
+          {
+            "id": "sp1",
+            "pauseReason": "New task added. Continue the queue when ready.",
+            "queueState": "paused",
+            "targetBranch": "main",
+            "taskIds": [
+              "earlier",
+              "t1"
+            ]
+          }
+        ],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": null
+    },
+    {
+      "name": "sprint-started",
+      "params": {
+        "action": "sprint",
+        "taskId": "t1",
+        "sprintId": "sp1"
+      },
+      "saved": {
+        "sprints": [
+          {
+            "id": "sp1",
+            "taskIds": [
+              "earlier"
+            ],
+            "queueState": "complete",
+            "targetBranch": "main"
+          }
+        ]
+      },
+      "options": {},
+      "store": true,
+      "runtime": "EXECUTING",
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "EXECUTING",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "not_editable",
+        "message": "Only a task that has not started can join a sprint."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [
+          {
+            "id": "sp1",
+            "queueState": "complete",
+            "targetBranch": "main",
+            "taskIds": [
+              "earlier"
+            ]
+          }
+        ],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            "e1"
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "sprint-missing",
+      "params": {
+        "action": "sprint",
+        "taskId": "missing",
+        "sprintId": "sp1"
+      },
+      "saved": {
+        "sprints": [
+          {
+            "id": "sp1",
+            "taskIds": [
+              "earlier"
+            ],
+            "queueState": "complete",
+            "targetBranch": "main"
+          }
+        ]
+      },
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "not_editable",
+        "message": "Only a task that has not started can join a sprint."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [
+          {
+            "id": "sp1",
+            "queueState": "complete",
+            "targetBranch": "main",
+            "taskIds": [
+              "earlier"
+            ]
+          }
+        ],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "sprint-closed",
+      "params": {
+        "action": "sprint",
+        "taskId": "t1",
+        "sprintId": "sp1"
+      },
+      "saved": {
+        "sprints": [
+          {
+            "id": "sp1",
+            "taskIds": [
+              "earlier"
+            ],
+            "queueState": "complete",
+            "targetBranch": "main",
+            "archivedAt": 1
+          }
+        ]
+      },
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "sprint_closed",
+        "message": "This sprint is closed. Create the task outside it."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [
+          {
+            "archivedAt": 1,
+            "id": "sp1",
+            "queueState": "complete",
+            "targetBranch": "main",
+            "taskIds": [
+              "earlier"
+            ]
+          }
+        ],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "sprint-unknown",
+      "params": {
+        "action": "sprint",
+        "taskId": "t1",
+        "sprintId": "missing"
+      },
+      "saved": {},
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unknown_sprint",
+        "message": "Unknown sprint."
+      },
+      "after": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "sprint-linked-elsewhere",
+      "params": {
+        "action": "sprint",
+        "taskId": "t1",
+        "sprintId": "sp1"
+      },
+      "saved": {
+        "sprints": [
+          {
+            "id": "sp1",
+            "taskIds": [
+              "earlier"
+            ],
+            "queueState": "complete",
+            "targetBranch": "main"
+          }
+        ],
+        "tasks": {
+          "t1": {
+            "sprintId": "other"
+          }
+        }
+      },
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "already_linked",
+        "message": "This task already belongs to a sprint."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "sprintId": "other"
+          }
+        },
+        "sprints": [
+          {
+            "id": "sp1",
+            "queueState": "complete",
+            "targetBranch": "main",
+            "taskIds": [
+              "earlier"
+            ]
+          }
+        ],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "sprint-repeat",
+      "params": {
+        "action": "sprint",
+        "taskId": "t1",
+        "sprintId": "sp1",
+        "dependencies": [
+          "earlier"
+        ]
+      },
+      "saved": {
+        "sprints": [
+          {
+            "id": "sp1",
+            "taskIds": [
+              "earlier",
+              "t1"
+            ],
+            "queueState": "complete",
+            "targetBranch": "main"
+          }
+        ],
+        "tasks": {
+          "t1": {
+            "sprintId": "sp1",
+            "dependencies": [
+              "earlier"
+            ],
+            "targetBranch": "chosen"
+          }
+        }
+      },
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "dependencies": [
+              "earlier"
+            ],
+            "planning": false,
+            "sprintId": "sp1",
+            "targetBranch": "chosen"
+          }
+        },
+        "sprints": [
+          {
+            "id": "sp1",
+            "queueState": "complete",
+            "targetBranch": "main",
+            "taskIds": [
+              "earlier",
+              "t1"
+            ]
+          }
+        ],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": false
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "name": "sprint-rewrite-deps",
+      "params": {
+        "action": "sprint",
+        "taskId": "t1",
+        "sprintId": "sp1",
+        "dependencies": []
+      },
+      "saved": {
+        "sprints": [
+          {
+            "id": "sp1",
+            "taskIds": [
+              "earlier",
+              "t1"
+            ],
+            "queueState": "complete",
+            "targetBranch": "main"
+          }
+        ],
+        "tasks": {
+          "t1": {
+            "sprintId": "sp1",
+            "dependencies": [
+              "earlier"
+            ]
+          }
+        }
+      },
+      "options": {},
+      "store": true,
+      "runtime": null,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{}"
+          ]
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "already_linked",
+        "message": "Existing task dependencies stay unchanged."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "dependencies": [
+              "earlier"
+            ],
+            "sprintId": "sp1"
+          }
+        },
+        "sprints": [
+          {
+            "id": "sp1",
+            "queueState": "complete",
+            "targetBranch": "main",
+            "taskIds": [
+              "earlier",
+              "t1"
+            ]
+          }
+        ],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observed": {
+        "tasks": [
+          [
+            "t1",
+            "Build task",
+            1,
+            null
+          ]
+        ],
+        "options": [
+          [
+            "t1",
+            {}
+          ]
+        ],
+        "projects": [
+          [
+            "p1",
+            1
+          ]
+        ]
+      }
+    }
+  ]
+}

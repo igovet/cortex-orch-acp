@@ -14,8 +14,8 @@ CW-R05 (results expose evidence, missing checks and the exact revision), CW-R07 
 
 - [domain-model](../domain-model.md): a result identifies evidence, check outcomes and the workspace or artifact digest; acceptance attaches to that digest and drift marks it stale.
 - [consistency-and-recovery](../consistency-and-recovery.md): a changed result digest invalidates prior acceptance.
-- Existing runtime evidence and gates: `src/cortex_runtime/delegation/evidence.py`, and the stale-verification comparison described in [workspaces-and-integration](../../features/workspaces-and-integration/index.md) (revision binding and re-verification).
-- Existing digest capture: `src/cortex_runtime/delegation/revision.py`. Confirm the digest scope in source before relying on it.
+- Existing runtime evidence and gates: the former `delegation/evidence` module, and the stale-verification comparison described in [workspaces-and-integration](../../features/workspaces-and-integration/index.md) (revision binding and re-verification).
+- Existing digest capture: the former `delegation/revision` module. Confirm the digest scope in source before relying on it.
 - [CW-C04](CW-C04.md): the typed execution projection this result hangs from.
 
 ## Deliverables

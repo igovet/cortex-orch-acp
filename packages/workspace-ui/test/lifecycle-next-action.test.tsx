@@ -130,7 +130,9 @@ it("a busy button keeps its label and icon readable, so it never seems to vanish
 });
 
 it("a sprint whose tasks could not be loaded offers Retry and an explicit container-only close", async () => {
-  await mount(world({}, {}, [sprint({ taskIds: ["gone"] })]), `/m/${LOCAL_MACHINE_ID}/p/p/s/sp/summary`);
+  const state = world({}, {}, [sprint({ taskIds: ["gone"] })]);
+  state.projects[0].issue = "The project failed repeated reads.";
+  await mount(state, `/m/${LOCAL_MACHINE_ID}/p/p/s/sp/summary`);
   expect(text()).toContain("Task details unavailable");
   expect(text()).not.toContain("No tasks yet");
   expect(control("Retry")).toBeTruthy();

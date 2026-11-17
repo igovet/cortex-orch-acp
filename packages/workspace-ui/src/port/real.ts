@@ -2,19 +2,24 @@ import { wireAttachments as checkedAttachments } from "../attachments";
 import { capabilities as localCapabilities, decodeResponse, negotiate, PROTOCOL, validate } from "@cortex/workspace-contract";
 import type { Answer as WireAnswer, Decision as WireDecision, Receipt as WireReceipt, Result as WireResult, Task as WireTask, HistoryRow, WireTypes } from "@cortex/workspace-contract";
 import { ACCESS_MODES, capabilityOf, checksPassed, DomainError, effortLabel, ENGINE_KEYS, engineLabel, FEATURES, LANGUAGES, LOCAL_MACHINE_ID, MACHINE_COMMANDS, mapProjectSlice, readableCheckReason, emptySession, overlayTask, runOrder, sprintTaskCheckout, validatePlan, WIRE_OPERATIONS } from "@cortex/workspace-domain";
+import { nativeDelta, nativeVersion } from "./native";
+import { applyNativeTaskDelta, weeklyUsage } from "@cortex/workspace-domain";
+import type { NativeTaskDelta, NativeTaskSnapshot } from "@cortex/workspace-domain";
 import { conversationOf } from "./history";
 import { same } from "../stable";
-import type { CommandEnvelope, CommandReceipt, DirectorySearch, EngineConnection, EngineWeeklyUsage, FileDiff, FileRead, FileSaveResult, Machine, MachineConfig, MachineFacts, Message, PlanItem, PortCapabilities, PortUpdate, ProjectFacts, ProjectionUpdate, ProjectRepo, ProjectSlice, QueryOperation, QueryParameters, QueryResults, SessionOptions, Sprint, TaskChanges, TaskOverlay, Worker, WorkspaceCommand, WorkspacePort } from "@cortex/workspace-domain";
+import { readBoards, writeBoards, type BoardStorage, type CachedBoard } from "./board-cache";
+import { liveMembers, presentSprint, unreadMembers, type SavedSprint } from "./sprint-members";
+import type { CatalogueState, CommandEnvelope, CommandReceipt, DirectorySearch, EngineConnection, EngineWeeklyUsage, FileDiff, FileRead, FileSaveResult, Machine, MachineConfig, MachineFacts, Message, PlanItem, PortCapabilities, PortUpdate, ProjectFacts, ProjectionUpdate, ProjectRepo, ProjectSlice, QueryOperation, QueryParameters, QueryResults, SessionOptions, Sprint, TaskChanges, TaskOverlay, Worker, WorkspaceCommand, WorkspacePort } from "@cortex/workspace-domain";
 
 /** How the native bridge reaches the machine service. The bridge owns the socket; this side only ever sees typed messages. */
-export type TransportEvent = { type: "connection"; state: "connected" | "disconnected" | "unavailable"; reason?: string } | { type: "invalidated"; projectId: string } | { type: "refresh" };
+export type TransportEvent = { type: "connection"; state: "connecting" | "connected" | "disconnected" | "unavailable"; reason?: string } | { type: "invalidated"; projectId: string; source?: "runtime" } | { type: "refresh" } | ({ type: "native_delta" } & NativeTaskDelta) | { type: "native_resync"; projectId: string };
 export type RealTransport = {
   request(operation: string, message: unknown): Promise<unknown>;
   subscribe(listener: (event: TransportEvent) => void): () => void;
 };
 /** One project the service has registered. Listing them is the service's; here they arrive already resolved. */
 export type ProjectLocator = { projectId: string; name: string; repository: string; openBranch: string; defaultBranch: string; activated?: boolean };
-export type RealPortOptions = { transport: RealTransport; actorId: string; projects?: ProjectLocator[]; registry?: boolean };
+export type RealPortOptions = { transport: RealTransport; actorId: string; projects?: ProjectLocator[]; registry?: boolean; boardStorage?: BoardStorage };
 
 /** For a build with no bridge yet. It fails every call, so the screen says so instead of showing anything. */
 export function unavailableTransport(): RealTransport {
@@ -61,10 +66,50 @@ const unsupported = (requestId: string): CommandReceipt => ({ requestId, ok: fal
  * What is left is outside Git and config: a quiet round waits longer, and returning to the window reads at once.
  */
 export const FACTS_POLL_MS = 30_000, FACTS_POLL_MAX_MS = 120_000, MACHINE_POLL_MS = 300_000;
-type Product = { hasGit?: boolean; tasks: Record<string, TaskOverlay>; sprints: (Sprint & { planningTaskId?: string })[]; drafts?: Record<string, string>; messages?: Message[]; comments?: Record<string, TaskChanges["comments"]> };
+/** First retry delay of a failed repository read; doubles per failure up to FACTS_POLL_MS. */
+export const REPO_RETRY_MS = 3_000;
+/**
+ * The service reads each connection's engine limits at most every five minutes, in background passes 15 seconds apart
+ * (`usage_refresh.rs`), and only while settings are being read. A machine read lands `USAGE_GRACE_MS` after the next
+ * snapshot is due, so what the sidebar shows is never older than `USAGE_REFRESH_MS + USAGE_GRACE_MS` while the window
+ * is visible. Two unaligned five-minute timers in a row had let it reach twenty minutes.
+ */
+export const USAGE_REFRESH_MS = 300_000, USAGE_GRACE_MS = 45_000, USAGE_RETRY_MS = 30_000, USAGE_LATE_MS = 120_000;
+/**
+ * How long until the next machine read, given when each engine's shown limits were observed (ms since the epoch).
+ * A late snapshot is asked for again every `USAGE_RETRY_MS` for `USAGE_LATE_MS`; after that the engine is left to the plain
+ * `MACHINE_POLL_MS` poll, so one that cannot report never makes reads more frequent. With limits shown, the machine is read
+ * about once per snapshot (every five minutes and a little), instead of on the plain poll as well. `catchUp` (the first read, or the first
+ * after the window was hidden, when the service's loop starts again) asks once more soon for a snapshot already overdue.
+ */
+export function machineReadDelay(observed: readonly number[], now: number, catchUp: boolean): number {
+  const next = observed.filter(Number.isFinite).map(at => at + USAGE_REFRESH_MS + USAGE_GRACE_MS);
+  if (catchUp && next.some(due => due <= now)) return USAGE_RETRY_MS;
+  const due = next.filter(at => at > now - USAGE_LATE_MS);
+  if (!due.length) return MACHINE_POLL_MS;
+  // Never later than one snapshot and its grace, even for a time ahead of this clock.
+  return Math.min(USAGE_REFRESH_MS + USAGE_GRACE_MS, Math.max(USAGE_RETRY_MS, Math.min(...due) - now));
+}
+/** When each engine's newest shown limit was observed, in ms since the epoch. An engine with no time is left out. */
+export function usageObserved(rows: readonly EngineWeeklyUsage[]): number[] {
+  return rows.flatMap(row => {
+    const times = [row.observedAt, ...(row.windows ?? []).map(w => w.observedAt)].flatMap(at => { const t = at ? Date.parse(at) : NaN; return Number.isFinite(t) ? [t] : []; });
+    return times.length ? [Math.max(...times)] : [];
+  });
+}
+type Product = { hasGit?: boolean; tasks: Record<string, TaskOverlay>; sprints: SavedSprint[]; drafts?: Record<string, string>; messages?: Message[]; comments?: Record<string, TaskChanges["comments"]> };
 type MachineRead = Partial<Machine> & { name: string };
-type ConfigRead = { config: MachineConfig; connections: EngineConnection[]; tokens: Record<string, unknown>; usage?: EngineWeeklyUsage[] };
+type ConfigRead = { config: MachineConfig; connections: EngineConnection[]; tokens: Record<string, unknown>; usage?: EngineWeeklyUsage[]; catalogueRefresh?: CatalogueState };
+class BoardPending extends Error {}
+/** Newer stream events made a background details read obsolete. That is neither success nor failure. */
+class DetailsSuperseded extends Error {}
 class Refusal extends Error { constructor(readonly code: string, message: string) { super(message); } }
+/** A read's own error, on one bounded line: the code the service gave and its message, never a payload. */
+function readCause(error: unknown) {
+  const code = (error as { code?: unknown })?.code, message = error instanceof Error ? error.message : String(error);
+  const line = `${typeof code === "string" && code && !message.startsWith(code) ? code + ": " : ""}${message}`.replace(/\s+/g, " ").trim();
+  return line.length > 300 ? line.slice(0, 299) + "…" : line;
+}
 function wireAttachments(files: Message["attachments"] = []) {
   try { return checkedAttachments(files); }
   catch (error) { throw new Refusal("invalid_attachment", error instanceof Error ? error.message : "Choose the files again."); }
@@ -112,7 +157,16 @@ function changesOf(repo: ProjectRepo | null, taskId?: string, overlay?: TaskOver
 export function createRealPort(options: RealPortOptions): WorkspacePort {
   const { transport, actorId } = options, projects = options.projects ?? [];
   const observers = new Set<(update: PortUpdate) => void>();
+  const cachedBoards = new Map(readBoards(options.boardStorage,actorId).map(b => [b.project.projectId,b]));
+  /** Projects whose tasks the service has confirmed since launch, and the reads waiting for that. */
+  const confirmedProjects = new Set<string>(), confirmations = new Set<() => void>();
+  const recheckConfirmations = () => { for (const check of [...confirmations]) check(); };
   const tasks = new Map<string, { projectId: string; version: string; executionId?: string | null }>(), decisions = new Map<string, { projectId: string; wire: WireDecision }>();
+  const nativeSnapshots = new Map<string, NativeTaskSnapshot>();
+  const boardTasks = new Map<string, Set<string>>();
+  const nativeWork = new Map<string, Promise<void>>();
+  const nativeQueued = new Map<string, number>(), nativeEpoch = new Map<string, number>();
+  const wireDecisions = new Map<string, WireDecision[]>(), wireResults = new Map<string, WireResult[]>();
   const slices = new Map<string, ProjectSlice>(), localDrafts = new Map<string, string>();
   /** Durable queue and exact-attempt guidance read from the machine. */
   const messages: Message[] = [];
@@ -135,7 +189,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   };
   /** Projects whose events arrived since the last refresh; the next refresh reads these and leaves the rest. */
   let invalidated = new Set<string>(), readScope = new Set<string>();
-  let offered: string[] = [], serviceMethods: string[] = [], machineOn = false, configTokens: Record<string, unknown> = {}, configRead: ConfigRead | null = null;
+  let offered: string[] = [], serviceMethods: string[] = [], machineOn = false, taskWorktrees = true, configTokens: Record<string, unknown> = {}, configRead: ConfigRead | null = null;
 
   async function machine<T>(op: string, projectId?: string, params?: unknown): Promise<T> {
     const reply = await transport.request("machine.call", { op, ...(projectId ? { projectId } : {}), ...(params === undefined ? {} : { params }) }) as { ok?: boolean; result?: T; code?: string; message?: string };
@@ -172,23 +226,39 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     if (project.activated === false || !serviceMethods.includes("projects.status")) return null;
     const status = await transport.request("projects.status", { projectId: project.projectId }) as { ready?: boolean; state?: string; reason?: string | null };
     if (status?.ready === true) return null;
-    if (status?.state === "starting" && !status.reason) return "This project is starting.";
-    if (status?.state === "recovering") return "This project is busy and catching up.";
+    if (["starting","recovering"].includes(status?.state ?? "") && !status.reason) return null;
     if (status?.reason?.startsWith("dev_project_refused")) return "The dev store ownership changed. Release data was not opened. Check the dev project folder before retrying.";
     return PROJECT_ISSUES[status?.reason ?? ""] ?? "This project could not start.";
   }
 
   type RepoRead = ProjectRepo & { openBranch: string; defaultBranch: string; taskDiffs?: Record<string,{files:FileDiff[];reason?:string}> };
-  const repoReads = new Map<string, { at: number; pending: Promise<RepoRead | null>; running: boolean; value: RepoRead | null; error: boolean }>();
-  async function repositoryFacts(id: string, fresh = false) {
+  const repoReads = new Map<string, { at: number; pending: Promise<RepoRead | null>; running: boolean; value: RepoRead | null; error: boolean; reason?: string }>();
+  /** A failed repository read is retried on its own, soon and then less often, while a screen
+   *  is open: a cause fixed outside the app (a folder's permissions, a Git lock) clears without
+   *  waiting for the slow facts poll, an unrelated event or a restart. */
+  const repoRetries = new Map<string, { timer?: ReturnType<typeof setTimeout>; failures: number }>();
+  function retryRepository(id: string) {
+    const retry = repoRetries.get(id) ?? { failures: 0 };
+    retry.failures++;
+    repoRetries.set(id, retry);
+    if (retry.timer !== undefined || !observers.size) return;
+    retry.timer = setTimeout(() => {
+      retry.timer = undefined;
+      if (observers.size && projects.some(p => p.projectId === id)) void repositoryFacts(id, true, true);
+    }, Math.min(REPO_RETRY_MS * 2 ** (retry.failures - 1), FACTS_POLL_MS));
+  }
+  async function repositoryFacts(id: string, fresh = false, publish = false) {
     let entry = repoReads.get(id);
     if (!entry || (!entry.running && (fresh || Date.now() - entry.at > 3000))) {
       const previous = entry?.value ?? null;
       entry = { at: Date.now(), pending: machine<RepoRead | null>("repo.snapshot", id), running: true, value: previous, error: false };
       repoReads.set(id, entry);
       const current = entry;
-      let deferred = previous !== null;
+      // A retry after a failure publishes its result itself: no screen read is waiting for it.
+      let deferred = previous !== null || publish;
       current.pending = current.pending.then(value => {
+        const retry = repoRetries.get(id);
+        if (retry) { clearTimeout(retry.timer); repoRetries.delete(id); }
         current.value = value;
         if (deferred && repoReads.get(id) === current) {
           // A slow Git reply is new facts, not a new task snapshot. A full refresh
@@ -199,7 +269,13 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
           }).catch(() => {}); // Keep the last confirmed facts; the normal poll retries.
         }
         return value;
-      }).catch(() => { current.error = true; return current.value; }).finally(() => { current.running = false; current.at = Date.now(); });
+      }).catch(error => {
+        current.error = true;
+        // The machine's own words say what is wrong and where; anything else stays generic.
+        current.reason = error instanceof Refusal && error.code !== "machine_tool_failed" ? error.message : undefined;
+        if (repoReads.get(id) === current) retryRepository(id);
+        return current.value;
+      }).finally(() => { current.running = false; current.at = Date.now(); });
       // Cached facts render immediately; the single in-flight read publishes its replacement.
       if (previous !== null) return entry;
       // Only fast Git belongs on the coherent task refresh path. A large checkout finishes separately.
@@ -212,6 +288,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
 
   async function factsOf(project: ProjectLocator, fresh = false): Promise<ProjectFacts> {
     const id = project.projectId;
+    if (serviceMethods.includes("native.board")) await presentations.get(id);
     const started = [...tasks].filter(([, t]) => t.projectId === id && t.executionId).map(([taskId]) => taskId);
     // Independent reads overlap; neither Git nor workers delays sending the product read.
     const [bundle, repository] = await Promise.all([
@@ -219,6 +296,18 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       repositoryFacts(id, fresh),
     ]);
     const { product, workers } = bundle;
+    factsReadAt.set(id, Date.now());
+    // Polls and explicit facts reads must obey the same membership fence as the first board.
+    if (serviceMethods.includes("native.board")) {
+      const confirmed = boardTasks.get(id);
+      if (!confirmed) throw new BoardPending();
+      // A member the service already deleted is never on the board again; only the members that still exist must be.
+      if (product.sprints.some(s => liveMembers(product.tasks, s).some(taskId => !confirmed.has(taskId)))) {
+        invalidated.add(id);
+        for (const notify of observers) notify({kind:"refresh"});
+        throw new BoardPending();
+      }
+    }
     rememberSprints(id, product);
     const read = repository.value;
     // A copy, never the cached read itself: the next reads share that one, and the poll compares these facts with the last sent.
@@ -230,29 +319,76 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     const ownMessages = [...(product.messages ?? []), ...workers.flatMap(w => w.messages ?? [])];
     for (let i = messages.length - 1; i >= 0; i--) if (tasks.get(messages[i].taskId)?.projectId === id) messages.splice(i, 1);
     messages.push(...ownMessages);
-    const reviews: TaskChanges[] = started.filter(taskId => product.tasks[taskId]?.status !== "done").map(taskId => ({ taskId, sha: "", unavailableReason: repo?.taskDiffs?.[taskId]?.reason ?? (!repo || repository.error ? "Repository details are updating or unavailable. Refresh Code or inspect Git before reviewing changes." : undefined), files: repo?.taskDiffs?.[taskId]?.files ?? changesOf(repo, taskId, product.tasks[taskId]), scopes: [], comments: product.comments?.[taskId] ?? [] }));
-    return { projectId: id, hasGit: product.hasGit, issue: await issueOf(project), openBranch: repo?.openBranch ?? "", defaultBranch: repo?.defaultBranch ?? "", repo, workers, reviews, overlays: product.tasks, sprints: product.sprints.map(withPlanning), messages: messages.filter(m => tasks.get(m.taskId)?.projectId === id),
+    // A task closed as is keeps its changes where they are, so its Changes tab keeps showing them. In the shared project
+    // folder only the files its workers recorded writing are its own; without such a record nothing is attributed to it.
+    const recorded = (taskId: string) => new Set(workers.filter(w => w.taskId === taskId).flatMap(w => w.result?.edits ?? []).map(e => e.path));
+    const keptFiles = (taskId: string) => {
+      const files = changesOf(repo, taskId, product.tasks[taskId]);
+      if (product.tasks[taskId]?.checkout?.kind === "worktree") return files;
+      const own = recorded(taskId);
+      return files.filter(f => own.has(f.path));
+    };
+    const reviewed = (taskId: string) => product.tasks[taskId]?.status !== "done" || (product.tasks[taskId]?.closedAs === "as_is" && (!!repo?.taskDiffs?.[taskId] || recorded(taskId).size > 0));
+    const reviews: TaskChanges[] = started.filter(reviewed).map(taskId => ({ taskId, sha: "", unavailableReason: repo?.taskDiffs?.[taskId]?.reason ?? (!repo || repository.error ? (repository.error && repository.reason) || "Repository details are updating or unavailable. Refresh Code or inspect Git before reviewing changes." : undefined), files: repo?.taskDiffs?.[taskId]?.files ?? (product.tasks[taskId]?.status === "done" ? keptFiles(taskId) : changesOf(repo, taskId, product.tasks[taskId])), scopes: [], comments: product.comments?.[taskId] ?? [] }));
+    return { projectId: id, hasGit: product.hasGit, issue: await issueOf(project), openBranch: repo?.openBranch ?? "", defaultBranch: repo?.defaultBranch ?? "", repo, workers, reviews, overlays: product.tasks, sprints: product.sprints.map(s => withPlanning(presentSprint(product.tasks, s))), messages: messages.filter(m => tasks.get(m.taskId)?.projectId === id),
       heldAnswers: Object.fromEntries([...held.values()].flatMap(batch => [...batch].filter(([decisionId]) => decisions.get(decisionId)?.projectId === id).map(([decisionId, answer]) => [decisionId, answer.answer.text]))) };
   }
 
   const configBases = new Map<string, Record<string, unknown>>();
+  /** Told after every settings read, wherever it came from, so the machine poll lines up with the service's next limits snapshot. */
+  const machineReads = new Set<(observed: number[]) => void>();
+  let lastObserved: number[] | null = null;
+  /** What the first screen needs: settings, connections, engine usage and the composer's options. Never the overview. */
   async function machineFacts(): Promise<MachineFacts> {
-    const overview = await machine<MachineRead>("overview");
+    const facts = await readMachineFacts();
+    const observed = lastObserved = usageObserved(facts.engineUsage ?? []);
+    for (const read of machineReads) read(observed);
+    return facts;
+  }
+  async function readMachineFacts(): Promise<MachineFacts> {
+    const currentRead = await machine<ConfigRead>("config.read");
     // First activation and background engine setup can create files without a UI command.
-    configRead = await machine<ConfigRead>("config.read");
-    configTokens = configRead.tokens;
-    for (const [surface, revision] of Object.entries(configRead.config.revisions ?? {})) configBases.set(`${surface}:${revision}`, configTokens);
-    for (const project of projects.filter(p => p.activated !== false)) {
-      const saved = await machine<{value: MachineConfig["projects"][string]; tokens: Record<string, unknown>}>("project.config.read", project.projectId);
-      configRead.config.projects[project.projectId] = saved.value;
+    configRead = currentRead;
+    configTokens = currentRead.tokens;
+    for (const [surface, revision] of Object.entries(currentRead.config.revisions ?? {})) configBases.set(`${surface}:${revision}`, currentRead.tokens);
+    // One project's refused store must not hide the machine's own settings behind
+    // the empty placeholder. Its overrides stay unread, and unsaveable, until a read succeeds.
+    const saves = await Promise.all(projects.filter(p => p.activated !== false).map(async project => {
+      try { return { project, saved: await machine<{value: MachineConfig["projects"][string]; tokens: Record<string, unknown>}>("project.config.read", project.projectId) }; }
+      catch (error) { if (!(error instanceof Refusal)) throw error; projectConfigTokens.delete(project.projectId); return null; }
+    }));
+    for (const entry of saves) {
+      if (!entry) continue;
+      const { project, saved } = entry;
+      currentRead.config.projects[project.projectId] = saved.value;
       projectConfigTokens.set(project.projectId, saved.tokens);
       for (const [surface,revision] of Object.entries(saved.value.revisions ?? {})) projectConfigBases.set(`${project.projectId}:${surface}:${revision}`, saved.tokens);
     }
-    const { name, retentionDays, autoArchiveDays, worktreeRoot, defaultWorktreeRoot, version, diskMb, storage, cleanup, diagnostics, ghAvailable, reclamationFailures } = overview;
-    return { machineId: LOCAL_MACHINE_ID, engineUsage: configRead.usage ?? [], options: sessionOptions(configRead.config), patch: { ghAvailable, reclamationFailures, name, retentionDays, autoArchiveDays, worktreeRoot, defaultWorktreeRoot, version, diskMb, storage, cleanup, diagnostics, config: configRead.config, connections: configRead.connections, lastConfirmedAt: new Date().toISOString() } };
+    return { machineId: LOCAL_MACHINE_ID, engineUsage: weeklyUsage(currentRead.usage ?? []), options: sessionOptions(currentRead.config), catalogue: currentRead.catalogueRefresh, patch: { config: currentRead.config, connections: currentRead.connections, lastConfirmedAt: new Date().toISOString() } };
+  }
+  /** Read when a screen that shows storage, retention, worktrees, the version or GitHub CLI opens. Once asked for, the machine poll keeps it current. */
+  let overviewAsked = false;
+  async function machineOverview(): Promise<MachineFacts> {
+    overviewAsked = true;
+    const { name, retentionDays, autoArchiveDays, worktreeRoot, defaultWorktreeRoot, version, diskMb, storage, cleanup, diagnostics, ghAvailable, reclamationFailures } = await machine<MachineRead>("overview");
+    return { machineId: LOCAL_MACHINE_ID, patch: { ghAvailable, reclamationFailures, name, retentionDays, autoArchiveDays, worktreeRoot, defaultWorktreeRoot, version, diskMb, storage, cleanup, diagnostics } };
   }
 
-  const read = async <K extends keyof WireTypes>(type: K, operation: string, message: unknown) => decodeResponse(type, await transport.request(operation, message)).value;
+  async function nativeRead(projectId: string, operation: string, payload: unknown) {
+    const raw = await transport.request(operation === "tasks.board" ? "native.board" : "native.query", { protocol: { major: 2, mapping: 2 }, requestId: `native-${operation}-${projectId}`, projectId, operation, payload });
+    const reply = raw as { protocol?: { major?: number; mapping?: number }; generation?: string; projectId?: string; highWatermark?: string; version?: string; data?: { type?: string; value?: unknown } };
+    if (reply?.protocol?.major !== 2 || reply.protocol.mapping !== 2 || reply.projectId !== projectId || !reply.generation || !nativeVersion(reply.highWatermark) || !nativeVersion(reply.version) || !reply.data) throw new Error("Invalid native read reply");
+    return reply as { generation: string; projectId: string; highWatermark: string; version: string; data: { type: string; value: unknown } };
+  }
+  const read = async <K extends keyof WireTypes>(type: K, operation: string, message: unknown): Promise<WireTypes[K]> => {
+    const m = message as { projectId?: string; target?: string; cursor?: string; limit?: number };
+    if (serviceMethods.includes("native.query") && m.projectId && ["tasks.get", "history.page"].includes(operation)) {
+      const reply = await nativeRead(m.projectId, operation, operation === "tasks.get" ? { id: m.target } : { target: m.target, cursor: m.cursor ?? null, limit: m.limit ?? 100 });
+      if (reply.data.type !== (operation === "tasks.get" ? "task" : "history")) throw new Error("Native read type mismatch");
+      return decodeResponse(type, reply.data.value).value;
+    }
+    return decodeResponse(type, await transport.request(operation, message)).value;
+  };
 
   async function capabilitiesGet(): Promise<PortCapabilities> {
     if (options.registry) {
@@ -260,6 +396,8 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       if (!Array.isArray(service.methods) || !service.methods.every(m => typeof m === "string")) throw new Error("Invalid service capabilities");
       serviceMethods = service.methods;
       machineOn = (service as { machine?: unknown }).machine === true;
+      // A native host runs tasks only in the project folder; it says so explicitly.
+      taskWorktrees = (service as { taskWorktrees?: unknown }).taskWorktrees !== false;
       const registry = await transport.request("projects.list", {});
       if (!Array.isArray(registry)) throw new Error("Invalid project registry");
       const next: ProjectLocator[] = registry.map(p => {
@@ -267,16 +405,52 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         return {projectId:p.projectId,name:p.displayName,repository:p.canonicalRoot,openBranch:"",defaultBranch:"",activated:p.activation != null};
       });
       projects.splice(0, projects.length, ...next);
+      for (const [id,b] of cachedBoards) if (!next.some(p => p.projectId === id && p.repository === b.project.repository)) cachedBoards.delete(id);
+      writeBoards(options.boardStorage,actorId,[...cachedBoards.values()]);
+      recheckConfirmations();
       for (const notify of observers) notify({kind:"registry",projectIds:next.map(p => p.projectId)});
+      for (const project of next) projectState(project, "registry", null);
     }
     const remote = await read("Capabilities", "capabilities.get", { protocol: { ...PROTOCOL }, requestId: "read-capabilities" });
     const shared = negotiate(localCapabilities("workspace-ui", "0", remote.operations), remote);
     offered = shared.operations;
     attachmentSupport = remote.attachments === true;
-    return { everything: false, operations: [...(attachmentSupport ? ["workspace.attachments"] : []), ...WIRE_OPERATIONS.filter(operation => offered.includes(operation)), ...(serviceMethods.includes("native.pick_folder") ? ["workspace.pick_folder"] : []), ...(serviceMethods.includes("directories.search") ? ["workspace.search_folders"] : []), ...(serviceMethods.includes("projects.register") ? ["workspace.add_project"] : []), ...(serviceMethods.includes("projects.rename") ? ["workspace.rename_project"] : []), ...(serviceMethods.includes("projects.activate") ? ["workspace.activate_project"] : []), ...(serviceMethods.includes("projects.remove") ? ["workspace.remove_project"] : []), ...(serviceMethods.includes("native.open_editor") ? ["workspace.open_editor"] : []), ...(serviceMethods.includes("native.open_editor.vscode") ? ["workspace.open_vscode"] : []), ...(serviceMethods.includes("native.open_logs") ? ["workspace.open_logs"] : []), ...(machineOn ? [...MACHINE_COMMANDS.map(capabilityOf), FEATURES.editFiles, "workspace.worker_messages", "workspace.task_worktrees", "workspace.task_route"] : [])] };
+    return { everything: false, operations: [...(attachmentSupport ? ["workspace.attachments"] : []), ...WIRE_OPERATIONS.filter(operation => offered.includes(operation)), ...(serviceMethods.includes("native.pick_folder") ? ["workspace.pick_folder"] : []), ...(serviceMethods.includes("directories.search") ? ["workspace.search_folders"] : []), ...(serviceMethods.includes("projects.register") ? ["workspace.add_project"] : []), ...(serviceMethods.includes("projects.rename") ? ["workspace.rename_project"] : []), ...(serviceMethods.includes("projects.activate") ? ["workspace.activate_project"] : []), ...(serviceMethods.includes("projects.remove") ? ["workspace.remove_project"] : []), ...(serviceMethods.includes("native.open_editor") ? ["workspace.open_editor"] : []), ...(serviceMethods.includes("native.open_editor.vscode") ? ["workspace.open_vscode"] : []), ...(serviceMethods.includes("native.open_logs") ? ["workspace.open_logs"] : []), ...(machineOn ? [...MACHINE_COMMANDS.map(capabilityOf), FEATURES.editFiles, "workspace.worker_messages", ...(serviceMethods.includes("native.query") ? [] : [FEATURES.workerAttachments]), ...(taskWorktrees ? ["workspace.task_worktrees"] : []), "workspace.task_route"] : [])] };
   }
 
-  async function projectTasks(project: ProjectLocator) {
+  async function projectTasks(project: ProjectLocator, cached = false) {
+    if (serviceMethods.includes("native.query")) {
+      const held = nativeSnapshots.get(project.projectId);
+      if (cached && held) return { version: held.highWatermark, watermark: held.highWatermark, eventCursor: null, items: held.items };
+      if (serviceMethods.includes("native.board")) {
+        const reply = await nativeRead(project.projectId, "tasks.board", {id:project.projectId});
+        if (reply.data.type !== "board") throw new Error("Native board type mismatch");
+        const value = reply.data.value as {items?: unknown[];nextCursor?: unknown;highWatermark?: unknown};
+        if (!Array.isArray(value.items) || value.items.length > 1000 || value.nextCursor !== null || value.highWatermark !== reply.highWatermark) throw new Error("Incomplete native board");
+        const items = value.items.map(t => validate("Task",t));
+        if (new Set(items.map(t => t.taskId)).size !== items.length) throw new Error("Duplicate task identities");
+        const snapshot = {projectId:project.projectId,generation:reply.generation,highWatermark:reply.highWatermark,version:reply.version,items};
+        nativeSnapshots.set(project.projectId,snapshot);
+        return {version:reply.highWatermark,watermark:reply.highWatermark,eventCursor:null,items};
+      }
+      let cursor: string | null = null, snapshot: NativeTaskSnapshot | undefined;
+      for (let page = 0; page < PAGE_LIMIT; page++) {
+        const reply = await nativeRead(project.projectId, "tasks.page", { target: project.projectId, cursor, limit: 50 });
+        if (reply.data.type !== "tasks") throw new Error("Native read type mismatch");
+        const value = decodeResponse("TaskPage", reply.data.value).value;
+        if (snapshot && (snapshot.generation !== reply.generation || snapshot.highWatermark !== reply.highWatermark)) throw new Error("Native snapshot changed between pages");
+        snapshot ??= { projectId: project.projectId, generation: reply.generation, highWatermark: reply.highWatermark, version: reply.version, items: [] };
+        snapshot.items.push(...value.items);
+        cursor = value.nextCursor;
+        if (cursor === null) break;
+      }
+      if (cursor !== null || !snapshot) throw new Error("Task history exceeds the read budget");
+      if (new Set(snapshot.items.map(t => t.taskId)).size !== snapshot.items.length) throw new Error("Duplicate task identities");
+      const current = nativeSnapshots.get(project.projectId);
+      if (current?.generation === snapshot.generation && BigInt(current.highWatermark) > BigInt(snapshot.highWatermark)) snapshot = current;
+      nativeSnapshots.set(project.projectId, snapshot);
+      return { version: snapshot.highWatermark, watermark: snapshot.highWatermark, eventCursor: null, items: snapshot.items };
+    }
     const snapshot = await read("ProjectSnapshot", "project.snapshot", request(project.projectId, "project.snapshot"));
     if (snapshot.projectId !== project.projectId) throw new Error("Snapshot project identity mismatch");
     const items = [...snapshot.tasks.items];
@@ -319,14 +493,22 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   }
   // Task versions alone do not reliably describe conversation changes.
   const historyReads = new Map<string, { projectId: string; version: string; executionId: string; rows: HistoryRow[] }>();
+  // A change makes a held conversation due for a reread, never unread. A board read, which reads no conversation, keeps the
+  // rows already confirmed until the details read that follows it replaces them: dropping them would empty a running task's
+  // page on every event and redraw all of it a moment later. The mark is the change's turn, so a read already under way
+  // when another change arrives leaves its task due.
+  const historyDue = new Map<string, number>();
+  let historyTurn = 0;
+  const historyChanged = (taskId: string) => { historyDue.set(taskId, ++historyTurn); };
   const historyPositions = new Map<string, { watermark: string; cursor: string | null }>();
-  async function readSnapshot(project: ProjectLocator): Promise<ProjectionUpdate> {
+  async function readSnapshot(project: ProjectLocator, changed?: Set<string>, details = false): Promise<ProjectionUpdate> {
+    const boardOnly = serviceMethods.includes("native.board") && !details;
     // A project whose Cortex is away still has a page, with its reason on it. A store keeps what it
     // last confirmed, because version zero is never newer. The machine stays connected for the rest.
-    const away = project.activated !== false && serviceMethods.includes("projects.status") && (await transport.request("projects.status", { projectId: project.projectId }) as { ready?: boolean }).ready !== true;
-    const { version, watermark, eventCursor, items } = project.activated === false || away ? {version:"0",watermark:"0",eventCursor:null,items:[] as WireTask[]} : await projectTasks(project);
+    const away = !serviceMethods.includes("native.query") && project.activated !== false && serviceMethods.includes("projects.status") && (await transport.request("projects.status", { projectId: project.projectId }) as { ready?: boolean }).ready !== true;
+    const { version, watermark, eventCursor, items } = project.activated === false || away ? {version:"0",watermark:"0",eventCursor:null,items:[] as WireTask[]} : await projectTasks(project, changed !== undefined);
     const prior = historyPositions.get(project.projectId);
-    if (prior && prior.watermark !== watermark) {
+    if (!changed && prior && prior.watermark !== watermark) {
       let complete = false;
       if (prior.cursor && eventCursor && offered.includes("events.page")) {
         try {
@@ -334,8 +516,8 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
           for (let page = 0; page < PAGE_LIMIT && cursor; page++) {
             const events: WireTypes["EventPage"] = await read("EventPage", "events.page", request(project.projectId, "events.page", {cursor}));
             for (const event of events.items) {
-              if (event.kind === "task") historyReads.delete(event.entityId);
-              else if (event.kind === "execution") for (const [id, cached] of historyReads) { if (cached.projectId === project.projectId && cached.executionId === event.entityId) historyReads.delete(id); }
+              if (event.kind === "task") historyChanged(event.entityId);
+              else if (event.kind === "execution") for (const [id, cached] of historyReads) { if (cached.projectId === project.projectId && cached.executionId === event.entityId) historyChanged(id); }
               else if (event.kind === "unknown") throw new Error("Unknown event target");
             }
             cursor = events.nextCursor;
@@ -343,15 +525,21 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
           }
         } catch { complete = false; }
       }
-      if (!complete) for (const [id, cached] of historyReads) if (cached.projectId === project.projectId) historyReads.delete(id);
+      if (!complete) for (const [id, cached] of historyReads) if (cached.projectId === project.projectId) historyChanged(id);
     }
     historyPositions.set(project.projectId, {watermark, cursor:eventCursor});
-    const asked = project.activated === false || away ? [] : await projectDecisions(project, items), results = away ? [] : await projectResults(project, items);
+    const selected = changed ? items.filter(t => changed.has(t.taskId)) : items;
+    const freshAsked = boardOnly ? wireDecisions.get(project.projectId) ?? [] : project.activated === false || away ? [] : await projectDecisions(project, selected), freshResults = boardOnly ? wireResults.get(project.projectId) ?? [] : away ? [] : await projectResults(project, selected);
+    const unchangedExecutions = new Set(items.filter(t => changed && !changed.has(t.taskId)).map(t => t.executionId));
+    const asked = [...(!boardOnly && changed ? (wireDecisions.get(project.projectId) ?? []).filter(d => unchangedExecutions.has(d.executionId)) : []), ...freshAsked];
+    const results = [...(!boardOnly && changed ? (wireResults.get(project.projectId) ?? []).filter(r => unchangedExecutions.has(r.executionId)) : []), ...freshResults];
+
     const histories = new Map<string, HistoryRow[]>();
-    for (const [id, held] of historyReads) if (held.projectId === project.projectId && !items.some(t => t.taskId === id && t.executionId !== null)) historyReads.delete(id);
-    if (offered.includes("history.page")) for (const task of items.filter(t => t.executionId !== null)) {
-      const held = historyReads.get(task.taskId);
-      if (held?.projectId === project.projectId && held.version === task.version && held.executionId === task.executionId) {
+    for (const [id, held] of historyReads) if (held.projectId === project.projectId && !items.some(t => t.taskId === id && t.executionId !== null)) { historyReads.delete(id); historyDue.delete(id); }
+    for (const task of items) { const held = historyReads.get(task.taskId); if (held?.executionId === task.executionId) histories.set(task.taskId, held.rows); }
+    if (!boardOnly && offered.includes("history.page")) for (const task of items.filter(t => t.executionId !== null)) {
+      const held = historyReads.get(task.taskId), due = historyDue.get(task.taskId);
+      if (due === undefined && held?.projectId === project.projectId && held.version === task.version && held.executionId === task.executionId) {
         histories.set(task.taskId, held.rows);
         continue;
       }
@@ -365,8 +553,16 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       if (cursor !== null) throw new Error("Conversation exceeds the read budget");
       histories.set(task.taskId, rows);
       historyReads.set(task.taskId, {projectId:project.projectId, version:task.version, executionId:task.executionId!, rows});
+      if (historyDue.get(task.taskId) === due) historyDue.delete(task.taskId);
     }
-    for (const wire of items) tasks.set(wire.taskId, { projectId: project.projectId, version: wire.version, executionId: wire.executionId });
+    if (details && nativeSnapshots.get(project.projectId)?.highWatermark !== watermark) throw new DetailsSuperseded("Native snapshot changed during details read");
+    wireDecisions.set(project.projectId, asked); wireResults.set(project.projectId, results);
+    for (const wire of items) {
+      // An older read may settle after a mutation acknowledged its newer version.
+      const current = tasks.get(wire.taskId);
+      if (!current || BigInt(wire.version) >= BigInt(current.version)) tasks.set(wire.taskId, { projectId: project.projectId, version: wire.version, executionId: wire.executionId });
+    }
+    confirmedProjects.add(project.projectId); recheckConfirmations();
     for (const [key, value] of decisions) if (value.projectId === project.projectId) decisions.delete(key);
     for (const wire of asked) decisions.set(wire.decisionId, { projectId: project.projectId, wire });
     const { projectId: id, name, repository, openBranch, defaultBranch } = project;
@@ -388,10 +584,128 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     return { kind: "projection", version, scope: "project", slice };
   }
 
+  // Registry identity and read health do not depend on opening a project's store.
+  let commandEpoch = 0;
+  const presentationFacts = new Map<string, ProjectFacts>();
+  const presentations = new Map<string, Promise<ProjectionUpdate>>();
+  const projectReadIssues = new Map<string, Map<string, string>>();
+  const projectRetries = new Map<string, ReturnType<typeof setTimeout>>();
+  const readFailures = new Map<string, number>();
+  /** When each project's facts were last read in full, so a failed refresh says how old what is shown is. */
+  const factsReadAt = new Map<string, number>();
+  const shownFrom = (projectId: string) => { const at = factsReadAt.get(projectId); return at === undefined ? "" : ` Showing data from ${new Date(at).toLocaleTimeString()}.`; };
+  const enrichments = new Map<string, Promise<void>>();
+  const projectReadCauses = new Map<string, Map<string, string>>();
+  /** `cause` is what actually failed, kept beside the owner's words so the retained reason is the precise one. */
+  function projectState(project: ProjectLocator, scope: string, issue: string | null, cause?: unknown) {
+    const issues = projectReadIssues.get(project.projectId) ?? new Map<string, string>();
+    const causes = projectReadCauses.get(project.projectId) ?? new Map<string, string>();
+    projectReadIssues.set(project.projectId, issues);
+    projectReadCauses.set(project.projectId, causes);
+    if (issue) issues.set(scope, issue); else issues.delete(scope);
+    if (issue && cause !== undefined) causes.set(scope, readCause(cause)); else causes.delete(scope);
+    const identity = mapProjectSlice({ id: project.projectId, machineId: LOCAL_MACHINE_ID, name: project.name, repository: project.repository, openBranch: project.openBranch, defaultBranch: project.defaultBranch, activated: project.activated }, [], [], []).project;
+    const first = [...issues.keys()][0];
+    for (const notify of observers) notify({ kind: "project_state", project: identity, issue: first === undefined ? null : issues.get(first)!, cause: first === undefined ? null : causes.get(first) ?? null });
+  }
+  // Bound only presentation waiting, not the read itself. Late verified results are
+  // delivered once; failures retain the prior records and belong to that project.
+  async function projectReads<T>(wanted: ProjectLocator[], scope: string, read: (p: ProjectLocator) => Promise<T>, publish: (value: T) => PortUpdate): Promise<T[]> {
+    if (!options.registry) return Promise.all(wanted.map(read));
+    const epoch = commandEpoch;
+    const values: T[] = [], pending = new Set(wanted);
+    let deferred = false, timer: ReturnType<typeof setTimeout> | undefined;
+    const work = wanted.map(async project => {
+      try {
+        const value = await read(project);
+        if (epoch !== commandEpoch) { invalidated.add(project.projectId); for (const notify of observers) notify({kind:"refresh"}); return; }
+        projectState(project, scope, null);
+        readFailures.delete(`${project.projectId}:${scope}`);
+        clearTimeout(projectRetries.get(`${project.projectId}:${scope}`));
+        projectRetries.delete(`${project.projectId}:${scope}`);
+        if (deferred) { const update = publish(value); for (const notify of observers) notify(update); }
+        else values.push(value);
+      } catch (error) {
+        const key = `${project.projectId}:${scope}`;
+        const failures = (readFailures.get(key) ?? 0) + (error instanceof BoardPending ? 0 : 1);
+        readFailures.set(key, failures);
+        if (failures >= 3) projectState(project, scope, `This project's data could not be read.${shownFrom(project.projectId)} Other projects remain available. Retrying automatically.`, error);
+        if (!projectRetries.has(key) && observers.size) projectRetries.set(key, setTimeout(() => {
+          projectRetries.delete(key);
+          if (observers.size) { invalidated.add(project.projectId); for (const notify of observers) notify({kind:"refresh"}); }
+        }, 3000));
+      } finally { pending.delete(project); }
+    });
+    await Promise.race([Promise.all(work), new Promise<void>(resolve => { timer = setTimeout(resolve, 100); })]);
+    deferred = true;
+    // A pending read is not a project failure. Retain the confirmed board silently.
+    clearTimeout(timer);
+    return values;
+  }
+  const factReads = new Map<string, Promise<ProjectFacts>>();
+  function factsRead(project: ProjectLocator, fresh?: boolean) {
+    const current = factReads.get(project.projectId);
+    if (current) return current;
+    const next = factsOf(project, fresh);
+    factReads.set(project.projectId, next);
+    void next.finally(() => { if (factReads.get(project.projectId) === next) factReads.delete(project.projectId); }).catch(() => {});
+    return next;
+  }
+  async function boardFacts(project: ProjectLocator): Promise<ProjectFacts> {
+    const product = await machine<Product>("product.board", project.projectId);
+    rememberSprints(project.projectId, product);
+    const snapshot = nativeSnapshots.get(project.projectId);
+    // A member the service already deleted (a sprint deletion that stopped part-way) is never on the board again.
+    const unread = project.activated === false ? null : unreadMembers(product.tasks, product.sprints, id => !!snapshot?.items.some(t => t.taskId === id));
+    if (unread) throw new Error(`Sprint membership could not be read completely. ${unread}`);
+    const shown = {...product, sprints: product.sprints.map(s => presentSprint(product.tasks, s))};
+    if (snapshot) {cachedBoards.set(project.projectId,{project,items:snapshot.items,product:shown});writeBoards(options.boardStorage,actorId,[...cachedBoards.values()]);}
+    const previous = sent.get(project.projectId);
+    return {...previous,projectId:project.projectId,openBranch:previous?.openBranch ?? "",defaultBranch:previous?.defaultBranch ?? "",
+      repo:previous?.repo ?? null,workers:previous?.workers ?? [],reviews:previous?.reviews ?? [],
+      overlays:product.tasks,sprints:shown.sprints.map(withPlanning)};
+  }
+  function queueEnrichment(project: ProjectLocator) {
+    if (enrichments.has(project.projectId)) return;
+    const epoch = commandEpoch, base = nativeSnapshots.get(project.projectId);
+    // A running task moves the watermark continuously. Requests made while this read
+    // was in flight were not queued, so an obsolete read rereads the newer snapshot.
+    let superseded = false;
+    // Run after the coherent board has had an opportunity to paint. Detail reads
+    // have their own lifetime and cannot hold sprint membership or task placement.
+    const work = new Promise<void>(resolve => setTimeout(resolve, 0)).then(async () => {
+      const [update, facts] = await Promise.all([
+        readSnapshot(project, new Set(base?.items.map(t => t.taskId)), true),
+        machineOn ? factsRead(project) : Promise.resolve(undefined),
+      ]);
+      const current = nativeSnapshots.get(project.projectId);
+      if (!observers.size || epoch !== commandEpoch) return;
+      if (current?.generation !== base?.generation || current?.highWatermark !== base?.highWatermark) { superseded = true; return; }
+      if (facts) {sent.set(project.projectId,facts); for (const notify of observers) notify({kind:"facts",facts});}
+      for (const notify of observers) notify({kind:"enrichment",update});
+      readFailures.delete(project.projectId+":details");
+      projectState(project,"details",null);
+    }).catch(error => {
+      if (error instanceof DetailsSuperseded) { superseded = true; return; }
+      const key = project.projectId+":details", failures = (readFailures.get(key) ?? 0)+(error instanceof BoardPending ? 0 : 1);
+      readFailures.set(key,failures);
+      if (failures >= 3) projectState(project,"details",`Task conversation details could not be read.${shownFrom(project.projectId)} The confirmed board is retained; workers last seen running under an ended task show as not confirmed. Retrying automatically.`,error);
+      if (!projectRetries.has(key) && observers.size) projectRetries.set(key,setTimeout(()=>{
+        projectRetries.delete(key);
+        if (observers.size) {invalidated.add(project.projectId);for(const notify of observers) notify({kind:"refresh"});}
+      },3000));
+    }).finally(() => {
+      enrichments.delete(project.projectId);
+      // Without a held snapshot a refresh is already pending and will queue its own details read.
+      if (superseded && observers.size && epoch === commandEpoch && nativeSnapshots.has(project.projectId)) queueEnrichment(project);
+    });
+    enrichments.set(project.projectId,work);
+  }
   const reads = new Map<string, Promise<ProjectionUpdate>>();
-  function snapshotOf(project: ProjectLocator): Promise<ProjectionUpdate> {
-    const previous = reads.get(project.projectId) ?? Promise.resolve();
-    const next = previous.catch(() => {}).then(() => readSnapshot(project));
+  function snapshotOf(project: ProjectLocator, changed?: Set<string>): Promise<ProjectionUpdate> {
+    const previous = reads.get(project.projectId);
+    if (previous && !changed) return previous;
+    const next = (previous ?? Promise.resolve()).catch(() => {}).then(() => readSnapshot(project, changed));
     reads.set(project.projectId,next);
     void next.finally(() => { if (reads.get(project.projectId) === next) reads.delete(project.projectId); }).catch(() => {});
     return next;
@@ -446,17 +760,24 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     const { requestId } = envelope, command = envelope.payload;
     const ok = () => done(requestId);
     const task = (taskId: string) => { const id = projectOfTask(taskId); if (!id) throw new Refusal("unknown_task", "Unknown task."); return id; };
+    // Screens apply machine result facts over the wire slice. Commands must use
+    // that same identity, including an explicit null that clears an older result.
+    const displayedResult = (taskId: string) => {
+      const id = task(taskId), result = sent.get(id)?.overlays[taskId]?.result;
+      return result !== undefined ? result : slices.get(id)?.tasks.find(t => t.id === taskId)?.result ?? undefined;
+    };
     const execution = (taskId: string) => { const e = tasks.get(taskId)?.executionId; if (!e) throw new Refusal("not_started", "This task has not started."); return e; };
-    const prompt = async (taskId: string, text: string, key = requestId, attachments?: Message["attachments"]) => { historyReads.delete(taskId); const r = await transport.request("executions.prompt", { projectId: task(taskId), executionId: execution(taskId), text, requestId:key, ...(attachments?.length ? {attachments:wireAttachments(attachments)} : {}) }) as {outcome?:string}; if (r.outcome !== "recorded") throw new Refusal("unknown_outcome", OUTCOME_WORDS.unknown_outcome); return ok(); };
-    const control = async (taskId: string, params: Record<string, unknown>) => { historyReads.delete(taskId); const reply = await transport.request("executions.control", {projectId:task(taskId), executionId:execution(taskId), requestId, ...params}) as {outcome?:string;message?:string}; if (reply.outcome && !RECORDED.has(reply.outcome) && reply.outcome !== "stop_requested") throw new Refusal(reply.outcome, reply.message ?? OUTCOME_WORDS[reply.outcome] ?? "The action could not run. Refresh and try again."); return ok(); };
+    const prompt = async (taskId: string, text: string, key = requestId, attachments?: Message["attachments"]) => { historyChanged(taskId); const r = await transport.request("executions.prompt", { projectId: task(taskId), executionId: execution(taskId), text, requestId:key, ...(attachments?.length ? {attachments:wireAttachments(attachments)} : {}) }) as {outcome?:string}; if (r.outcome !== "recorded") throw new Refusal("unknown_outcome", OUTCOME_WORDS.unknown_outcome); return ok(); };
+    const control = async (taskId: string, params: Record<string, unknown>) => { historyChanged(taskId); const reply = await transport.request("executions.control", {projectId:task(taskId), executionId:execution(taskId), requestId, ...params}) as {outcome?:string;message?:string}; if (reply.outcome && !RECORDED.has(reply.outcome) && reply.outcome !== "stop_requested") throw new Refusal(reply.outcome, reply.message ?? OUTCOME_WORDS[reply.outcome] ?? "The action could not run. Refresh and try again."); return ok(); };
     const messageCall = async (taskId: string, params: Record<string, unknown>) => { await machine("product.message", task(taskId), params); return ok(); };
     const workerTask = (workerId: string) => { const id = workerTasks.get(workerId); if (!id) throw new Refusal("worker_unavailable", "This worker is not available."); return id; };
     const note = (taskId: string, text: string, delivery: "queued" | "recorded", attachments?: Message["attachments"]) => messageCall(taskId, {action:"add",message:{ id: requestId, taskId, workerId: null, text, mode: "queue", delivery, at: Date.now(), deliveredAt: null, failure: null, ...(attachments?.length ? { attachments: wireAttachments(attachments) } : {}) }});
     // The machine has the message by now: a copy that no longer fits must not turn a delivered message into a failed one.
     const keepSent = async (taskId: string, text: string, attachments?: Message["attachments"]) => { if (attachments?.length) await note(taskId, text, "recorded", attachments).catch(() => undefined); };
+    // The runtime reopens a finished result; the saved card follows it, native or not.
     const say = async (taskId: string, text: string, attachments?: Message["attachments"]) => { await prompt(taskId, text, requestId, attachments); await keepSent(taskId, text, attachments); await taskCall(task(taskId), {action:"reopen",taskId}); return ok(); };
     const queued = (id: string) => { const at = messages.findIndex(m => m.id === id && m.delivery === "queued"); if (at < 0) throw new Refusal("unknown_message", "This message is no longer in the queue."); return at; };
-    const git = async (checkoutId: string, params: Record<string, unknown>) => { await machine("git", projectOfCheckout(checkoutId), { checkoutId, ...params }); return ok(); };
+    const git = async (checkoutId: string, params: Record<string, unknown>) => { await machine("git", projectOfCheckout(checkoutId), { requestId, checkoutId, ...params }); return ok(); };
     const local = async (patch: unknown) => { await machine("machine.update", undefined, { patch }); return ok(); };
     const dirty = async <T>(run: Promise<T>) => { try { return await run; } finally { configRead = null; } };
     switch (command.type) {
@@ -470,6 +791,9 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       }
       case "stop_task": return control(command.taskId, {action:"pause",expectedVersion:tasks.get(command.taskId)?.version});
       case "continue_task": return control(command.taskId, {action:"resume",expectedVersion:tasks.get(command.taskId)?.version});
+      // A task the runtime holds for the owner (an interrupted turn, a stop it decided) continues from its recorded state:
+      // the runtime's Retry, which acknowledges any outcome it could not confirm and hands the task back to the coordinator.
+      case "retry_task": return control(command.taskId, {action:"retry"});
       // Worker guidance targets one attempt; task steering uses durable source capture.
       case "send_message":
         if (command.workerId) return control(command.taskId, {action:"worker_message",workerId:command.workerId,text:command.text,attachments:wireAttachments(command.attachments)});
@@ -500,7 +824,8 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       }
       case "request_changes": return say(command.taskId, command.text, command.attachments);
       case "rerun_check": {
-        const result = slices.get(task(command.taskId))?.tasks.find(t => t.id === command.taskId)?.result;
+        const displayed = displayedResult(command.taskId);
+        const result = displayed !== undefined ? displayed : (await machine<Product>("product.read", task(command.taskId))).tasks[command.taskId]?.result;
         const check = result?.checks[command.checkIndex];
         if (!check || result?.digest !== command.digest) throw new Refusal("stale_result", "This result changed. Review it again.");
         if (check.kind === "manual" || check.kind === "policy" || check.rerunnable !== true || !check.command?.length) throw new Refusal("unsupported", "This item has no runnable command or needs owner authorization. Check it manually; it has not passed.");
@@ -559,11 +884,17 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         const cached = repoReads.get(command.projectId);
         if (cached) repoReads.set(command.projectId, {...cached,at:-Infinity,running:false});
         return {...ok(),ok:reply.done,outcome:reply.done ? "recorded" : "partial_effect",
-          message:reply.done ? (reply.keptPaths?.length ? "Sprint deleted. Kept worktrees: " + reply.keptPaths.join(", ") : "Sprint and tasks deleted.") : reply.reason ?? "Deletion is incomplete. Retry Delete sprint.",
+          message:reply.done ? (reply.keptPaths?.length ? "Sprint deleted. Kept worktrees: " + reply.keptPaths.join(", ") : "Sprint and tasks deleted.")
+            : (reply.reason ?? "Deletion is incomplete. Retry Delete sprint.") + (reply.keptPaths?.length ? " Kept worktrees: " + reply.keptPaths.join(", ") : ""),
           deletedTaskIds:reply.taskIds,keptPaths:reply.keptPaths};
       }
       case "close_sprint": await machine("product.sprint", await projectOfSprint(command.sprintId), {action:"close",sprintId:command.sprintId,confirmed:command.confirmed}); return ok();
-      case "rename_task": await taskCall(task(command.taskId), { action: "rename", taskId: command.taskId, title: command.title }); return ok();
+      case "rename_task": {
+        const reply = await machine<{version?:string}>("product.task", task(command.taskId), {action:"rename",taskId:command.taskId,title:command.title});
+        const current = tasks.get(command.taskId);
+        if (current && nativeVersion(reply.version) && BigInt(reply.version!) > BigInt(current.version)) tasks.set(command.taskId, {...current,version:reply.version!});
+        return ok();
+      }
       case "archive_task": await taskCall(task(command.taskId), { action: "archive", taskId: command.taskId }); return ok();
       case "answer_archive": await taskCall(task(command.taskId), { action: "answer_archive", taskId: command.taskId, discard: command.discard }); return ok();
       case "restore_task": await taskCall(task(command.taskId), { action: "restore", taskId: command.taskId }); return ok();
@@ -580,12 +911,13 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       case "purge_many": for (const id of command.taskIds) await taskCall(task(id), { action: "purge", taskId: id, confirmed: command.confirmed }); return ok();
       case "close_task": {
         const executionId = tasks.get(command.taskId)?.executionId;
-        if (executionId && command.choice !== "external" && command.choice !== "already_in_target") await control(command.taskId, {action:"close_task",confirmed:command.confirmed});
+        if (executionId && command.choice !== "external" && command.choice !== "already_in_target") await control(command.taskId, {action:"close_task",confirmed:command.confirmed,expectedVersion:tasks.get(command.taskId)?.version});
+        // The execution records the owner's resolution; the card's closed disposition is the saved task's own.
         await taskCall(task(command.taskId), { action: "close", taskId: command.taskId, choice: command.choice, confirmed: command.confirmed });
         return ok();
       }
       case "accept_result": {
-        const result = slices.get(task(command.taskId))?.tasks.find(t => t.id === command.taskId)?.result;
+        const result = displayedResult(command.taskId);
         if (!result?.sourceVersion || result.digest !== command.digest) throw new Refusal("stale_result", "This result changed. Review it again.");
         await taskCall(task(command.taskId), { action: "accept", taskId: command.taskId, digest: command.digest, version: result.sourceVersion, acknowledgeOpenChecks: command.openChecks === true });
         return ok();
@@ -599,12 +931,12 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       case "git_revert": return git(command.checkoutId, { action: "revert", path: command.path, hunk: command.hunk, confirmed: command.confirmed });
       case "git_draft": localDrafts.set(command.checkoutId, command.message); return { ...ok(), outcome: "local" };
       case "git_commit": { const result = await git(command.checkoutId, { action: "commit", message: command.message, amend: command.amend }); if (localDrafts.get(command.checkoutId) === command.message) localDrafts.delete(command.checkoutId); return result; }
-      case "git_fetch": await machine("git", command.projectId, { action: "fetch" }); return ok();
-      // Same helper call as every other Git action; the helper creates an empty repository in the project folder.
-      case "git_init": await machine("git", command.projectId, { action: "git_init", confirmed: command.confirmed }); return ok();
+      case "git_fetch": await machine("git", command.projectId, { requestId, action: "fetch" }); return ok();
+      // One native owner operation, bound to the command identity; never replay an uncertain Git effect.
+      case "git_init": await machine("git", command.projectId, { requestId, action: "git_init", confirmed: command.confirmed }); return ok();
       case "git_pull": return git(command.checkoutId, { action: "pull" });
       case "git_push": return git(command.checkoutId, { action: "push", remote: command.remote, branch: command.branch, confirmed: command.confirmed });
-      case "create_branch": await machine("git", command.projectId, { action: "branch", name: command.name, at: command.at }); return ok();
+      case "create_branch": await machine("git", command.projectId, { requestId, action: "branch", name: command.name, at: command.at }); return ok();
       case "revert_commit": return git(command.checkoutId, { action: "revert_commit", sha: command.sha, confirmed: command.confirmed });
       case "delete_worktree": return git(command.checkoutId, { action: "delete_worktree", confirmed: command.confirmed, discard: command.discard });
       case "rename_machine": return local({ name: command.name });
@@ -648,7 +980,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       case "create_sprint": {
         const available = await machine<ConfigRead>("config.read");
         const selected = command.settings?.model?.trim();
-        if (!selected || !ENGINE_KEYS.some(engine => available.config.catalogue[engine].models.some(m => (m.routeId ?? m.id) === selected || m.id === selected))) throw new Refusal("model_required", "Connect an engine and select an available model before starting sprint planning. Your description is kept.");
+        if (!selected || !sessionOptions(available.config).models.some(m => m.id === selected)) throw new Refusal("model_required", "Connect an engine and select an available model before starting sprint planning. Your description is kept.");
         const { sprintId } = await machine<{ sprintId: string }>("product.sprint", command.projectId, { action: "create", description: command.description, attachments: wireAttachments(command.attachments), runMode: command.runMode, checkout: command.checkout, settings: command.settings, targetBranch: command.targetBranch });
         sprintProjects.set(sprintId, command.projectId);
         // The service plans from descriptions without a runtime execution or project tools.
@@ -689,8 +1021,8 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
           const made = await send({ requestId: `${requestId}-${key}`, operation: "create_task", expectedVersion: null, payload: { type: "create_task", projectId: id, description: item.description, settings: sprint.settings ? {mode:"guarded",language:"auto",...sprint.settings} : undefined, checkout: sprintTaskCheckout(sprint, item) } });
           if (!made.ok || !made.entityId) return { ...made, requestId };
           created.set(key, made.entityId);
-          await taskCall(id, { action: "sprint", taskId: made.entityId, sprintId: command.sprintId, dependencies: item.dependsOn.map(d => created.get(d)) });
-          // Saved sprint descriptions use the same service-owned naming flow as standalone tasks.
+          // The plan's own title names the task; joining the sprint records it with the task's saved state.
+          await taskCall(id, { action: "sprint", taskId: made.entityId, sprintId: command.sprintId, dependencies: item.dependsOn.map(d => created.get(d)), ...(item.title?.trim() && item.title.trim() !== item.description.trim() ? { title: item.title.trim() } : {}) });
         }
         await sprintPatch(id, command.sprintId, { planning: "created", materializedVersion: command.version, taskIds: [...created.values()] });
         return ok();
@@ -722,7 +1054,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
 
   async function send(envelope: CommandEnvelope): Promise<CommandReceipt> {
     const wire = wireCommand(envelope);
-    if (envelope.payload.type === "answer_decision") historyReads.delete(envelope.payload.taskId);
+    if (envelope.payload.type === "answer_decision") historyChanged(envelope.payload.taskId);
     if (!wire) return unsupported(envelope.requestId);
     if (wire === "held") return done(envelope.requestId);
     validate("Command", wire.message);
@@ -748,19 +1080,57 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     query<O extends QueryOperation>(operation: O, parameters: QueryParameters[O]): Promise<QueryResults[O]> {
       if (operation === "capabilities.get") return capabilitiesGet() as Promise<QueryResults[O]>;
       if (operation === "machine.facts") return (machineOn ? machineFacts().then(f => [f]) : Promise.resolve([])) as Promise<QueryResults[O]>;
+      if (operation === "machine.overview") return (machineOn ? machineOverview().then(f => [f]) : Promise.resolve([])) as Promise<QueryResults[O]>;
       const { projectId } = parameters as QueryParameters["project.snapshot"];
       // A refresh caused by one project's events rereads that project, not every project on the machine.
       if (operation === "project.snapshot" && !projectId) { readScope = (parameters as QueryParameters["project.snapshot"]).full ? new Set() : invalidated; invalidated = new Set(); }
       const wanted = (p: ProjectLocator) => projectId ? p.projectId === projectId : !readScope.size || readScope.has(p.projectId);
       if (operation === "project.facts") {
         presentationRead++;
-        const facts = machineOn ? Promise.all(projects.filter(wanted).map(p => factsOf(p, (parameters as QueryParameters["project.facts"]).fresh))) : Promise.resolve([]);
+        const facts = machineOn ? projectReads(projects.filter(wanted), "facts", async p => {
+          // An independent facts request must not expose sprint membership while
+          // the first coherent board is still waiting for its task read.
+          if (serviceMethods.includes("native.board")) {
+            await presentations.get(p.projectId);
+            if (!boardTasks.has(p.projectId)) throw new BoardPending();
+          }
+          const prepared = presentationFacts.get(p.projectId);
+          presentationFacts.delete(p.projectId);
+          return prepared && !(parameters as QueryParameters["project.facts"]).fresh ? Promise.resolve(prepared) : factsRead(p, (parameters as QueryParameters["project.facts"]).fresh);
+        }, facts => ({kind:"facts",facts})) : Promise.resolve([]);
         if (!projectId) readScope = new Set();
         return facts.then(all => { for (const f of all) sent.set(f.projectId, f); return all; }).finally(() => { presentationRead++; }) as Promise<QueryResults[O]>;
       }
-      return Promise.all(projects.filter(wanted).map(snapshotOf)) as Promise<QueryResults[O]>;
+      const epoch = commandEpoch;
+      return projectReads(projects.filter(wanted), "snapshot", p => {
+        const work = (async () => {
+        const update = await snapshotOf(p);
+        // Do not expose planning/purged rows without their owner overlays.
+        if (machineOn) {
+          const facts = serviceMethods.includes("native.board") ? await boardFacts(p) : await factsRead(p);
+          if (epoch === commandEpoch) presentationFacts.set(p.projectId, facts);
+        }
+        if (serviceMethods.includes("native.board")) {
+          if (update.scope === "project") boardTasks.set(p.projectId,new Set(update.slice.tasks.map(t => t.id)));
+          queueEnrichment(p);
+        }
+        return update;
+        })();
+        presentations.set(p.projectId,work);
+        void work.finally(() => { if (presentations.get(p.projectId) === work) presentations.delete(p.projectId); }).catch(() => {});
+        return work;
+      }, update => {
+        if (update.scope === "project") {
+          const facts = presentationFacts.get(update.slice.project.id);
+          if (facts) { sent.set(facts.projectId, facts); for (const notify of observers) notify({kind:"facts",facts}); }
+        }
+        return update;
+      }) as Promise<QueryResults[O]>;
     },
     async command(envelope) {
+      commandEpoch++;
+      presentationFacts.clear();
+      factReads.clear();
       const command = envelope.payload;
       if (options.registry && (command.type === "add_project" || command.type === "activate_project")) {
         const operation = command.type === "add_project" ? "projects.register" : "projects.activate";
@@ -831,6 +1201,13 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       if (machineId === LOCAL_MACHINE_ID && serviceMethods.includes("directories.cancel")) await transport.request("directories.cancel", { session }).catch(() => undefined);
     },
     async readTaskAttachments(taskId) {
+      // A page restored at launch is painted from the cached board before the service has
+      // confirmed its task. Its files are read once that project's first read says where it is.
+      const cachedIn = () => [...cachedBoards.values()].find(b => b.items.some(t => t.taskId === taskId))?.project.projectId;
+      if (!projectOfTask(taskId) && cachedIn() && !confirmedProjects.has(cachedIn()!)) await new Promise<void>(resolve => {
+        const check = () => { const id = cachedIn(); if (projectOfTask(taskId) || !id || confirmedProjects.has(id)) { confirmations.delete(check); resolve(); } };
+        confirmations.add(check);
+      });
       const projectId = projectOfTask(taskId);
       if (!projectId) throw new Refusal("unknown_task", "Unknown task.");
       // An older service answers this with its whole product state, which has no files to offer.
@@ -857,7 +1234,14 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     async readReport(taskId, reportId, cursor) {
       const projectId = projectOfTask(taskId);
       if (!projectId) throw new Refusal("unknown_task", "Unknown task.");
-      const result = decodeResponse("ReportPage", await transport.request("reports.read", request(projectId, "reports.read", {target:reportId,limit:4000,...(cursor ? {cursor} : {})}))).value;
+      let reply: unknown;
+      try { reply = await transport.request("reports.read", request(projectId, "reports.read", {target:reportId,limit:4000,...(cursor ? {cursor} : {})})); }
+      catch (error) {
+        // A read is never shown as a raw service refusal.
+        const text = error instanceof Error ? error.message : "";
+        throw new Error(text.includes("not_found") ? "This report is no longer available." : text.includes("native_operation_unavailable") || text.startsWith(REFUSED) ? "This report cannot be opened right now. Retry." : "Report could not be loaded. Retry.");
+      }
+      const result = decodeResponse("ReportPage", reply).value;
       if (result.reportId !== reportId) throw new Error("Report identity mismatch.");
       return result;
     },
@@ -872,7 +1256,17 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     },
     subscribe(listener: (update: PortUpdate) => void) {
       observers.add(listener);
-      let active = true, wait = FACTS_POLL_MS, timer: ReturnType<typeof setTimeout> | undefined, machineRead = Date.now();
+      for (const cached of cachedBoards.values()) {
+        const p = cached.project;
+        const slice = mapProjectSlice({id:p.projectId,machineId:LOCAL_MACHINE_ID,name:p.name,repository:p.repository,
+          openBranch:p.openBranch,defaultBranch:p.defaultBranch,activated:p.activated},cached.items,[],[]);
+        const facts: ProjectFacts = {projectId:p.projectId,openBranch:p.openBranch,defaultBranch:p.defaultBranch,repo:null,
+          workers:[],reviews:[],overlays:cached.product.tasks,sprints:cached.product.sprints};
+        listener({kind:"preview",slice,facts});
+      }
+      let active = true, wait = FACTS_POLL_MS, timer: ReturnType<typeof setTimeout> | undefined;
+      // The machine has its own timer, lined up with the service's limits snapshots (machineReadDelay), never behind a slow repository.
+      let machineTimer: ReturnType<typeof setTimeout> | undefined, machineDue = Date.now() + MACHINE_POLL_MS, catchUp = true, overviewRead = Date.now();
       // A slow repository must not stack reads behind itself: the next round starts when this one ended.
       const running = new Set<string>();
       const once = (key: string, read: () => Promise<void>) => { if (running.has(key)) return Promise.resolve(); running.add(key); return read().catch(() => {}).finally(() => { running.delete(key); }); };
@@ -891,21 +1285,84 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
             listener({ kind: "facts", facts });
           });
         }));
-        if (Date.now() - machineRead >= MACHINE_POLL_MS) {
-          machineRead = Date.now();
-          reads.push(once("machine", () => machineFacts().then(facts => { if (active) listener({ kind: "machine", facts }); })));
-        }
         void Promise.all(reads).then(() => { wait = moved ? FACTS_POLL_MS : Math.min(wait * 2, FACTS_POLL_MAX_MS); plan(); });
       };
-      // Coming back from another window is exactly when Git may have moved.
-      const back = () => { if (hidden()) { plan(); return; } wait = FACTS_POLL_MS; round(true); };
+      const planMachine = () => { clearTimeout(machineTimer); machineTimer = active && !hidden() ? setTimeout(machineRound, Math.max(0, machineDue - Date.now())) : undefined; };
+      // Any settings read, this poll's or one after an action, sets when the next one is due.
+      const machineRead = (observed: number[]) => {
+        if (!active) return;
+        machineDue = Date.now() + machineReadDelay(observed, Date.now(), catchUp);
+        if (observed.length) catchUp = false;
+        planMachine();
+      };
+      machineReads.add(machineRead);
+      const machineRound = () => {
+        if (!active || hidden()) return;
+        // A failed read is tried again on the plain poll; a successful one has already set the next.
+        const retry = () => { if (machineDue <= Date.now()) machineDue = Date.now() + MACHINE_POLL_MS; planMachine(); };
+        if (!machineOn) { retry(); return; }
+        void once("machine", () => machineFacts().then(facts => { if (active) listener({ kind: "machine", facts }); })).then(retry);
+        if (overviewAsked && Date.now() - overviewRead >= MACHINE_POLL_MS) { overviewRead = Date.now(); void once("overview", () => machineOverview().then(facts => { if (active) listener({ kind: "machine", facts }); })); }
+      };
+      // Coming back from another window is exactly when Git may have moved, and when the limits shown may be old.
+      const back = () => {
+        if (hidden()) { plan(); planMachine(); return; }
+        wait = FACTS_POLL_MS; round(true);
+        if (machineDue <= Date.now()) { catchUp = true; machineRound(); } else planMachine();
+      };
       const page = typeof document !== "undefined" ? document : undefined, screen = typeof window !== "undefined" ? window : undefined;
       page?.addEventListener("visibilitychange", back);
       screen?.addEventListener("focus", back);
       plan();
+      // The startup read usually came first: line up with what it showed.
+      if (lastObserved) machineRead(lastObserved); else planMachine();
       const stop = transport.subscribe(event => {
         if (event.type === "connection") { listener({ kind: "connection", connection: { state: event.state, reason: event.reason ?? null, at: Date.now() } }); return; }
-        if (event.type === "refresh") { listener({ kind: "refresh" }); return; }
+        if (event.type === "refresh") { for (const id of nativeWork.keys()) nativeEpoch.set(id, (nativeEpoch.get(id) ?? 0) + 1); nativeSnapshots.clear(); listener({ kind: "refresh" }); return; }
+        if (event.type === "native_delta") {
+          const checked = nativeDelta(event), project = projects.find(p => p.projectId === event.projectId);
+          if (!checked || !project) return;
+          const epoch = nativeEpoch.get(project.projectId) ?? 0, queued = nativeQueued.get(project.projectId) ?? 0;
+          if (queued >= 128) {
+            nativeEpoch.set(project.projectId, epoch + 1); nativeSnapshots.delete(project.projectId);
+            invalidated.add(project.projectId); listener({kind:"refresh"}); return;
+          }
+          nativeQueued.set(project.projectId, queued + 1);
+          const work = (nativeWork.get(project.projectId) ?? Promise.resolve()).catch(() => {}).then(async () => {
+            // Finish a snapshot already in flight before applying its buffered continuation.
+            await reads.get(project.projectId)?.catch(() => {});
+            if ((nativeEpoch.get(project.projectId) ?? 0) !== epoch) return;
+            const snapshot = nativeSnapshots.get(project.projectId);
+            if (!snapshot) throw new Error("Native snapshot unavailable");
+            const next = applyNativeTaskDelta(snapshot, checked);
+            if (next === snapshot) return;
+            nativeSnapshots.set(project.projectId, next);
+            const changed = new Set(checked.batch.changes.filter(c => c.kind === "task").map(c => c.id));
+            for (const id of changed) historyChanged(id);
+            if (!changed.size) return;
+            const update = await snapshotOf(project, changed);
+            if (active && (nativeEpoch.get(project.projectId) ?? 0) === epoch) {
+              if (update.scope === "project") boardTasks.set(project.projectId,new Set(update.slice.tasks.map(t => t.id)));
+              listener({ kind: "delta", update }); if (serviceMethods.includes("native.board")) queueEnrichment(project);
+            }
+          }).catch(() => {
+            if ((nativeEpoch.get(project.projectId) ?? 0) !== epoch) return;
+            nativeEpoch.set(project.projectId, epoch + 1);
+            nativeSnapshots.delete(project.projectId);
+            invalidated.add(project.projectId);
+            if (active) listener({ kind: "refresh" });
+          });
+          nativeWork.set(project.projectId, work);
+          void work.finally(() => { nativeQueued.set(project.projectId, Math.max(0, (nativeQueued.get(project.projectId) ?? 1) - 1)); if (nativeWork.get(project.projectId) === work) nativeWork.delete(project.projectId); });
+          return;
+        }
+        if (event.type === "native_resync") {
+          nativeEpoch.set(event.projectId, (nativeEpoch.get(event.projectId) ?? 0) + 1);
+          nativeSnapshots.delete(event.projectId);
+          invalidated.add(event.projectId);
+          listener({ kind: "refresh" }); return;
+        }
+        if (event.type === "invalidated" && event.source === "runtime" && nativeSnapshots.has(event.projectId)) return;
         const project = projects.find(p => p.projectId === event.projectId);
         if (!project) return;
         // A failed reread leaves the last confirmed state on screen. It says nothing about the machine.
@@ -914,7 +1371,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         invalidated.add(project.projectId);
         listener({ kind: "refresh" });
       });
-      return () => { observers.delete(listener); active = false; clearTimeout(timer); page?.removeEventListener("visibilitychange", back); screen?.removeEventListener("focus", back); stop(); };
+      return () => { observers.delete(listener); if (!observers.size) { for (const retry of projectRetries.values()) clearTimeout(retry); projectRetries.clear(); } active = false; clearTimeout(timer); clearTimeout(machineTimer); machineReads.delete(machineRead); page?.removeEventListener("visibilitychange", back); screen?.removeEventListener("focus", back); stop(); };
     },
   };
 }

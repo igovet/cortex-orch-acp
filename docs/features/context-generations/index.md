@@ -1,6 +1,6 @@
 # Context generations and qualified recovery delivery
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 Builds on [recovery capsules](../recovery-capsules/index.md): this page tracks
@@ -8,16 +8,22 @@ Builds on [recovery capsules](../recovery-capsules/index.md): this page tracks
 distinguishes intent from actually-observed delivery of the capsule/role/
 tool-schema content Cortex sends into it.
 
+The additive Rust host now records attempt-scoped context generations and
+rebuilds retained-state capsules for observed compaction and settled coordinator
+replacement. Its bounded snapshot, unmeasured-token limitation and fake-client
+evidence are documented in [native incoming ACP](../../project/native-incoming-acp.md#context-rollover-and-reconciliation).
+The Python-specific mechanisms below are not claims of complete Rust parity.
+
 ## Compaction-support tiers
 
 One tier per (engine, version), from static adapter dist evidence only
-(`delegation.generations.tier_for`; see that module's docstring for exact
+(`tier_for`; see that module's docstring for exact
 `file:line` citations):
 
 - **automatic** — the adapter emits a verifiable compaction signal over
   ACP. The exact registrations qualify **codex-acp** 1.12.0 and 2.1.1 and
   **claude-agent-acp** 0.77.0, 0.78.0, 0.87.0 and 0.88.0; other versions of
-  a known engine follow the wildcard convention of `delegation.generations`
+  a known engine follow the wildcard convention of the runtime
   (`tier_for`), and an unknown version falls to `controlled_boundary`.
   The adapters report their own internal context compaction as a
   `tool_call`/`tool_call_update` pair carrying `_meta.contextCompaction` (the 0.87.0
@@ -48,7 +54,7 @@ never runs a second, competing compaction controller for the same session.
 
 ## Context generations
 
-`context_generations` (see `delegation.generations`) records one row per
+`context_generations` records one row per
 distinct epoch for an `engine_session_ref`, 1-based `sequence`, and a closed
 `cause` set: `session_open`, `observed_compaction`, `observed_reset`
 (reserved — no pinned adapter has been shown to emit a *reset* distinct
@@ -68,7 +74,7 @@ opens a second generation; only the first sighting of a terminal
 
 ## Delivery ledger
 
-`capsule_deliveries` (see `delegation.deliveries`), keyed by
+`capsule_deliveries`, keyed by
 `(recipient, context_generation_id, capsule_revision)`: a second
 compaction with unchanged task state opens a new generation, so the
 identical logical snapshot gets a fresh, distinct delivery key —
@@ -107,7 +113,7 @@ that justifies it.
 
 Before the first controlled continuation for a fresh generation (including
 a session's very first turn — `session_open` is itself a generation),
-`acp.orchestrating_runtime._begin_generation_delivery` prefixes that turn's
+`_begin_generation_delivery` prefixes that turn's
 prompt with, in order: current role instructions (via the delivery
 mechanism — `qualify_delivery`/`delivery_for`, respecting its existing
 qualification/refusal policy) and the recovery capsule (`render_capsule`,

@@ -1,6 +1,6 @@
 import { readableCheckReason, ACCESS_MODES, effortLabel, emptySession, isOpen, LANGUAGES, machineDefaults } from "@cortex/workspace-domain";
 import type { Check, Decision, Message, SessionOptions, TaskSession, TaskSettings, Worker, WorkerStatus } from "@cortex/workspace-domain";
-import { clock, plainChoice, readyLabel, sameBranch, type TaskView, type WorkspaceIndex } from "./selectors";
+import { clock, interruptedTurn, plainChoice, readyLabel, readyStep, sameBranch, type TaskView, type WorkspaceIndex } from "./selectors";
 
 /** Read models for the task session. Every count on the screen comes from these lists; nothing here changes state. */
 export type Face = { label: string; tone: string; icon: string; spin?: boolean };
@@ -24,6 +24,16 @@ export function workerState(w: Worker): Face {
 const ACTIVE: WorkerStatus[] = ["working", "waiting_you", "paused", "unknown"];
 const FINISHED: WorkerStatus[] = ["completed", "failed", "cancelled"];
 export const isFinished = (w: Worker) => FINISHED.includes(w.status);
+/** How many workers are at work, finished with a result, cancelled and failed. A cancelled or failed worker never counts as finished. */
+export function workerCounts(workers: Worker[]) {
+  const count = (status: WorkerStatus) => workers.filter(w => w.status === status).length;
+  return { active: workers.filter(w => ACTIVE.includes(w.status)).length, done: count("completed"), cancelled: count("cancelled"), failed: count("failed") };
+}
+/** The one outcome line for a settled set of workers, shown in the task header and the right-hand panel. */
+export function workersOutcome(workers: Worker[], active: number): string {
+  const c = workerCounts(workers);
+  return `${active} active, ${c.done} finished${c.cancelled ? `, ${c.cancelled} cancelled` : ""}${c.failed ? `, ${c.failed} failed` : ""}`;
+}
 
 export type ComposerMode = "live" | "paused" | "stopping" | "draft" | "review" | "closed" | "ended" | "archived" | "offline" | "unconfirmed";
 export type SessionModel = {
@@ -52,7 +62,7 @@ export function sessionModel(index: WorkspaceIndex, id: string): SessionModel | 
   const nodes = session.plan?.nodes ?? [], byId = new Map(workers.map(w => [w.id, w]));
   return {
     view, session, workers, messages, mode: composerMode(view),
-    active: workers.filter(w => ACTIVE.includes(w.status)), finished: workers.filter(isFinished), running: workers.filter(w => w.status === "working"),
+    active: workers.filter(w => ACTIVE.includes(w.status) && !w.stale), finished: workers.filter(isFinished), running: workers.filter(w => w.status === "working"),
     queue: messages.filter(m => m.delivery === "queued"), open: session.decisions.filter(isOpen),
     planDone: nodes.filter(n => n.workerId && byId.get(n.workerId)?.status === "completed").length, planTotal: nodes.length,
   };
@@ -64,23 +74,28 @@ export const stoppedAt = (m: SessionModel) => {
   return line?.kind === "line" ? line.at : null;
 };
 
+/** Whether work is going on right now: the task runs or a worker still does. A task that waits for an answer with nothing
+ *  running is waiting for the owner, and says so wherever its state shows, never "Working". */
+export const workingNow = (m: SessionModel) => m.running.length > 0 || m.view.task.status === "working";
+
 export type Chip = { icon: string; tone: string; spin?: boolean; text: string; wide?: string; next?: string };
 /** The current state and the next step, for the title band. */
 export function stateChip(m: SessionModel): Chip {
   const { task } = m.view;
   if (m.view.unknown && task.status !== "stopping") return { icon: "alert", tone: "st-idle", text: m.mode === "unconfirmed" ? "Not confirmed" : m.view.fact.text };
+  if (task.observedPhase === "recovery") return { icon: "pause", tone: "st-warn", text: interruptedTurn(task.issue) ? "Interrupted" : "Stopped", next: "Waiting for you" };
   if (task.conflict === "resolving") return { icon: "loader", tone: "st-run", spin: true, text: "Resolving" };
   if (task.conflict !== "none") return { icon: "alert", tone: "st-bad", text: "Conflict" };
   switch (task.status) {
     case "draft": return { icon: "circle", tone: "st-idle", text: "Not started" };
     case "paused": { const at = stoppedAt(m); return { icon: "pause", tone: "st-idle", text: "Paused", wide: at === null ? " by you" : ` by you, ${clock(at)}` }; }
     case "stopping": return { icon: "loader", tone: "st-warn", spin: true, text: "Stopping" };
-    case "review": return { icon: "eye", tone: "st-idle", text: "Review", next: m.view.project.hasGit === false || sameBranch(task, m.view.target) ? "Ready to finish" : "Ready to merge" };
+    case "review": return { icon: "eye", tone: "st-idle", text: "Review", next: readyStep(task, m.view.target, m.view.project.hasGit) };
     case "ready_to_merge": return { icon: "check", tone: "st-idle", text: readyLabel(task, m.view.target) };
     case "done": return { icon: m.view.fact.icon ?? "check-circle", tone: "st-idle", text: m.view.fact.text };
     case "failed": return { icon: "x-circle", tone: "st-bad", text: "Run failed" };
     case "cancelled": return { icon: "x-circle", tone: "st-idle", text: "Run cancelled" };
-    default: return m.running.length || task.status === "working" ? { icon: "loader", tone: "st-run", spin: true, text: "Working", next: "Review" } : { icon: "question", tone: "st-warn", text: "Needs you" };
+    default: return workingNow(m) ? { icon: "loader", tone: "st-run", spin: true, text: "Working", next: "Review" } : { icon: "question", tone: "st-warn", text: "Needs you" };
   }
 }
 
@@ -156,8 +171,9 @@ export function checkWhy(check: Check) {
   if (check.outcome === "unverified") return "It ran, but its result could not be confirmed. Treat it as unproven.";
   return "This check failed. See the result for what it found.";
 }
-/** All worker checks plus the task's result, the one list the Inspector counts. */
-export const checksOf = (m: SessionModel): Check[] => m.view.task.result?.checks ?? m.workers.flatMap(w => w.result?.checks ?? []);
+/** The task's result, or while there is none the checks of this version's workers: the one list the Inspector counts. A worker of an
+ *  earlier version (before Request changes or a replan) reported on files that are gone, so its checks are not counted as current. */
+export const checksOf = (m: SessionModel): Check[] => m.view.task.result?.checks ?? m.workers.filter(w => !w.superseded).flatMap(w => w.result?.checks ?? []);
 export const editedFiles = (w: Worker) => {
   const items = w.activity.filter(a => a.kind === "edit");
   return { files: new Set(items.map(a => a.code)).size, add: items.reduce((n, a) => n + (a.diff?.add ?? 0), 0), del: items.reduce((n, a) => n + (a.diff?.del ?? 0), 0) };

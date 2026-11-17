@@ -14,7 +14,7 @@ CW-R03 (questions, permissions and result acceptance are distinct; no approve-al
 
 - [protocol](../protocol.md): decision commands, conflict semantics and receipts.
 - [consistency-and-recovery](../consistency-and-recovery.md): one winner for concurrent distinct decisions; stale and revoked operations fail explicitly.
-- Existing idempotency store: `runtime_requests` (`src/cortex_runtime/orchestration/state.py`), keyed by task, actor and request key, with a digest and a stored result. The handler reuses this pattern and adds device identity to the key. Confirm the existing key shape in source before reuse.
+- Existing idempotency store: `runtime_requests` (the former `orchestration/state` module), keyed by task, actor and request key, with a digest and a stored result. The handler reuses this pattern and adds device identity to the key. Confirm the existing key shape in source before reuse.
 - [CW-C01](CW-C01.md) and [CW-C02](CW-C02.md): envelopes, versions and the outbox that the public event uses.
 
 ## Deliverables

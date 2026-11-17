@@ -5,7 +5,7 @@ import { autoGrow } from "./autogrow";
 import { EditTask } from "./task-edit";
 import { createAttachments, createDictation, MessageComposer } from "./composer";
 import { useWs } from "./ctx";
-import { I, MenuItem, Modal, Pop } from "./kit";
+import { I, MenuItem, Modal, Pop, useWantOverview } from "./kit";
 import { ActionBar, Row, Whole } from "./layout";
 import { behindTarget, checksLine, conflictFacts, fileName, needsOverride, openChecks, repoOf, targetOptions, taskCheckout, worktreeWork } from "./review-model";
 import { clock, sameBranch } from "./selectors";
@@ -92,6 +92,10 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
   const isWorktree = () => t().checkout.kind === "worktree";
   const remote = () => !!repoOf(state(), t().projectId)?.remote.trim();
   const [choice, setHow] = createSignal(props.d.how);
+  // A pull request needs GitHub CLI, which the machine's overview reports. Until it has, the choice says it is being checked.
+  useWantOverview(remote);
+  const gh = () => ws.store.mode !== "real" || view().machine.ghAvailable ? "yes" : ws.store.overviewLoaded() ? "no" : "checking";
+  const ghWait = () => ws.t(ws.store.overviewIssue() ? "overviewIssue" : "ghChecking");
   const how = () => remote() ? choice() : "squash";
   const [other, setOther] = createSignal<string | null>(null);
   // Generated commit text is English regardless of the task or conversation language.
@@ -116,8 +120,8 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
   const why = () => same() && !t().integrationFacts?.commitAvailable ? t().integrationFacts?.reason ?? "Refresh the task before committing." : pending() ? acceptBlocked(t()) ?? (overrides() && !sure() ? "Tick the box about the open checks first" : null) : null;
   // The target is the one part of the label that can be long, so only it shortens; the whole label stays the button's name.
   const label = () => same() ? `Confirm commit to ${target()}` : pending() ? `Accept v${t().result?.version} and ${how() === "squash" ? `merge into ${target()}` : "create PR"}` : how() === "squash" ? `Confirm merge into ${target()}` : ws.store.mode === "demo" ? "Push and create PR" : "Create PR (no push)";
-  const noGh = () => !same() && how() === "pr" && ws.store.mode === "real" && !view().machine.ghAvailable;
-  const blocked = () => noGh() ? "GitHub CLI (gh) is unavailable." : why();
+  const noGh = () => !same() && how() === "pr" && gh() !== "yes";
+  const blocked = () => noGh() ? (gh() === "no" ? "GitHub CLI (gh) is unavailable." : ghWait()) : why();
   let working = false;
   const confirm = (e: MouseEvent) => {
     if (working || why()) return;
@@ -163,7 +167,7 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
       </div>
       <div class="two">
         <label class="rc"><input type="radio" name="merge-how" checked={how() === "squash"} onChange={() => setHow("squash")} /><span><span class="t">Squash merge locally</span><span class="d">One commit on <span class="mono">{target()}</span>, in this repository.</span></span></label>
-        <Show when={remote()}><label class="rc"><input type="radio" name="merge-how" disabled={ws.store.mode === "real" && !view().machine.ghAvailable} checked={how() === "pr"} onChange={() => setHow("pr")} /><span><span class="t">Create a pull request</span><span class="d">{ws.store.mode === "demo" ? <>Pushes <span class="mono">{t().checkout.branch}</span> to <span class="mono">{repoOf(state(), t().projectId)?.remote ?? "origin"}</span> and opens a PR.</> : <>Uses GitHub CLI. Push the branch yourself first in <button class="lnk" onClick={() => { props.onClose(); ws.go({ name: "project", machine: view().machine.id, project: t().projectId, view: "git", scope: { kind: "all" } }); }}>Git</button>; this action never pushes.</>}<Show when={ws.store.mode === "real" && !view().machine.ghAvailable}> <span class="st-warn">Install and sign in to GitHub CLI (gh) first.</span></Show></span></span></label></Show>
+        <Show when={remote()}><label class="rc"><input type="radio" name="merge-how" disabled={gh() === "no"} checked={how() === "pr"} onChange={() => setHow("pr")} /><span><span class="t">Create a pull request</span><span class="d">{ws.store.mode === "demo" ? <>Pushes <span class="mono">{t().checkout.branch}</span> to <span class="mono">{repoOf(state(), t().projectId)?.remote ?? "origin"}</span> and opens a PR.</> : <>Uses GitHub CLI. Push the branch yourself first in <button class="lnk" onClick={() => { props.onClose(); ws.go({ name: "project", machine: view().machine.id, project: t().projectId, view: "git", scope: { kind: "all" } }); }}>Git</button>; this action never pushes.</>}<Show when={gh() === "no"}> <span class="st-warn">Install and sign in to GitHub CLI (gh) first.</span></Show><Show when={gh() === "checking"}> <span class="muted" role="status">{ghWait()}</span></Show></span></span></label></Show>
       </div>
       </Show>
       <div class="pre">

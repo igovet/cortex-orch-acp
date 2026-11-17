@@ -1,0 +1,3523 @@
+{
+  "format": 1,
+  "now": "2027-01-15T08:00:00.123456+00:00",
+  "processNetworkAttempts": 0,
+  "sources": {
+    "crates/workspace-service/machine_tools.py": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+    "src/cortex_runtime/configuration/management.py": "f035019940568b7b2881c7548e29f53a8e1ce0433eb5b7b1d2fc12e70f6ae8a2",
+    "src/cortex_runtime/configuration/routing_profiles.py": "2365f75d1fd1fdb0269b44932e3b666031d56e7e777191965d33ad7f78103971",
+    "src/cortex_runtime/connections/registry.py": "6c96df2025a2b3e73d81dbcfabb57f2d9fcd233c167b19b5684163c4986a1ce5",
+    "crates/workspace-service/tests/generate_config_profiles_fixture.py": "6f5ba985cb854721862bebd9f9d1ec8ce3eab779cb1208ef8884d9653e058802"
+  },
+  "cases": [
+    {
+      "name": "read",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read",
+        "name": "a"
+      },
+      "reply": {
+        "ok": false,
+        "code": "unsupported_request_field",
+        "message": "Unknown request field(s) name for this action."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "create",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:6004a477bbb295f7c0a6c2332ec52c835e7a41d4505a4d2f668151fa8b4862a0",
+          "format": 2,
+          "migrated_from": null,
+          "active": "new",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "new",
+            "at": "2027-01-15T08:00:00.123456+00:00",
+            "revisions": {
+              "routing": "absent",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Existing Ω",
+              "revision": "sha256:ae38127b88099eebf372b4611213ac020e402089287f50014e6aabd885bcacea",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": "old",
+              "updated_at": "old",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            },
+            {
+              "name": "new",
+              "description": "",
+              "revision": "sha256:6f28771c31d99dfc8b45805aa97df466744ec8bfa91851e892877c5499e18099",
+              "sections": [
+                "routing",
+                "user_defaults",
+                "mcp_servers",
+                "connections"
+              ],
+              "settings": {
+                "routing": {},
+                "user_defaults": {
+                  "defaults": {},
+                  "ceiling": {
+                    "allowed_connections": null,
+                    "allowed_data_recipients": null,
+                    "allowed_routes": null,
+                    "fallback_policy": {
+                      "allowed_failure_classes": null,
+                      "allowed_target_routes": null,
+                      "budget": null,
+                      "data_recipient_consent": false
+                    },
+                    "limits": {},
+                    "permission_level": null,
+                    "spend_limit": null,
+                    "spend_limit_enforceable": false
+                  }
+                },
+                "mcp_servers": {},
+                "connections": {}
+              },
+              "created_at": "2027-01-15T08:00:00.123456+00:00",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a",
+            "new"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"new\",\n  \"applied\": {\n    \"profile\": \"new\",\n    \"at\": \"2027-01-15T08:00:00.123456+00:00\",\n    \"revisions\": {\n      \"routing\": \"absent\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"new\": {\n      \"description\": \"\",\n      \"created_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\",\n        \"user_defaults\",\n        \"mcp_servers\",\n        \"connections\"\n      ],\n      \"settings\": {\n        \"routing\": {},\n        \"user_defaults\": {\n          \"defaults\": {},\n          \"ceiling\": {\n            \"allowed_connections\": null,\n            \"allowed_data_recipients\": null,\n            \"allowed_routes\": null,\n            \"fallback_policy\": {\n              \"allowed_failure_classes\": null,\n              \"allowed_target_routes\": null,\n              \"budget\": null,\n              \"data_recipient_consent\": false\n            },\n            \"limits\": {},\n            \"permission_level\": null,\n            \"spend_limit\": null,\n            \"spend_limit_enforceable\": false\n          }\n        },\n        \"mcp_servers\": {},\n        \"connections\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "save",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "save",
+        "name": "a",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:5bc4cd0cc0ec43948d924ea5f40854f799a57e2727613f0c73306bc8e7ba1c8d",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "2027-01-15T08:00:00.123456+00:00",
+            "revisions": {
+              "routing": "absent",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Existing Ω",
+              "revision": "sha256:e0ea316c0f746d64022b55f05af4a4d9667fadc4aedcd47b7585c2b724dbeab9",
+              "sections": [
+                "routing",
+                "user_defaults",
+                "mcp_servers",
+                "connections"
+              ],
+              "settings": {
+                "routing": {},
+                "user_defaults": {
+                  "defaults": {},
+                  "ceiling": {
+                    "allowed_connections": null,
+                    "allowed_data_recipients": null,
+                    "allowed_routes": null,
+                    "fallback_policy": {
+                      "allowed_failure_classes": null,
+                      "allowed_target_routes": null,
+                      "budget": null,
+                      "data_recipient_consent": false
+                    },
+                    "limits": {},
+                    "permission_level": null,
+                    "spend_limit": null,
+                    "spend_limit_enforceable": false
+                  }
+                },
+                "mcp_servers": {},
+                "connections": {}
+              },
+              "created_at": "old",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"2027-01-15T08:00:00.123456+00:00\",\n    \"revisions\": {\n      \"routing\": \"absent\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\",\n        \"user_defaults\",\n        \"mcp_servers\",\n        \"connections\"\n      ],\n      \"settings\": {\n        \"routing\": {},\n        \"user_defaults\": {\n          \"defaults\": {},\n          \"ceiling\": {\n            \"allowed_connections\": null,\n            \"allowed_data_recipients\": null,\n            \"allowed_routes\": null,\n            \"fallback_policy\": {\n              \"allowed_failure_classes\": null,\n              \"allowed_target_routes\": null,\n              \"budget\": null,\n              \"data_recipient_consent\": false\n            },\n            \"limits\": {},\n            \"permission_level\": null,\n            \"spend_limit\": null,\n            \"spend_limit_enforceable\": false\n          }\n        },\n        \"mcp_servers\": {},\n        \"connections\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "update",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:68a4b5106c2b0540036c4e48b4f1e7188cee13aac5f1b4116f6aeede1f2a2137",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "old",
+            "revisions": {
+              "routing": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Existing Ω",
+              "revision": "sha256:55109a43436580d860e409bb82a7e38e4edd1ac8bbbdc40187981581f48773b7",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": "old",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "delete",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "delete",
+        "name": "a",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:a1c9b02a604f177af2a80ad24b3cefad2a677116e7dab6d747d66a0e1bb4b24a",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {}\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "deactivate",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "deactivate",
+        "name": "a",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": false,
+        "code": "unsupported_request_field",
+        "message": "Unknown request field(s) name for this action."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "create-absent",
+      "initial": {},
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "description": "Unicode Ω",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:0e991200b80e14b1a4698814562522d9540f29834702ae475a1c59ecaff2f9eb",
+          "format": 2,
+          "migrated_from": null,
+          "active": "new",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "new",
+            "at": "2027-01-15T08:00:00.123456+00:00",
+            "revisions": {
+              "routing": "absent",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "new",
+              "description": "Unicode Ω",
+              "revision": "sha256:b77ecef251be44015bfe2305e111754d9bf7598ba1c8add80fe68cdeba0397ab",
+              "sections": [
+                "routing",
+                "user_defaults",
+                "mcp_servers",
+                "connections"
+              ],
+              "settings": {
+                "routing": {},
+                "user_defaults": {
+                  "defaults": {},
+                  "ceiling": {
+                    "allowed_connections": null,
+                    "allowed_data_recipients": null,
+                    "allowed_routes": null,
+                    "fallback_policy": {
+                      "allowed_failure_classes": null,
+                      "allowed_target_routes": null,
+                      "budget": null,
+                      "data_recipient_consent": false
+                    },
+                    "limits": {},
+                    "permission_level": null,
+                    "spend_limit": null,
+                    "spend_limit_enforceable": false
+                  }
+                },
+                "mcp_servers": {},
+                "connections": {}
+              },
+              "created_at": "2027-01-15T08:00:00.123456+00:00",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "new"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"new\",\n  \"applied\": {\n    \"profile\": \"new\",\n    \"at\": \"2027-01-15T08:00:00.123456+00:00\",\n    \"revisions\": {\n      \"routing\": \"absent\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"new\": {\n      \"description\": \"Unicode Ω\",\n      \"created_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\",\n        \"user_defaults\",\n        \"mcp_servers\",\n        \"connections\"\n      ],\n      \"settings\": {\n        \"routing\": {},\n        \"user_defaults\": {\n          \"defaults\": {},\n          \"ceiling\": {\n            \"allowed_connections\": null,\n            \"allowed_data_recipients\": null,\n            \"allowed_routes\": null,\n            \"fallback_policy\": {\n              \"allowed_failure_classes\": null,\n              \"allowed_target_routes\": null,\n              \"budget\": null,\n              \"data_recipient_consent\": false\n            },\n            \"limits\": {},\n            \"permission_level\": null,\n            \"spend_limit\": null,\n            \"spend_limit_enforceable\": false\n          }\n        },\n        \"mcp_servers\": {},\n        \"connections\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "create-as-new-with-modifications",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+        "routing.json": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ]\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f",
+        "expected_revisions": {
+          "routing": "sha256:15c2f7fc9cf17d7633b95cb5b52b8892c1f93acab8d20ecfc31fa35fd388c5d1",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:4ccdacb7793a4379b17018005c068b0a1ef18c5ec364e5052fc1080948cfa7d6",
+          "format": 2,
+          "migrated_from": null,
+          "active": "new",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "new",
+            "at": "2027-01-15T08:00:00.123456+00:00",
+            "revisions": {
+              "routing": "sha256:15c2f7fc9cf17d7633b95cb5b52b8892c1f93acab8d20ecfc31fa35fd388c5d1",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "sha256:15c2f7fc9cf17d7633b95cb5b52b8892c1f93acab8d20ecfc31fa35fd388c5d1",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Existing Ω",
+              "revision": "sha256:ae38127b88099eebf372b4611213ac020e402089287f50014e6aabd885bcacea",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": "old",
+              "updated_at": "old",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            },
+            {
+              "name": "new",
+              "description": "",
+              "revision": "sha256:a83024914e211b21f7307ec66e705d57ddcc01ab74fc7c048d78348d8218f652",
+              "sections": [
+                "routing",
+                "user_defaults",
+                "mcp_servers",
+                "connections"
+              ],
+              "settings": {
+                "routing": {
+                  "deny": [
+                    "codex-acp/*"
+                  ]
+                },
+                "user_defaults": {
+                  "defaults": {},
+                  "ceiling": {
+                    "allowed_connections": null,
+                    "allowed_data_recipients": null,
+                    "allowed_routes": null,
+                    "fallback_policy": {
+                      "allowed_failure_classes": null,
+                      "allowed_target_routes": null,
+                      "budget": null,
+                      "data_recipient_consent": false
+                    },
+                    "limits": {},
+                    "permission_level": null,
+                    "spend_limit": null,
+                    "spend_limit_enforceable": false
+                  }
+                },
+                "mcp_servers": {},
+                "connections": {}
+              },
+              "created_at": "2027-01-15T08:00:00.123456+00:00",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [
+                  "codex-acp"
+                ],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:15c2f7fc9cf17d7633b95cb5b52b8892c1f93acab8d20ecfc31fa35fd388c5d1",
+          "shadowed_by": null,
+          "matches_profile": [
+            "new"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"new\",\n  \"applied\": {\n    \"profile\": \"new\",\n    \"at\": \"2027-01-15T08:00:00.123456+00:00\",\n    \"revisions\": {\n      \"routing\": \"sha256:15c2f7fc9cf17d7633b95cb5b52b8892c1f93acab8d20ecfc31fa35fd388c5d1\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"new\": {\n      \"description\": \"\",\n      \"created_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\",\n        \"user_defaults\",\n        \"mcp_servers\",\n        \"connections\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"deny\": [\n            \"codex-acp/*\"\n          ]\n        },\n        \"user_defaults\": {\n          \"defaults\": {},\n          \"ceiling\": {\n            \"allowed_connections\": null,\n            \"allowed_data_recipients\": null,\n            \"allowed_routes\": null,\n            \"fallback_policy\": {\n              \"allowed_failure_classes\": null,\n              \"allowed_target_routes\": null,\n              \"budget\": null,\n              \"data_recipient_consent\": false\n            },\n            \"limits\": {},\n            \"permission_level\": null,\n            \"spend_limit\": null,\n            \"spend_limit_enforceable\": false\n          }\n        },\n        \"mcp_servers\": {},\n        \"connections\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ]\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "capture-policy-not-secrets",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+        "defaults.json": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {}\n  },\n  \"ceiling\": {}\n}\n",
+        "mcp-servers.json": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/synthetic/not-executed\",\n      \"args\": [\n        \"synthetic\"\n      ],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"allowed_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "sha256:9de689e81e6a21d030b851d06133c2b706173aed8f11203416acda1e1dd03dd4",
+          "mcp_servers": "sha256:c7ac0353afebd3d4267866f3591de64921d5aa725a8b9bb8d84eb12590adb33f",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_section_unavailable",
+        "message": "The current user_defaults settings cannot be stored in a profile (invalid_ceiling_snapshot); repair them first. Nothing was written."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "mcp-servers.json": {
+          "content": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/synthetic/not-executed\",\n      \"args\": [\n        \"synthetic\"\n      ],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"allowed_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {}\n  },\n  \"ceiling\": {}\n}\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "rename-linkages",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "rename_to": "renamed",
+        "description": "Renamed Ω",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:23600d86d7e4bc3f6191116621ad9efb311ee4ac6275cf3e313713bcd20c6f34",
+          "format": 2,
+          "migrated_from": null,
+          "active": "renamed",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "renamed",
+            "at": "old",
+            "revisions": {
+              "routing": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "renamed",
+              "description": "Renamed Ω",
+              "revision": "sha256:f6cd1cfb96f85a43b2bff8b1ab38e5be8a3e692398028791f04c95bccc3a317b",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": "old",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "renamed"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"renamed\",\n  \"applied\": {\n    \"profile\": \"renamed\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"renamed\": {\n      \"description\": \"Renamed Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "pending-update",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": {\n    \"operation\": \"activate\",\n    \"profile\": \"a\",\n    \"at\": \"old\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "rename_to": "b",
+        "expected_revision": "sha256:e1c8f82a534ce2d2623b1d23b3814d8951a5b64787a032e2e1d7281ad8225f4e"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:1dc9336bcc54515343451fc17266761345bba8371494a363d6978c66e581ba89",
+          "format": 2,
+          "migrated_from": null,
+          "active": "b",
+          "state": "interrupted",
+          "modified_sections": [],
+          "differences": [],
+          "pending": {
+            "operation": "activate",
+            "profile": "b",
+            "at": "old"
+          },
+          "problems": [],
+          "applied": {
+            "profile": "b",
+            "at": "old",
+            "revisions": {
+              "routing": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "b",
+              "description": "Existing Ω",
+              "revision": "sha256:55109a43436580d860e409bb82a7e38e4edd1ac8bbbdc40187981581f48773b7",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": "old",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "b"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"b\",\n  \"applied\": {\n    \"profile\": \"b\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": {\n    \"operation\": \"activate\",\n    \"profile\": \"b\",\n    \"at\": \"old\"\n  },\n  \"profiles\": {\n    \"b\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "pending-delete",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": {\n    \"operation\": \"activate\",\n    \"profile\": \"a\",\n    \"at\": \"old\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "delete",
+        "name": "a",
+        "expected_revision": "sha256:e1c8f82a534ce2d2623b1d23b3814d8951a5b64787a032e2e1d7281ad8225f4e"
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_interrupted",
+        "message": "Resolve the interrupted activation before deleting a profile."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": {\n    \"operation\": \"activate\",\n    \"profile\": \"a\",\n    \"at\": \"old\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "pending-save",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": {\n    \"operation\": \"activate\",\n    \"profile\": \"a\",\n    \"at\": \"old\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "save",
+        "name": "a",
+        "expected_revision": "sha256:e1c8f82a534ce2d2623b1d23b3814d8951a5b64787a032e2e1d7281ad8225f4e",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:5bc4cd0cc0ec43948d924ea5f40854f799a57e2727613f0c73306bc8e7ba1c8d",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "2027-01-15T08:00:00.123456+00:00",
+            "revisions": {
+              "routing": "absent",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Existing Ω",
+              "revision": "sha256:e0ea316c0f746d64022b55f05af4a4d9667fadc4aedcd47b7585c2b724dbeab9",
+              "sections": [
+                "routing",
+                "user_defaults",
+                "mcp_servers",
+                "connections"
+              ],
+              "settings": {
+                "routing": {},
+                "user_defaults": {
+                  "defaults": {},
+                  "ceiling": {
+                    "allowed_connections": null,
+                    "allowed_data_recipients": null,
+                    "allowed_routes": null,
+                    "fallback_policy": {
+                      "allowed_failure_classes": null,
+                      "allowed_target_routes": null,
+                      "budget": null,
+                      "data_recipient_consent": false
+                    },
+                    "limits": {},
+                    "permission_level": null,
+                    "spend_limit": null,
+                    "spend_limit_enforceable": false
+                  }
+                },
+                "mcp_servers": {},
+                "connections": {}
+              },
+              "created_at": "old",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"2027-01-15T08:00:00.123456+00:00\",\n    \"revisions\": {\n      \"routing\": \"absent\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\",\n        \"user_defaults\",\n        \"mcp_servers\",\n        \"connections\"\n      ],\n      \"settings\": {\n        \"routing\": {},\n        \"user_defaults\": {\n          \"defaults\": {},\n          \"ceiling\": {\n            \"allowed_connections\": null,\n            \"allowed_data_recipients\": null,\n            \"allowed_routes\": null,\n            \"fallback_policy\": {\n              \"allowed_failure_classes\": null,\n              \"allowed_target_routes\": null,\n              \"budget\": null,\n              \"data_recipient_consent\": false\n            },\n            \"limits\": {},\n            \"permission_level\": null,\n            \"spend_limit\": null,\n            \"spend_limit_enforceable\": false\n          }\n        },\n        \"mcp_servers\": {},\n        \"connections\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "pending-deactivate",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": {\n    \"operation\": \"activate\",\n    \"profile\": \"a\",\n    \"at\": \"old\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "deactivate",
+        "name": "a",
+        "expected_revision": "sha256:e1c8f82a534ce2d2623b1d23b3814d8951a5b64787a032e2e1d7281ad8225f4e"
+      },
+      "reply": {
+        "ok": false,
+        "code": "unsupported_request_field",
+        "message": "Unknown request field(s) name for this action."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": {\n    \"operation\": \"activate\",\n    \"profile\": \"a\",\n    \"at\": \"old\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "pending-read",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": {\n    \"operation\": \"activate\",\n    \"profile\": \"a\",\n    \"at\": \"old\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read",
+        "name": "a"
+      },
+      "reply": {
+        "ok": false,
+        "code": "unsupported_request_field",
+        "message": "Unknown request field(s) name for this action."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": {\n    \"operation\": \"activate\",\n    \"profile\": \"a\",\n    \"at\": \"old\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "rename-collision",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"b\": {\n      \"description\": \"B\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "rename_to": "b",
+        "expected_revision": "sha256:4af0992041c5192f9aa1c718947489293e2e6b53100e52b920c4705a0209e17c"
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_exists",
+        "message": "A profile with that name already exists."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"b\": {\n      \"description\": \"B\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "delete-inactive",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"b\": {\n      \"description\": \"B\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "delete",
+        "name": "b",
+        "expected_revision": "sha256:4af0992041c5192f9aa1c718947489293e2e6b53100e52b920c4705a0209e17c"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "old",
+            "revisions": {
+              "routing": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Existing Ω",
+              "revision": "sha256:ae38127b88099eebf372b4611213ac020e402089287f50014e6aabd885bcacea",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": "old",
+              "updated_at": "old",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "missing-update",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "missing",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_not_found",
+        "message": "No profile has that name."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-name-update",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "../unsafe",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profile_name",
+        "message": "Profile name must be 1-40 lowercase letters, digits or hyphens."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "missing-delete",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "delete",
+        "name": "missing",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_not_found",
+        "message": "No profile has that name."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-name-delete",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "delete",
+        "name": "../unsafe",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profile_name",
+        "message": "Profile name must be 1-40 lowercase letters, digits or hyphens."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "missing-save",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "save",
+        "name": "missing",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_not_found",
+        "message": "No profile has that name."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-name-save",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "save",
+        "name": "../unsafe",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profile_name",
+        "message": "Profile name must be 1-40 lowercase letters, digits or hyphens."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "create-name-''",
+      "initial": {},
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profile_name",
+        "message": "Profile name must be 1-40 lowercase letters, digits or hyphens."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "create-name-'Bad'",
+      "initial": {},
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "Bad",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profile_name",
+        "message": "Profile name must be 1-40 lowercase letters, digits or hyphens."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "create-name-'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'",
+      "initial": {},
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profile_name",
+        "message": "Profile name must be 1-40 lowercase letters, digits or hyphens."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "create-name-None",
+      "initial": {},
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": null,
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profile_name",
+        "message": "Profile name must be 1-40 lowercase letters, digits or hyphens."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "create-name-1",
+      "initial": {},
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": 1,
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profile_name",
+        "message": "Profile name must be 1-40 lowercase letters, digits or hyphens."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "description-'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "description": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profile_description",
+        "message": "Description must be at most 256 printable characters."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "description-'line\\n'",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "description": "line\n",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profile_description",
+        "message": "Description must be at most 256 printable characters."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "description-False",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "description": false,
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profile_description",
+        "message": "Description must be at most 256 printable characters."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "rename-invalid",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "rename_to": "UPPER",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profile_name",
+        "message": "Profile name must be 1-40 lowercase letters, digits or hyphens."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "save-not-selected",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "save",
+        "name": "a",
+        "expected_revision": "sha256:3cde8fb2d2b3002fc734fdb9943f3585dd1ebdaef03042097f75088efb474563",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "no_active_profile",
+        "message": "No profile is selected; create a new profile instead."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "save-other-selected",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"b\": {\n      \"description\": \"B\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "save",
+        "name": "b",
+        "expected_revision": "sha256:4af0992041c5192f9aa1c718947489293e2e6b53100e52b920c4705a0209e17c",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_not_active",
+        "message": "Only the selected profile can be saved; select it first or save as a new profile."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"b\": {\n      \"description\": \"B\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "revision-conflict-create",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "a",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "revision_conflict",
+        "message": "The routing_profiles configuration changed after it was read (expected revision absent, current sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f); nothing was written. Re-read it and apply the change again."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-revision-create",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "a",
+        "expected_revision": false,
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_expected_revision",
+        "message": "expected_revision must be the exact revision a read returned ('absent' or 'sha256:<64 hex>')."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "revision-conflict-save",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "save",
+        "name": "a",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "revision_conflict",
+        "message": "The routing_profiles configuration changed after it was read (expected revision absent, current sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f); nothing was written. Re-read it and apply the change again."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-revision-save",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "save",
+        "name": "a",
+        "expected_revision": false,
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_expected_revision",
+        "message": "expected_revision must be the exact revision a read returned ('absent' or 'sha256:<64 hex>')."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "revision-conflict-update",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "expected_revision": "absent"
+      },
+      "reply": {
+        "ok": false,
+        "code": "revision_conflict",
+        "message": "The routing_profiles configuration changed after it was read (expected revision absent, current sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f); nothing was written. Re-read it and apply the change again."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-revision-update",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "expected_revision": false
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_expected_revision",
+        "message": "expected_revision must be the exact revision a read returned ('absent' or 'sha256:<64 hex>')."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "revision-conflict-delete",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "delete",
+        "name": "a",
+        "expected_revision": "absent"
+      },
+      "reply": {
+        "ok": false,
+        "code": "revision_conflict",
+        "message": "The routing_profiles configuration changed after it was read (expected revision absent, current sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f); nothing was written. Re-read it and apply the change again."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-revision-delete",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "delete",
+        "name": "a",
+        "expected_revision": false
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_expected_revision",
+        "message": "expected_revision must be the exact revision a read returned ('absent' or 'sha256:<64 hex>')."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "revision-conflict-deactivate",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "deactivate",
+        "name": "a",
+        "expected_revision": "absent"
+      },
+      "reply": {
+        "ok": false,
+        "code": "unsupported_request_field",
+        "message": "Unknown request field(s) name for this action."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-revision-deactivate",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "deactivate",
+        "name": "a",
+        "expected_revision": false
+      },
+      "reply": {
+        "ok": false,
+        "code": "unsupported_request_field",
+        "message": "Unknown request field(s) name for this action."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-section-revisions-{}",
+      "initial": {},
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revisions": {},
+        "expected_revision": "absent"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_expected_revisions",
+        "message": "expected_revisions must hold the revision a read returned for each of routing, user_defaults, mcp_servers, connections ('absent' or 'sha256:<64 hex>')."
+      },
+      "files": {},
+      "dirs": {}
+    },
+    {
+      "name": "invalid-section-revisions-None",
+      "initial": {},
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revisions": null,
+        "expected_revision": "absent"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_expected_revisions",
+        "message": "expected_revisions must hold the revision a read returned for each of routing, user_defaults, mcp_servers, connections ('absent' or 'sha256:<64 hex>')."
+      },
+      "files": {},
+      "dirs": {}
+    },
+    {
+      "name": "invalid-section-revisions-{'routing': 'absent'}",
+      "initial": {},
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revisions": {
+          "routing": "absent"
+        },
+        "expected_revision": "absent"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_expected_revisions",
+        "message": "expected_revisions must hold the revision a read returned for each of routing, user_defaults, mcp_servers, connections ('absent' or 'sha256:<64 hex>')."
+      },
+      "files": {},
+      "dirs": {}
+    },
+    {
+      "name": "capture-broken-routing.json",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+        "routing.json": "{broken"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f",
+        "expected_revisions": {
+          "routing": "sha256:be302461cda285db3ed2d45fb767b23e08ca8808b35a638009937df22b332d73",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_section_unavailable",
+        "message": "The current routing (user) settings cannot be stored in a profile (invalid_routing_overrides); repair them first. Nothing was written."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{broken",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "metadata-with-broken-routing.json",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+        "routing.json": "{broken"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:68a4b5106c2b0540036c4e48b4f1e7188cee13aac5f1b4116f6aeede1f2a2137",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "unavailable",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "routing",
+              "code": "invalid_routing_overrides",
+              "message": "routing.json is not valid UTF-8 JSON; repair it by hand. Nothing was changed."
+            }
+          ],
+          "applied": {
+            "profile": "a",
+            "at": "old",
+            "revisions": {
+              "routing": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "sha256:be302461cda285db3ed2d45fb767b23e08ca8808b35a638009937df22b332d73",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Existing Ω",
+              "revision": "sha256:55109a43436580d860e409bb82a7e38e4edd1ac8bbbdc40187981581f48773b7",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": "old",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:be302461cda285db3ed2d45fb767b23e08ca8808b35a638009937df22b332d73",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{broken",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "capture-broken-defaults.json",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+        "defaults.json": "{broken"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "sha256:be302461cda285db3ed2d45fb767b23e08ca8808b35a638009937df22b332d73",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_section_unavailable",
+        "message": "The current user_defaults settings cannot be stored in a profile (invalid_user_defaults); repair them first. Nothing was written."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{broken",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "metadata-with-broken-defaults.json",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+        "defaults.json": "{broken"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:68a4b5106c2b0540036c4e48b4f1e7188cee13aac5f1b4116f6aeede1f2a2137",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "user_defaults",
+              "code": "invalid_user_defaults",
+              "message": "defaults.json is not valid UTF-8 JSON; repair it by hand. Nothing was changed."
+            }
+          ],
+          "applied": {
+            "profile": "a",
+            "at": "old",
+            "revisions": {
+              "routing": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "sha256:be302461cda285db3ed2d45fb767b23e08ca8808b35a638009937df22b332d73",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Existing Ω",
+              "revision": "sha256:55109a43436580d860e409bb82a7e38e4edd1ac8bbbdc40187981581f48773b7",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": "old",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{broken",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "capture-broken-mcp-servers.json",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+        "mcp-servers.json": "{broken"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "sha256:be302461cda285db3ed2d45fb767b23e08ca8808b35a638009937df22b332d73",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_section_unavailable",
+        "message": "The current mcp_servers settings cannot be stored in a profile (invalid_mcp_registry); repair them first. Nothing was written."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "mcp-servers.json": {
+          "content": "{broken",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "metadata-with-broken-mcp-servers.json",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+        "mcp-servers.json": "{broken"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:68a4b5106c2b0540036c4e48b4f1e7188cee13aac5f1b4116f6aeede1f2a2137",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "mcp_servers",
+              "code": "invalid_mcp_registry",
+              "message": "mcp-servers.json is not valid UTF-8 JSON; repair it by hand. Nothing was changed."
+            }
+          ],
+          "applied": {
+            "profile": "a",
+            "at": "old",
+            "revisions": {
+              "routing": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "sha256:be302461cda285db3ed2d45fb767b23e08ca8808b35a638009937df22b332d73",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Existing Ω",
+              "revision": "sha256:55109a43436580d860e409bb82a7e38e4edd1ac8bbbdc40187981581f48773b7",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": "old",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "mcp-servers.json": {
+          "content": "{broken",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "capture-broken-connections.json",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+        "connections.json": "{broken"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "sha256:be302461cda285db3ed2d45fb767b23e08ca8808b35a638009937df22b332d73"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_section_unavailable",
+        "message": "The current connections settings cannot be stored in a profile (invalid_registry); repair them first. Nothing was written."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "connections.json": {
+          "content": "{broken",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "metadata-with-broken-connections.json",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+        "connections.json": "{broken"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:68a4b5106c2b0540036c4e48b4f1e7188cee13aac5f1b4116f6aeede1f2a2137",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "connections",
+              "code": "invalid_registry",
+              "message": "connections.json is not valid UTF-8 JSON."
+            }
+          ],
+          "applied": {
+            "profile": "a",
+            "at": "old",
+            "revisions": {
+              "routing": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:be302461cda285db3ed2d45fb767b23e08ca8808b35a638009937df22b332d73"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Existing Ω",
+              "revision": "sha256:55109a43436580d860e409bb82a7e38e4edd1ac8bbbdc40187981581f48773b7",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": "old",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "connections.json": {
+          "content": "{broken",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-document-{broken",
+      "initial": {
+        "routing-profiles.json": "{broken"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "expected_revision": "sha256:be302461cda285db3ed2d45fb767b23e08ca8808b35a638009937df22b332d73"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profiles",
+        "message": "routing-profiles.json is not valid UTF-8 JSON; repair it by hand. Nothing was changed."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{broken",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-document-[]",
+      "initial": {
+        "routing-profiles.json": "[]"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "expected_revision": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profiles",
+        "message": "routing-profiles.json must contain a JSON object; repair it by hand. Nothing was changed."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "[]",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-document-{\"format\":3}",
+      "initial": {
+        "routing-profiles.json": "{\"format\":3}"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "expected_revision": "sha256:17c50fa9f5f8e8b6b4db7455674eaa799d028604d71876ba3da542ff32ad2934"
+      },
+      "reply": {
+        "ok": false,
+        "code": "unsupported_profiles_format",
+        "message": "routing-profiles.json format must be 2 (or 1, which is migrated on the first change)."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\"format\":3}",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-document-{\n  \"format\": 2",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": []\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "expected_revision": "sha256:893aa9f3766f2f7480bbb2f4cf3159a71775c17cb50dfb15367ece8731303a51"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profiles",
+        "message": "routing-profiles.json has invalid profile metadata."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": []\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "format1-read",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 1,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"routing_revision\": \"absent\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"rules\": {},\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\"\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read",
+        "name": "a"
+      },
+      "reply": {
+        "ok": false,
+        "code": "unsupported_request_field",
+        "message": "Unknown request field(s) name for this action."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 1,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"routing_revision\": \"absent\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"rules\": {},\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\"\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "format1-create",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 1,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"routing_revision\": \"absent\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"rules\": {},\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\"\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "sha256:d2f5baa0eeb7daf385cca14fbe9b9f728d43b4e1334c907c7e65208f9c393c42",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:697053aed2c47dcc0ee8b70ef77a64923cc1027b7b530a99cee6ccdc7262fb0e",
+          "format": 2,
+          "migrated_from": null,
+          "active": "new",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "new",
+            "at": "2027-01-15T08:00:00.123456+00:00",
+            "revisions": {
+              "routing": "absent",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "legacy",
+              "revision": "sha256:d8a90c3d8413a346b6b8d66dd02b4b13af011b0b3145f967fe8953467c28286f",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": "old",
+              "updated_at": "old",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            },
+            {
+              "name": "new",
+              "description": "",
+              "revision": "sha256:6f28771c31d99dfc8b45805aa97df466744ec8bfa91851e892877c5499e18099",
+              "sections": [
+                "routing",
+                "user_defaults",
+                "mcp_servers",
+                "connections"
+              ],
+              "settings": {
+                "routing": {},
+                "user_defaults": {
+                  "defaults": {},
+                  "ceiling": {
+                    "allowed_connections": null,
+                    "allowed_data_recipients": null,
+                    "allowed_routes": null,
+                    "fallback_policy": {
+                      "allowed_failure_classes": null,
+                      "allowed_target_routes": null,
+                      "budget": null,
+                      "data_recipient_consent": false
+                    },
+                    "limits": {},
+                    "permission_level": null,
+                    "spend_limit": null,
+                    "spend_limit_enforceable": false
+                  }
+                },
+                "mcp_servers": {},
+                "connections": {}
+              },
+              "created_at": "2027-01-15T08:00:00.123456+00:00",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a",
+            "new"
+          ],
+          "notes": [
+            "migrated_from_format_1"
+          ],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"new\",\n  \"applied\": {\n    \"profile\": \"new\",\n    \"at\": \"2027-01-15T08:00:00.123456+00:00\",\n    \"revisions\": {\n      \"routing\": \"absent\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"new\": {\n      \"description\": \"\",\n      \"created_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\",\n        \"user_defaults\",\n        \"mcp_servers\",\n        \"connections\"\n      ],\n      \"settings\": {\n        \"routing\": {},\n        \"user_defaults\": {\n          \"defaults\": {},\n          \"ceiling\": {\n            \"allowed_connections\": null,\n            \"allowed_data_recipients\": null,\n            \"allowed_routes\": null,\n            \"fallback_policy\": {\n              \"allowed_failure_classes\": null,\n              \"allowed_target_routes\": null,\n              \"budget\": null,\n              \"data_recipient_consent\": false\n            },\n            \"limits\": {},\n            \"permission_level\": null,\n            \"spend_limit\": null,\n            \"spend_limit_enforceable\": false\n          }\n        },\n        \"mcp_servers\": {},\n        \"connections\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        ".migration-backups/routing-profiles.format-1.20270115T080000123456Z.json": {
+          "content": "{\n  \"format\": 1,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"routing_revision\": \"absent\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"rules\": {},\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\"\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {
+        ".migration-backups": 448
+      }
+    },
+    {
+      "name": "format1-save",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 1,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"routing_revision\": \"absent\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"rules\": {},\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\"\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "save",
+        "name": "a",
+        "expected_revision": "sha256:d2f5baa0eeb7daf385cca14fbe9b9f728d43b4e1334c907c7e65208f9c393c42",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:ad5ec63633d7445cf83dd85355d09ff8a75dddbabc46ebf69cb9b3081d567216",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "2027-01-15T08:00:00.123456+00:00",
+            "revisions": {
+              "routing": "absent",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "legacy",
+              "revision": "sha256:4f31b4f9018c0b86e5b8b34469b37fcfc817b53617ec08b0bb0cdb978f02c904",
+              "sections": [
+                "routing",
+                "user_defaults",
+                "mcp_servers",
+                "connections"
+              ],
+              "settings": {
+                "routing": {},
+                "user_defaults": {
+                  "defaults": {},
+                  "ceiling": {
+                    "allowed_connections": null,
+                    "allowed_data_recipients": null,
+                    "allowed_routes": null,
+                    "fallback_policy": {
+                      "allowed_failure_classes": null,
+                      "allowed_target_routes": null,
+                      "budget": null,
+                      "data_recipient_consent": false
+                    },
+                    "limits": {},
+                    "permission_level": null,
+                    "spend_limit": null,
+                    "spend_limit_enforceable": false
+                  }
+                },
+                "mcp_servers": {},
+                "connections": {}
+              },
+              "created_at": "old",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [
+            "migrated_from_format_1"
+          ],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"2027-01-15T08:00:00.123456+00:00\",\n    \"revisions\": {\n      \"routing\": \"absent\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\",\n        \"user_defaults\",\n        \"mcp_servers\",\n        \"connections\"\n      ],\n      \"settings\": {\n        \"routing\": {},\n        \"user_defaults\": {\n          \"defaults\": {},\n          \"ceiling\": {\n            \"allowed_connections\": null,\n            \"allowed_data_recipients\": null,\n            \"allowed_routes\": null,\n            \"fallback_policy\": {\n              \"allowed_failure_classes\": null,\n              \"allowed_target_routes\": null,\n              \"budget\": null,\n              \"data_recipient_consent\": false\n            },\n            \"limits\": {},\n            \"permission_level\": null,\n            \"spend_limit\": null,\n            \"spend_limit_enforceable\": false\n          }\n        },\n        \"mcp_servers\": {},\n        \"connections\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        ".migration-backups/routing-profiles.format-1.20270115T080000123456Z.json": {
+          "content": "{\n  \"format\": 1,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"routing_revision\": \"absent\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"rules\": {},\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\"\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {
+        ".migration-backups": 448
+      }
+    },
+    {
+      "name": "format1-update",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 1,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"routing_revision\": \"absent\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"rules\": {},\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\"\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "expected_revision": "sha256:d2f5baa0eeb7daf385cca14fbe9b9f728d43b4e1334c907c7e65208f9c393c42"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:0e9942b5ceac36f00898694ef73b31d4539712607c0f36deaffa52594e32b237",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "old",
+            "revisions": {
+              "routing": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "legacy",
+              "revision": "sha256:f3da120e6b2f5190ae1ed074050815692bd183b9f435ca4b5a0f96a0f2eef1bb",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": "old",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [
+            "migrated_from_format_1"
+          ],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        ".migration-backups/routing-profiles.format-1.20270115T080000123456Z.json": {
+          "content": "{\n  \"format\": 1,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"routing_revision\": \"absent\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"rules\": {},\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\"\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {
+        ".migration-backups": 448
+      }
+    },
+    {
+      "name": "format1-delete",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 1,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"routing_revision\": \"absent\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"rules\": {},\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\"\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "delete",
+        "name": "a",
+        "expected_revision": "sha256:d2f5baa0eeb7daf385cca14fbe9b9f728d43b4e1334c907c7e65208f9c393c42"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:a1c9b02a604f177af2a80ad24b3cefad2a677116e7dab6d747d66a0e1bb4b24a",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": [
+            "migrated_from_format_1"
+          ],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {}\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        ".migration-backups/routing-profiles.format-1.20270115T080000123456Z.json": {
+          "content": "{\n  \"format\": 1,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"routing_revision\": \"absent\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"rules\": {},\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\"\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {
+        ".migration-backups": 448
+      }
+    },
+    {
+      "name": "format1-deactivate",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 1,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"routing_revision\": \"absent\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"rules\": {},\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\"\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "deactivate",
+        "name": "a",
+        "expected_revision": "sha256:d2f5baa0eeb7daf385cca14fbe9b9f728d43b4e1334c907c7e65208f9c393c42"
+      },
+      "reply": {
+        "ok": false,
+        "code": "unsupported_request_field",
+        "message": "Unknown request field(s) name for this action."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 1,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"routing_revision\": \"absent\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"rules\": {},\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\"\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "unknown-fields-ignored",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "configRoot": "/not-authorized",
+        "project": "/not-authorized",
+        "refresh": true,
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:68a4b5106c2b0540036c4e48b4f1e7188cee13aac5f1b4116f6aeede1f2a2137",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "old",
+            "revisions": {
+              "routing": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Existing Ω",
+              "revision": "sha256:55109a43436580d860e409bb82a7e38e4edd1ac8bbbdc40187981581f48773b7",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": "old",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "disallowed-wrapper-field",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "expected_revisions": {},
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": false,
+        "code": "unsupported_request_field",
+        "message": "Unknown request field(s) expected_revisions for this action."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "conflicting-ignore",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+        ".gitignore": "keep\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "expected_revision": "sha256:099b189dd95a615b025b22e6338d12c83477e64308daab08717b6ef12975b90f"
+      },
+      "reply": {
+        "ok": false,
+        "code": "unsafe_storage",
+        "message": "$CONFIG/.gitignore already exists with unexpected content; refusing to overwrite it (it must contain exactly '*')."
+      },
+      "files": {
+        ".gitignore": {
+          "content": "keep\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Existing Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    }
+  ]
+}

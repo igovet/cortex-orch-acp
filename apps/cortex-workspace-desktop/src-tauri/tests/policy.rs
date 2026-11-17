@@ -6,6 +6,30 @@ fn query(op: &str) -> Value {
 }
 
 #[test]
+fn native_queries_are_typed_read_requests_not_mutation_or_sql_escape_hatches() {
+    let message = json!({"protocol":{"major":2,"mapping":2},"requestId":"read","projectId":"p","operation":"tasks.state","payload":{"id":"t"}});
+    let call = |message: Value| {
+        authorize(
+            "main",
+            "tauri://localhost/",
+            json!({"operation":"native.query","message":message}),
+        )
+    };
+    assert!(call(message.clone()).is_ok());
+    let mut bad = message.clone();
+    bad["actorId"] = json!("owner");
+    assert!(call(bad).is_err());
+    let mut bad = message.clone();
+    bad["payload"]["sql"] = json!("select 1");
+    assert!(call(bad).is_err());
+    let mut bad = message.clone();
+    bad["operation"] = json!("tasks.start");
+    assert!(call(bad).is_err());
+    let mut bad = message.clone();
+    bad["protocol"]["mapping"] = json!(1);
+    assert!(call(bad).is_err());
+}
+#[test]
 fn the_window_grant_is_exactly_its_own_frame() {
     let capability: Value =
         serde_json::from_str(include_str!("../capabilities/main.json")).unwrap();
@@ -37,23 +61,51 @@ fn the_window_grant_is_exactly_its_own_frame() {
 
 #[test]
 fn saving_an_attachment_takes_only_a_plain_name_and_bounded_bytes() {
-    let call = |message: Value| authorize("main", "tauri://localhost/", json!({"operation":"native.save_attachment","message":message}));
+    let call = |message: Value| {
+        authorize(
+            "main",
+            "tauri://localhost/",
+            json!({"operation":"native.save_attachment","message":message}),
+        )
+    };
     assert!(call(json!({"name":"shot.png","data":"eA=="})).is_ok());
     assert!(call(json!({"name":"../shot.png","data":"eA=="})).is_err());
     assert!(call(json!({"name":"","data":"eA=="})).is_err());
     assert!(call(json!({"name":"a\nb","data":"eA=="})).is_err());
     assert!(call(json!({"name":"shot.png","data":"eA==","path":"/tmp/x"})).is_err());
-    assert!(call(json!({"name":"shot.png","data":"x".repeat(workspace_protocol::ATTACHMENT_BYTES * 2)})).is_err());
-    assert!(authorize("other", "tauri://localhost/", json!({"operation":"native.save_attachment","message":{"name":"a","data":""}})).is_err());
+    assert!(call(
+        json!({"name":"shot.png","data":"x".repeat(workspace_protocol::ATTACHMENT_BYTES * 2)})
+    )
+    .is_err());
+    assert!(authorize(
+        "other",
+        "tauri://localhost/",
+        json!({"operation":"native.save_attachment","message":{"name":"a","data":""}})
+    )
+    .is_err());
 }
 
 #[test]
 fn native_login_and_maintenance_are_closed_owner_actions() {
     for engine in ["codex-acp", "claude-agent-acp"] {
-        assert!(authorize("main", "tauri://localhost/", json!({"operation":"native.engine_login","message":{"engine":engine}})).is_ok());
+        assert!(authorize(
+            "main",
+            "tauri://localhost/",
+            json!({"operation":"native.engine_login","message":{"engine":engine}})
+        )
+        .is_ok());
     }
-    for message in [json!({"engine":"opencode"}), json!({"engine":"codex-acp","program":"/tmp/other"}), json!({"engine":"codex-acp","key":"fixture"})] {
-        assert!(authorize("main", "tauri://localhost/", json!({"operation":"native.engine_login","message":message})).is_err());
+    for message in [
+        json!({"engine":"opencode"}),
+        json!({"engine":"codex-acp","program":"/tmp/other"}),
+        json!({"engine":"codex-acp","key":"fixture"}),
+    ] {
+        assert!(authorize(
+            "main",
+            "tauri://localhost/",
+            json!({"operation":"native.engine_login","message":message})
+        )
+        .is_err());
     }
     for op in ["maintenance", "engine.connection", "workflow.describe"] {
         let call = json!({"operation":"machine.call","message":{"op":op,"params":{}}});
@@ -99,7 +151,12 @@ fn attachment_bridge_takes_bytes_and_never_client_paths() {
         assert!(authorize("main", "tauri://localhost/", call.clone()).is_ok());
         assert!(authorize("main", "https://example.invalid/", call.clone()).is_err());
         assert!(authorize("other", "tauri://localhost/", call).is_err());
-        assert!(authorize("main", "tauri://localhost/", json!({"operation":op,"message":{"path":"/a"}})).is_err());
+        assert!(authorize(
+            "main",
+            "tauri://localhost/",
+            json!({"operation":op,"message":{"path":"/a"}})
+        )
+        .is_err());
     }
     let mut prompt = json!({"operation":"executions.prompt","message":{"projectId":"p","executionId":"e","requestId":"r","text":"Keep",
         "attachments":[{"name":"notes.txt","mimeType":"text/plain","data":"Zml4dHVyZQ=="}]}});
@@ -115,11 +172,26 @@ fn an_owner_save_is_a_closed_machine_call_and_opening_a_file_names_only_a_target
     // The bridge alone asks where a file is on disk; a page never learns or names a host path.
     let locate = json!({"operation":"machine.call","message":{"op":"repo.locate","projectId":"p","params":{"file":"a.txt"}}});
     assert!(authorize("main", "tauri://localhost/", locate).is_err());
-    let open = |message: Value| authorize("main", "tauri://localhost/", json!({"operation":"native.open_editor","message":message}));
+    let open = |message: Value| {
+        authorize(
+            "main",
+            "tauri://localhost/",
+            json!({"operation":"native.open_editor","message":message}),
+        )
+    };
     assert!(open(json!({"projectId":"p"})).is_ok());
-    assert!(open(json!({"projectId":"p","checkoutId":"p:main","file":"src/a.rs","line":12})).is_ok());
-    for bad in [json!({"projectId":"p","line":0}), json!({"projectId":"p","line":"1"}), json!({"projectId":"p","file":""}), json!({"projectId":"p","file":"a\0b"}),
-        json!({"projectId":"p","command":"sh"}), json!({"projectId":"p","checkoutId":7}), json!({"checkoutId":"p:main"})] {
+    assert!(
+        open(json!({"projectId":"p","checkoutId":"p:main","file":"src/a.rs","line":12})).is_ok()
+    );
+    for bad in [
+        json!({"projectId":"p","line":0}),
+        json!({"projectId":"p","line":"1"}),
+        json!({"projectId":"p","file":""}),
+        json!({"projectId":"p","file":"a\0b"}),
+        json!({"projectId":"p","command":"sh"}),
+        json!({"projectId":"p","checkoutId":7}),
+        json!({"checkoutId":"p:main"}),
+    ] {
         assert!(open(bad).is_err());
     }
 }
@@ -153,17 +225,61 @@ fn exact_allowlist_and_arguments() {
     new_folder["message"]["newFolder"] = json!(1);
     assert!(authorize("main", "tauri://localhost/", new_folder).is_err());
     assert!(authorize("main", "tauri://localhost/", json!({"operation":"directories.search","message":{"session":"pick-1","query":"~/code","limit":30}})).is_ok());
-    assert!(authorize("main", "tauri://localhost/", json!({"operation":"directories.cancel","message":{"session":"pick-1"}})).is_ok());
-    for message in [json!({"session":"pick-1","query":"x","root":"/"}), json!({"session":"pick-1","query":"x","limit":1000}), json!({"query":"x"}), json!({"session":"../x","query":"x"})] {
-        assert!(authorize("main", "tauri://localhost/", json!({"operation":"directories.search","message":message})).is_err());
+    assert!(authorize(
+        "main",
+        "tauri://localhost/",
+        json!({"operation":"directories.cancel","message":{"session":"pick-1"}})
+    )
+    .is_ok());
+    for message in [
+        json!({"session":"pick-1","query":"x","root":"/"}),
+        json!({"session":"pick-1","query":"x","limit":1000}),
+        json!({"query":"x"}),
+        json!({"session":"../x","query":"x"}),
+    ] {
+        assert!(authorize(
+            "main",
+            "tauri://localhost/",
+            json!({"operation":"directories.search","message":message})
+        )
+        .is_err());
     }
-    assert!(authorize("main", "tauri://localhost/", json!({"operation":"directories.delete","message":{"session":"pick-1"}})).is_err());
-    assert!(authorize("main", "tauri://localhost/", json!({"operation":"projects.rename","message":{"projectId":"wp_1","displayName":"Cedar"}})).is_ok());
-    for message in [json!({"projectId":"wp_1","displayName":" "}), json!({"projectId":"wp_1"}), json!({"projectId":"wp_1","displayName":"Cedar","root":"/"})] {
-        assert!(authorize("main", "tauri://localhost/", json!({"operation":"projects.rename","message":message})).is_err());
+    assert!(authorize(
+        "main",
+        "tauri://localhost/",
+        json!({"operation":"directories.delete","message":{"session":"pick-1"}})
+    )
+    .is_err());
+    assert!(authorize(
+        "main",
+        "tauri://localhost/",
+        json!({"operation":"projects.rename","message":{"projectId":"wp_1","displayName":"Cedar"}})
+    )
+    .is_ok());
+    for message in [
+        json!({"projectId":"wp_1","displayName":" "}),
+        json!({"projectId":"wp_1"}),
+        json!({"projectId":"wp_1","displayName":"Cedar","root":"/"}),
+    ] {
+        assert!(authorize(
+            "main",
+            "tauri://localhost/",
+            json!({"operation":"projects.rename","message":message})
+        )
+        .is_err());
     }
-    assert!(authorize("main", "tauri://localhost/", json!({"operation":"native.pick_folder","message":{}})).is_ok());
-    assert!(authorize("main", "tauri://localhost/", json!({"operation":"native.pick_folder","message":{"root":"/"}})).is_err());
+    assert!(authorize(
+        "main",
+        "tauri://localhost/",
+        json!({"operation":"native.pick_folder","message":{}})
+    )
+    .is_ok());
+    assert!(authorize(
+        "main",
+        "tauri://localhost/",
+        json!({"operation":"native.pick_folder","message":{"root":"/"}})
+    )
+    .is_err());
     for op in ["service.status", "service.capabilities", "projects.list"] {
         assert!(authorize(
             "main",
@@ -234,7 +350,10 @@ fn machine_calls_are_a_closed_set_and_cannot_name_a_root() {
         )
     };
     assert!(call(json!({"op":"overview"})).is_ok());
-    assert!(call(json!({"op":"git","projectId":"wp_1","params":{"action":"stage","path":"a.txt"}})).is_ok());
+    assert!(call(
+        json!({"op":"git","projectId":"wp_1","params":{"action":"stage","path":"a.txt"}})
+    )
+    .is_ok());
     assert!(call(json!({"op":"shell","params":{"line":"true"}})).is_err());
     assert!(call(json!({"op":"overview","root":"/etc"})).is_err());
     assert!(call(json!({"op":"overview","stateDir":"/tmp"})).is_err());
@@ -273,19 +392,44 @@ fn every_machine_operation_the_real_port_names_is_allowed() {
         let rest = if rest.starts_with('<') {
             let mut depth = 0;
             let Some(end) = rest.char_indices().find_map(|(i, c)| {
-                match c { '<' => depth += 1, '>' => { depth -= 1; if depth == 0 { return Some(i + 1); } } _ => {} }
+                match c {
+                    '<' => depth += 1,
+                    '>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(i + 1);
+                        }
+                    }
+                    _ => {}
+                }
                 None
-            }) else { continue };
+            }) else {
+                continue;
+            };
             &rest[end..]
-        } else { rest };
-        if let Some(op) = rest.strip_prefix("(\"").and_then(|tail| tail.split('"').next()) {
-            if !ops.contains(&op) { ops.push(op); }
+        } else {
+            rest
+        };
+        if let Some(op) = rest
+            .strip_prefix("(\"")
+            .and_then(|tail| tail.split('"').next())
+        {
+            if !ops.contains(&op) {
+                ops.push(op);
+            }
         }
     }
-    assert!(ops.contains(&"product.facts") && ops.contains(&"repo.snapshot") && ops.len() >= 15, "{ops:?}");
+    assert!(
+        ops.contains(&"product.facts") && ops.contains(&"repo.snapshot") && ops.len() >= 15,
+        "{ops:?}"
+    );
     for op in ops {
-        let call = json!({"operation":"machine.call","message":{"op":op,"projectId":"wp_1","params":{}}});
-        assert!(authorize("main", "tauri://localhost/", call).is_ok(), "the bridge refuses machine op {op}");
+        let call =
+            json!({"operation":"machine.call","message":{"op":op,"projectId":"wp_1","params":{}}});
+        assert!(
+            authorize("main", "tauri://localhost/", call).is_ok(),
+            "the bridge refuses machine op {op}"
+        );
     }
 }
 
@@ -298,19 +442,31 @@ fn owner_check_reruns_name_only_retained_result_evidence() {
     assert!(authorize("other", "tauri://localhost/", body.clone()).is_err());
     assert!(authorize("main", "https://example.invalid/", body.clone()).is_err());
     for (key, value) in [
-        ("checkIndex", json!(-1)), ("checkIndex", json!(100)), ("checkIndex", json!("0")),
-        ("checkName", json!("")), ("digest", json!(null)), ("resultVersion", json!("0")),
-        ("resultVersion", json!(47)), ("argv", json!(["true"])), ("cwd", json!("/tmp")),
+        ("checkIndex", json!(-1)),
+        ("checkIndex", json!(100)),
+        ("checkIndex", json!("0")),
+        ("checkName", json!("")),
+        ("digest", json!(null)),
+        ("resultVersion", json!("0")),
+        ("resultVersion", json!(47)),
+        ("argv", json!(["true"])),
+        ("cwd", json!("/tmp")),
         ("extra", json!(true)),
     ] {
         let mut bad = body.clone();
         bad["message"][key] = value;
-        assert!(authorize("main", "tauri://localhost/", bad).is_err(), "{key}");
+        assert!(
+            authorize("main", "tauri://localhost/", bad).is_err(),
+            "{key}"
+        );
     }
     for key in ["checkIndex", "checkName", "digest", "resultVersion"] {
         let mut bad = body.clone();
         bad["message"].as_object_mut().unwrap().remove(key);
-        assert!(authorize("main", "tauri://localhost/", bad).is_err(), "{key}");
+        assert!(
+            authorize("main", "tauri://localhost/", bad).is_err(),
+            "{key}"
+        );
     }
 }
 

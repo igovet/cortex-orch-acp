@@ -1,0 +1,849 @@
+{
+  "oracle": "machine_tools.product_read",
+  "sourceSha256": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+  "cases": [
+    {
+      "name": "plain-empty",
+      "git": false,
+      "store": false,
+      "rows": [],
+      "expected": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": false,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "git-empty",
+      "git": true,
+      "store": false,
+      "rows": [],
+      "expected": {
+        "tasks": {},
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "private-overlay",
+      "git": true,
+      "store": false,
+      "saved": {
+        "tasks": {
+          "t1": {
+            "title": "Saved",
+            "status": "done"
+          }
+        },
+        "sprints": [
+          {
+            "id": "s1",
+            "title": "Sprint"
+          }
+        ],
+        "messages": [
+          {
+            "id": "m1",
+            "text": "Retained"
+          }
+        ],
+        "comments": {
+          "t1": []
+        },
+        "drafts": {
+          "t1": "draft"
+        }
+      },
+      "rows": [],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "status": "done",
+            "title": "Saved"
+          }
+        },
+        "sprints": [
+          {
+            "id": "s1",
+            "title": "Sprint"
+          }
+        ],
+        "drafts": {
+          "t1": "draft"
+        },
+        "messages": [
+          {
+            "id": "m1",
+            "text": "Retained"
+          }
+        ],
+        "comments": {
+          "t1": []
+        },
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "saved-main-options",
+      "git": true,
+      "store": true,
+      "options": {
+        "checkout": {
+          "kind": "main"
+        },
+        "settings": {
+          "mode": "development"
+        },
+        "baseRevision": "baseline",
+        "draftTitle": "Chosen title"
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            null
+          ]
+        ],
+        [
+          "INSERT INTO workspace_task_options VALUES ('t1',?)",
+          [
+            "{\"checkout\": {\"kind\": \"main\"}, \"settings\": {\"mode\": \"development\"}, \"baseRevision\": \"baseline\", \"draftTitle\": \"Chosen title\"}"
+          ]
+        ]
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "checkout": {
+              "kind": "main",
+              "branch": "main"
+            },
+            "settings": {
+              "mode": "development"
+            },
+            "baseRevision": "baseline",
+            "title": "Chosen title",
+            "titleState": "user"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "running",
+      "git": true,
+      "store": true,
+      "runtime": "EXECUTING",
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "EXECUTING",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": false,
+              "reason": "Wait for Cortex to finish this result.",
+              "unblockAction": "wait",
+              "acknowledgeOpenChecks": false
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "waiting",
+      "git": false,
+      "store": true,
+      "runtime": "WAITING_USER",
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "WAITING_USER",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": false,
+              "reason": "Wait for Cortex to finish this result.",
+              "unblockAction": "wait",
+              "acknowledgeOpenChecks": false
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": false,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "completed-missing-result",
+      "git": true,
+      "store": true,
+      "runtime": "COMPLETED",
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            null
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "comments": {},
+        "drafts": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": true,
+        "messages": [],
+        "sprints": [],
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "acknowledgeOpenChecks": false,
+              "digest": "result:wr_e1:1",
+              "earlierVersion": true,
+              "reason": "This result is from an earlier version of the app and is shown read-only. Request changes for a fresh result you can review and accept.",
+              "requestChanges": true,
+              "resultId": "wr_e1",
+              "unblockAction": "request_changes",
+              "version": "1"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "completed-answer",
+      "git": true,
+      "store": true,
+      "runtime": "COMPLETED",
+      "answer": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1','ANSWER_SUBMITTED','{}','runtime','now')",
+          []
+        ]
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": true,
+              "requestChanges": true,
+              "reason": null,
+              "unblockAction": null,
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "completed-unknown-kind",
+      "git": true,
+      "store": true,
+      "runtime": "COMPLETED",
+      "synthesis": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ]
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "This result has no recorded answer or work evidence. Request a new result.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "done-preserves-default-actions",
+      "git": true,
+      "store": true,
+      "runtime": "COMPLETED",
+      "answer": true,
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "done"
+          }
+        }
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1','ANSWER_SUBMITTED','{}','runtime','now')",
+          []
+        ]
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "status": "done",
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": false,
+              "reason": "This task is closed.",
+              "unblockAction": null,
+              "acknowledgeOpenChecks": false
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "fresh-answer-required",
+      "git": true,
+      "store": true,
+      "runtime": "COMPLETED",
+      "answer": true,
+      "saved": {
+        "tasks": {
+          "t1": {
+            "requiresFreshResult": {
+              "resultId": "wr_e1",
+              "version": "1"
+            }
+          }
+        }
+      },
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1','ANSWER_SUBMITTED','{}','runtime','now')",
+          []
+        ]
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "requiresFreshResult": {
+              "resultId": "wr_e1",
+              "version": "1"
+            },
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "The source changed after this result. Request changes for fresh checks and review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "bad-owner-binding",
+      "git": true,
+      "store": true,
+      "runtime": "COMPLETED",
+      "answer": true,
+      "badOwner": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            2
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1','ANSWER_SUBMITTED','{}','runtime','now')",
+          []
+        ]
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": false,
+              "reason": "This result binding is unavailable. Refresh or reopen the project before requesting a new result.",
+              "unblockAction": "refresh",
+              "acknowledgeOpenChecks": false
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "same-branch-no-task-evidence",
+      "git": true,
+      "store": false,
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "checkout": {
+              "kind": "main"
+            }
+          }
+        }
+      },
+      "rows": [],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "checkout": {
+              "kind": "main"
+            },
+            "status": "ready_to_merge",
+            "integrationFacts": {
+              "targetBranch": "",
+              "alreadyInTarget": false,
+              "pushStatus": null
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "plain-ready",
+      "git": false,
+      "store": false,
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge"
+          }
+        }
+      },
+      "rows": [],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "integrationFacts": {
+              "targetBranch": "",
+              "alreadyInTarget": false,
+              "pushStatus": null
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": false,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    }
+  ]
+}

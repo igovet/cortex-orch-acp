@@ -373,12 +373,27 @@ export function Workspace(props: WorkspaceProps) {
   window.addEventListener("keydown", onMoveKey, true);
   window.addEventListener("pointerdown", onPointer, true);
   onCleanup(() => { window.removeEventListener("keydown", onMoveKey, true); window.removeEventListener("pointerdown", onPointer, true); keyboard(false); });
+  // A focused control that a projection removes (Request changes once the task reopens) would drop focus to the
+  // page body. Focus lands on the main area instead, so the keyboard keeps a place to start from.
+  let lastFocus: Element | null = null;
+  const onFocusIn = (e: FocusEvent) => { lastFocus = e.target as Element | null; };
+  document.addEventListener("focusin", onFocusIn, true);
+  const lost = new MutationObserver(() => {
+    const active = document.activeElement;
+    if ((active && active !== document.body) || !lastFocus || lastFocus.isConnected || document.querySelector("dialog[open]")) return;
+    lastFocus = null;
+    document.querySelector<HTMLElement>("main[tabindex]")?.focus({ preventScroll: true });
+  });
+  lost.observe(document.body, { childList: true, subtree: true });
+  onCleanup(() => { document.removeEventListener("focusin", onFocusIn, true); lost.disconnect(); });
 
   // The logo stands only while the machine has not been heard from, or answered without a view to show. A service that cannot be
   // reached is the offline workspace: the frame with its Offline notice and Retry, as on any later disconnect. Once built, the
   // frame stays, so a retry never drops back to the logo.
   const offline = () => { const s = store.connection().state; return s === "unavailable" || s === "disconnected"; };
-  const framed = createMemo<boolean>(was => was || store.ready() || offline(), false);
+  // The machine's own settings (the composer's models and efforts) are part of the first screen: the logo stays until they are in, or
+  // until waiting for them has run out, so the interface is never first shown with its pickers still empty.
+  const framed = createMemo<boolean>(was => was || store.loaded() || offline(), false);
   // The frame is built whole, in the same update that ends the logo, so no partial interface is ever painted.
   return <WsContext.Provider value={ws}><Show when={framed()} fallback={<StartupScreen logo={props.logo} notice={props.notice} />}>
     <div class="ws-app" data-sidebar={panels.sidebarShown() ? "shown" : "hidden"} data-inspector={panels.inspectorHidden() || !inspectable() || !store.ready() ? "hidden" : "shown"}
@@ -391,10 +406,20 @@ export function Workspace(props: WorkspaceProps) {
             <TabStrip tabs={tabs} title={titleOf} onSelect={selectTab} onClose={askClose} />
             <ConnectionNotice />
             <Show when={store.ready() && store.syncing()}>
-              <div class="strip" role="status">Updating confirmed state…</div>
+              <div class="ws-sync" role="status">Updating confirmed state…</div>
             </Show>
             <Show when={store.ready() && store.readIssue() && store.connection().state === "connected"}>
               <div class="strip warn" role="alert"><span>Workspace refresh failed. Showing the last loaded view.</span>
+                <button class="lnk" onClick={() => void store.reload()}>Retry</button>
+              </div>
+            </Show>
+            <Show when={store.machineIssue() && !store.machineLoaded() && store.connection().state === "connected"}>
+              <div class="strip warn" role="alert" data-reason={store.machineIssue() ?? undefined}><span>The machine's models and settings could not be read yet. Retrying automatically.</span>
+                <button class="lnk" onClick={() => void store.reload()}>Retry</button>
+              </div>
+            </Show>
+            <Show when={store.modelsIssue() && store.connection().state === "connected"}>
+              <div class="strip warn" role="alert" data-reason={store.modelsIssue() ?? undefined}><span>{t(store.modelsIssue() === "failed" ? "modelsFailed" : "modelsSlow")}</span>
                 <button class="lnk" onClick={() => void store.reload()}>Retry</button>
               </div>
             </Show>

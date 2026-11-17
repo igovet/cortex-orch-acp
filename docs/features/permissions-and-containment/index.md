@@ -1,6 +1,6 @@
 # Permissions and execution containment
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 The runtime owns action authority. Each engine process runs in an OS jail that
@@ -14,8 +14,7 @@ Permission card command subjects JSON-quote empty arguments and arguments
 containing whitespace or control characters, including newlines and tabs.
 A subject longer than 600 characters has an explicit omitted-character count
 in the card title; `rawInput.subject` retains the complete subject. This is a
-display safeguard, not a change to the command or authorization rules
-(`orchestration.consent`).
+display safeguard, not a change to the command or authorization rules.
 
 ## Discovery and bounded read batches
 
@@ -30,18 +29,18 @@ reads keep their existing behavior. No evaluator or new containment claim follow
 ## Native engines
 
 Every channel-bound engine process runs in the engine jail
-(`orchestration.sandbox.engine_jail`, Linux `bwrap`). The host is mounted read-only, except the host's real `/tmp`, which is
+(`engine_jail`, Linux `bwrap`). The host is mounted read-only, except the host's real `/tmp`, which is
 explicitly writable for owner/process interoperability. `/run/user` remains
 visible inside the engine jail, including user-session sockets; it is not an
 isolation boundary. `/var/tmp` is instead a private, writable, per-run
 directory. `TMPDIR`/`TMP`/`TEMP` use private per-process scratch;
 Cortex keeps that scratch and its other temporary files under the host's
-`/var/tmp` (`cortex_runtime.tempdirs`), not in a RAM-backed `/tmp`. The private
+`/var/tmp`, not in a RAM-backed `/tmp`. The private
 `/var/tmp` is mounted before the scratch, so the scratch stays visible inside the
 sandbox while the other Cortex scratch directories there stay hidden.
 The verified engine install the process launches from (Node binary, the
 adapter's `node_modules` tree, Codex's bundled binary and Cortex's private Codex
-adapter and launcher, `engine.process._jail_launch_inputs`) is mounted read-only
+adapter and launcher, `_jail_launch_inputs`) is mounted read-only
 over itself, so an owned engine root under `/var/tmp` (an `XDG_DATA_HOME` there)
 stays launchable instead of failing ACP `initialize`;
 HOME is the owner's real read-only home with selected writable caches. See
@@ -64,7 +63,7 @@ A revoked or expired channel terminates the process. Engines therefore keep thei
 native tools, `AGENTS.md`/`CLAUDE.md` loading and skills. The one bounded
 exception is a worker channel revoked by acceptance of that attempt's own current
 (non-superseded) result: the 1 s authority watchdog
-(`delegation.live_adapters._jail_for`, `engine.process.EngineProcess._watch_authority`)
+
 lets the in-flight turn end for at most 20 seconds, so its final token report can
 arrive, before it terminates the engine. The post-result settlement normally
 tears the engine down as soon as the turn ends and within 15 seconds (see
@@ -81,14 +80,14 @@ trusts on the host are mounted as read-only, owner-owned copies, because the
 sandbox's user namespace shows root's files as `nobody`'s; see
 [SECURITY.md](../../../SECURITY.md#owners-ssh-agent).
 
-With the owner's opt-in `ssh-askpass.json` (`orchestration.ssh_askpass`), the
+With the owner's opt-in `ssh-askpass.json`, the
 engine environment and each `command_run` also receive the display session and
 `SSH_ASKPASS` pointing at a Cortex-generated dialog script mounted read-only.
 ssh prompts then appear on the owner's desktop and the answers bypass the model.
 See [SECURITY.md](../../../SECURITY.md#optional-ssh-password-dialog).
 
-The pinned Codex adapter is codex-acp 2.3.0 (`@openai/codex` `^0.164.0`);
-codex-acp 1.12.0, 1.13.0, 2.0.1 and 2.1.1 remain qualified. A verified private
+The pinned Codex adapter is codex-acp 2.6.0 (`@openai/codex` `^0.166.0`);
+codex-acp 1.12.0, 1.13.0, 2.0.1, 2.1.1 and 2.3.0 remain qualified. A verified private
 adapter and per-process launcher disable native agents, multi-agent, plugin,
 hook and app features and each inherited MCP server; only session-specific
 brokered servers are re-enabled. The same two layers also force Codex's own
@@ -111,7 +110,7 @@ exec/read path once `shell_tool` is off is not established without a live
 qualification check. Every turn runs with `dangerFullAccess`
 (Codex's own sandbox cannot start in the jail's user namespace, and the jail is
 the boundary) and approval `untrusted`, pinned by the adapter patch in
-`engine.process`, so each command still reaches the permission bridge. The user's account configuration and credentials
+the runtime, so each command still reaches the permission bridge. The user's account configuration and credentials
 are not rewritten.
 
 Claude ACP 0.78.0 keeps its `settingSources` default and receives
@@ -159,7 +158,11 @@ except a deletion, which the user confirms in Guarded and Development modes (see
 [Access mode](#access-mode-guarded-and-auto)); a native subagent request is
 refused. Offered MCP allow options are used and the
 gateway then checks the actual channel and operation. Display titles and raw
-argument text are never an authority. Channeled engine sessions cannot enable ACP
+argument text are never an authority. The native Rust runtime has no engine jail;
+it answers claude-agent-acp requests itself (MCP tools pass, read-only channels
+stay read/search-only, Guarded approves only reads and in-project edits, deletions
+wait for the owner outside Auto) and keeps the client route for Codex and
+OpenCode; see [SECURITY.md](../../../SECURITY.md#current-acp-boundary-106). Channeled engine sessions cannot enable ACP
 filesystem or terminal bridges, which would act outside the jail. The trusted
 engine binary runs as the local user and can read what that user can read.
 
@@ -197,7 +200,7 @@ work, and whether a deletion waits for the user.
 
 Automatic runtime verification mounts the project as a private overlay (upper layer on disk in
 the command's own scratch directory, never RAM-backed, removed with it) over its
-pinned read-only source (`sandbox.discard_project_writes`), with the git-ignored directories,
+pinned read-only source, with the git-ignored directories,
 private-name masks and git metadata guards bound on top as before. A check may therefore run a
 tool that rewrites a tracked file on every run (`next typegen` rewrites `next-env.d.ts`); the write
 lands in the overlay and is gone when the check ends, so the reviewed sources and revision never
@@ -214,7 +217,7 @@ and the Docker buildx activity records). Scratch is private, and the command run
 PID namespace. Through these mounts a read-only role's command cannot change the project tree,
 HOME startup files outside the cache allowlist, or other host files, in any access mode. Its
 project writes (vitest's `node_modules/.vite-temp`, Playwright results) land in a private
-disk-backed overlay discarded when the command ends (`sandbox.discard_project_writes`; refused
+disk-backed overlay discarded when the command ends (`discard_project_writes`; refused
 where the host cannot overlay), so a reviewer's suite runs and the project keeps nothing.
 AppArmor's world-writable query file `/sys/kernel/security/apparmor/.access` is bound
 writable so a private `dbus-daemon` (`dbus-run-session`, a nested desktop shell) can accept
@@ -238,7 +241,7 @@ network access: as with every owner command, the owner's network is shared.
 
 A missing, refused, cancelled or timed-out answer to a consent card blocks the
 effect. Protected control-plane paths for `outside_write` are the
-`sandbox.control_plane_paths` locations (Cortex, Paseo, Codex, Claude and
+`control_plane_paths` locations (Cortex, Paseo, Codex, Claude and
 OpenCode state and configuration, `~/.gitconfig`, `~/.git-credentials`, the
 installed runtime, the project's `.cortex` and an external hooks directory),
 existing or not, and anything beneath them, including through a symlinked parent. The
@@ -247,7 +250,7 @@ directory) are protected too. An outside-write target whose resolved real path l
 the project is refused as `outside_path_inside_project`, even when its literal path does not.
 
 Development is trusted local development, **not a hostile-code sandbox**.
-`sandbox.development_command` uses `--bind / /`, real HOME and /var/tmp,
+`development_command` uses `--bind / /`, real HOME and /var/tmp,
 owner devices, groups and shared network. It retains task-private, Git and
 denied-path overlays and protects known existing runtime/configuration/native
 engine locations and the production Paseo home/profile. Parent protections precede
@@ -281,7 +284,7 @@ and ordinary arguments are not shell prefixes. Rejected consent precedes
 working-directory preparation, command mounts and process launch.
 Shell text remains lexical matching, not complete shell interpretation. The
 classifier is not a semantic firewall for interpreters, scripts or Docker effects.
-Auto uses the same host-writable `sandbox.development_command` profile as
+Auto uses the same host-writable `development_command` profile as
 Development (receipts name it `development`) and keeps its automatic approval
 and engine-mode confirmation. Development does not select Claude
 bypassPermissions; no mode re-enables the native Claude or Codex shells, so
@@ -299,8 +302,7 @@ detached processes, containers, volumes or daemon builds. No incomplete command
 is automatically rerun. Earlier explicit Auto workers keep their confirmed
 engine mode until they end.
 
-Coverage: `tests/test_access_mode.py`, `tests/test_development_commands.py`,
-gateway/permission/evidence tests and real `requires_bwrap` cases. Test-only
+Coverage: the `workspace-service` and `cortex-engine` Rust tests for access mode, development commands and gateway/permission/evidence, and the real-namespace cases. Test-only
 unjailed launch replacement establishes receipts/cancellation, not containment
 or real Docker operation. A namespace skip is an unverified containment result;
 no-paid smoke and source tests do not qualify a rendered client or paid engine.
@@ -450,9 +452,8 @@ unified-prompt editions and writer recovery capsules distinguish this workflow
 from an authorization refusal. No new error taxonomy or retry
 engine is introduced.
 
-Focused regressions: `tests/test_project_read_recovery.py` and
-`tests/test_project_file_tools.py`. The former exercises real channel dispatch
-and stdio recovery without creating a question or consent request; its scripted
+Focused regressions are in the `cortex-engine` gateway and `workspace-service` Rust tests. They exercise real channel dispatch
+and stdio recovery without creating a question or consent request; their scripted
 calls and instruction checks do **not** prove real-model compliance. Requested
 live CLI qualification must use a fresh stamped runtime and exact session
 bindings; checkout edits do not hot-upgrade an existing session.
@@ -480,7 +481,7 @@ transaction; published reports are immutable.
 
 ### Project skill links
 
-`project_skill_link` (`orchestration.skill_links`) is the guarded way to expose
+`project_skill_link` is the guarded way to expose
 a shared skill to Claude. A writing worker can also change `.claude` with the
 ordinary file tools and commands; the operation adds source verification and
 collision protection. It creates or removes exactly one directory
@@ -519,7 +520,7 @@ in the shared `.agents/skills` directory.
   failure after a directory or link may have been created is an uncertain
   outcome that is never re-executed automatically.
 
-Covered by `tests/test_project_skill_links.py`.
+Covered by the `workspace-service` Rust tests.
 
 `command_run` requires Linux bubblewrap and has no silent unsandboxed fallback.
 Its effective mounts depend on [access mode](#access-mode-development-guarded-and-auto).
@@ -570,8 +571,7 @@ A host-writable pass never closes a gap once the task is Guarded.
 ### Git and tool state
 
 Git run by a writing worker -- through `command_run` or its native shell in the
-engine jail -- updates the project's own repository
-(`orchestration.sandbox.git_metadata_mounts`), so commit, branch, switch, stash,
+engine jail -- updates the project's own repository, so commit, branch, switch, stash,
 merge and other operations that change only repository data work (the tests
 cover commit, switch, stash and merge; fetch/push additionally need the owner's
 network credentials and are not covered). This applies only when the project root
@@ -691,9 +691,9 @@ same-user process racing the final check/rename. Direct host aliases, Docker and
 the already host-writable Development profile remain outside this project-alias
 protection; this does not claim the shared cache is globally read-only.
 
-Coverage: `tests/test_hardlink_materialization.py` exercises copying, metadata,
+Coverage: the `workspace-service` Rust tests exercise copying, metadata,
 protected paths, bounded/error/interrupted preparation and shared-inode integrity;
-its real-bubblewrap recreate case requires working user namespaces.
+the real-bubblewrap recreate case requires working user namespaces.
 
 Finding these links and the private names takes a full scan of the project (one
 `lstat` per granted file) before every sandboxed launch. On a large tree on a
@@ -746,6 +746,20 @@ filters discovery and calls, rejects server-initiated sampling/elicitation, bind
 request receipts to the actual channel and kills the child on revocation. A partial
 JSON line has the same deadline as a complete response. An unresolved receipt
 blocks replay. A read-path grant cannot overlay the project or its private masks.
+A worker scope that does not exist yet is not granted to the server. An optional
+server that cannot be attached safely, or that exits before the session is
+created, is withheld from that session only, with a recorded reason
+(`NATIVE_EXTERNAL_MCP_WITHHELD`) and a timeline note; the task keeps running.
+
+The owner may opt a server out of that sandbox with `"containment": "none"` on
+its entry, or for every entry without its own value as the registry default.
+Such a server runs with the owner's full user authority: no Landlock, seccomp or
+network restriction, and its path grants, `network` flag and runtime-directory
+variables are not applied. Only its tool grants, the channel-bound relay and the
+process-group stop at session end still apply; a daemon that detaches from that
+group is outside Cortex's kill guarantee. Settings shows such a server as
+**No sandbox** and offers the **Run without the sandbox** switch per server.
+See [native external MCP boundaries](../../project/native-incoming-acp.md#external-mcp-boundary).
 
 ## Evidence limits
 
@@ -797,5 +811,5 @@ The guard never deletes runtime data, untracks entries, stages or commits.
 Focused no-paid checks:
 
 ```bash
-python3 -B -m pytest -q tests/test_gitignore_guard.py tests/test_situational_skill_gate.py tests/test_command_run_arguments.py
+umask 022 && timeout 900 cargo test --locked --offline -p workspace-service -p cortex-core
 ```

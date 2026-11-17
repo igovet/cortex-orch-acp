@@ -1,11 +1,48 @@
 # Deterministic recovery capsules
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
-This page documents `src/cortex_runtime/recovery/capsule.py`
-and the `read_capsule` MCP tool (`delegation/mcp_tools.py`,
-`delegation/contracts.py`). A capsule is a **derived, rebuildable view**
+## Native retained-state capsule (current Rust runtime)
+
+The native coordinator, worker, reviewer, guidance and answer prompts carry a
+retained-state capsule built by `cortex-core/src/recovery_context.rs`. It is
+bounded by construction and never stops a task for size:
+
+- Every section has its own character budget and keeps its newest rows. Any
+  section that drops rows adds an entry to the top-level `clipping` array
+  (`section`, `total`, `included`, `omitted`, `omitted_which`, `how_to_read`),
+  so an omission is always visible and nothing is invented.
+- Per-command chatter (`NATIVE_COMMAND_*`, guidance, routing and delivery
+  events) is not restated. `command_events_not_restated` counts it, and
+  `unresolved_commands` lists every started command without a recorded outcome
+  (marked "do not replay").
+- The accepted plan is carried once. `plan_summary` holds node ids and a bounded
+  verification list; `PLAN_ACCEPTED` and `WORKER_COMPLETED`/`WORKER_FAILED`
+  decision rows are reduced to ids, and results live only in `current_nodes`.
+- `current_nodes` keeps every node's id, role, status, stage and assignment
+  exactly. Objectives, scopes, dependency lists and results fall back through
+  shorter previews (with `size_chars` and `sha256`) until the whole list fits
+  its budget, which is guaranteed for the 64-node, 8,000-character plan
+  admission maximum. The recipient worker's own objective is always complete.
+- A follow-up owner message is written to both the internal `native_*` session
+  and the ACP session so both histories display it; the capsule lists it once
+  (an internal copy is skipped when an identical ACP copy exists at the same
+  moment). A repeated message sent later is a separate message and stays.
+- A retained message or constraint text over 1,500 characters is carried as a
+  preview with `size_chars` and `sha256`; text equal to the goal becomes
+  `{"same_as":"original_goal"}` and a later repeat of a long text a sha256 reference,
+  so the goal is carried once. Section budgets are strict (a row never exceeds
+  its section). Older constraints omitted from the capsule are never unreadable: the
+  `constraints` clipping notice lists their ids (`omitted_event_ids`, bounded, with
+  `index_complete`) and `read_source` with `<event_id>:constraint` returns the
+  full text.
+- The only refusal left (`coordinator_recovery_context_limit`) is for a capsule
+  that still exceeds the 120,000-character ceiling, which ordinary tasks cannot
+  reach (messages are limited to 32,000 characters).
+
+This page documents the recovery capsule
+and the `read_capsule` MCP tool. A capsule is a **derived, rebuildable view**
 over already-durable state — never a second authoritative pipeline, and
 never a place a new fact is invented. Context-generation delivery uses this capsule on compaction and replacement.
 Runtime task state and DAG remain authoritative; compacted model text cannot
@@ -103,7 +140,7 @@ an explicit `{"status": "unavailable"|"unknown", "reason": "..."}` marker
    The same section also carries `answered_questions` (with
    `answered_question_count`): every question a real user answer resolved
    (`pending_questions` rows with `status='answered'` and `answer_source`
-   `text`/`elicitation`, see `acp.questions_store.answered_questions`), in
+   `text`/`elicitation`, see `answered_questions`), in
    the order asked, each with its exact `question_id`, `source_ref`
    (`<question_id>:answer`), `asked_by` (`runtime`/`coordinator`/`worker`),
    the question text and options as asked, the user's verbatim
@@ -133,7 +170,7 @@ an explicit `{"status": "unavailable"|"unknown", "reason": "..."}` marker
 5. **publications_and_checks** — coordinator: every assignment's retained
    `worker_result`(s) (summary, checks with their claimed/observed/
    contradicted `evidence` label already resolved by
-   `delegation.evidence`, report ref+digest) plus every coordinator
+   the runtime, report ref+digest) plus every coordinator
    decision; worker: only its own results and decisions.
 6. **drafts_and_open_actions** — open `pending_questions`, `ambiguous`
    capacity reservations, claimed-but-undelivered `task_events`
@@ -147,7 +184,7 @@ an explicit `{"status": "unavailable"|"unknown", "reason": "..."}` marker
    cancellation event for its own assignment (documented: no per-worker
    delivery cursor exists in this schema, so this is "everything", not "only
    what's new since last seen").
-8. **role_and_tool_access** — `role_id`, its canonical `portable.roles`
+8. **role_and_tool_access** — `role_id`, its canonical the runtime
    source path + sha256 (role *text* is never persisted or duplicated here
    — see below), `instruction_delivery` qualification from
    `delegation_provisioning`, and `allowed_mcp_tools` matching the complete
@@ -308,9 +345,7 @@ at the paginated `list_events`/`list_sources` tools for the rest.
 
 ## `read_capsule` MCP tool
 
-A shared, read-only operation (`delegation/contracts.py`'s
-`CAPSULE_OPERATIONS`, merged into both `COORDINATOR_OPERATIONS` and
-`WORKER_OPERATIONS`) with one optional `at_revision` field — no task id,
+A shared, read-only operation with one optional `at_revision` field — no task id,
 recipient selector, role, or assignment id is ever accepted as an
 argument. The recipient is always derived from the channel's own already-
 resolved identity (`ChannelContext.task_id`/`.role`/`.assignment_id`/

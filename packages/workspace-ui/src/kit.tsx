@@ -1,6 +1,7 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show, splitProps, useContext, type Accessor, type JSX } from "solid-js";
 import type { WorkspaceCommand } from "@cortex/workspace-domain";
 import { useWs, WsContext } from "./ctx";
+import { ScreenActive } from "./freshness";
 import { hrefOf, type Route } from "./router";
 import type { Fact } from "./selectors";
 
@@ -10,6 +11,28 @@ export const I = (props: { n: string; s?: 12 | 14; class?: string }) =>
 /** Words for something still on its way, with a loader that runs only as long as they are shown. */
 export const Loading = (props: { text: string; class?: string }) =>
   <div class={`ws-loading${props.class ? ` ${props.class}` : ""}`} role="status"><I n="loader" s={12} class="spin" /><span>{props.text}</span></div>;
+
+/**
+ * Machine details a screen asked for with `wantOverview` (storage, retention, worktrees, the version, GitHub CLI). Until they
+ * arrive this says so, or why they could not be read yet, never a stand-in value such as a default or zero.
+ */
+export function OverviewShown(props: { children: JSX.Element; inline?: boolean }) {
+  const wait = useOverviewWait();
+  return <Show when={!wait()} fallback={props.inline ? <span class="cap muted" role="status">{wait()}</span> : <Loading text={wait()!} />}>{props.children}</Show>;
+}
+/**
+ * Asks for the machine's overview (`wantOverview`) once the screen that shows its fields is on view and `visible` holds:
+ * never for a kept-alive tab in the background or a hidden inspector, so nothing reads it merely because the app started.
+ */
+export function useWantOverview(visible: () => unknown = () => true) {
+  const ws = useWs(), shown = useContext(ScreenActive);
+  createEffect(() => { if (shown() && visible()) ws.store.wantOverview(); });
+}
+/** The words for machine details still on their way, or null once they are in. For a description that cannot hold a component. */
+export function useOverviewWait() {
+  const ws = useWs();
+  return () => ws.store.overviewLoaded() ? null : ws.t(ws.store.overviewIssue() ? "overviewIssue" : "overviewLoading");
+}
 
 /** A count beside a name. Nothing to count says nothing, so no list ever reads "All 0". */
 export const Count = (props: { n: number }) => <Show when={props.n > 0}><span class="n">{props.n}</span></Show>;
@@ -29,18 +52,11 @@ export function Keyed<T>(props: { each: readonly T[]; by: (item: T) => string; c
     // A row on its way out still reads what it last held.
     let last = table().get(key)!;
     const entry = () => last = table().get(key) ?? last;
-    return props.children(() => entry().item, () => entry().index);
+    // Every read of the list makes a new table, so a row hears only when its own item or place really changed: otherwise
+    // whatever a row builds from its item would be built again on every update of the list.
+    const item = createMemo(() => entry().item), index = createMemo(() => entry().index);
+    return props.children(item, index);
   }}</For>;
-}
-
-/** A name is edited where it stands: a click opens it, Enter saves, Escape leaves it as it was. */
-export function NameEdit(props: { value: string; label: string; onSave: (name: string) => void; disabled?: string; class?: string; hint?: string }) {
-  const [text, setText] = createSignal<string | null>(null);
-  const save = () => { const t = text()?.trim(); setText(null); if (t && t !== props.value) props.onSave(t); };
-  return <Show when={text() !== null} fallback={<button class={`ws-edit${props.class ? ` ${props.class}` : ""}`} aria-label={`${props.label}: ${props.value}`} aria-disabled={props.disabled ? "true" : undefined} data-why={props.disabled} onClick={() => { if (!props.disabled) setText(props.value); }}>{props.value}</button>}>
-    <input class="inp ws-edit-in" aria-label={props.label} value={text()!} onInput={e => setText(e.currentTarget.value)} ref={el => queueMicrotask(() => { el.focus(); el.select(); })} onBlur={() => setText(null)}
-      onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); save(); } else if (e.key === "Escape") { e.stopPropagation(); setText(null); } }} />
-  </Show>;
 }
 
 /** History link: a plain left click stays in the app, modified clicks keep their browser meaning. */
@@ -130,9 +146,16 @@ export function MenuItem(props: { icon?: string; label: JSX.Element; sub?: strin
   </button>;
 }
 
-/** Native modal: the rest of the app is inert while it is open, and focus returns to where it was. */
+let titles = 0;
+/**
+ * Native modal: the rest of the app is inert while it is open, and focus returns to where it was. Its visible title (its first heading) is its accessible name, so a title naming the worker, file or task is
+ * also what a screen reader says; `label` names a dialog with no heading, and stays on it as `data-dialog` for finding it.
+ */
 export function Modal(props: { open: boolean; onClose: () => void; onDismiss?: () => void; label: string; class?: string; children: JSX.Element }) {
   let el!: HTMLDialogElement, back: HTMLElement | null = null;
+  const [title, setTitle] = createSignal<string | null>(null);
+  const named = () => { const h = el.querySelector<HTMLElement>("h2"); if (h && !h.id) h.id = `dlg-title-${++titles}`; setTitle(h?.id ?? null); };
+  onMount(() => { const watch = new MutationObserver(named); watch.observe(el, { childList: true, subtree: true }); onCleanup(() => watch.disconnect()); named(); });
   const ws = useContext(WsContext);
   const [priorReceipt, setPriorReceipt] = createSignal(ws?.store.receipt());
   const error = () => { const r = ws?.store.receipt(); return r && r !== priorReceipt() && !r.ok ? r.message : null; };
@@ -147,11 +170,12 @@ export function Modal(props: { open: boolean; onClose: () => void; onDismiss?: (
       setPriorReceipt(() => ws?.store.receipt());
       back = document.activeElement as HTMLElement | null;
       if (!el.open) { if (typeof el.showModal === "function") el.showModal(); else el.setAttribute("open", ""); }
+      named();
       placeFocus(el.querySelector<HTMLElement>("[data-autofocus]"));
     } else close();
   }));
   onCleanup(close);
-  return <dialog ref={el} class={`dlg ${props.class ?? ""}`} aria-label={props.label}
+  return <dialog ref={el} class={`dlg ${props.class ?? ""}`} data-dialog={props.label} aria-labelledby={title() ?? undefined} aria-label={title() ? undefined : props.label}
     onCancel={e => { e.preventDefault(); props.onClose(); }}
     onClick={e => { if (e.target === el) (props.onDismiss ?? props.onClose)(); }}>
     <Show when={props.open}>{props.children}<Show when={error()}>{message => <div class="dlg-b ws-err" role="alert">{message()}</div>}</Show></Show>
@@ -163,7 +187,7 @@ export { createFollow } from "./follow";
 /**
  * A long column of rows in normal flow. Every row is rendered once and the engine paints only what is in view, so scrolling
  * runs no script and changes nothing in the page. (Windowing rows in and out on each scroll event built, measured and
- * re-placed cards while the owner scrolled, which dropped frames in WebKitGTK; test/scroll-perf.py measures it.) Keys stay
+ * re-placed cards while the owner scrolled, which dropped frames in WebKitGTK; test/scroll-perf.driver.mjs measures it.) Keys stay
  * stable across snapshots, so an updated record redraws inside its row and the focused row keeps its focus.
  */
 export function RowList<T>(props: {

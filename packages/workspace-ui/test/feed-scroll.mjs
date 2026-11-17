@@ -26,7 +26,7 @@ const plugins=label==="before"?[{name:"retained-pre-fix-scroll",enforce:"pre",tr
 }}]:[];
 await build({configFile:root+"packages/workspace-ui/vite.config.ts",root:root+"packages/workspace-ui",logLevel:"error",plugins,
  build:{outDir:out+"/bundle",emptyOutDir:true,rollupOptions:{input:root+"packages/workspace-ui/test/feed-scroll.html"}}});
-const seed=spawn("python3",["-B",root+"packages/workspace-ui/test/feed-scroll-startup.py"],{stdio:["pipe","pipe","inherit"]});
+const seed=spawn(process.execPath,[fileURLToPath(new URL("./feed-scroll-startup.mjs",import.meta.url))],{stdio:["pipe","pipe","inherit"]});
 let info, infoText="";
 const seedReady=new Promise((resolve,reject)=>{
  seed.stdout.on("data",chunk=>{infoText+=chunk;if(infoText.includes("\n")){try{info=JSON.parse(infoText.split("\n")[0]);resolve();}catch(e){reject(e);}}});
@@ -59,8 +59,7 @@ try{
  });
  await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
  const url="http://127.0.0.1:"+server.address().port+"/";
- const child=spawn("timeout",["--kill-after=5","140","docker","run","--rm","-i","--network","host","-v",out+":/evidence","cortex-workspace-rendered:ubuntu26.04","python3","-B","-",url,label],{stdio:["pipe","inherit","inherit"]});
- child.stdin.end(await readFile(new URL("./feed-scroll.py",import.meta.url)));
+ const child=spawn("timeout",["--kill-after=5","140","docker","run","--rm","-i","--network","host","-v",out+":/evidence","-v",fileURLToPath(new URL(".",import.meta.url))+":/driver:ro",(process.env.CW_RENDERED_IMAGE??"cortex-workspace-rendered:ubuntu26.04"),"node","/driver/feed-scroll.driver.mjs",url,label],{stdio:"inherit"});
  process.exitCode=await new Promise((resolve,reject)=>{child.on("error",reject);child.on("exit",code=>resolve(code??1));});
 }finally{
  if(server)await new Promise(resolve=>server.close(resolve));

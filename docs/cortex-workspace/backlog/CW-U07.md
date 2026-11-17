@@ -20,7 +20,7 @@ The orchestration settings pages and shared rules are in [SCREENS](../SCREENS.md
 
 ## Field inventory checklist (CW-R41)
 
-Each item must be reachable on an orchestration settings page, as Simple, Advanced or read-only as stated. Scope: M machine, P project. Source references name runtime modules: `configuration/management.py`, `configuration/mcp_servers.py`, `routing/auto_route.py` and `routing/model_policy.py`.
+Each item must be reachable on an orchestration settings page, as Simple, Advanced or read-only as stated. Scope: M machine, P project. Source references name the former Python runtime modules (configuration management, MCP servers, automatic routing and model policy), now implemented in the native settings API.
 
 Coordinator and defaults (`user_defaults`):
 - [ ] `coordinator.engine`, `coordinator.model`: Coordinator, Simple; M; the model must be enabled.

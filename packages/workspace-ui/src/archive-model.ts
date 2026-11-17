@@ -1,5 +1,5 @@
 import { DAY, purgeBlocker } from "@cortex/workspace-domain";
-import type { TaskView, WorkspaceIndex } from "./selectors";
+import { closedAsIs, type TaskView, type WorkspaceIndex } from "./selectors";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 export const shortDate = (at: number) => { const d = new Date(at); return `${d.getDate()} ${MONTHS[d.getMonth()]}`; };
@@ -26,7 +26,7 @@ function subline(v: TaskView, outcome: Outcome, blocker: string | null) {
   if (outcome === "committed") return `Committed to ${v.task.integration!.targetBranch}${when}`;
   if (outcome === "merged") return `Merged${when}${v.task.integration?.method === "pr" ? ", through a pull request" : ""}`;
   if (outcome === "external") return "Done outside the app; not accepted or merged here";
-  if (outcome === "as_is") return "Closed as is, not verified";
+  if (outcome === "as_is") return closedAsIs(v.task);
   if (outcome === "cancel") return `Cancelled${when}`;
   return "Done";
 }

@@ -1,12 +1,13 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
-import { capabilityOf, taskEditable } from "@cortex/workspace-domain";
-import { checkCounts, clock, dayClock, engineLimits, sameBranch, sprintTitle, type TaskView } from "./selectors";
+import { capabilityOf, taskEditable, taskRenamable } from "@cortex/workspace-domain";
+import { asOf, checkCounts, clock, dayClock, engineLimits, nothingToCommit, sameBranch, windowTitle, sprintTitle, type TaskView } from "./selectors";
 import { useWs } from "./ctx";
+import { FieldEdit } from "./field-edit";
 import { onScreen } from "./freshness";
 import { A, FactLine, I, Modal, Pop } from "./kit";
 import { ActionBar, revealWhenCut } from "./layout";
 import { behindTarget, conflictLine, finishBlocked, taskCheckout } from "./review-model";
-import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, languageLabel, modeLabel, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, usesMachineRoute, workerFace, type SessionModel } from "./session-model";
+import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, languageLabel, modeLabel, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, usesMachineRoute, workerFace, workersOutcome, type SessionModel } from "./session-model";
 import { CHECK_ICON, VERIFICATION } from "./worker";
 
 const useModel = (id: () => string) => {
@@ -14,16 +15,15 @@ const useModel = (id: () => string) => {
   return createMemo(() => sessionModel(ws.store.index(), id()));
 };
 
-/** The crumb is the title: a click renames it in place, and a manual title always wins over a late generated one. */
+/** The crumb is the title: a click renames it in place, started or not, and a manual title always wins over a late generated one. */
 export function TaskTitle(props: { view: TaskView }) {
   const ws = useWs();
-  const [text, setText] = createSignal<string | null>(null);
-  const shown = () => props.view.task.titleState === "failed" ? props.view.task.description.split("\n")[0].slice(0, 60) : props.view.task.title;
-  const save = () => { const t = text(); if (t?.trim()) ws.ok({ type: "rename_task", taskId: props.view.id, title: t }, () => { setText(null); }); };
-  return <Show when={taskEditable(props.view.task)} fallback={<span ref={revealWhenCut} class="cur trunc ws-title" data-whole="">{shown()}</span>}><Show when={text() !== null} fallback={<button class="cur trunc ws-title" {...ws.needs("rename_task")} onClick={() => !taskEditable(props.view.task) || ws.gate("rename_task") || setText(props.view.task.title.startsWith("Title unavailable") || props.view.task.titleState === "pending" ? "" : props.view.task.title)}>{shown()}</button>}>
-    <input class="inp ws-title-in" aria-label="Task title" value={text()!} onInput={e => setText(e.currentTarget.value)} ref={el => queueMicrotask(() => { el.focus(); el.select(); })} onBlur={() => setText(null)}
-      onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); save(); } else if (e.key === "Escape") { e.stopPropagation(); setText(null); } }} />
-  </Show></Show>;
+  const title = () => props.view.task.title;
+  const shown = () => props.view.task.titleState === "failed" ? props.view.task.description.split("\n")[0].slice(0, 60) : title();
+  return <Show when={taskRenamable(props.view.task)} fallback={<span ref={revealWhenCut} class="cur trunc ws-title" data-whole="">{shown()}</span>}>
+    <FieldEdit band label="Task title" value={title()} off={ws.gate("rename_task")} inputClass="ws-title-in" save={text => ws.run({ type: "rename_task", taskId: props.view.id, title: text })}
+      closed={{ class: "cur trunc ws-title", text: saved => saved === title() ? shown() : saved, start: () => title().startsWith("Title unavailable") || props.view.task.titleState === "pending" ? "" : title() }} />
+  </Show>;
 }
 
 /** Where the task works and where it merges. The target stays changeable until merge. */
@@ -77,12 +77,12 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
     <Show when={chip()}>{c => <span class="chip tb-state"><I n={c().icon} s={12} class={`${c().spin ? "spin " : ""}${c().tone}`} /><span style={{ color: "var(--fg)" }}>{c().text}<Show when={c().wide}><span class="w-wide">{c().wide}</span></Show></span>
       <Show when={c().next}><I n="chevron-right" s={12} class="faint w-wide" /><span class="w-wide">{c().next}</span></Show></span>}</Show>
     <Show when={taskEditable(props.view.task)}><button class="btn btn-line tb-fold" {...ws.needs("edit_task")} onClick={() => ws.open({kind:"edit-task",taskId:props.view.id})}>Edit task…</button></Show>
-    <Show when={mode() === "live" && props.view.task.conflict === "none" && ((m()?.open.length ?? 0) > 0 || props.view.column === "needs")}><button class="btn btn-primary" onClick={go}>Answer</button></Show>
+    <Show when={mode() === "live" && props.view.task.conflict === "none" && ((m()?.open.length ?? 0) > 0 || (props.view.column === "needs" && props.view.task.observedPhase !== "recovery"))}><button class="btn btn-primary" onClick={go}>Answer</button></Show>
     <Show when={props.view.task.status === "review" && mode() === "review"}><A class="btn btn-primary" to={{ name: "task", machine: props.view.machine.id, task: props.view.id, tab: "changes", sub: "diff" }}>Review changes</A></Show>
     <Show when={props.view.task.status === "ready_to_merge" && mode() === "review"}>
       <Show when={!props.view.task.integrationFacts?.alreadyInTarget} fallback={<button class="btn btn-primary" {...ws.needs("close_task")} onClick={() => ws.closeTask(props.view.id, "already_in_target")}>Close task…</button>}>
       <Show when={sameBranch(props.view.task, props.view.target)}>
-        <Show when={props.view.task.integrationFacts?.commitAvailable} fallback={<button class="btn btn-primary" {...ws.needs("close_task")} onClick={() => ws.closeTask(props.view.id)}>Close as is…</button>}>
+        <Show when={props.view.task.integrationFacts?.commitAvailable} fallback={<button class="btn btn-primary" {...ws.needs("close_task")} onClick={() => ws.closeTask(props.view.id)}>{nothingToCommit(props.view.task) ? "Close task…" : "Close as is…"}</button>}>
           <button class="btn btn-primary" aria-describedby={finishBlocked(props.view.task) ? why() : undefined} aria-disabled={finishBlocked(props.view.task) ? "true" : undefined} data-why={finishBlocked(props.view.task)} {...ws.needs("integrate")} onClick={() => { if (!finishBlocked(props.view.task)) ws.open({ kind: "merge", taskId: props.view.id, how: "squash" }); }}>Commit to <span class="l-branch">{props.view.target}</span>…</button>
         </Show>
       </Show>
@@ -93,6 +93,8 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
       </Show>
       </Show>
     </Show>
+    {/* A held task waits for the owner: say what is expected with one concrete action, not only a message box. */}
+    <Show when={mode() === "live" && props.view.task.observedPhase === "recovery" && props.view.task.conflict === "none"}><button class="btn btn-primary" {...ws.needs("retry_task")} onClick={() => ws.run({ type: "retry_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Continue</button></Show>
     <Show when={mode() === "live"}><button class="btn btn-line" {...ws.needs("stop_task")} onClick={() => ws.stopTask(props.view.id)}><I n="stop" s={12} class="st-bad" />{stopLabel(ws.can(capabilityOf("continue_task")))}</button></Show>
     <Show when={mode() === "paused"}><button class="btn btn-primary" {...ws.needs("continue_task")} onClick={() => ws.run({ type: "continue_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Resume</button></Show>
     <Show when={mode() === "paused" || mode() === "stopping"}><button class="btn btn-line" aria-describedby={blocked() ? why() : undefined} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("close_task")} onClick={() => { if (!blocked()) ws.closeTask(props.view.id); }}>Close task…</button></Show>
@@ -115,7 +117,12 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
     if (s.planUsage) rows.push(["Plan", `${s.planUsage.percent}%, snapshot ${clock(s.planUsage.observedAt)}`]);
     return rows;
   };
-  const limitRows = () => limits().rows.flatMap((r): [string, string][] => r.usedPercent === null ? [] : [[r.label, `${r.usedPercent}% of this week${r.resetAt ? `, resets ${dayClock(r.resetAt)}` : ""}`]]);
+  // Only reported windows, each by itself; a stale snapshot says when it was taken.
+  const limitRows = () => limits().rows.flatMap(r => r.windows.flatMap((w): [string, string][] => {
+    if (w.usedPercent === null) return [];
+    const seen = asOf(w.observedAt, ws.store.clock());
+    return [[windowTitle(r, w), `${w.usedPercent}% of this week${w.resetAt ? `, resets ${dayClock(w.resetAt)}` : ""}${seen?.stale ? `, ${seen.text.toLowerCase()}` : ""}`]];
+  }));
   const chip = () => stateChip(m());
   const settings = () => taskSettings(m());
   const checks = createMemo(() => checksOf(m()));
@@ -123,7 +130,6 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
   const limits = createMemo(() => engineLimits(ws.store.state(), m().view.machine));
   const open = () => m().open.length;
   const paused = () => m().mode === "paused" || m().mode === "stopping";
-  const finishedCount = () => m().finished.length;
   const selected = () => m().workers.find(w => w.id === props.pick) ?? null;
   const shownChecks = () => checks().filter(c => c.outcome !== "passed").slice(0, 5);
   const hiddenChecks = () => checks().filter(c => c.outcome !== "passed").length - shownChecks().length;
@@ -132,6 +138,7 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
   const note = () => {
     if (t().conflict === "resolving") return `Handed over by you${t().merge?.handedAt != null ? ` at ${clock(t().merge!.handedAt)}` : ""}. You can stop it and take over at any time.`;
     if (t().conflict !== "none") return "Resolve it yourself, resolve it automatically or abort the merge.";
+    if (t().observedPhase === "recovery" && !m().view.unknown) return "Continue lets the coordinator decide the next step from the recorded state; nothing is replayed. Or send a message.";
     if (t().status === "review") return `Finished. Accepting v${t().result?.version ?? ""} is your decision.`;
     if (t().status === "ready_to_merge") return t().acceptance ? "Waiting for you to confirm." : m().view.project.hasGit === false ? "Review the result before closing the task." : sameBranch(t(), m().view.target) ? "Nothing is committed or closed without your confirmation." : "Nothing merges without your confirmation.";
     return m().mode === "live" ? `${open() ? `${open()} question${open() === 1 ? "" : "s"} for you. ` : ""}Next step is Review.` : paused() ? "Resume, or send any message. Nothing was deleted." : "";
@@ -171,7 +178,7 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
       </div>
     </Show>
     <Show when={m().workers.length > 0}>
-      <div class="ins-sec"><div class="ins-h"><span>Workers</span><span>{m().active.length} active, {finishedCount()} finished</span></div>
+      <div class="ins-sec"><div class="ins-h"><span>Workers</span><span>{workersOutcome(m().workers, m().active.length)}</span></div>
         <For each={m().workers}>{w => { const f = () => workerFace(w.status); return <A class="wins ws-wins" to={{ name: "task", machine: m().view.machine.id, task: m().view.id, tab: "workers", worker: w.id }}><I n={f().icon} s={14} class={`${f().spin ? "spin " : ""}${f().tone === "st-idle" ? "faint" : f().tone}`} /><span class="trunc">{w.role}</span><span class={`st ${f().tone}`}>{f().label}</span></A>; }}</For>
       </div>
     </Show>

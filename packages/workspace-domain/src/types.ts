@@ -47,12 +47,14 @@ export type McpServer = {
   allowedTools: string[]; readOnlyTools: string[]; coordinatorTools: string[] | null; alwaysLoadTools: string[] | null;
   readPaths: string[]; writePaths: string[]; network: boolean; runtimeDirEnv: string[];
   handTools: string[]; unsupportedKeys: string[]; problem: string | null;
+  /** "none": runs without the sandbox (its own value or the registry default). Absent: contained. Machine-local, never a profile policy. */
+  containment?: "contained" | "none";
 };
 export type SecretAction = "keep" | "replace" | "remove";
 export type RoleAccess = "writing" | "read_only" | "consultant";
 export type Surfaces = { routing: RoutingRules; user_defaults: UserDefaults; mcp_servers: McpServer[] };
 export type SurfaceKey = keyof Surfaces | "project_ceiling";
-export type McpPolicy = Omit<McpServer, "command" | "args" | "env" | "handTools" | "unsupportedKeys" | "problem">;
+export type McpPolicy = Omit<McpServer, "command" | "args" | "env" | "handTools" | "unsupportedKeys" | "problem" | "containment">;
 /** A profile never holds project settings, MCP commands, arguments, environment or credentials. */
 export type ProfileSections = { routing: RoutingRules; defaults: UserDefaults; mcp: McpPolicy[]; sessions: Record<string, number> };
 export type ProfileSection = keyof ProfileSections;
@@ -82,6 +84,8 @@ export type Project = {
   openBranch: string; defaultBranch: string; activated?: boolean; confirmedAt?: number; mock?: true;
   /** Why Cortex is not working for this project right now, in the owner's words. The machine itself can be fine. */
   issue?: string | null;
+  /** What actually failed behind `issue`, for diagnostics: the read's own error, not owner wording. */
+  issueCause?: string | null;
   /** Whether the project folder is a Git repository, once the machine has said. Unknown until then. */
   hasGit?: boolean;
 };
@@ -122,7 +126,8 @@ export type Task = {
   conflict: "none" | "conflict" | "resolving" | "failed";
   merge: MergeState | null; resolvedBy: "cortex" | "you" | null;
   integration: Integration | null;
-  integrationFacts?: { targetBranch: string; alreadyInTarget: boolean; sameBranch?: boolean; commitAvailable?: boolean; pendingPaths?: string[]; otherUncommitted?: boolean; reason?: string | null; pushStatus: "pushed" | "not_pushed" | "unknown" | null };
+  /** `noChanges`: the machine found an answer-only result that changed no files, so there is nothing to commit. */
+  integrationFacts?: { targetBranch: string; alreadyInTarget: boolean; sameBranch?: boolean; commitAvailable?: boolean; noChanges?: boolean; pendingPaths?: string[]; otherUncommitted?: boolean; reason?: string | null; pushStatus: "pushed" | "not_pushed" | "unknown" | null };
   closedAs: "as_is" | "cancel" | "external" | null; notVerifiedByCortex: boolean;
   doneAt: number | null; archive: { at: number; previousStatus: "done"; sizeMb?: number | null } | null;
   archiveQuestion: boolean; archiveAskAfter: number | null;
@@ -147,6 +152,9 @@ export type Sprint = {
   /** Chosen once for all new sprint tasks. Absent on older sprints. */
   checkout?: { kind: CheckoutChoice["kind"] };
   archivedAt?: number;
+  /** A deletion the service started and has not finished: how many tasks it set out to delete and the ones still left. Such
+   *  a sprint is archived but stays on view, so its unfinished deletion can be seen and retried. */
+  deletion?: { total: number; left: string[] };
   planningFailure?: string; planningTaskId?: string; targetBranch: string | null; planning: "planning" | "question" | "ready" | "created" | "cancelled";
   conversation: SprintEntry[]; settings?: { model: string; effort: string; mode?: TaskSettings["mode"]; language?: TaskSettings["language"] };
   plan: PlanVersion | null; history?: PlanVersion[]; materializedVersion: number | null;
@@ -166,9 +174,13 @@ export type Activity = {
   diff?: { add: number; del: number; lines: string[] };
   command?: { state: CommandState; exit: number | null; took: string | null; tail: string; reason: string | null };
   messageId?: string;
+  /** The runtime's recorded refusal code of this failed result submission, present only when bound exactly to this step. */
+  refusal?: string;
 };
 export type WorkerResult = {
   summary: string; checks: Check[]; reportId?: string; mock?: true;
+  /** "failed" when the worker itself reported its assignment failed; absent for a finished result. */
+  outcome?: "failed";
   edits?: { path: string; add: number; del: number }[];
   attempts?: { n: number; ok: boolean; detail: string; at: number | null }[];
 };
@@ -183,6 +195,14 @@ export type Worker = {
   elapsedMs: number | null; runningSince: number | null;
   context: { used: number; window: number } | null; usage: number | null;
   activity: Activity[]; result: WorkerResult | null; messages?: Message[]; activityPartial?: boolean; activityCursor?: string | null; mock?: true;
+  /** A worker of an earlier version of the result (the task was reopened or replanned after it). Its checks are history. */
+  superseded?: true;
+  /** Set by the app, never read from the machine: the last facts showed this worker running, but the task has since ended, so its state is no longer confirmed. */
+  stale?: true;
+  /** How often the runtime refused this worker's result submission, and the latest refusal's code. */
+  resultRefusals?: { count: number; code: string };
+  /** Why a worker without a result ended: the owner stopped it, the coordinator cancelled it (replan), or its engine session was lost. Absent when not recorded. */
+  endedReason?: "stopped_by_owner" | "cancelled_by_coordinator" | "worker_lost";
 };
 export type Delivery = "queued" | "sending" | "recorded" | "delivered" | "failed" | "unverified" | "withdrawn";
 export type Attachment = { name: string; mimeType: string; data: string };
@@ -248,9 +268,13 @@ export type ChangeScope = { id: string; label: string; sub?: string; paths: stri
 export type ReviewComment = { attachments?: AttachmentInput[]; id: string; path: string; line: number; text: string; sent: boolean; mock?: true };
 /** What one task changed, as the Changes tab reviews it. */
 export type TaskChanges = { taskId: string; sha: string; unavailableReason?: string; files: FileDiff[]; scopes: ChangeScope[]; comments: ReviewComment[]; mock?: true };
+/** One reported plan window. Claude names its weekly windows `seven_day` (all models) and `seven_day_<model>` (for example `seven_day_fable`). */
+export type UsageWindow = { name: string; usedPercent: number | null; resetAt: string | null; observedAt: string | null };
 export type EngineUsageInput = {
   engine: string; connected: boolean; usedPercent: number | null;
   resetAt: string | null; observedAt: string | null;
+  /** Claude only: each reported weekly window by itself. A window that is absent was not reported. */
+  windows?: UsageWindow[];
 };
 export type EngineWeeklyUsage = Omit<EngineUsageInput, "engine"> & { engine: "codex" | "claude"; window: "weekly"; mock?: true };
 /** What the running session offers. A list stays empty until it is reported, and an empty list turns its control off. */
@@ -305,7 +329,7 @@ export type WorkspaceCommand =
   | { type: "rename_task"; taskId: string; title: string }
   | { type: "edit_task"; taskId: string; expectedVersion: string; title: string; description: string; attachments: AttachmentInput[]; settings: TaskSettings; checkout: { kind: CheckoutChoice["kind"] } }
   | { type: "generate_title"; taskId: string; fail?: boolean }
-  | { type: "start_task" | "continue_task" | "confirm_stop" | "clear_issue" | "restore_task" | "flush_queue" | "stop_resolution" | "abort_merge" | "finish_merge" | "update_from_target"; taskId: string; now?: number }
+  | { type: "start_task" | "continue_task" | "retry_task" | "confirm_stop" | "clear_issue" | "restore_task" | "flush_queue" | "stop_resolution" | "abort_merge" | "finish_merge" | "update_from_target"; taskId: string; now?: number }
   | { type: "retry_delivery"; messageId: string }
   | { type: "resolve_with_cortex"; taskId: string; guidance?: string; attachments?: AttachmentInput[]; now?: number }
   | { type: "resolve_block"; taskId: string; path: string; blockId: string; choice: Exclude<BlockChoice, "cortex"> }

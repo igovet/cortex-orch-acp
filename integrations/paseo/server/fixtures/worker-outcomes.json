@@ -1,0 +1,338 @@
+{
+  "failed": {
+    "live": [
+      {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "worker:17fcc1e7ca24926c67e38531c19826867ecd2a7579e885e6adecf59fd1bdecfa",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory",
+        "kind": "other",
+        "status": "in_progress"
+      },
+      {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "worker:17fcc1e7ca24926c67e38531c19826867ecd2a7579e885e6adecf59fd1bdecfa",
+        "status": "failed",
+        "rawOutput": {
+          "cortexWorkerOutcome": {
+            "status": "failed",
+            "openIssues": 3
+          }
+        }
+      }
+    ],
+    "replay": [
+      {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "worker:17fcc1e7ca24926c67e38531c19826867ecd2a7579e885e6adecf59fd1bdecfa",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory",
+        "kind": "other",
+        "status": "completed"
+      },
+      {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "worker:17fcc1e7ca24926c67e38531c19826867ecd2a7579e885e6adecf59fd1bdecfa",
+        "status": "failed",
+        "rawOutput": {
+          "cortexWorkerOutcome": {
+            "status": "failed",
+            "openIssues": 3
+          }
+        },
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory"
+      }
+    ],
+    "ref": "17fcc1e7ca24926c67e38531c19826867ecd2a7579e885e6adecf59fd1bdecfa",
+    "label": "failed",
+    "issues": 3
+  },
+  "issues": {
+    "live": [
+      {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "worker:c883345209e305d2d42c598cf98b45ebc73bc1f9578efe96ed5e05e2c97bf9b2",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory",
+        "kind": "other",
+        "status": "in_progress"
+      },
+      {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "worker:c883345209e305d2d42c598cf98b45ebc73bc1f9578efe96ed5e05e2c97bf9b2",
+        "status": "completed",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory · Completed with issues",
+        "rawOutput": {
+          "cortexWorkerOutcome": {
+            "status": "completed",
+            "openIssues": 3
+          }
+        }
+      }
+    ],
+    "replay": [
+      {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "worker:c883345209e305d2d42c598cf98b45ebc73bc1f9578efe96ed5e05e2c97bf9b2",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory",
+        "kind": "other",
+        "status": "completed"
+      },
+      {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "worker:c883345209e305d2d42c598cf98b45ebc73bc1f9578efe96ed5e05e2c97bf9b2",
+        "status": "completed",
+        "rawOutput": {
+          "cortexWorkerOutcome": {
+            "status": "completed",
+            "openIssues": 3
+          }
+        },
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory · Completed with issues"
+      }
+    ],
+    "ref": "c883345209e305d2d42c598cf98b45ebc73bc1f9578efe96ed5e05e2c97bf9b2",
+    "label": "completed with issues",
+    "issues": 3
+  },
+  "clean": {
+    "live": [
+      {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "worker:4a222c70b0c8d3e67748471924302c8fbdc8d03b24416cfe40d8f31184f23956",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory",
+        "kind": "other",
+        "status": "in_progress"
+      },
+      {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "worker:4a222c70b0c8d3e67748471924302c8fbdc8d03b24416cfe40d8f31184f23956",
+        "status": "completed",
+        "rawOutput": {
+          "cortexWorkerOutcome": {
+            "status": "completed",
+            "openIssues": 0
+          }
+        }
+      }
+    ],
+    "replay": [
+      {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "worker:4a222c70b0c8d3e67748471924302c8fbdc8d03b24416cfe40d8f31184f23956",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory",
+        "kind": "other",
+        "status": "completed"
+      },
+      {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "worker:4a222c70b0c8d3e67748471924302c8fbdc8d03b24416cfe40d8f31184f23956",
+        "status": "completed",
+        "rawOutput": {
+          "cortexWorkerOutcome": {
+            "status": "completed",
+            "openIssues": 0
+          }
+        },
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory"
+      }
+    ],
+    "ref": "4a222c70b0c8d3e67748471924302c8fbdc8d03b24416cfe40d8f31184f23956",
+    "label": "completed",
+    "issues": 0
+  },
+  "failed_cancel_early": {
+    "live": [
+      {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "worker:71b84d09a9003560761d61029f77c5ba882e810e2d44556a4406dd4a5230cf62",
+        "title": "Worker assignment",
+        "kind": "other",
+        "status": "pending"
+      },
+      {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "worker:71b84d09a9003560761d61029f77c5ba882e810e2d44556a4406dd4a5230cf62",
+        "status": "failed",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory",
+        "rawOutput": {
+          "cortexWorkerOutcome": {
+            "status": "failed",
+            "openIssues": 1
+          }
+        }
+      }
+    ],
+    "replay": [
+      {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "worker:71b84d09a9003560761d61029f77c5ba882e810e2d44556a4406dd4a5230cf62",
+        "title": "Worker assignment",
+        "kind": "other",
+        "status": "pending"
+      },
+      {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "worker:71b84d09a9003560761d61029f77c5ba882e810e2d44556a4406dd4a5230cf62",
+        "status": "failed",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory · Cancelled",
+        "rawOutput": "Cancelled: replanning"
+      },
+      {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "worker:71b84d09a9003560761d61029f77c5ba882e810e2d44556a4406dd4a5230cf62",
+        "status": "failed",
+        "rawOutput": {
+          "cortexWorkerOutcome": {
+            "status": "failed",
+            "openIssues": 1
+          }
+        },
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory"
+      }
+    ],
+    "ref": "71b84d09a9003560761d61029f77c5ba882e810e2d44556a4406dd4a5230cf62",
+    "label": "failed",
+    "issues": 1
+  },
+  "failed_cancel_late": {
+    "live": [
+      {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "worker:a950d145784071d34e53c51452674f5ff1970610b2c5c6304e7e7eb4efbfd5a8",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory",
+        "kind": "other",
+        "status": "in_progress"
+      },
+      {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "worker:a950d145784071d34e53c51452674f5ff1970610b2c5c6304e7e7eb4efbfd5a8",
+        "status": "failed",
+        "rawOutput": {
+          "cortexWorkerOutcome": {
+            "status": "failed",
+            "openIssues": 1
+          }
+        }
+      }
+    ],
+    "replay": [
+      {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "worker:a950d145784071d34e53c51452674f5ff1970610b2c5c6304e7e7eb4efbfd5a8",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory",
+        "kind": "other",
+        "status": "in_progress"
+      },
+      {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "worker:a950d145784071d34e53c51452674f5ff1970610b2c5c6304e7e7eb4efbfd5a8",
+        "status": "failed",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory · Cancelled",
+        "rawOutput": "Cancelled: replanning"
+      },
+      {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "worker:a950d145784071d34e53c51452674f5ff1970610b2c5c6304e7e7eb4efbfd5a8",
+        "status": "failed",
+        "rawOutput": {
+          "cortexWorkerOutcome": {
+            "status": "failed",
+            "openIssues": 1
+          }
+        },
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory"
+      }
+    ],
+    "ref": "a950d145784071d34e53c51452674f5ff1970610b2c5c6304e7e7eb4efbfd5a8",
+    "label": "failed",
+    "issues": 1
+  },
+  "failed_cancel_persist": {
+    "live": [
+      {
+        "kind": "other",
+        "sessionUpdate": "tool_call",
+        "status": "in_progress",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory",
+        "toolCallId": "worker:1491c8b99bd1541dc9bc634ac20d7c39f5be3a3ef2e0b2d7acdc660cbd197a69"
+      },
+      {
+        "rawOutput": {
+          "cortexWorkerOutcome": {
+            "openIssues": 1,
+            "status": "failed"
+          }
+        },
+        "sessionUpdate": "tool_call_update",
+        "status": "failed",
+        "toolCallId": "worker:1491c8b99bd1541dc9bc634ac20d7c39f5be3a3ef2e0b2d7acdc660cbd197a69"
+      }
+    ],
+    "replay": [
+      {
+        "kind": "other",
+        "sessionUpdate": "tool_call",
+        "status": "in_progress",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory",
+        "toolCallId": "worker:1491c8b99bd1541dc9bc634ac20d7c39f5be3a3ef2e0b2d7acdc660cbd197a69"
+      },
+      {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "worker:1491c8b99bd1541dc9bc634ac20d7c39f5be3a3ef2e0b2d7acdc660cbd197a69",
+        "status": "failed",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory · Cancelled",
+        "rawOutput": "Cancelled: replanning"
+      },
+      {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "worker:1491c8b99bd1541dc9bc634ac20d7c39f5be3a3ef2e0b2d7acdc660cbd197a69",
+        "status": "failed",
+        "rawOutput": {
+          "cortexWorkerOutcome": {
+            "status": "failed",
+            "openIssues": 1
+          }
+        },
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory"
+      }
+    ],
+    "ref": "1491c8b99bd1541dc9bc634ac20d7c39f5be3a3ef2e0b2d7acdc660cbd197a69",
+    "label": "failed",
+    "issues": 1
+  },
+  "cancelled": {
+    "live": [
+      {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "worker:e551f0c55625cabeb436da0b3f98f2e01b1581ffb9844d9f311966ba51622eba",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory",
+        "kind": "other",
+        "status": "in_progress"
+      },
+      {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "worker:e551f0c55625cabeb436da0b3f98f2e01b1581ffb9844d9f311966ba51622eba",
+        "status": "failed",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory · Cancelled",
+        "rawOutput": "Cancelled: user stop"
+      }
+    ],
+    "replay": [
+      {
+        "sessionUpdate": "tool_call",
+        "toolCallId": "worker:e551f0c55625cabeb436da0b3f98f2e01b1581ffb9844d9f311966ba51622eba",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory",
+        "kind": "other",
+        "status": "in_progress"
+      },
+      {
+        "sessionUpdate": "tool_call_update",
+        "toolCallId": "worker:e551f0c55625cabeb436da0b3f98f2e01b1581ffb9844d9f311966ba51622eba",
+        "status": "failed",
+        "title": "Worker: backend-dev · codex · sol · medium — Read inventory · Cancelled",
+        "rawOutput": "Cancelled: user stop"
+      }
+    ],
+    "ref": "e551f0c55625cabeb436da0b3f98f2e01b1581ffb9844d9f311966ba51622eba",
+    "label": "cancelled",
+    "issues": null
+  }
+}

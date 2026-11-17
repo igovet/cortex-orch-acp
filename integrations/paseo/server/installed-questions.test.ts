@@ -122,11 +122,22 @@ const component = load("e.QuestionFormCard=function", [
   { names: ["jsx", "jsxs"], value: { jsx, jsxs: jsx } },
   { names: ["Alert"], value: { Alert: "Alert" } },
   { names: ["LoadingSpinner"], value: { LoadingSpinner: "LoadingSpinner" } },
+  // Installed 0.15.3 renders question text and option label/description through
+  // MarkdownRenderer; the stand-in keeps its `text` prop observable in the tree.
+  { names: ["MarkdownRenderer"], value: { MarkdownRenderer: "MarkdownRenderer" } },
 ]);
 const replies: any[] = [];
 function render() {
   cursor = 0;
   return component.QuestionFormCard({ permission: { request: { input } }, onRespond: (answer: any) => replies.push(answer), isResponding: responding });
+}
+// The current question is the sole MarkdownRenderer text inside its test-id container.
+function questionText(tree: any[]): unknown {
+  const container = tree.filter((node) => node.props.testID === "question-form-current-question");
+  assert.equal(container.length, 1, "Expected one current-question container");
+  const text = nodes(container[0].props.children).filter((node) => node.type === "MarkdownRenderer");
+  assert.equal(text.length, 1, "Expected one installed MarkdownRenderer question text");
+  return text[0].props.text;
 }
 function nodes(tree: any): any[] {
   if (!tree || typeof tree !== "object") return [];
@@ -134,7 +145,7 @@ function nodes(tree: any): any[] {
   return tree.props ? [tree, ...nodes(tree.props.children)] : [];
 }
 let tree = nodes(render());
-assert.ok(tree.some((node) => node.props.testID === "question-form-current-question" && node.props.children === "Layout?"));
+assert.equal(questionText(tree), "Layout?");
 assert.ok(tree.some((node) => node.props.accessibilityRole === "radiogroup" && node.props.accessibilityLabel === "Layout?"));
 assert.deepEqual(tree.filter((node) => node.props.option).map((node) => node.props.option.label), ["Compact", "Spacious"]);
 assert.ok(tree.some((node) => node.props.onChange && node.props.accessibilityLabel === "Layout?"));
@@ -143,7 +154,7 @@ assert.ok(tree.some((node) => node.props.questions?.length === 2)); // one pagin
 // Select first answer; the real component advances to the second question.
 tree.find((node) => node.props.option).props.onToggle(0, 0, false);
 tree = nodes(render());
-assert.ok(tree.some((node) => node.props.testID === "question-form-current-question" && node.props.children === "Theme?"));
+assert.equal(questionText(tree), "Theme?");
 assert.equal(tree.find((node) => node.props.testID === "question-form-primary-action").props.disabled, true);
 tree.find((node) => node.props.onChange && node.props.accessibilityLabel === "Theme?").props.onChange(1, "Custom theme");
 tree = nodes(render());

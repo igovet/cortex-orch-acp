@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 import solid from "vite-plugin-solid";
+import { workspaceOutput } from "./build-chunks.ts";
 
 const at = (path: string) => fileURLToPath(new URL(path, import.meta.url));
 
@@ -16,7 +17,7 @@ export default defineConfig({
     ],
     dedupe: ["solid-js"],
   },
-  build: { outDir: at("dist"), emptyOutDir: true },
+  build: { outDir: at("dist"), emptyOutDir: true, rolldownOptions: { output: workspaceOutput } },
   test: { root: at("."), include: ["test/**/*.test.{ts,tsx}"] },
   clearScreen: false,
 });

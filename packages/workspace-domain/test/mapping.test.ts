@@ -18,6 +18,12 @@ const wireDecision = (patch: Partial<WireDecision> = {}): WireDecision => ({
 const ctx = { projectId: "p" };
 
 describe("task mapping", () => {
+  it("shows an explicit native owner resolution as done without certifying the work", () => {
+    const resolved = wireTask({phase:"stopped",runtimeState:"CANCELLED",executionState:"stopped",warnings:["owner_resolved_without_certification"]});
+    expect(mapTask(resolved,ctx)).toMatchObject({status:"done",closedAs:"as_is",notVerifiedByCortex:true,acceptance:null,result:null});
+    expect(mapTask({...resolved,warnings:[...resolved.warnings,"contradictory_evidence"]},ctx).status).not.toBe("done");
+    expect(mapTask({...resolved,warnings:[]},ctx).status).toBe("cancelled");
+  });
   it("carries the observed coordinator route separately from editable settings", () => {
     const route = { model: "Observed Model", effort: "High" };
     expect(mapTask(wireTask({ coordinatorRoute: route }), ctx).coordinatorRoute).toEqual(route);
@@ -82,6 +88,31 @@ describe("task mapping", () => {
     state.machines[0].connection = "connected";
     state.tasks.push(task);
     expect(boardPhase(state, "t")).toBe("unknown");
+  });
+
+  it("an interrupted turn is an owner-facing wait, not unknown process evidence", () => {
+    const task = mapTask(wireTask({ phase: "recovery", runtimeState: "RECOVERING", executionState: "recovering", waitReason: "turn_interrupted" }), ctx);
+    expect(task).toMatchObject({ status: "needs_you", process: "live", observedPhase: "recovery", issue: "turn_interrupted" });
+    // Live means messaging is possible, not proof of physical quiescence.
+    expect(task.process).not.toBe("stopped");
+  });
+
+  it.each([
+    { phase: "unknown", runtimeState: "RECOVERING", executionState: "unknown", warnings: ["contradictory_evidence"] },
+    { phase: "recovery", runtimeState: "EXECUTING", executionState: "recovering" },
+    { phase: "recovery", runtimeState: "RECOVERING", executionState: "unknown" },
+    { phase: "recovery", runtimeState: null, executionState: "recovering" },
+    { phase: "recovery", runtimeState: "RECOVERING", executionState: "recovering", executionId: null },
+    { phase: "recovery", runtimeState: "RECOVERING", executionState: "recovering", warnings: ["contradictory_evidence"] },
+  ])("an interruption reason cannot override missing or contradictory evidence: %j", patch => {
+    expect(mapTask(wireTask({ ...patch, waitReason: "turn_interrupted" }), ctx).process).toBe("unknown");
+  });
+
+  it("a recovery with a recorded native reason is an owner-facing wait with Stop and Close, not unknown", () => {
+    // D7: after a native start failure the task sat in RECOVERING with Stop and Close disabled.
+    const task = mapTask(wireTask({ phase: "recovery", runtimeState: "RECOVERING", executionState: "recovering", waitReason: "native_session_outcome_unknown" }), ctx);
+    expect(task).toMatchObject({ status: "needs_you", process: "live", observedPhase: "recovery", issue: "native_session_outcome_unknown" });
+    expect(mapTask(wireTask({ phase: "recovery", runtimeState: "RECOVERING", executionState: "recovering", waitReason: " " }), ctx).process).toBe("unknown");
   });
 
   it("an unconfirmed recovery is unknown until the runtime settles it", () => {

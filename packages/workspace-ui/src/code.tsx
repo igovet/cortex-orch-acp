@@ -63,11 +63,15 @@ function GoToFile(props: { open: boolean; paths: string[]; onClose: () => void; 
   </Modal>;
 }
 
+const sameFiles = (a: ReturnType<typeof checkoutFiles>, b: ReturnType<typeof checkoutFiles>) =>
+  a.diffs === b.diffs && a.tree.length === b.tree.length && a.tree.every((path, i) => path === b.tree[i]);
+
 /** Tree, tabs, the file and its diff for one checkout. `at` builds the address, so the same view serves a project and a task. */
 export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; file?: string; line?: number; at: (file: string, line?: number) => Route }) {
   const ws = useWs();
   const state = () => ws.store.state();
-  const data = createMemo(() => checkoutFiles(state(), props.repo, props.checkout));
+  // Every store update recomputes this; one that left the checkout's files alone must not rebuild the tree or the tabs.
+  const data = createMemo(() => checkoutFiles(state(), props.repo, props.checkout), undefined, { equals: sameFiles });
   const [tabs, setTabs] = createSignal<{ path: string; preview: boolean }[]>([]);
   const [onlyChanged, setOnlyChanged] = createSignal(false);
   const [collapsed, setCollapsed] = createSignal<Set<string>>(new Set());
@@ -98,7 +102,7 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
   const toggleDir = (dir: string) => { const next = new Set(collapsed()); if (next.has(dir)) next.delete(dir); else next.add(dir); setCollapsed(next); };
   const show = (file: string, line?: number) => ws.go(props.at(file, line));
   const ensure = (path: string, preview: boolean) => setTabs(list => {
-    if (list.some(t => t.path === path)) return preview ? list : list.map(t => t.path === path ? { ...t, preview: false } : t);
+    if (list.some(t => t.path === path)) return preview || !list.some(t => t.path === path && t.preview) ? list : list.map(t => t.path === path ? { ...t, preview: false } : t);
     return [...list.filter(t => !t.preview), { path, preview }];
   });
   const drop = (path: string) => {

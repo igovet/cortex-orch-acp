@@ -1,9 +1,60 @@
 # claude-agent-acp outgoing adapter
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
-## Current support: 0.97.0 (2026-10-27)
+## Current support: 0.107.0 (2026-11-16)
+
+<a id="current-support-01070-2026-11-16"></a>
+
+Exact **0.107.0** is registered alongside **0.97.0**, **0.88.0**, **0.87.0**
+and **0.78.0**. This installed adapter uses Claude Agent SDK **0.3.323** and
+ACP SDK **2.6.0**; Cortex still negotiates **ACP v1** (the real adapter
+answered `initialize` with `protocolVersion: 1`, no auth methods and added
+`auth.status`, `options`, `status` and `title` capabilities). Later releases
+0.107.1 and 0.107.2 exist, differ in several modules from 0.107.0 and are not
+registered.
+
+The package was reorganized (`dist/acp-agent.js` became `dist/v1/acp-agent.js`
+with a separate `dist/v2/` tree, which Cortex does not enable). The
+instruction channel is unchanged in behavior: `sessionSystemPrompt` in
+`dist/client-system-prompt.js` uses the spec `systemPrompt` if supplied, else
+the `_meta.systemPrompt` string override or preset-append object, else the
+Claude Code preset, and the result is the SDK `options.systemPrompt`. The
+options spread, disallowed tools, hooks and `_meta.claudeCode.toolName`
+for compaction and tool calls are unchanged in meaning (Cortex sends no
+`_meta.claudeCode` options in the native session path). `toolName` on a permission request is still present only for MCP tools
+and subagent calls, exactly as on 0.97.0.
+
+Behavior changes relevant to Cortex:
+
+- With no `permissions.defaultMode` in the user's settings the session now
+  starts in `auto` (when offered) instead of `default`. Cortex's native
+  sessions configure `mode` explicitly before any prompt and require the
+  confirmed value, so this is not relied on; observed on 0.107.0:
+  `session/set_config_option` for `mode`, `effort` and `model` each returned the
+  requested `currentValue`. A session that never configures `mode` would start
+  in `auto`.
+- Blob resources are now converted: text, PNG/JPEG/GIF/WebP images and PDFs are
+  decoded, other MIME types are skipped. Cortex sends each retained attachment in
+  the form the adapter reads (see
+  [Attachment retention](../../project/native-incoming-acp.md#attachment-retention)).
+- Authentication status is now reported by the adapter (`auth.status`);
+  Cortex continues to use `claude auth status`, which is unchanged.
+
+No-paid observation with the real adapter, an isolated project and the owner's
+existing Claude login (`initialize`, `session/new` and set-config calls, no
+prompt): the same model list as 0.97.0 (`default`, `opus[1m]`,
+`claude-opus-5[1m]`, `claude-fable-5-1[1m]`, `claude-fable-5`,
+`claude-sonnet-5`, `haiku`, `claude-opus-4-8`, `claude-opus-4-7`,
+`claude-opus-4-6`, `claude-sonnet-4-6`), the same `effort` values (`default`,
+`low` to `max`), the same `fast` and `ultracode` on/off options and the same five
+modes. Model choices are the account's; the adapter version does not add models.
+This is not a paid model turn, tool-enforcement or rendered client evidence.
+
+## Previous support: 0.97.0 (2026-10-27)
+
+<a id="current-support-0970-2026-10-27"></a>
 
 Exact **0.97.0** is registered alongside **0.88.0**, **0.87.0** and **0.78.0**.
 This installed adapter uses Claude Agent SDK **0.3.310** and ACP SDK **2.0.2**;
@@ -40,7 +91,7 @@ Checkout discovery prefers the newest registered installation and retains all ea
 for rollback. Incoming ACP startup and approved engine installations now advance
 existing connections to newer approved owned installs, or relocate the same version to the verified Workspace bundle, preserving accounts,
 routes and model settings. The source path is
-`configuration.management.follow_approved_adapters`. There is no per-connection
+`follow_approved_adapters`. There is no per-connection
 pin; `CORTEX_ENGINE_FOLLOW=off` disables following for rollback. See
 [selection, private backups and rollback](../../configuration.md#approved-adapter-following-and-rollback).
 Selection is not a substitute for isolated live qualification.
@@ -156,8 +207,7 @@ process it stops about a second after `session/new`. While the refresh started
 after `session/new` ran on a thread of that process, it was killed every time:
 the isolated dev Paseo's Refresh saved Codex and OpenCode catalogs but never a
 Claude one. It now runs in its own process session
-(`src/cortex_runtime/catalog/detached_refresh.py`, one refresh per connection
-at a time) and saves its snapshot after the requesting process has exited.
+ and saves its snapshot after the requesting process has exited.
 
 The picker also shows only models the effective routing enables. On the same
 date the dev profile's `routing.json` still carried the pre-Haiku policy (bare
@@ -166,7 +216,7 @@ produced the six-model picker. It was updated to the current preset through
 `management.update_routing` after a private backup.
 
 A Cortex runtime deployed before the `<version>+sdk.<sdk>` build-name ordering
-in `connections/discovery.py` sorts `0.87.0+sdk.0.3.293` below `0.87.0`. Each
+in the connection discovery sorts `0.87.0+sdk.0.3.293` below `0.87.0`. Each
 start of such a runtime repoints the Claude connection back to the upstream
 install, whose SDK 0.3.287 resolves `haiku` to Haiku 4.5 with no effort
 choices, even though routing names `haiku` at Luna parity. The owner's
@@ -199,27 +249,22 @@ the pinned version.
 
 ## Pinned install requirements (manual recipe placeholder)
 
-Settings > Connections > Download engine installs the manifest-pinned claude-agent-acp into Cortex's owned engine root and needs no install record (see [engine install records](../../configuration.md#engine-install-records)). The recipe below implements **no installer** and is for an adapter installed outside Cortex. An operator who has
+Settings > Connections > Download engine installs the manifest-pinned claude-agent-acp into Cortex's owned engine root and needs no install record (see [engine install records](../../configuration.md#engine-install-records)). The record below describes an adapter installed outside Cortex (the former Python API for recording it was removed; the Rust runtime verifies the manifest-pinned or bundled install natively). An operator who has
 already installed claude-agent-acp by some other means (for example
 following Zed's own npx-based Custom Agent registration, or a manual `npm
-install @agentclientprotocol/claude-agent-acp`) records the resulting
-install as an `engine.claude_install.ClaudeAcpInstall`:
+install @agentclientprotocol/claude-agent-acp`) would have recorded the resulting
+install as a `ClaudeAcpInstall`:
 
-```python
-from cortex_runtime.engine.claude_install import ClaudeAcpInstall, verify_install
-
-install = ClaudeAcpInstall(
-    node_binary="/usr/bin/node",                              # absolute, no symlink component
-    adapter_entry="/opt/claude-agent-acp/dist/index.js",       # absolute, no symlink component
-    package_json="/opt/claude-agent-acp/package.json",
-    package_version="0.78.0",                                  # must equal package.json's own "version"
-    package_json_sha256="<sha256 of package.json>",
-    adapter_entry_sha256="<sha256 of dist/index.js>",
-)
-verify_install(install)  # re-hashes/re-checks everything fresh; raises on any drift/untrust
+```text
+node_binary          absolute, no symlink component
+adapter_entry        absolute, no symlink component
+package_json         absolute path
+package_version      must equal package.json's own "version"
+package_json_sha256  sha256 of package.json
+adapter_entry_sha256 sha256 of dist/index.js
 ```
 
-Unlike `CodexAcpInstall`, there is no `bundled_codex_binary`-equivalent
+Unlike a Codex install record, there is no `bundled_codex_binary`-equivalent
 field: the pinned release bundles no separate spawned binary (the Claude
 Agent SDK is a pure JS/TS library loaded into the same Node process as
 `dist/index.js`). The same untrusted-location list codex-acp's own install
@@ -238,11 +283,11 @@ environ)` returns `(launch_command, pinned_engine_vars)`, where
 from codex-acp's own `{"CODEX_PATH", "NO_BROWSER"}`: this pinned release
 bundles no separate binary to pin an env var to. The connection's
 `CLAUDE_CONFIG_DIR` is already set generically for every `claude-agent-acp`
-connection by `connections.environment.build_process_env`'s
+connection by `build_process_env`'s
 `_ISOLATION_ENV_VAR` mapping — no per-launch escape hatch is
 required or accepted. Discovered connections reference the user's existing
 `~/.claude` directory; explicitly created native-account connections can
-still use a Cortex-owned directory. `connections.environment.build_process_env`'s
+still use a Cortex-owned directory. `build_process_env`'s
 `pinned_engine_vars` parameter remains validated as accepted **only** for
 `record.engine == "codex-acp"`; a caller must therefore never pass this
 function's `pinned_engine_vars` return value there for a claude-agent-acp
@@ -284,9 +329,7 @@ effort if offered, otherwise the nearest lower one, otherwise the nearest
 higher one. When the session offers no comparable effort, no effort is sent.
 Next, it confirms the `default` mode floor on the wire. That step is still
 confirm-or-fail: if the switched session no longer offers `mode`, the worker
-is refused. See `delegation.live_adapters
-.EngineSessionManagerAdapter._apply_worker_mode_floor` and
-`tests/test_delegation_worker_mode_floor.py`.
+is refused. 
 
 Fresh ACP sessions initialize Development for brokered writing-worker host
 commands. This leaves the Claude engine jail, disallowed native tools and worker
@@ -295,7 +338,7 @@ separate offered-mode behavior. See [access modes and Docker limits](../permissi
 
 ## Evidence status
 
-`engine.claude_adapter_acp.build_claude_evidence_status` returns a
+`build_claude_evidence_status` returns a
 `ClaudeEvidenceStatus` with three distinct fields — `selected`,
 `configuration_applied`, `execution_verified` — mirroring
 `CodexEvidenceStatus` exactly. `execution_verified` is always
@@ -353,7 +396,7 @@ observation; the existing post-event refusal remains a defense if an engine
 ever emits a native subagent call despite the restriction. This change is
 independent of the observed Codex worker native-subagent attempt.
 
-`engine.instruction_delivery_registry.ClaudeAgentAcp0_78Delivery` is
+`ClaudeAgentAcp0_78Delivery` is
 **QUALIFIED** for exactly `("claude-agent-acp", "0.78.0")`, channel
 `session/new _meta.systemPrompt`. This reclassifies an earlier pass
 that had kept it UNSUPPORTED (a since-corrected, overly conservative
@@ -392,10 +435,10 @@ lead- and agent-verified 2026-09-17):
 Wiring path (registry → live_adapters → session_manager → wire `_meta`,
 a real runtime effect, never a paper-only registry entry):
 `ClaudeAgentAcp0_78Delivery.plan()` builds the payload via
-`engine.claude_adapter_acp.build_claude_session_new_meta`;
-`delegation.live_adapters._session_new_meta_for`/`EngineSessionManagerAdapter.
+`build_claude_session_new_meta`;
+`_session_new_meta_for`/`EngineSessionManagerAdapter.
 open()` resolve it per connection and pass it to
-`engine.session_manager.EngineSessionManager.create_session`'s additive
+`create_session`'s additive
 `session_new_meta` parameter, which sends it as that `session/new` call's
 own `_meta` field on the wire.
 
@@ -408,14 +451,11 @@ either; the flag remains available for any future engine whose channel is
 still UNQUALIFIED. Any *other*/unrecognized claude-agent-acp version remains UNSUPPORTED
 (`ClaudeAgentAcpUnrecognizedVersionDelivery`) and is still refused exactly
 as before — the evidence chain above was only confirmed against 0.78.0's
-own dist. `tests/test_engine_claude_coordinator_live_session.py` and
-`tests/test_engine_claude_coordinator_delegation_cycle.py` exercise and
-assert this real production path
-(`OrchestratingRuntime`/`EngineSessionManagerAdapter`) actually succeeding
+own dist. The former Python coordinator live-session and delegation-cycle tests exercised and
+asserted this real production path actually succeeding
 end to end (coordinator session negotiate/create with the real
 `_meta.systemPrompt` observed on the wire; delegate/worker-report/decide),
-and `tests/test_instruction_delivery_qualification.py` (updated by
-this same change) asserts the qualification directly, plus that an
+and the former Python qualification test asserted the qualification directly, plus that an
 unrecognized version/unknown engine still refuses a critical-rules role.
 
 **Still not live-executed**: no real turn has run through this channel. What a live
@@ -448,10 +488,9 @@ sandbox around what it instructs.
 ## Unavailable native features (honest statement)
 
 - **Native summarizer/compaction selection**: not exposed by either pinned
-  adapter's static `configOptions` surface
-  (`recovery.summarizer_policy.ADAPTER_SUMMARIZER_SUPPORT`); Cortex relies
+  adapter's static `configOptions` surface; Cortex relies
   on the deterministic recovery capsule instead.
-- **Compaction tier**: `AUTOMATIC` per `delegation.generations` (both
+- **Compaction tier**: `AUTOMATIC` per the runtime (both
   0.78.0 and 0.77.0 registered explicitly, plus a version-agnostic
   wildcard) — a reactive, never-preemptive tool_call/tool_call_update
   observation, not a controllable request.

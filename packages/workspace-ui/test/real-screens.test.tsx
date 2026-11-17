@@ -1,8 +1,11 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { render } from "solid-js/web";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { capture, emptyWorkspace, LOCAL_MACHINE_ID, type EngineConnection, type MachineConfig, type Worker, type Message } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
 import { createRealPort } from "../src/port/real";
+import { SIDEBAR_DEFAULT, SIDEBAR_MIN } from "../src/prefs";
 import { capabilitiesWire, flush, scriptedTransport, snapshot, wireDecision, wireTask } from "./support";
 
 /** The screens on the real port, with a machine that answers as the helper does, so what they show is what real data gives. */
@@ -80,6 +83,298 @@ const openTeam = async () => { all(".timeline button.fold").find(b => /working|f
 const type = (label: string, value: string) => { const el = $<HTMLTextAreaElement>(`[aria-label="${label}"]`)!; el.value = value; el.dispatchEvent(new Event("input", { bubbles: true })); };
 const prompts = (s: ReturnType<typeof machine>) => s.calls.filter(c => c.operation === "executions.prompt").map(c => (c.message as { text: string }).text);
 const TASK = `/m/${LOCAL_MACHINE_ID}/t/task-1`;
+
+describe("machine overview, read when a screen shows it", () => {
+  const ops = (s: ReturnType<typeof machine>) => s.calls.filter(c => c.operation === "machine.call").map(c => (c.message as { op: string }).op);
+  const go = async (to: string) => { history.pushState(null, "", to); window.dispatchEvent(new PopStateEvent("popstate")); await settled(); };
+  /** The overview answers with values unlike every default, and only when the test lets it. */
+  const overviewHeld = (s: ReturnType<typeof machine>, fail = 0) => {
+    const answer = s.answers["machine.call"]!;
+    let open!: () => void, failures = fail;
+    const gate = new Promise<void>(resolve => { open = resolve; });
+    s.answers["machine.call"] = async message => {
+      if ((message as { op: string }).op !== "overview") return answer(message);
+      await gate;
+      if (failures-- > 0) return { ok: false, code: "machine_busy", message: "busy" };
+      return { ok: true, result: { name: "Desk", retentionDays: 12, autoArchiveDays: 4, worktreeRoot: "~/t", version: "1", diskMb: 3, storage: [{ label: "Workspace state", mb: 3 }], cleanup: null, diagnostics: null, ghAvailable: true, reclamationFailures: 0 } };
+    };
+    return { open: () => open() };
+  };
+  const stepper = (label: string) => $(`.stepper[aria-label="${label}"] .v`)?.textContent;
+
+  it("opens without asking for the overview, then reads it once when Settings, Storage opens", async () => {
+    const s = machine(), held = overviewHeld(s);
+    const root = await open(s, `/m/${LOCAL_MACHINE_ID}/p/p`);
+    // The first screen is up on the settings read alone; storage accounting was never asked for.
+    expect(root.querySelector(".l-startup")).toBeNull();
+    expect(root.querySelector(".titlebar")).toBeTruthy();
+    expect(ops(s)).toContain("config.read");
+    expect(ops(s)).not.toContain("overview");
+    await go(`/settings/machine/${LOCAL_MACHINE_ID}/storage`);
+    expect(ops(s).filter(op => op === "overview")).toHaveLength(1);
+    // While it is on its way the page says so, never the stand-in 30 and 7 days or an empty size.
+    expect(stepper("Retention")).toBeUndefined();
+    expect(root.textContent).toContain("Reading this machine's details…");
+    expect(root.textContent).not.toContain("No cleanup has run");
+    held.open(); await settled();
+    expect(stepper("Retention")).toBe("12 days");
+    expect(stepper("Auto archive")).toBe("4 days");
+    expect(root.textContent).toContain("Workspace state");
+    expect(root.textContent).toContain("3 MB in total");
+    expect(root.textContent).not.toContain("Reading this machine's details…");
+    // Other screens that show it share the read already made.
+    await go(`/settings/machine/${LOCAL_MACHINE_ID}/overview`);
+    await go(`/m/${LOCAL_MACHINE_ID}/archive`);
+    expect(root.textContent).toContain("Kept for 12 days after archiving");
+    expect(ops(s).filter(op => op === "overview")).toHaveLength(1);
+  });
+
+  it("reads the overview for a shown inspector Machine panel, and not for a hidden one", async () => {
+    localStorage.setItem("cw.ws.inspectorHidden", "true");
+    const hidden = machine();
+    await open(hidden, `/m/${LOCAL_MACHINE_ID}`);
+    expect($(".titlebar")).toBeTruthy();
+    expect(ops(hidden)).not.toContain("overview");
+    dispose?.(); dispose = undefined; document.body.innerHTML = ""; localStorage.clear();
+    const s = machine(), held = overviewHeld(s);
+    await open(s, `/m/${LOCAL_MACHINE_ID}`);
+    expect(ops(s).filter(op => op === "overview")).toHaveLength(1);
+    const kept = () => [...document.querySelectorAll(".inspector dt")].find(dt => dt.textContent === "Archive kept")?.nextElementSibling?.textContent;
+    expect(kept()).toBe("Reading this machine's details…");
+    held.open(); await settled();
+    expect(kept()).toBe("12 days");
+  });
+
+  it("never holds the interface back on a failed overview read, says so where it is shown, and retries", async () => {
+    vi.useFakeTimers();
+    try {
+      const s = machine(), held = overviewHeld(s, 1);
+      held.open();
+      history.replaceState(null, "", `/settings/machine/${LOCAL_MACHINE_ID}/storage`);
+      const root = document.createElement("div"); document.body.append(root);
+      dispose = render(() => <Workspace port={createRealPort({ transport: s.transport, actorId: "owner", registry: true })} />, root);
+      await vi.advanceTimersByTimeAsync(0); await vi.advanceTimersByTimeAsync(0);
+      // The interface is open and usable; only the overview's own fields wait, saying why.
+      expect(root.querySelector(".titlebar")).toBeTruthy();
+      expect(ops(s).filter(op => op === "overview")).toHaveLength(1);
+      expect(root.textContent).toContain("This machine's details could not be read yet. Retrying automatically.");
+      expect(stepper("Retention")).toBeUndefined();
+      expect([...root.querySelectorAll("button")].some(b => b.textContent === "Run cleanup now")).toBe(true);
+      await vi.advanceTimersByTimeAsync(3100);
+      expect(ops(s).filter(op => op === "overview")).toHaveLength(2);
+      expect(stepper("Retention")).toBe("12 days");
+      expect(root.textContent).not.toContain("could not be read yet");
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+describe("engine availability", () => {
+  it("keeps a connected engine visible when the service has no usage row", async () => {
+    const s = machine();
+    const answer = s.answers["machine.call"]!;
+    s.answers["machine.call"] = message => {
+      const reply = answer(message) as {ok:boolean;result:Record<string,unknown>};
+      if ((message as {op:string}).op === "config.read") reply.result.connections = [
+        {id:"c",engine:"claude",label:"Claude",note:"",sessions:1,state:"connected",checkedAt:null,detail:{}},
+        {id:"o",engine:"opencode",label:"OpenCode",note:"",sessions:1,state:"connected",checkedAt:null,detail:{}},
+      ];
+      return reply;
+    };
+    await open(s, `/settings/machine/${LOCAL_MACHINE_ID}/connections`);
+    expect(all(".urow").some(r => r.textContent?.includes("Claude") && r.textContent.includes("Not reported"))).toBe(true);
+    // OpenCode has no weekly usage source: no limits row, never a misleading usage row.
+    expect(all(".urow").some(r => r.textContent?.includes("OpenCode"))).toBe(false);
+    expect(document.querySelector(".sb-usage")?.textContent).toContain("Not reported");
+    expect(document.querySelector(".sb-usage")?.textContent).not.toContain("OpenCode");
+  });
+
+  it("shows Claude unavailable rather than hiding it in Limits", async () => {
+    const s = machine();
+    const answer = s.answers["machine.call"]!;
+    s.answers["machine.call"] = message => {
+      const reply = answer(message) as {ok:boolean;result:Record<string,unknown>};
+      if ((message as {op:string}).op === "config.read") reply.result.usage = [
+        {engine:"codex",connected:true,usedPercent:24,resetAt:null,observedAt:null,window:"weekly"},
+        {engine:"claude",connected:true,usedPercent:null,resetAt:null,observedAt:null,window:"weekly"},
+      ];
+      return reply;
+    };
+    await open(s, `/settings/machine/${LOCAL_MACHINE_ID}/connections`);
+    const rows = all(".urow").filter(r => !r.classList.contains("th"));
+    expect(rows.some(r => /Claude/.test(r.textContent ?? "") && /Not reported/.test(r.textContent ?? ""))).toBe(true);
+    expect(rows.some(r => /Codex/.test(r.textContent ?? "") && /24% used/.test(r.textContent ?? ""))).toBe(true);
+  });
+
+  const ops = (s: ReturnType<typeof machine>) => s.calls.filter(c => c.operation === "machine.call").map(c => (c.message as { op: string }).op);
+  /** A machine whose `config.read` answers whatever `usage` holds at the time of the read. */
+  const reporting = (usage: { value: unknown[] }) => {
+    const s = machine();
+    const answer = s.answers["machine.call"]!;
+    s.answers["machine.call"] = message => {
+      const reply = answer(message) as {ok:boolean;result:Record<string,unknown>};
+      if ((message as {op:string}).op === "config.read") reply.result.usage = structuredClone(usage.value);
+      return reply;
+    };
+    return s;
+  };
+  const RESET = "2026-11-17T02:59:00Z";
+  const claude = (observedAt: string, windows: {name: string; usedPercent: number}[]) => ({
+    engine: "claude", connected: true, usedPercent: Math.max(...windows.map(w => w.usedPercent)), resetAt: RESET, observedAt, window: "weekly",
+    windows: windows.map(w => ({ ...w, resetAt: RESET, observedAt })),
+  });
+  const codex = (usedPercent: number, observedAt: string) => ({ engine: "codex", connected: true, usedPercent, resetAt: RESET, observedAt, window: "weekly" });
+  const bars = () => all(".sb-usage .um").map(b => b.textContent?.replace(/\s+/g, " ").trim());
+  const limitRows = () => all(".urow").filter(r => !r.classList.contains("th")).map(r => r.textContent ?? "");
+
+  it("shows Claude's general weekly window and its Fable window separately everywhere", async () => {
+    const at = new Date().toISOString();
+    const s = reporting({ value: [claude(at, [{ name: "seven_day", usedPercent: 67 }, { name: "seven_day_fable", usedPercent: 2 }]), codex(33, at)] });
+    await open(s, `/settings/machine/${LOCAL_MACHINE_ID}/connections`);
+    expect(bars()).toEqual(["Claude67%", "Fable2%", "Codex33%"]);
+    expect($(".sb-usage")?.getAttribute("aria-label")).toBe("Engine limits: Claude all models 67%, Claude Fable 2%, Codex 33% used this week");
+    const rows = limitRows();
+    expect(rows.some(r => r.includes("This week, all models") && r.includes("67% used"))).toBe(true);
+    expect(rows.some(r => r.includes("This week, Fable") && r.includes("2% used"))).toBe(true);
+    expect(rows.some(r => r.includes("Codex") && r.includes("33% used"))).toBe(true);
+    expect(rows.every(r => !r.includes("Stale"))).toBe(true);
+    const card = [...document.querySelectorAll("#m-usage .u-eng")].find(e => e.textContent?.includes("Claude"))!;
+    expect([...card.querySelectorAll(".u-win")].map(w => w.textContent)).toEqual([expect.stringContaining("All models67% used"), expect.stringContaining("Fable2% used")]);
+    expect(card.querySelector(".u-src")?.textContent).toMatch(/^As of \d\d:\d\d, reported by the provider$/);
+  });
+
+  it("gives each sidebar limit its own line, so three windows fit the narrowest and the default sidebar without overlap", async () => {
+    const at = new Date().toISOString();
+    const s = reporting({ value: [claude(at, [{ name: "seven_day", usedPercent: 100 }, { name: "seven_day_fable", usedPercent: 2 }]), codex(33, at)] });
+    await open(s, `/m/${LOCAL_MACHINE_ID}`);
+    expect(bars()).toEqual(["Claude100%", "Fable2%", "Codex33%"]);
+    // jsdom lays nothing out, so the fit is read from the rules the engine lays the bar out by.
+    const css = readFileSync(fileURLToPath(import.meta.url).replace(/test\/[^/]*$/, "src/mockup-styles.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rule = (selector: string) => [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].find(m => m[1].trim() === selector)?.[2] ?? "";
+    const box = rule(".sb-usage"), line = rule(".um"), name = rule(".um > :first-child"), missing = rule(".um > .na"), value = rule(".um .tnum");
+    // Every window is one line of the button's grid, its name, bar and value in three columns shared by all lines,
+    // never one more cell squeezed into a single row (where "70%" was drawn over "Fable" and "33%" was cut at the edge).
+    expect(box).not.toMatch(/grid-auto-flow:\s*column/);
+    expect(line).toMatch(/display:\s*contents/);
+    const columns = /grid-template-columns:\s*minmax\(0, max-content\) minmax\((\d+)px, 1fr\) max-content/.exec(box);
+    expect(columns).not.toBeNull();
+    expect(box).not.toMatch(/(^|;)\s*height:/);
+    // A long name is cut with an ellipsis inside its own column; a value and "Not reported" are never cut or wrapped.
+    expect(name).toMatch(/min-width:\s*0/); expect(name).toMatch(/overflow:\s*hidden/); expect(name).toMatch(/text-overflow:\s*ellipsis/); expect(name).toMatch(/white-space:\s*nowrap/);
+    expect(value).toMatch(/white-space:\s*nowrap/);
+    expect(missing).toMatch(/grid-column:\s*2 \/ -1/);
+    // The widest line, with a generous 0.62 em per character at 12 px, fits the narrowest sidebar (and so the default one).
+    const pad = 2 * Number(/padding:\s*\d+px (\d+)px/.exec(box)![1]), gap = Number(/column-gap:\s*(\d+)px/.exec(box)![1]), em = 12 * .62;
+    const text = (el: Element | null | undefined) => (el?.textContent ?? "").length * em;
+    const widest = Math.max(...all(".sb-usage .um").map(u => {
+      const [label, ...rest] = [...u.children];
+      return pad + text(label) + gap + (u.querySelector(".na") ? text(u.querySelector(".na")) : Number(columns![1]) + gap + text(rest.at(-1)));
+    }));
+    for (const width of [SIDEBAR_MIN, SIDEBAR_DEFAULT]) expect(widest).toBeLessThanOrEqual(width);
+    // Unreported, the line's words take the bar and value columns together.
+    const t = new Date().toISOString();
+    const unreported = reporting({ value: [claude(t, [{ name: "seven_day", usedPercent: 40 }]), codex(33, t)] });
+    dispose?.(); document.body.innerHTML = "";
+    await open(unreported, `/m/${LOCAL_MACHINE_ID}`);
+    const fable = all(".sb-usage .um").find(u => u.textContent?.startsWith("Fable"))!;
+    expect(fable.querySelector(".na")?.textContent).toBe("Not reported");
+    expect(pad + text(fable.firstElementChild) + gap + text(fable.querySelector(".na"))).toBeLessThanOrEqual(SIDEBAR_MIN);
+  });
+
+  it("says Not reported for a Fable window the provider did not report, never zero", async () => {
+    const s = reporting({ value: [claude(new Date().toISOString(), [{ name: "seven_day", usedPercent: 40 }])] });
+    await open(s, `/settings/machine/${LOCAL_MACHINE_ID}/connections`);
+    expect(bars()).toEqual(["Claude40%", "FableNot reported"]);
+    expect(limitRows().some(r => r.includes("This week, Fable") && r.includes("Not reported"))).toBe(true);
+    expect(limitRows().some(r => r.includes("This week, Fable") && /\d+%/.test(r))).toBe(false);
+  });
+
+  it("marks a limit snapshot older than fifteen minutes as stale and says when it was taken", async () => {
+    const old = new Date(Date.now() - 2 * 3600_000).toISOString();
+    const s = reporting({ value: [claude(old, [{ name: "seven_day", usedPercent: 54 }, { name: "seven_day_fable", usedPercent: 0 }])] });
+    await open(s, `/settings/machine/${LOCAL_MACHINE_ID}/connections`);
+    expect(limitRows().filter(r => /Stale, as of \d\d:\d\d/.test(r))).toHaveLength(2);
+    expect(all(".sb-usage .um.stale")).toHaveLength(2);
+    expect($(".sb-usage")?.getAttribute("aria-label")).toContain("some values are stale");
+  });
+
+  it("replaces an older limit value with a newer one while the app stays open", async () => {
+    vi.useFakeTimers();
+    try {
+      const usage = { value: [claude(new Date().toISOString(), [{ name: "seven_day", usedPercent: 54 }, { name: "seven_day_fable", usedPercent: 0 }]), codex(30, new Date().toISOString())] };
+      const s = reporting(usage);
+      history.replaceState(null, "", `/m/${LOCAL_MACHINE_ID}`);
+      const root = document.createElement("div"); document.body.append(root);
+      dispose = render(() => <Workspace port={createRealPort({ transport: s.transport, actorId: "owner", registry: true })} />, root);
+      for (let i = 0; i < 4; i++) await vi.advanceTimersByTimeAsync(0);
+      expect(bars()).toEqual(["Claude54%", "Fable0%", "Codex30%"]);
+      const reads = ops(s).filter(op => op === "config.read").length;
+      // The service refreshed its limits in the background; the next machine read carries them.
+      usage.value = [claude(new Date(Date.now() + 300_000).toISOString(), [{ name: "seven_day", usedPercent: 67 }, { name: "seven_day_fable", usedPercent: 2 }]), codex(33, new Date(Date.now() + 300_000).toISOString())];
+      await vi.advanceTimersByTimeAsync(300_000 + 120_000);
+      for (let i = 0; i < 4; i++) await vi.advanceTimersByTimeAsync(0);
+      expect(ops(s).filter(op => op === "config.read").length).toBeGreaterThan(reads);
+      expect(bars()).toEqual(["Claude67%", "Fable2%", "Codex33%"]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("refuses a switched-off model for new sprint planning and omits it from composer options", async () => {
+    const s = machine([], [], {config(c) {
+      c.setup["codex-acp"].status = "connected";
+      c.catalogue["codex-acp"].models = [{id:"sol",label:"Disabled Sol",efforts:["low"],observed:true}];
+      c.surfaces.routing.engines["codex-acp"].enabled = ["sol"];
+      c.surfaces.routing.deny = ["codex-acp/*"];
+    }});
+    const p = createRealPort({transport:s.transport,actorId:"owner",registry:true});
+    await p.query("capabilities.get", {});
+    const facts = await p.query("machine.facts", {});
+    expect(facts[0].options?.models.some(m => m.id === "sol")).toBe(false);
+    const payload = {type:"create_sprint" as const,projectId:"p",description:"Work",runMode:"manual" as const,
+      checkout:{kind:"main" as const},settings:{model:"sol",effort:"low",mode:"auto" as const,language:"auto" as const}};
+    const result = await p.command({requestId:"disabled-sprint",operation:"create_sprint",expectedVersion:null,payload});
+    expect(result.ok).toBe(false);
+    expect(s.calls.some(c => c.operation === "machine.call" && (c.message as {op:string}).op === "product.sprint")).toBe(false);
+  });
+
+  it("does not offer a switched-off engine in coordinator defaults", async () => {
+    const s = machine([], [], {config(c) {
+      c.setup["codex-acp"].status = "connected";
+      c.catalogue["codex-acp"].models = [{id:"sol",label:"Disabled Sol",efforts:["low"],observed:true}];
+      c.surfaces.routing.engines["codex-acp"].enabled = ["sol"];
+      c.surfaces.routing.deny = ["codex-acp/*"];
+    }});
+    await open(s, `/settings/machine/${LOCAL_MACHINE_ID}/orchestration/defaults`);
+    expect(document.querySelector("#m-def-model")).toBeTruthy();
+    expect(document.querySelector("#m-def-model")?.textContent).not.toContain("Disabled Sol");
+  });
+});
+
+describe("Accept on real native result facts", () => {
+  for (const hasWireResult of [false, true]) it(`accepts the displayed native result with ${hasWireResult ? "a different" : "no"} wire result`, async () => {
+    const s = machine([wireTask({executionId:"e",phase:"result",runtimeState:"COMPLETED",executionState:"result"})]);
+    if (!hasWireResult) s.answers["capabilities.get"] = () => capabilitiesWire(OFFERED.filter(op => op !== "results.get"));
+    const answer = s.answers["machine.call"]!;
+    const result = {kind:"work",version:2,sourceVersion:"47",digest:"native-review-digest",summary:"Native result",checks:[{name:"Runtime check",outcome:"passed",detail:""}],acceptanceAvailable:true};
+    let accepted = false;
+    s.answers["machine.call"] = message => {
+      const call = message as {op:string;params?:{action:string}};
+      if (call.op === "product.read") return {ok:true,result:{tasks:{"task-1":{
+        result,workspaceDigest:result.digest,reviewActions:{accept:true},
+        ...(accepted ? {status:"ready_to_merge",acceptance:{version:"47",digest:result.digest}} : {}),
+      }},sprints:[],messages:[]}};
+      if (call.op === "product.task" && call.params?.action === "accept") accepted = true;
+      return answer(message);
+    };
+    await open(s, TASK + "/changes");
+    expect(button("Accept v2")?.getAttribute("aria-disabled")).not.toBe("true");
+    expect(button("Accept v2")).toBeTruthy();
+    button("Accept v2")!.click();
+    await settled();
+    const calls = s.calls.filter(c => c.operation === "machine.call" && (c.message as {params?:{action:string}}).params?.action === "accept");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].message).toMatchObject({op:"product.task",projectId:"p",params:{action:"accept",taskId:"task-1",digest:result.digest,version:"47",acknowledgeOpenChecks:false}});
+    expect(document.body.textContent).not.toContain("Acceptance was not confirmed");
+  });
+});
 
 describe("Git on real data", () => {
   it("commits unstaged files in one request and opens cached Git while the next snapshot is pending", async () => {
@@ -268,7 +563,7 @@ describe("task session on real data", () => {
     s.send({type:"refresh"}); await settled();
     return s;
   };
-  const report = () => $('[aria-label="Worker report"]')!;
+  const report = () => $('dialog[data-dialog="Worker report"]')!;
 
   it("opens only the referenced public report and shows all of it at once", async () => {
     const s = await finishedReportWorker(request => reportPage(chunkOf(request)));
@@ -313,6 +608,14 @@ describe("task session on real data", () => {
     button("Open report")!.click(); await settled();
     expect(report().querySelector('[role="alert"]')?.textContent).toContain("The report changed");
     expect(report().textContent).not.toContain("Opening line");
+  });
+
+  it("shows a readable message, never the raw service refusal, when a report read is refused", async () => {
+    await finishedReportWorker(() => { throw new Error("refused: This control is not available for native execution yet."); });
+    button("Open report")!.click(); await settled();
+    const text = report().querySelector('[role="alert"]')?.textContent ?? "";
+    expect(text).toContain("cannot be opened right now");
+    expect(text).not.toContain("native execution");
   });
 
   it("stops reading a report once it is closed, and reopening starts clean", async () => {
@@ -546,6 +849,15 @@ describe("messages on real data", () => {
     stop.click();
     await settled();
     expect($("dialog[open]")).not.toBeNull();
+    // Its accessible name is its visible title, which names the worker; it once said "Stop this worker?" instead.
+    const named = $("dialog[open]")!.getAttribute("aria-labelledby");
+    expect($("dialog[open] h2")?.textContent).toBe("Stop frontend-dev?");
+    expect(named && document.getElementById(named)?.textContent).toBe("Stop frontend-dev?");
+    expect($("dialog[open]")!.hasAttribute("aria-label")).toBe(false);
+    // No words sit beside a composer's paper plane: the text-only Attach keeps its reason in its own box.
+    const attach = $<HTMLElement>('dialog[open] [aria-label="Attach files"]')!;
+    expect(attach.getAttribute("data-why")).toBe("A stop reason is text only. Files cannot be sent with it.");
+    expect($("dialog[open] .c-bar .l-reason")).toBeNull();
     all("dialog[open] button").find(b => b.textContent?.trim() === "Stop worker")!.click();
     await settled();
     expect(s.calls.find(c => c.operation === "executions.control")?.message).toMatchObject({action:"worker_stop",workerId:"w1"});

@@ -19,7 +19,6 @@ const server=createServer(async(req,res)=>{
 });
 try {
  await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
- const child=spawn("timeout",["--kill-after=5","120","docker","run","--rm","-i","--network","host","-v",shots+":/evidence","cortex-workspace-rendered:ubuntu26.04","python3","-B","-","http://127.0.0.1:"+server.address().port+"/"],{stdio:["pipe","inherit","inherit"]});
- child.stdin.end(await readFile(new URL("./tabs-visual.py",import.meta.url)));
+ const child=spawn("timeout",["--kill-after=5","120","docker","run","--rm","-i","--network","host","-v",shots+":/evidence","-v",fileURLToPath(new URL(".",import.meta.url))+":/driver:ro",(process.env.CW_RENDERED_IMAGE??"cortex-workspace-rendered:ubuntu26.04"),"node","/driver/tabs-visual.driver.mjs","http://127.0.0.1:"+server.address().port+"/"],{stdio:"inherit"});
  process.exitCode=await new Promise((resolve,reject)=>{child.on("error",reject);child.on("exit",code=>resolve(code??1));});
 }finally{await new Promise(resolve=>server.close(resolve));}

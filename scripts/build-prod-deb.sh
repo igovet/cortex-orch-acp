@@ -2,6 +2,9 @@
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 cd "$root"
+# The build driver is the Rust cortex-xtask tool; no scripting runtime is involved.
+command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
+xtask() { cargo run --locked --quiet -p cortex-xtask -- "$@"; }
 
 # The wrapper owns channel selection and a fresh, invocation-specific output.
 for arg do
@@ -10,7 +13,7 @@ for arg do
             printf '%s\n' 'Channel and --resume options are reserved by this wrapper.' >&2
             exit 2 ;;
         -h|--help)
-            exec python3 -B scripts/build_workspace_desktop.py --local-release "$@" ;;
+            exec cargo run --locked --quiet -p cortex-xtask -- build-deb --local-release "$@" ;;
     esac
 done
 if [ -L .workspace-build ] || [ -L .workspace-build/local-prod ]; then
@@ -18,8 +21,8 @@ if [ -L .workspace-build ] || [ -L .workspace-build/local-prod ]; then
     exit 1
 fi
 mkdir -p .workspace-build/local-prod
-build=$(python3 -B -c 'import tempfile; from pathlib import Path; print(Path(tempfile.mkdtemp(prefix="build-", dir=".workspace-build")).name)')
-python3 -B scripts/build_workspace_desktop.py --local-release --resume "$build" "$@"
+build=$(xtask new-build-dir .workspace-build)
+xtask build-deb --local-release --resume "$build" "$@"
 set -- ".workspace-build/$build/artifacts/"*.deb
 if [ ! -f "$1" ]; then
     printf '%s\n' 'Builder produced no Debian archive.' >&2

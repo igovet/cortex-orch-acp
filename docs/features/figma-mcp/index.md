@@ -1,6 +1,6 @@
 # Figma MCP in Cortex
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 **Status: unavailable through the current Cortex setup.** Do not enable a Figma entry in the owner MCP registry until the connection and authorization steps below have been observed on this host. An installed Codex Figma plugin does not by itself expose a server to Cortex.

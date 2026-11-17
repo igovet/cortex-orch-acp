@@ -1,9 +1,7 @@
 # Tool discovery and read batches
 
-Source: [tool_read_api.py](../../../src/cortex_runtime/tool_read_api.py),
-[advertised schemas](../../../src/cortex_runtime/delegation/contracts.py),
-[server dispatch](../../../src/cortex_runtime/server.py).
-Focused coverage: `tests/test_tool_read_api.py`.
+Source: the advertised tool schemas in `crates/cortex-engine/src/schema.rs` and the brokered gateway in `crates/cortex-engine/src/gateway.rs`.
+Focused coverage: the `cortex-engine` Rust tests.
 
 ## Additive, not an evaluator
 
@@ -59,7 +57,7 @@ delivery, not complete document coverage or successful underlying command output
 
 These two tools require current channel/owner authority and an active runtime
 task; a worker channel additionally needs a resolved running assignment with a
-role and stage (`tool_read_api.effective_catalogue`), while a coordinator channel
+role and stage, while a coordinator channel
 needs none. Authority and effective catalogue are
 rechecked between reads and before delivery, even when the server's original
 channel context is cached. Loss of authority or changed role/stage offers aborts
@@ -97,8 +95,7 @@ The first object is for `tools_discover`, the second for `read_batch`.
 Discovering references and reading them are dependent steps: do not invent a
 substitution language inside one batch.
 
-Run `python3 -B scripts/cortex_read_api_benchmark.py` for deterministic current
-catalogue sizes and fixture request bytes. A serial-only client can replace three
+The former benchmark script (`cortex_read_api_benchmark`) was removed. A serial-only client can replace three
 independent read round trips with one batch, or two calls with initial schema
 discovery. Native Codex exec already combines independent calls in one model
 turn. The ordinary bootstrap catalogue is unchanged and two new tools add
@@ -124,76 +121,19 @@ runtime-owned.
 
 ## Executable public evidence
 
-First run the no-paid real-stdio fixture (new disposable store, no engine):
+The no-paid real-stdio fixture, the live assertion CLI and the outcome-assertion script (`cortex_read_api_fixture`, `cortex_read_api_live_assert`, `cortex_qualification_assert`) were Python tools; they were removed on 2026-11-16 without replacement. The matrix below can still be exercised by hand in an owner-requested live CLI case, but nothing shipped asserts its result, so each row is read from the retained evidence and a row that cannot be read is reported as unverified, never as passed.
 
-```bash
-python3 -B scripts/cortex_read_api_fixture.py
-```
-
-It asserts named/schema and catalogue parity against tools/list, the exact
-name-plus-limit diagnostic, literal UTF-8 output, native/successful/mixed/rejected
-reads and exact deferred canonical JSON retrieval. Its independent expectations
-come from public literal bytes, current tools/list and an individually checked
-public report, not copied observation rows. It checks the immutable fingerprints
-and runs the assertion CLI before deleting its owned fixture. Its output explicitly
-says no paid dispatch and no acceptance. Worker-specific tests ensure that deferred
-retrieval does not create report-delivery evidence.
-
-For an owner-requested live CLI case, use one writing worker in a new disposable
-project. First make the public expected report file as `required_first_line + "\n\n" +
-"# Public fixture\n" + "λ" * 3600 + "\n"` **before** publishing/reading it.
-Preserve it as `public-read-api-report.md` directly in the disposable project,
-outside private storage. The reader requires the literal fixture structure and
-its published edition digest/size, not an arbitrary observed response dump.
-Use the advertised tool schemas and
-the following small matrix; every call needs a unique actual MCP request identity:
+For a live CLI case, use one writing worker in a new disposable project. First make the public expected report file as `required_first_line + "\n\n" + "# Public fixture\n" + "λ" * 3600 + "\n"` **before** publishing/reading it. Preserve it as `public-read-api-report.md` directly in the disposable project, outside private storage. Use the advertised tool schemas and the following small matrix; every call needs a unique actual MCP request identity:
 
 | Assertion | Calls / independent expected value |
 | --- | --- |
 | Exact schema and catalogue | Discover `read_report` by name; catalogue with limit 50. Expected effective records derive from the stamped checkout and the exact worker role/stage. |
 | Malformed discovery | Name `read_report` plus limit 1. Expect the exact incompatible-limit field/expected/correction, not merely an error flag. |
-| Native and successful batch | Through `command_run`, run `python3 -B -c 'import sys;sys.stdout.write("Cortex public fixture v1: λ\n")'`. Retain its real receipt/output ID. Read that ID individually with limit 1000 and in one batch item `public`. Expected literal UTF-8 bytes are fixed independently. |
+| Native and successful batch | Through `command_run`, run `printf 'Cortex public fixture v1: λ\n'`. Retain its real receipt/output ID. Read that ID individually with limit 1000 and in one batch item `public`. Expected literal UTF-8 bytes are fixed independently. |
 | Mixed / rejected | Add item `missing`, reading `lo_000000000000` with limit 100; expect a native item error beside the unchanged public result. Separately add item `forbidden` with tool `command_run` and empty arguments; expect schema rejection and zero member executions. |
 | Deferred and retrieved | Read the public report individually with limit 4000; then as batch item `deferred`. Compare the native canonical hash/bytes and public file content. Retrieve the actual deferred ID individually with limit 16000; compare the exact canonical JSON bytes and require no batch report-delivery observation. |
 | Real check / mandatory review | Make a tiny real project edit (for example change disposable `qualification.txt` from `pending\n` to `qualified\n` after reading it). Run an exact byte assertion through `command_run` and attach that same attempt's returned receipt to its passed check. The runtime, not execution QA, supplies the independent review. |
 
-After dispatch, obtain the exact owned binding through the dev wrapper. Run from
-the checkout, using only observed IDs and the public expected file:
+Expected schemas/catalogue come from the selected worker role/stage, never the first matching reply. Authenticated coordinator/reviewer/other-attempt reads in the same snapshot are other-actor observations, not worker evidence. Fresh repeated idempotent worker reads are allowed, not deduplicated: every selected occurrence must independently satisfy exact binding and expected semantics. Duplicate observations, reused request correlation, foreign/unbound identities or one wrong/error/withheld/truncated/incomplete occurrence block the matrix even beside a correct reply. Missing required shapes also fail. Checkout schema parity is not live process build attestation; establish current-build adoption separately before the case.
 
-```bash
-python3 -B scripts/cortex_read_api_live_assert.py --project "$PROJECT" \
-  --session "$ACP_SESSION" --task "$TASK" --owner-epoch "$OWNER_EPOCH" \
-  --attempt "$ATTEMPT" --command-ref "$PUBLIC_COMMAND_RECEIPT" \
-  --report-id "$PUBLIC_REPORT_ID" --public-report "$PUBLIC_EXPECTED_FILE"
-python3 -B scripts/cortex_qualification_assert.py --project "$PROJECT" \
-  --session "$ACP_SESSION" --task "$TASK" --owner-epoch "$OWNER_EPOCH" \
-  --require-review --expect-command-ref "$BYTE_ASSERTION_RECEIPT" \
-  --expect-route "$EXPECTED_WORKER_ROUTE" --expect-route "$EXPECTED_REVIEW_ROUTE"
-```
-
-The first command authenticates every page of the exact task/session/current-owner
-snapshot and its durable channel/attempt bindings, then selects the worker through
-its unique assignment/engine-session/role/stage joins. Expected schemas/catalogue
-come from that selected role/stage, never the first matching reply. Authenticated
-coordinator/reviewer/other-attempt reads in the same snapshot are other-actor
-observations, not worker evidence or failures solely for having the same shape.
-Fresh repeated idempotent worker reads are allowed, not deduplicated: every
-selected occurrence must independently satisfy exact binding and expected semantics.
-The JSON result includes safe worker occurrence counts, observation IDs and
-request/channel hashes, plus other-actor counts. Duplicate observations,
-reused request correlation, foreign/unbound identities or one wrong/error/withheld/
-truncated/incomplete selected occurrence block the matrix even beside a correct reply.
-Missing required shapes also fail. Unavailable observations whose shape the
-allowlist cannot expose fail closed, rather than being assumed unrelated.
-Checkout schema parity is not live process
-build attestation; establish current-build adoption separately before the case.
-The second checks lifecycle,
-actual review and native route/command evidence. Neither command grants acceptance.
-A supplied expectations file to `--read-api-expectations` is another strict
-fingerprint comparison route; its origin must still be established independently.
-
-A missing client-dispatched malformed call, unsupported native cancellation
-interleaving, absent binding, failed/ambiguous/replayed/truncated/pending evidence
-or an unexpected catalogue/page size is a concrete blocker. Do not relabel it
-passed or spend repeated paid calls trying to manufacture the signal. This matrix
-does not qualify GUI rendering, costs, latency or unobservable host actions.
+A missing client-dispatched malformed call, unsupported native cancellation interleaving, absent binding, failed/ambiguous/replayed/truncated/pending evidence or an unexpected catalogue/page size is a concrete blocker. Do not relabel it passed or spend repeated paid calls trying to manufacture the signal. This matrix does not qualify GUI rendering, costs, latency or unobservable host actions.

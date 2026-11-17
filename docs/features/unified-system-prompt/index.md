@@ -1,6 +1,6 @@
 # Unified system prompt
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 The writing-worker prompt in both editions distinguishes recognized
@@ -21,11 +21,11 @@ pre-existing native base-prompt path; it does not roll back unrelated runtime
 optimizations or routing changes. After sent session metadata is recorded, Cortex best-effort records a secret-free
 `base_prompt` observability event; the diagnostics summary counts observed
 `unified`, `native` and `unknown` modes, per engine as well as overall
-(`counts`/`counts_by_engine` in `observability.metrics._base_prompt`). `native`
+(`counts`/`counts_by_engine` in `_base_prompt`). `native`
 means the session's engine kept its own native system-prompt/instructions
 channel and Cortex's text was appended alongside it; `unified` means that
 native channel was replaced outright by Cortex's own base-prompt text; this is
-the same per-engine classification `delegation.live_adapters.base_prompt_mode`
+the same per-engine classification `base_prompt_mode`
 already derives from the sent session metadata, not a separate one. When the sent metadata carries the
 unified prompt, the event also records which [edition](#editions) it was, read
 back from the sent text (`sent_prompt_edition`), and the summary counts events
@@ -39,7 +39,7 @@ unverified.
 The same event also carries, when non-empty, `unresolved_catalog_count` and
 `unresolved_catalog_ids`: the situational/catalog `read_skill` entries this
 session's role names that would currently fail to load, from
-`portable.instruction_bundle.catalog_resolution_gaps`. A situational skill is
+`catalog_resolution_gaps`. A situational skill is
 never loaded eagerly -- a model reads one only once its own stated trigger
 arises -- so a broken entry here never blocked and never blocks that session;
 it is recorded only as a count and a list of catalog ids, never raw skill
@@ -57,10 +57,8 @@ the intended instructions.
 By default, every Cortex engine session, coordinator or worker, on Codex or
 Claude, starts from one Cortex-owned base prompt instead of the engine's own.
 When the switch above disables it, each adapter uses its documented native
-base-prompt path. The unified text lives in
-`src/cortex_runtime/engine/unified_system_prompt.py` (`cortex_system_prompt`),
-and `delegation.live_adapters._session_new_meta_for` selects the mode when
-building session metadata.
+base-prompt path. The unified text is part of the generated instruction data (`scripts/cortex-xtask.sh generate-instructions`),
+and the session metadata builder selects the mode.
 
 ## Editions
 
@@ -106,8 +104,7 @@ environment section unchanged and reorders everything between them into:
    schemas.
 
 Every edition-1 rule sentence is present verbatim in edition 2 except four
-deliberate rewordings, which `tests/test_unified_system_prompt.py` lists and
-checks: the length rule ("at a length that fits the work" instead of
+deliberate rewordings (listed and checked by the former Python test suite): the length rule ("at a length that fits the work" instead of
 "concisely"), the outcome-first rule, the missing-information rule (ask only
 when the gap would materially change the result, otherwise proceed on a stated
 assumption) and the writing-worker check rule. Edition 2 duplicates some of the
@@ -118,9 +115,8 @@ unchanged.
 Rendered on Linux with no working directory or project skills, edition 1 is
 5,481 to 7,788 characters and edition 2 is 6,178 to 8,821, depending on role and
 native-tool policy. The code-mode variants are 6,069 to 8,240 and 6,797 to 9,304
-respectively (measured with `cortex_system_prompt` on 2026-10-23). Existing size ceilings are
-unchanged: edition 1 is checked in `tests/test_prompt_drift.py`; for
-edition 2 they are in `tests/test_first_prompt_size_and_dedup.py`. Real-model
+respectively (measured with the former Python prompt builder on 2026-10-23). Existing size ceilings are
+unchanged: they were checked by the former Python test suite. Real-model
 behavior with edition 2 has not been observed in a paid live check.
 
 ## Working economy and code mode
@@ -212,7 +208,7 @@ nothing.
 Native-tool guidance is emitted only when the launch adapter enables those
 tools: Claude's gateway-alternative policy disables native shell/file/search
 and omits that guidance, while Codex and OpenCode retain it (`native_tools=True`
-in `delegation.live_adapters._session_new_meta_for`). For Codex this is still
+in `_session_new_meta_for`). For Codex this is still
 accurate, not stale: `shell_tool` and `view_image` are now forced off for
 every Cortex-launched Codex session (the per-process launcher and the
 verified private adapter's session-config patch both set them, verified
@@ -322,7 +318,7 @@ superseded persisted generations fail closed.
 When `codebase-memory-mcp` is attached, the prompt tells the session to call
 `list_projects` once and take the project whose root path matches the working
 directory. The runtime does not pass a pre-resolved project name
-(`engine.session_manager` sends none), so no project identity is guessed; the
+(`session_manager` sends none), so no project identity is guessed; the
 inlined `code-and-evidence` reference gives the same first step. Only a role
 granted `index_repository` is told to make one bootstrap attempt when no index
 matches; other roles record the missing index as a limitation.
@@ -391,12 +387,7 @@ description and `skill` selector description; this makes the trigger visible
 at tool-selection time rather than only near the end of a long role prompt.
 Neither prompt nor schema calls the tool on the model's behalf, so actual
 Claude/Codex trigger compliance still needs a true-trigger live observation.
-For triggers the runtime can observe, it no longer relies on the prompt alone:
-a worker whose project changes pair documentation with behavior files and that
-never read `documentation-sync` is refused at `result_submit` with
-`situational_skill_required` until it reads the skill (see
-[roles and delegation](../roles-and-delegation/index.md)). The `result_submit` and
-`read_skill` tool descriptions state this gate.
+The native runtime observes neither skill reads nor per-attempt changes, so it enforces no situational trigger at `result_submit`; the trigger text above and the independent review are the only controls (see [roles and delegation](../roles-and-delegation/index.md)).
 In the 2026-09-28 CLI run the Claude backend worker wrote code and tests, not
 documentation. A Codex technical writer updated the README and read
 `documentation-sync`. The Claude coordinator planned that writer; the earlier

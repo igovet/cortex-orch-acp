@@ -37,7 +37,7 @@ const connected = () => !document.querySelector(".ws-conn[role=alert]");
 
 describe("a project whose Cortex is away", () => {
   const project = { projectId: "p", displayName: "Cedar", canonicalRoot: "/cedar", activation: { actorId: "uid:1", recordedAt: 1 } };
-  const helper = { "machine.call": (call: unknown) => ({ ok: true, result: (call as { op: string }).op === "product.read" ? { tasks: {}, sprints: [] } : null }) };
+  const helper = { "machine.call": (call: unknown) => { const op = (call as { op: string }).op; return { ok: true, result: op === "product.read" ? { tasks: {}, sprints: [] } : op === "overview" ? { name: "This machine" } : op === "config.read" ? { config: { projects: {}, revisions: {} }, connections: [], tokens: {} } : op === "project.config.read" ? { value: {}, tokens: {} } : null }; } };
 
   it("names the reason on its page, keeps the machine connected and tries again on request", async () => {
     let ready = false, activations = 0;

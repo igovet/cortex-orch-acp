@@ -14,11 +14,11 @@ CW-R04 (versioned, server-authorized commands), CW-R15 (Cortex-specific views ne
 
 - [domain-model](../domain-model.md) and [protocol](../protocol.md): distinct task, execution, decision and result identities.
 - [ADR 0001](../adr/0001-product-task-and-execution.md) and [ADR 0014](../adr/0014-local-service-transport.md).
-- The existing bootstrap deduplication of stable source identities, and the runtime state vocabularies in `src/cortex_runtime/orchestration/state.py` and `src/cortex_runtime/delegation/events_store.py`.
+- The existing bootstrap deduplication of stable source identities, and the runtime state vocabularies in the former `orchestration/state` module and the former `delegation/events_store` module.
 
 ## Deliverables
 
-- `src/cortex_runtime/workspace_api/`: storage, projection queries and the request handler.
+- the former `workspace_api/` module: storage, projection queries and the request handler.
 - Additive project-local tables registered through the normal initializing store open. Inspection opens (`initialize=False`) create nothing.
 - Mapping version 1 from runtime lifecycle to public phase and execution state, following the table in [protocol](../protocol.md). Missing, unrecognized or contradictory facts map to `unknown` with a warning.
 - The `_cortex/workspace` extension dispatch on the existing Agent. It stays unadvertised until its storage requirements and tests pass.
@@ -44,7 +44,7 @@ Negative:
 
 ## Validation
 
-- Targeted `tests/test_workspace_*.py` for draft, activation, identity, mapping and read-transaction consistency.
+- Targeted tests (the former Python `test_workspace_*` suites; now `crates/workspace-service/tests`) for draft, activation, identity, mapping and read-transaction consistency.
 - Existing store and migration tests for the additive tables, including a non-mutating `initialize=False` open.
 
 ## Documentation impact

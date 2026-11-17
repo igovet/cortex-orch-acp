@@ -7,7 +7,7 @@ import { useWs } from "./ctx";
 import { createUnsent, onScreen, ScreenActive } from "./freshness";
 import { createLocalDictation } from "./voice";
 import { I, MenuItem, Pop } from "./kit";
-import { Action, ReasonSlot, Whole } from "./layout";
+import { Action, Whole } from "./layout";
 import { duration, taskSettings, type ComposerMode, type SessionModel } from "./session-model";
 
 /** Draft bytes stay in memory until an explicit send or queue action. */
@@ -121,12 +121,11 @@ export function TaskAttachments(props: { taskId: string }) {
 const label = (list: readonly { id: string; label: string }[], id: string) => list.find(x => x.id === id)?.label ?? plainChoice(id);
 
 /**
- * A composer's one bar: its controls, and in the room between the choices and the send controls the reason one of them
- * cannot be used, read from the controls themselves. The words never change the bar's height or move a control.
+ * A composer's one bar: its controls only. No words sit beside the send button: a control that cannot be used says why in
+ * its own box, opened by a press or keyboard focus (ReasonTip), so nothing beside the plane reads as being about it.
  */
 export function CBar(props: { children: JSX.Element }) {
-  let bar: HTMLDivElement | undefined;
-  return <div class="c-bar" ref={bar}>{props.children}<ReasonSlot bar={() => bar} /></div>;
+  return <div class="c-bar">{props.children}</div>;
 }
 
 /**
@@ -141,8 +140,8 @@ export function RouteBar(props: { id: string; settings: TaskSettings; onChange: 
   const cls = () => props.up ? "pop-up" : "pop-anchor";
   // A session that offers no list leaves its control off. A choice is never filled in for it.
   const trigger = (kind: string, title: string, icon: string, list: () => readonly { id: string; label: string }[], id: () => string) => {
-    const off = () => list().length ? (props.disabled ?? (props.needs && ws.gate(props.needs) ? ws.t("machineRoute") : undefined)) : ws.t("noOptions");
-    const text = () => list().length && id() ? label(list(), id()) : ws.t("optionUnavailable");
+    const off = () => list().length ? (props.disabled ?? (props.needs && ws.gate(props.needs) ? ws.t("machineRoute") : undefined)) : ws.store.optionsKnown() ? ws.t("noOptions") : ws.t("optionLoading");
+    const text = () => list().length && id() ? label(list(), id()) : ws.store.optionsKnown() ? ws.t("optionUnavailable") : ws.t("optionLoading");
     return <button class="sel" popovertarget={off() ? undefined : `m-${kind}-${props.id}`} aria-disabled={off() ? "true" : undefined} data-why={off()} aria-label={`${title}: ${text()}`}>
       <I n={icon} s={14} /><span class="sel-t">{text()}</span><I n="chevron-down" s={12} />
     </button>;

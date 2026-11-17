@@ -16,7 +16,7 @@ import "../src/workspace.css";
 import "../src/layout.css";
 
 // Disposable, opt-in fake data over the real port: long names everywhere a row could break. No service, engines or real stores.
-// `scroll` makes every list long for the scroll benchmark (scroll-perf.py): 400 more files in the tree, a 4,000-line file,
+// `scroll` makes every list long for the scroll benchmark (scroll-perf.driver.mjs): 400 more files in the tree, a 4,000-line file,
 // 400 commits, 40 changed files of 300 lines, the 60-task sprint, a long conversation and worker feed, and with `terminal` a
 // shell that printed 900 lines. The layout gate never sets it.
 const scroll = new URLSearchParams(location.search).has("scroll");
@@ -196,7 +196,7 @@ if (query.get("world") === "review") {
   const pane = query.get("pane");
   render(() => <div style={{ "grid-row": "1 / -1", "min-width": "0", "min-height": "0" }}><Primitives stress={query.has("stress")} dialog={query.has("dialog")} pane={pane ? Number(pane) : null} /></div>, root);
 } else {
-  // The screens' routes are named in layout-fit.py, one per entry; this fills in the two values only the data here knows.
+  // The screens' routes are named in layout-fit.driver.mjs, one per entry; this fills in the two values only the data here knows.
   const route = query.get("route") ?? "/m/<M>/p/p/git";
   history.replaceState(null, "", route.replaceAll("<M>", LOCAL_MACHINE_ID).replaceAll("<FILE>", encodeURIComponent(changed[0])));
   // `chrome` puts the desktop window's own controls in the title band, as the real window has them.

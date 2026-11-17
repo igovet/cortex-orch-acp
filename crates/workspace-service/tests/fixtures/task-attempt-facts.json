@@ -1,0 +1,5323 @@
+{
+  "oracle": "machine_tools.product_read",
+  "sourceSha256": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+  "sources": {
+    "crates/workspace-service/machine_tools.py": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+    "src/cortex_runtime/workspace_api/projections.py": "2a12388eff6c93b2d4d6a19a1d250908c45f186a8de5880ba1556e2fb9d56109",
+    "src/cortex_runtime/orchestration/worker_checks.py": "f52084e77ab0af41749e04bae3b073620dd2a73a8de5e91891bebaada7ff4a9f",
+    "src/cortex_runtime/orchestration/check_closure.py": "6c044cc93eee1f36527f160fe8afa64a4a029460ac35d55368ecb573128c7a1e",
+    "src/cortex_runtime/delegation/evidence.py": "c8787ba189d5d007d74ebea73cf3116ab863fb145423c6bceea6683836cc8237"
+  },
+  "cases": [
+    {
+      "name": "current-pending-overrides-failure",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_REQUESTED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-finished-failure",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 1, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-timeout-incomplete",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"failure\": \"timeout\", \"complete\": false}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-incomplete-failure-unverified",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 1, \"complete\": false}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-bool-exit-is-not-failure",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": true, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-pass-does-not-close-without-review",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 0, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-finished-empty",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-technical-unavailable",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"blocker\": \"verification_executable_unavailable\"}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-command-unavailable",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"blocker\": \"verification_command_unavailable\"}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-execution-error",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"blocker\": \"verification_execution_error:OSError\"}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-store-error-is-not-technical",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"blocker\": \"verification_execution_error:StoreError\"}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-other-blocker-is-not-technical",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"blocker\": \"arbitrary diagnostic\"}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-stale-technical",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"stale\": true, \"blocker\": \"verification_executable_unavailable\"}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-stale-failure",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"stale\": true, \"checks\": [{\"exit_code\": 1, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-prior-owner-failure-is-unverified",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 0, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 1, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-prior-owner-pass-is-unverified",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 0, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 0, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-prior-owner-execution-error-is-unverified",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 0, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"blocker\": \"verification_execution_error:OSError\"}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-prior-owner-stale-unavailable",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 0, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"stale\": true, \"blocker\": \"verification_executable_unavailable\"}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-missing-owner-binding",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": null, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 1, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-unrelated-assignment",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"other\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 0, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-unrelated-index",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 1}}, \"result\": {\"checks\": [{\"exit_code\": 0, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-negative-index",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": -1}}, \"result\": {\"checks\": [{\"exit_code\": 0, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-failure-then-pending",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 1, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_REQUESTED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "2",
+              "digest": "result:wr_e1:2"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-pending-then-failure",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_REQUESTED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {}}",
+            "runtime"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 1, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "2",
+              "digest": "result:wr_e1:2"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-pass-then-failure",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 0, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 1, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "2",
+              "digest": "result:wr_e1:2"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-failure-then-pass-not-closed",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 1, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 0, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "2",
+              "digest": "result:wr_e1:2"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-technical-then-pending",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"blocker\": \"verification_executable_unavailable\"}}",
+            "runtime"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_REQUESTED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "2",
+              "digest": "result:wr_e1:2"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-failure-then-old-pass",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 1, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 1, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 0, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "2",
+              "digest": "result:wr_e1:2"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-failure-then-nonruntime-pass",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 1, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 0, \"complete\": true}]}}",
+            "display"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "2",
+              "digest": "result:wr_e1:2"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-gap-command-pending",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"not_run\", \"command\": [\"tool\"]}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_REQUESTED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-gap-manual-failure",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"not_run\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 1, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-policy-gap-pending",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"not_run\", \"blocker\": \"Owner permission required\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_REQUESTED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-not-applicable-pending",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"not_applicable\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_REQUESTED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-not-applicable-failed",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"not_applicable\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 1, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-unknown-pending",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"invented\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_REQUESTED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-displayed-pass-then-pending",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"passed\", \"tool_call_ref\": \"engine:unobservable\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_REQUESTED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-missing-result-is-unverified",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "runtime-events-pending",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "review",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_REQUESTED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"runtime-verification\", \"index\": 0}}, \"result\": {}}",
+            "runtime"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_FAILED",
+            "{\"revision\": 0, \"checks\": [{\"argv\": [\"extra\"], \"exit_code\": 1, \"complete\": true}]}"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Run the current runtime verification checks before accepting work.",
+              "unblockAction": "rerun_checks",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "2",
+              "digest": "result:wr_e1:2"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "runtime-events-failed",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "review",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"runtime-verification\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 1, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_FAILED",
+            "{\"revision\": 0, \"checks\": [{\"argv\": [\"extra\"], \"exit_code\": 1, \"complete\": true}]}"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Run the current runtime verification checks before accepting work.",
+              "unblockAction": "rerun_checks",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "2",
+              "digest": "result:wr_e1:2"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "runtime-events-pass-not-closed",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "review",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"runtime-verification\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 0, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_FAILED",
+            "{\"revision\": 0, \"checks\": [{\"argv\": [\"extra\"], \"exit_code\": 1, \"complete\": true}]}"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Run the current runtime verification checks before accepting work.",
+              "unblockAction": "rerun_checks",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "2",
+              "digest": "result:wr_e1:2"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "runtime-events-technical",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "review",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"runtime-verification\", \"index\": 0}}, \"result\": {\"blocker\": \"verification_executable_unavailable\"}}",
+            "runtime"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_FAILED",
+            "{\"revision\": 0, \"checks\": [{\"argv\": [\"extra\"], \"exit_code\": 1, \"complete\": true}]}"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Run the current runtime verification checks before accepting work.",
+              "unblockAction": "rerun_checks",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "2",
+              "digest": "result:wr_e1:2"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "runtime-post_events-pending",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "review",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_FAILED",
+            "{\"revision\": 0, \"checks\": [{\"argv\": [\"extra\"], \"exit_code\": 1, \"complete\": true}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_REQUESTED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"runtime-verification\", \"index\": 0}}, \"result\": {}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Run the current runtime verification checks before accepting work.",
+              "unblockAction": "rerun_checks",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "2",
+              "digest": "result:wr_e1:2"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "runtime-post_events-failed",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "review",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_FAILED",
+            "{\"revision\": 0, \"checks\": [{\"argv\": [\"extra\"], \"exit_code\": 1, \"complete\": true}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"runtime-verification\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 1, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Run the current runtime verification checks before accepting work.",
+              "unblockAction": "rerun_checks",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "2",
+              "digest": "result:wr_e1:2"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "runtime-post_events-pass-not-closed",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "review",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_FAILED",
+            "{\"revision\": 0, \"checks\": [{\"argv\": [\"extra\"], \"exit_code\": 1, \"complete\": true}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"runtime-verification\", \"index\": 0}}, \"result\": {\"checks\": [{\"exit_code\": 0, \"complete\": true}]}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Run the current runtime verification checks before accepting work.",
+              "unblockAction": "rerun_checks",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "2",
+              "digest": "result:wr_e1:2"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "runtime-post_events-technical",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "review",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_FAILED",
+            "{\"revision\": 0, \"checks\": [{\"argv\": [\"extra\"], \"exit_code\": 1, \"complete\": true}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_FINISHED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"runtime-verification\", \"index\": 0}}, \"result\": {\"blocker\": \"verification_executable_unavailable\"}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Run the current runtime verification checks before accepting work.",
+              "unblockAction": "rerun_checks",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "2",
+              "digest": "result:wr_e1:2"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "runtime-planned-command-current-pending",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": [[\"tool\"]]}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "review",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_REQUESTED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"runtime-verification\", \"index\": 0}}, \"result\": {}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Run the current runtime verification checks before accepting work.",
+              "unblockAction": "rerun_checks",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-provisioned-not_run",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"not_run\", \"command\": [\"tool\"]}]}"
+          ]
+        ],
+        [
+          "INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES (?,'r1',?,'worker-backend-dev','ready','running',1,'now','now')",
+          [
+            "assignment0",
+            "attempt0"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_REQUESTED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": true,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    },
+    {
+      "name": "current-provisioned-failed",
+      "git": true,
+      "store": true,
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": []}"
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',?,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            0,
+            "n0",
+            "execution",
+            "assignment0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Fixture check\", \"outcome\": \"failed\", \"command\": [\"tool\"]}]}"
+          ]
+        ],
+        [
+          "INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,owner_epoch,created_at,updated_at) VALUES (?,'r1',?,'worker-backend-dev','ready','running',1,'now','now')",
+          [
+            "assignment0",
+            "attempt0"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,?,'now')",
+          [
+            "WORKER_CHECK_REQUESTED",
+            "{\"binding\": {\"revision\": 0, \"owner_epoch\": 1, \"target\": {\"assignment\": \"assignment0\", \"index\": 0}}, \"result\": {}}",
+            "runtime"
+          ]
+        ]
+      ],
+      "files": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n",
+          "symlink": false
+        }
+      ],
+      "expected": {
+        "tasks": {
+          "t1": {
+            "reviewActions": {
+              "accept": false,
+              "requestChanges": true,
+              "reason": "Independent review is not approved. Request changes to complete review.",
+              "unblockAction": "request_changes",
+              "acknowledgeOpenChecks": false,
+              "resultId": "wr_e1",
+              "version": "1",
+              "digest": "result:wr_e1:1"
+            }
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {},
+        "hasGit": true,
+        "ghAvailable": "$GH_AVAILABLE"
+      }
+    }
+  ]
+}

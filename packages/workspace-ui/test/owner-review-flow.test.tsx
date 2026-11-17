@@ -72,7 +72,9 @@ it("policy checks remain explicitly not run without a misleading rerun", async (
 });
 
 it("review offers Accept as the primary action that moves the task to Ready to merge", async () => {
-  const p = await mount(inReview([{ name: "Focused tests", detail: "", outcome: "passed" }]), taskPath + "/changes");
+  const state = inReview([{ name: "Focused tests", detail: "", outcome: "passed" }]);
+  state.tasks[0].checkout = { kind: "worktree", branch: "cw/work", path: "/w" };
+  const p = await mount(state, taskPath + "/changes");
   const bar = document.querySelector(".rv-bar")!;
   expect(bar.textContent).toContain("Accept moves the task to Ready to merge");
   const accept = [...bar.querySelectorAll<HTMLButtonElement>("button.btn-primary")].find(b => b.textContent?.includes("Accept v1"))!;
@@ -83,6 +85,16 @@ it("review offers Accept as the primary action that moves the task to Ready to m
   expect(document.querySelector('[aria-label="Review comments"]')).not.toBeNull();
   accept.click(); await settle();
   expect(p.commands.map(c => c.operation)).toContain("accept_result");
+});
+
+// Live run: the header of a project-folder task said "Review > Ready to finish" while the review bar said Accept moves it
+// to Ready to merge. Both name the same step.
+it("a project-folder task in review names Ready to finish in its header and its review bar alike", async () => {
+  await mount(inReview([{ name: "Focused tests", detail: "", outcome: "passed" }]), taskPath + "/changes");
+  const bar = document.querySelector(".rv-bar")!;
+  expect(bar.textContent).toContain("Accept moves the task to Ready to finish");
+  expect(bar.textContent).not.toContain("Ready to merge");
+  expect(text()).toContain("Ready to finish");
 });
 
 it("an Accept refusal remains beside the result with a next action after the toast is dismissed", async () => {
@@ -122,20 +134,19 @@ it("review in a project without Git says the changes are in the folder and offer
   expect(panel.textContent!.match(/Changes were applied in the project folder/g)).toHaveLength(1);
 });
 
-it("Request changes keeps Send and reopen a real button, with its reason in the composer's reason slot", async () => {
+it("Request changes keeps Send and reopen a real button, with no words beside it", async () => {
   await mount(inReview([{ name: "Focused tests", detail: "", outcome: "passed" }]), taskPath + "/changes");
   button("Request changes…")!.click(); await settle();
-  // The shared composer's paper plane, named for what it does; its reason stays outside the button, in the bar's slot.
+  // The shared composer's paper plane, named for what it does. Nothing is written beside it; its reason is its own box.
   const send = document.querySelector<HTMLButtonElement>('dialog[open] button[aria-label="Send and reopen"]')!;
-  const slot = document.querySelector("dialog[open] .c-bar .l-reason")!;
   expect(send.tagName).toBe("BUTTON");
   expect(send.getAttribute("aria-disabled")).toBe("true");
-  expect(slot.textContent).toBe("Say what should change");
-  expect(send.getAttribute("aria-describedby")).toBe(slot.id);
+  expect(send.getAttribute("data-why")).toBe("Say what should change");
+  expect(document.querySelector("dialog[open] .c-bar .l-reason")).toBeNull();
+  expect(document.querySelector("dialog[open] .c-bar")!.textContent).not.toContain("Say what should change");
   const field = document.querySelector<HTMLTextAreaElement>("dialog[open] textarea")!;
   field.value = "Keep the old menu order"; field.dispatchEvent(new Event("input", { bubbles: true })); await settle();
   expect(send.getAttribute("aria-disabled")).toBeNull();
-  expect(slot.textContent).toBe("");
 });
 
 it("a refused action's message never stays on screen", async () => {
@@ -216,4 +227,16 @@ it("the conversation shows workers once: worker launches stay in the Workers car
 it("a busy button keeps its fill and size and shows a spinner inside", async () => {
   const css = (await import("node:fs")).readFileSync(`${process.cwd()}/${(await import("node:fs")).existsSync("src/workspace.css") ? "" : "packages/workspace-ui/"}src/workspace.css`, "utf8");
   expect(css).toMatch(/\.btn-primary\[data-busy\]\[disabled\][^{]*\{[^}]*background: var\(--primary\)/);
+});
+
+it("a focused control the projection removes hands focus to the main area, not the page body", async () => {
+  const s = await mount(inReview([{ name: "Focused tests", detail: "", outcome: "passed" }]), taskPath + "/changes");
+  const trigger = button("Request changes…")!;
+  trigger.focus();
+  expect(document.activeElement).toBe(trigger);
+  const reopened = inReview([{ name: "Focused tests", detail: "", outcome: "passed" }]);
+  reopened.tasks[0].status = "working"; reopened.tasks[0].result = null;
+  s.emit(projection("2", reopened)); await settle();
+  expect(trigger.isConnected).toBe(false);
+  expect(document.activeElement).toBe(document.querySelector("main[tabindex]"));
 });

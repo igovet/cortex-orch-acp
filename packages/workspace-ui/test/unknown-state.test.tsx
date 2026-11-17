@@ -10,20 +10,22 @@ let dispose: (() => void) | undefined;
 beforeEach(() => { localStorage.clear(); sessionStorage.clear(); });
 afterEach(() => { dispose?.(); document.body.innerHTML = ""; });
 const settle = async () => { for (let i = 0; i < 8; i++) await flush(); };
-function world(phase: "unknown" | "execution" | "paused" = "unknown"): WorkspaceState {
+function world(phase: "unknown" | "execution" | "paused" | "recovery" = "unknown"): WorkspaceState {
   const s = withTask(emptyWorkspace(), "Retained task");
   s.machines[0].connection = "connected";
   const slice = mapProjectSlice(s.projects[0], [wireTask({
     taskId: "t", description: "Retained task", title: "Retained task", titleAvailability: "generated", executionId: "e", phase,
     runtimeState: phase === "execution" ? "EXECUTING" : phase === "paused" ? "PAUSED" : "RECOVERING",
+    executionState: phase === "recovery" ? "recovering" : phase === "execution" ? "running" : phase === "paused" ? "paused" : "unknown",
+    waitReason: phase === "recovery" ? "turn_interrupted" : null,
     warnings: phase === "unknown" ? ["contradictory_evidence"] : [],
   })]);
   return { ...s, tasks: slice.tasks, sessions: slice.sessions };
 }
 const model = (s: WorkspaceState) => sessionModel(buildIndex(s, 0), "t")!;
-async function mount(path = "/m/local/t/t") {
+async function mount(path = "/m/local/t/t", phase: Parameters<typeof world>[0] = "unknown") {
   const p = scriptedPort({ capabilities: { everything: true, operations: [] } });
-  let answer = world(), fail = false, reads = 0;
+  let answer = world(phase), fail = false, reads = 0;
   if (path.includes("/workers")) answer.workers = [{ id: "w", taskId: "t", executionId: "e", role: "debugger", status: "working", lane: "execution", goal: "Inspect the defect", now: null, waitsFor: null, scope: [], route: null, attempt: null, elapsedMs: null, runningSince: null, context: null, usage: null, result: null, activity: [] }];
   p.port.query = async operation => {
     if (operation === "project.snapshot") { reads++; if (fail) throw new Error("unavailable"); return [projection("1", answer)] as never; }
@@ -78,6 +80,31 @@ it("re-check installs even an equal-version confirmed snapshot and restores cont
   expect(document.querySelector(".l-task .l-strip")).toBeNull();
   expect(document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')!.disabled).toBe(false);
   expect(p.commands).toHaveLength(0); // A read, never Resume or Stop.
+});
+
+it("opens an interrupted turn ready for a message without a manual refresh", async () => {
+  const p = await mount("/m/local/t/t", "recovery");
+  expect(strip().textContent).toContain("This turn was interrupted");
+  expect(document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')!.disabled).toBe(false);
+  expect([...document.querySelectorAll("button")].some(b => b.textContent === "Answer")).toBe(false);
+  expect(p.commands).toHaveLength(0);
+  const offline = world("recovery"); offline.machines[0].connection = "disconnected";
+  expect(model(offline).mode).toBe("offline");
+});
+
+it("re-check resolves the real interrupted-turn shape without restarting the task", async () => {
+  const p = await mount();
+  p.answer(world("recovery"));
+  recheck().click(); await settle();
+  expect(document.body.textContent).not.toContain("Task state not confirmed");
+  expect(strip().textContent).toContain("This turn was interrupted");
+  expect(strip().textContent).toContain("Send a message to continue");
+  expect(document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')!.disabled).toBe(false);
+  expect(model(world("recovery")).view.task.process).not.toBe("stopped");
+  expect(model(world("recovery")).mode).toBe("live");
+  expect(document.body.textContent).toContain("Interrupted");
+  expect(document.body.textContent).not.toMatch(/turn_interrupted|Mark as handled|Working…|Next step is Review/);
+  expect(p.commands).toHaveLength(0);
 });
 
 it("a repeated unknown snapshot stays blocked and explains the next diagnostic step", async () => {

@@ -6,17 +6,17 @@ import type { AttachmentInput } from "@cortex/workspace-domain";
 import { AttachChips, Composer, RouteBar, TaskAttachments } from "./composer";
 import { useWs } from "./ctx";
 import { Confirmed, createBodyMark, createTicker, ScreenActive } from "./freshness";
-import { A, Count, createFollow, I, MenuItem, Pop } from "./kit";
+import { A, Count, createFollow, I, MenuItem, Pop, useWantOverview } from "./kit";
 import { ConflictPanel, ReadyPanel } from "./merge";
 import { Answered, QuestionTabs, type Ask } from "./questions";
 import { ChangesPanel, ResultCard } from "./review";
 import { ActionBar, Page, StatusLane, Toolbar, Whole, type StripItem } from "./layout";
 import { taskWhyId, titleBlock } from "./task-chrome";
-import { inConflict, repoOf, taskCheckout } from "./review-model";
+import { inConflict, repoOf, sentence, taskCheckout } from "./review-model";
 import type { Route, TaskTab } from "./router";
-import { age, clock } from "./selectors";
-import { contextOf, duration, elapsedOf, isFinished, phases, recordedCoordinatorRoute, sessionModel, taskSettings, tokens, verificationFace, workerFace, workerState, type SessionModel } from "./session-model";
-import { CORTEX, Pill, StopCommand, VERIFICATION, WorkerPane, WorkingIndicator } from "./worker";
+import { age, clock, stopReason } from "./selectors";
+import { contextOf, duration, elapsedOf, isFinished, workersOutcome, phases, recordedCoordinatorRoute, sessionModel, taskSettings, tokens, verificationFace, workerFace, workerState, workingNow, type SessionModel } from "./session-model";
+import { CORTEX, Pill, StopCommand, VERIFICATION, WorkerPane, WaitingIndicator, WorkingIndicator } from "./worker";
 import { createOpenState, Fold, TextSteps } from "./feed";
 
 import { ResultText, resultPreview } from "./result-text";
@@ -31,9 +31,11 @@ const useTicker = () => {
 };
 
 const workersNote = (m: SessionModel) => {
+  // A worker last seen running under a task that has ended is named, never counted as active.
+  const stale = m.workers.filter(w => w.stale).length;
+  if (stale) return `${m.finished.length} finished, ${stale} not confirmed (the latest worker facts could not be read)`;
   if (m.active.length || m.finished.length !== m.workers.length) return `${m.active.length} active of ${m.workers.length}`;
-  const cancelled = m.workers.filter(w => w.status === "cancelled").length, done = m.workers.length - cancelled;
-  return `${done} finished${cancelled ? `, ${cancelled} cancelled` : ""}`;
+  return workersOutcome(m.workers, 0).replace(/^0 active, /, "");
 };
 
 /** What the task is doing, in words. No percentage is made up: a phase or the last recorded fact, and the plan's real count. */
@@ -77,11 +79,12 @@ function TaskBar(props: { m: SessionModel; tab: TaskTab | undefined; route: Task
     </>} />;
 }
 
-/** A factual one-line summary of a team update, opened in place for the full list. */
+/** A factual one-line summary of a team update, opened in place for the full list. A settled team reads as the header's
+ *  outcome line: a cancelled or failed worker is never counted as finished. */
 function teamLine(m: SessionModel, title: string, ids: string[]) {
   const list = m.workers.filter(w => ids.includes(w.id));
   const working = list.filter(w => !isFinished(w)).length;
-  return `${title}: ${working ? `${working} of ${list.length} working` : `${list.length} finished`}`;
+  return `${title}: ${working ? `${working} of ${list.length} working` : workersOutcome(list, 0).replace(/^0 active, /, "")}`;
 }
 
 /** Why a recorded result is not offered as the current one right now, or null when it is. */
@@ -89,7 +92,9 @@ function resultHeld(m: SessionModel, pending: boolean): string | null {
   if (m.mode === "offline" || m.mode === "unconfirmed") return "State needs confirmation";
   if (pending || m.open.length > 0) return "A decision is pending";
   if (m.mode === "stopping") return "The stop is not confirmed yet";
-  if (m.mode === "live" || m.active.length > 0) return "Work is running";
+  // Only work that runs says so. A task held for the owner's message (an interrupted turn, a stop) runs nothing.
+  if (workingNow(m) || m.active.some(w => w.status === "working")) return "Work is running";
+  if (m.mode === "live") return "Waiting for your message";
   return null;
 }
 
@@ -213,7 +218,10 @@ function Waiting(props: { m: SessionModel }) {
     {/* A card's action bar, so a way out the machine does not offer says why beside it. */}
     <ActionBar place="card">
       <Show when={t().conflict === "none"} fallback={<><A class="btn btn-line btn-sm" to={conflict()}>Open the conflict</A><button class="btn btn-primary btn-sm" {...ws.needs("resolve_with_cortex")} onClick={() => ws.open({ kind: "cortex", taskId: t().id })}>Resolve automatically…</button></>}>
-        <button class="btn btn-line btn-sm" {...ws.needs("clear_issue")} onClick={() => ws.run({ type: "clear_issue", taskId: t().id })}>{ws.t("clearWait")}</button>
+        {/* A way out this machine does not offer is not presented as one. */}
+        <Show when={ws.store.can(capabilityOf("clear_issue"))}>
+          <button class="btn btn-line btn-sm" {...ws.needs("clear_issue")} onClick={() => ws.run({ type: "clear_issue", taskId: t().id })}>{ws.t("clearWait")}</button>
+        </Show>
       </Show>
     </ActionBar>
   </div>;
@@ -234,6 +242,11 @@ function Conversation(props: { model: Accessor<SessionModel>; now: number; pick:
   // (its reason takes a second line, a face arrives), a reader at the end stays at the end instead of under the dock.
   let lastDock = dock();
   createEffect(() => { const h = dock(); if (h !== lastDock) { lastDock = h; if (follow.following()) requestAnimationFrame(() => follow.jump()); } });
+  // What the owner just sent, and the work it starts, come into view above the composer even from a reader who had scrolled
+  // up: left where it was, the reply's Working line sat under the floating composer.
+  const mine = createMemo(() => m().session.timeline.filter(e => e.kind === "said" || e.kind === "message").length);
+  let mineSeen = mine();
+  createEffect(() => { const n = mine(); if (n > mineSeen) follow.jump(); mineSeen = n; });
   const decision = (id: string) => m().session.decisions.find(d => d.id === id)!;
   const message = (id: string) => m().messages.find(x => x.id === id)!;
   const stranded = () => m().view.column === "needs" && !m().view.unknown && m().open.length === 0;
@@ -284,7 +297,8 @@ function Conversation(props: { model: Accessor<SessionModel>; now: number; pick:
             return <div class={`answered${l().rule ? " ws-rule" : ""}`}><I n={l().icon} s={14} /><span>{l().text}</span><Show when={l().at !== null}><span class="faint">{clock(l().at)}</span></Show></div>;
           })()}</Match>
         </Switch>}</For>
-        <Show when={stranded()}><Waiting m={m()} /></Show>
+        {/* Only a task that waits on the owner reads as waiting for a decision: a cancelled or failed run has none. */}
+        <Show when={stranded() && m().view.task.observedPhase !== "recovery" && (m().view.task.status === "needs_you" || m().view.task.conflict !== "none")}><Waiting m={m()} /></Show>
         <Show when={m().view.task.result && m().active.length === 0 && m().workers.length > 0 && !lastWorkers()}>
           <div class="answered"><I n="users" s={14} />{workersNote(m())} <A class="lnk ws-ml4" to={{ name: "task", machine: m().view.machine.id, task: m().view.id, tab: "workers" }}>Work details</A></div>
         </Show>
@@ -292,7 +306,10 @@ function Conversation(props: { model: Accessor<SessionModel>; now: number; pick:
         <Show when={m().view.task.result && held()}>
           <div class="answered ws-prev-result" role="note"><I n="eye" s={14} /><span>Previous result v{m().view.task.result!.version}, read-only. {held()}.</span> <A class="lnk ws-ml4" to={changesAt()}>Open</A></div>
         </Show>
-        <Show when={m().mode === "live"}><WorkingIndicator activity={m().active.flatMap(w => w.activity)} /></Show>
+        {/* The last line says what the task is doing now, as its header does: waiting for an answer is not working. */}
+        <Show when={m().mode === "live" && m().view.task.observedPhase !== "recovery"}>
+          <Show when={workingNow(m())} fallback={<Show when={!stranded()}><WaitingIndicator /></Show>}><WorkingIndicator activity={m().active.flatMap(w => w.activity)} /></Show>
+        </Show>
       </div>
     </div>
     <Show when={ws.can(capabilityOf("send_message"))}><Composer model={props.model} onHeight={setDock} pill={<Pill follow={follow} />} folded={m().open.some(d => d.kind === "question")} /></Show>
@@ -391,7 +408,9 @@ export function TaskPage(props: { id: string }) {
   const stoppingItem: StripItem = { id: "stopping", tone: "warn", icon: <I n="loader" s={14} class="spin st-warn" />, domId: taskWhyId(props.id),
     get text() { return `Stopping. ${stopping() ? `${stopping()} worker${stopping() === 1 ? " is" : "s are"} not confirmed as stopped.` : "The stop is not confirmed yet."} Close and Archive stay off until it is.`; },
     action: <button class="btn btn-line btn-sm" {...ws.needs("confirm_stop")} onClick={() => ws.run({ type: "confirm_stop", taskId: props.id, now: ws.store.clock() })}>Retry</button> };
-  const archived: StripItem = { id: "archived", tone: "info", icon: <I n="archive" s={14} class="faint" />, get text() { return `Archived, read-only. ${daysLeft(archiveRow(ws.store.index(), m().view).left)} before cleanup.`; },
+  // Days before cleanup come from the machine's retention, read only for an archived task's page.
+  useWantOverview(() => m().mode === "archived");
+  const archived: StripItem = { id: "archived", tone: "info", icon: <I n="archive" s={14} class="faint" />, get text() { return ws.store.overviewLoaded() ? `Archived, read-only. ${daysLeft(archiveRow(ws.store.index(), m().view).left)} before cleanup.` : "Archived, read-only."; },
     action: <button class="btn btn-line btn-sm" {...ws.needs("restore_task")} onClick={() => ws.run({ type: "restore_task", taskId: props.id, now: ws.store.clock() })}><I n="undo" s={12} />Restore</button> };
   const [checking, setChecking] = createSignal(false), [rechecked, setRechecked] = createSignal(false);
   const recheck = async () => {
@@ -410,12 +429,19 @@ export function TaskPage(props: { id: string }) {
       <Show when={!checking()}>Machine settings → <A class="lnk" to={{ name: "settings", machine: m().view.machine.id, section: "diagnostics" }}>Diagnostics</A>.</Show>
     </>; },
     action: <button class="btn btn-line btn-sm" aria-busy={checking() ? "true" : undefined} onClick={() => void recheck()}>Re-check state</button> };
+  // A recorded recovery reason is shown in words; Stop and Close task stay available.
+  const interrupted: StripItem = { id: "interrupted", tone: "info", icon: <I n="pause" s={14} />, get text() {
+    const reason = m().view.task.issue;
+    return !reason || reason === "turn_interrupted" ? "This turn was interrupted. Send a message to continue from the recorded state. Nothing has been restarted."
+      : `${sentence(stopReason(reason))} Send a message to continue from the recorded state, or use Stop or Close task. Nothing has been restarted.`;
+  } };
   const unverified: StripItem = { id: "unverified", tone: "warn", icon: <I n="alert" s={14} class="st-warn" />, text: "Not verified. This task was closed as is, and the warning stays with its result." };
   const titleWhy: StripItem = { id: "title-why", tone: "info", icon: <I n="alert" s={14} class="st-warn" />, domId: taskWhyId(props.id), get text() { return titleBlock(m()) ?? ""; } };
   const status = createMemo<StripItem[]>(() => [
     ...(m().mode === "stopping" ? [stoppingItem] : []),
     ...(m().mode === "archived" ? [archived] : []),
     ...(["offline", "unconfirmed"].includes(m().mode) ? [offline] : []),
+    ...(m().mode === "live" && m().view.task.observedPhase === "recovery" ? [interrupted] : []),
     ...(m().view.task.notVerifiedByCortex && m().view.task.closedAs === "as_is" ? [unverified] : []),
     ...(m().mode !== "stopping" && titleBlock(m()) ? [titleWhy] : []),
   ]);

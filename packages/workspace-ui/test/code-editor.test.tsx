@@ -368,7 +368,9 @@ describe("owner text is never lost", () => {
     type("mine\n");
     await settled();
     await click("Close a.txt");
-    expect($("dialog[open]")!.getAttribute("aria-label")).toBe("Unsaved changes");
+    expect($("dialog[open]")!.getAttribute("data-dialog")).toBe("Unsaved changes");
+    // Named by its visible title.
+    expect(document.getElementById($("dialog[open]")!.getAttribute("aria-labelledby")!)?.textContent).toBe("Save changes to a.txt?");
     await click("Cancel");
     expect(doc()).toBe("one\ntwo\nmine\n");
     await click("Close a.txt");

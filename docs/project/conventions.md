@@ -1,6 +1,6 @@
 # Conventions
 
-Use Python 3 and keep product behavior below `./`. Tool argument contracts
+The product is Rust and contains no Python; keep product behavior below `./`. Tool argument contracts
 belong in the advertised MCP schemas and descriptions, not in skills or
 profiles. Model proposals enter through channel-verified dispatch; runtime transitions
 commit state and events transactionally.
@@ -21,7 +21,7 @@ reports required for that assignment. A worker may implement, verify and
 document a bounded change. Add another worker only for a concrete independent
 benefit.
 
-Use `python3 -B`, preserve the no-paid default test policy, and report live ACP
+Use the Rust tooling (`scripts/cortex-xtask.sh`, `scripts/cortex-paseo-tools.sh`), preserve the no-paid default test policy, and report live ACP
 client checks as unverified until observed and retained; follow the isolated
 dev Paseo procedure in `docs/project/dev-environment.md`. Release-sensitive generation, stamping, package and sync checks
 run sequentially.

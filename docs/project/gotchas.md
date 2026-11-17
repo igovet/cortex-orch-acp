@@ -1,5 +1,7 @@
 # Gotchas
 
+> Historical record. Module, test and script paths in this page that name `.py` files, `src/`, `tests/test_*.py` or the former Python scripts refer to the former Python runtime, which was removed on 2026-11-16; they are kept as dated history, no longer exist in the checkout and are not current commands. The behavior statements are unverified against the Rust runtime unless a Rust source path is given.
+
 ## Final disclosure ownership
 
 Only structured `not_verified` supplies the runtime's gap section. Matching just

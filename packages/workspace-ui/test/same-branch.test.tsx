@@ -96,3 +96,19 @@ for (const accepted of [false, true]) for (const known of [false, true]) it(`sam
     expect(p.commands.at(-1)?.payload).toMatchObject({ type: "integrate", method: "commit", targetBranch: "main", confirmed: true });
   } else expect(labels()).toContain("Close as is…");
 });
+for (const reason of [null, "There is no record of which files this task changed in the project folder (only changes made through the app's own file tools are recorded), so they cannot be committed from here. Close as is, or commit in Git and use Done outside the app."]) it(`a project-folder task without recorded files says what is missing, not that its evidence is unavailable (machine reason: ${reason ? "given" : "none"})`, async () => {
+  const s = withTask(emptyWorkspace(), "Folder task"), t = s.tasks[0];
+  s.machines[0].connection = "connected";
+  Object.assign(t, { status: "ready_to_merge", result: { version: 1, digest: "d", summary: "Done", checks: [{ name: "Test", outcome: "passed" }] }, workspaceDigest: "d", acceptance: null,
+    integrationFacts: { targetBranch: "main", alreadyInTarget: false, sameBranch: true, commitAvailable: false, pendingPaths: [], otherUncommitted: false, reason, pushStatus: null } });
+  expect(t.checkout.kind).toBe("main");
+  const p = scriptedPort({ capabilities: { everything: true, operations: [] } });
+  history.replaceState(null, "", "/m/local/t/t/changes");
+  const root = document.createElement("div"); document.body.append(root);
+  dispose = render(() => <Workspace port={p.port} />, root);
+  await settle(); p.emit(projection("1", s)); await settle();
+  const card = [...root.querySelectorAll(".rcard")].find(c => c.textContent?.includes("Review task"))!;
+  expect(card.textContent).not.toMatch(/evidence is unavailable|Task-owned/);
+  expect(card.textContent).toContain(reason ?? "Which files this task changed in the project folder could not be confirmed, so they cannot be committed from here.");
+  expect([...card.querySelectorAll("button")].map(b => b.textContent?.trim())).toContain("Close as is…");
+});

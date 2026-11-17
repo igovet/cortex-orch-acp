@@ -27,12 +27,17 @@ and pipeline templates leave incident decisions out by default. For a production
 incident, the coordinator records an incident decision in the current pipeline;
 the owner can include it in the final handoff when relevant.
 
+The additive Rust native host serves owned draft creation/replacement, immutable
+publication and bounded report/draft reads through authenticated MCP channels.
+Worker results can reference their own published report, not another principal's
+report. Discovery and remaining limits are described in
+[native incoming ACP](../../project/native-incoming-acp.md).
+
 Report reads use bounded cursors and exact report identities. Workers receive
 selected predecessor reports through context packets; they do not inspect
 private store paths. The runtime records source revisions, candidate digests,
 requirement revisions and attempt identity so stale evidence can be invalidated
 without rewriting the original report.
 
-The public operation contracts are in [`src/cortex_runtime/contracts.py`](../../../src/cortex_runtime/contracts.py).
-The focused lifecycle tests are `tests/test_source_reports.py` and
-`tests/test_pipeline_bootstrap.py`.
+The public operation contracts are the advertised tool schemas in `crates/cortex-engine/src/schema.rs`.
+The focused lifecycle tests are in `crates/cortex-core/tests` (`publication.rs`, `publication_parity.rs`).

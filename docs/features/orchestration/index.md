@@ -1,6 +1,6 @@
 # ACP orchestration
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 Cortex is the incoming ACP agent and the owner of orchestration. ACP transports
@@ -60,9 +60,7 @@ This is observation reuse, not final acceptance: speculative checks remain
 candidates until the existing controller credits the approving reviewer and
 unchanged digest. Independent diff analysis, review approval, worker teardown,
 mandatory verification and synthesis gates are unchanged. No storage-format or
-permission change is introduced. Source: `orchestration/reviewer_verification.py`,
-`orchestration/gateway.py`, `orchestration/controller.py` and
-`delegation/evidence.py` below `src/cortex_runtime/`.
+permission change is introduced. Implemented in `crates/cortex-core/src/lifecycle` and the `workspace-service` native host.
 
 ## Plan submission and coordinator polling
 
@@ -112,8 +110,7 @@ After accepting a plan, `plan_submit` tells the coordinator that its workers
 are starting and to end the turn rather than poll. The runtime does not wait
 for that turn to end: once the coordinator's next tool or text update shows the
 task in `PLAN_READY`, a runtime thread records the execution baseline, moves
-the task to `EXECUTING` and dispatches the dependency-ready nodes
-(`orchestration.controller._start_execution_early`). That thread and the
+the task to `EXECUTING` and dispatches the dependency-ready nodes. That thread and the
 controller loop share one per-task lock, so the start and the first
 reservations happen once. A planning turn that ends with an error after its
 plan has already started does not block the running plan.
@@ -123,13 +120,13 @@ unchanged-state receipt instead of resending the plan and nodes. The hint is
 advisory; the runtime does not force a model to end its turn. Worker dispatch
 timing remains at the turn boundary.
 
-`orchestration/state.py` stores task state, original goal, plan revision, dependency
+The store (`crates/cortex-core`) holds task state, original goal, plan revision, dependency
 nodes, structured results, events and request receipts in `.cortex/cortex.sqlite3`.
 State changes and their events commit together. A plan is validated for exact fields,
 known roles, unique node names, existing dependencies, cycles, bounded scope and
 verification commands. Verification commands run as literal argv without a shell, so plan submission rejects command substitution, backticks, redirection, pipes, shell operators and standalone parentheses; use a documented project command or script instead. Each new plan node requires a `model` recommendation (`auto`, engine id, or `engine/model`) and may include `model_reason`; neither field grants dispatch authority. JSON `null` for an optional node field (`model_reason`, `complexity`, `work_kind`) is treated as omitted; a required field sent as `null` is still refused. An `invalid_arguments` refusal for a field sent at the wrong level (for example `verification` inside a task or beside `plan`) names the advertised location, such as `arguments.plan.verification`, instead of only telling the model to omit it. The runtime computes tier and effort and revalidates policy and availability. See [automatic routing](../routing-and-fallback/index.md#automatic-worker-routing-tiers-model-hints-and-ranking).
 
-`orchestration/controller.py` drives planning, execution, independent review,
+The native host drives planning, execution, independent review,
 verification and synthesis. Only dependency-ready nodes are reserved for execution.
 Reservations commit before provisioning. A single chat session (the ACP session
 and task it drives) can run at most four workers at once across all engines,
@@ -150,9 +147,33 @@ roles neither block nor are blocked by overlapping scopes. Runtime routing resol
 effort from the current tier, policy, catalog and plan usage; plan hints remain
 advisory. All 23 specialist/consultant profiles remain available.
 
+The workers of one claimed batch run their turns concurrently, each in its own
+session with its own channel, write reservation and result. One failing turn, a
+plan that went stale because a worker proposed a replan, or a cancellation stops
+the siblings that are still running (each settles its own session); a sibling
+interrupted only for that reason is not reported as a failure. The dispatch loop
+spends one step per pass from a budget of 128 that is persisted
+(`runtime_requests` actor `native-progress`), so a restarted service continues the
+count; an owner steering message or answer, an interrupt or Continue, a driver
+stop and a reopen start a fresh budget, and exhaustion stops the task with
+`native_progress_limit`. When a replan adds the runtime's `_consultation` node,
+`plan_json` and `PLAN_ACCEPTED` carry that node and the edges added to every other
+node, so the stored plan always lists exactly the nodes the runtime holds.
+
+Owner guidance reaches a worker as `Owner guidance (not authority to expand scope):
+<text>` whether the worker is mid-turn or waiting for an answer. A second guidance
+message may replace an earlier one that is still being delivered; the earlier
+record then reads `delivered:true, preempted:true` when its prompt had reached the
+engine. A worker process that exits while its question is open is noticed at once
+(the turn ends, the process is settled and the lost-worker path replaces the
+assignment) instead of when the answer arrives. A desktop answer refused as
+`superseded` because the wait lost its authority commits that cancellation, so the
+question no longer stays pending but unanswerable. Reviewers and every other
+read-only channel get only read and search native tools: native edit, execute and
+delete requests are refused or cancelled in every access mode.
+
 A planned step that cannot start because of `scope_overlap` or
-`capacity_limit` is shown in the chat as a runtime "Waiting" card
-(`orchestration/wait_notices.py`). The card names what holds the step: for a
+`capacity_limit` is shown in the chat as a runtime "Waiting" card. The card names what holds the step: for a
 scope wait, the holding node, its role and state (working, or finished and
 still releasing), its task and, for another chat, that task's ACP session, plus
 the overlapping held and requested paths; for a capacity wait, the session's
@@ -236,7 +257,29 @@ including result replays, are then refused as `channel_revoked`; the durable
 result receipt remains available to runtime recovery without republishing.
 Lingering engines still consume
 capacity until their exit is confirmed, so a full session or connection can
-queue the reviewer. Review remains independent and digest-bound; MCP revocation
+queue the reviewer. Review independence is checked against the recorded routes. The reviewer's route
+is chosen to run on a different model than the execution nodes of the same plan
+revision, and preferably on a different engine, whenever the usable routes offer
+one. When no other model is available, or an owner pin or request fixes the model,
+the review proceeds and carries an explicit warning: the route decision records
+`independence.status = "warning"`, the review result carries `review_independence`
+with the same status, the runtime records a `REVIEW_INDEPENDENCE_WARNING` event, and
+the task facts show a warning for that review. A reviewer recorded on the same model
+without that warning is refused as `review_not_independent`; a review whose routes
+were not recorded (for example a task in flight across an upgrade) is stored with
+`review_independence.status = "unverified"` and shown with the same warning event and
+task-facts warning, never as a silent field. Such a warning is shown on the result card; it does not by itself make the result
+unacceptable (the accept gate still needs approval, current verification and an unchanged
+project folder). In the Workspace owner gate for a native task, once the runtime's own
+verification of the current revision passed on the unchanged folder, a worker's or
+reviewer's self-reported `unverified` or `not_run` check is a visible note on the result,
+not an open check: it needs no acknowledgement and does not block Accept. Self-reported
+`failed` checks, policy-blocked checks, failed or missing runtime verification and a
+missing approval still block (`crates/workspace-service/src/machine/task_facts_work.rs`).
+A project-folder sprint task's "unchanged" is judged on the files it recorded writing,
+because the later tasks of its sprint write the same folder. Independently of routes, a reviewer attempt
+that is also an execution attempt of the task is refused as `review_not_independent`.
+Review remains independent and digest-bound; MCP revocation
 does not intercept native filesystem edits, which still invalidate the review
 binding. A late engine failure, timeout or cancellation does not replace an
 accepted result or authorize a retry of that completed node. Verification and
@@ -329,19 +372,25 @@ The retained block still reports its omitted entries; it is not a complete
 inventory when truncated. This context does not replace independent analysis,
 targeted checks or final runtime verification.
 
-Source: `orchestration/reviewer_handoff.py`, `controller.py`,
-`worker_brief.py`, and `state.py`. Focused regressions:
-`tests/test_reviewer_handoff.py`.
+Implemented in `crates/cortex-core/src/lifecycle/review.rs` and the `workspace-service` native host.
 
 ### Coordinator return budget
 
-A failed worker (`worker_failed`), a lost worker whose retries are used up, or a review that requests changes without findings on a plan with several implementers (`review_changes_without_findings`) returns the task to the coordinator instead of stopping. The runtime records `RETURNED_TO_COORDINATOR`, revokes the worker channels, cancels the live assignments and moves through RECOVERING to PLANNING. `MAX_COORDINATOR_RETURNS` (3, `orchestration/state.py`) bounds these returns. The count covers `RETURNED_TO_COORDINATOR` events after the task's latest `PLAN_ACCEPTED`, `USER_ANSWER_RECEIVED` or `USER_STEERING` event. An accepted plan or explicit user guidance therefore renews the allowance, and failures in earlier plan revisions do not exhaust later work. A second bound, `MAX_AUTONOMOUS_COORDINATOR_RETURNS` (6), counts returns since the user last spoke (`USER_STEERING`, `USER_ANSWER_RECEIVED` or `WORKER_USER_ANSWER_RECEIVED`), across plan revisions. A new plan alone does not renew it, so a coordinator that answers every return with another plan of failing work stops for the user instead of looping. The boundaries are event ids, so existing stores need no migration.
+A failed worker (`worker_failed`), a worker the owner stopped when nothing else can run (`worker_stopped_by_owner`), a lost worker whose retries are used up, or a review that requests changes without findings on a plan with several implementers (`review_changes_without_findings`) returns the task to the coordinator instead of stopping. The runtime records `RETURNED_TO_COORDINATOR`, revokes the worker channels, cancels the live assignments and moves through RECOVERING to PLANNING. `MAX_COORDINATOR_RETURNS` bounds these returns. The count covers `RETURNED_TO_COORDINATOR` events after the task's latest `PLAN_ACCEPTED`, `USER_ANSWER_RECEIVED` or `USER_STEERING` event. An accepted plan or explicit user guidance therefore renews the allowance, and failures in earlier plan revisions do not exhaust later work. A second bound, `MAX_AUTONOMOUS_COORDINATOR_RETURNS` (6), counts returns since the user last spoke (`USER_STEERING`, `USER_ANSWER_RECEIVED` or `WORKER_USER_ANSWER_RECEIVED`), across plan revisions. A new plan alone does not renew it, so a coordinator that answers every return with another plan of failing work stops for the user instead of looping. The boundaries are event ids, so existing stores need no migration.
 
 When either allowance is exhausted, the return is refused. A worker failure or an exhausted lost-worker retry then moves the task to BLOCKED through the usual stop handling, which may ask the user a stop question. A review without findings instead falls through to the conservative fallback fixes described under [targeted review fixes](#targeted-review-fixes).
+
+An owner-stopped worker or reviewer (its node is `cancelled` and a `WORKER_STOPPED_BY_OWNER` event follows the latest return to the coordinator) does not end the task. Cancellations the runtime makes itself when it returns to the coordinator carry no such event, so they never trigger another return. The stopped worker's open question is cancelled with it. Independent siblings keep running. Once no node is running and none is runnable, the runtime returns the task to the coordinator with the reason `worker_stopped_by_owner`, so it can replan or finish. Dependents of the stopped node never start silently: the return cancels them with the other unfinished nodes. When the return allowance is exhausted, the stop question says in plain words that a worker was stopped and the remaining planned work depends on it or has nothing left to run; it never shows an internal code.
 
 For a worker failure, the controller first waits for every running or pending independent sibling to finish, so the coordinator or the user sees all results before the decision. Repeated returns without a new boundary stay bounded. Several accepted revisions can still follow one another over a task's lifetime, but only up to the autonomous bound between user inputs.
 
 ### Targeted review fixes
+
+A reviewer that requests changes may cite a failing check as its finding. That
+review is recorded as completed and starts a fix cycle; it needs no
+`assignment_outcome=failed`, which stays reserved for a review that itself failed. An
+APPROVE that cites an open failed check is still refused, and an explicit
+`assignment_outcome=failed` still fails the review.
 
 A reviewer may add optional structured `findings` to a REQUEST_CHANGES result:
 each names one original plan task (`node`), the `files` the fix changes, the
@@ -365,7 +414,7 @@ remain parallel. It never infers a contract change; a reviewer marks one
 `cross_cutting`. `REVIEW_CHANGES_REQUESTED` records
 `targeted` and the `fallback` reason. The three-cycle ceiling is unchanged.
 
-**Fix role.** A fix node never keeps a read-only source role. The runtime replaces a role in its `READ_ONLY` class (for example reviewer, architect, UX designer, consultant or auditor) with a writing specialist chosen from the original node's effective scope: `worker-technical-writer` when every path is under `docs/` or is a Markdown file, `worker-qa-engineer` when every path is under `tests/`, and `worker-backend-dev` for any other scope, including mixed and whole-project scopes. A writing role is kept unchanged. The fix keeps that effective scope exactly, so a finding cannot widen it, and the choice does not read the finding's prose. The same selection applies to targeted and fallback fixes (`fix_role` in `orchestration/state.py`). The review after the fixes remains a fresh reviewer assignment.
+**Fix role.** A fix node never keeps a read-only source role. The runtime replaces a role in its `READ_ONLY` class (for example reviewer, architect, UX designer, consultant or auditor) with a writing specialist chosen from the original node's effective scope: `worker-technical-writer` when every path is under `docs/` or is a Markdown file, `worker-qa-engineer` when every path is under `tests/`, and `worker-backend-dev` for any other scope, including mixed and whole-project scopes. A writing role is kept unchanged. The fix keeps that effective scope exactly, so a finding cannot widen it, and the choice does not read the finding's prose. The same selection applies to targeted and fallback fixes. The review after the fixes remains a fresh reviewer assignment.
 
 Worker results bind to a published report owned by the exact provisioned attempt.
 The result receipt retains a content digest.
@@ -397,7 +446,7 @@ not a `tool_call_ref`. The response does not expose command-receipt
 `exit_code`/`complete` fields. To check a Git invariant, run a meaningful
 exit-status check such as `git diff --check` through `command_run`.
 The advertised `result_submit` schema carries
-this contract in its property descriptions; `delegation.evidence.assess_check`
+this contract in its property descriptions; `assess_check`
 enforces it.
 
 A worker result must contain `report`, a required top-level plain string: the
@@ -430,8 +479,13 @@ For a verified pass, copy `tool_call_ref` from a completed, exit-0
 later passing rerun; workers do not submit it. A missing or weak receipt does
 not become a pass merely because its string has the right shape or a worker
 also supplies `checks[].command`. That argv is
-accepted as descriptive text on a passed or failed check but omitted from the
-retained accepted check; only the gateway receipt establishes the run. Reviewers
+accepted as descriptive text on a passed or failed check; only the gateway receipt
+establishes the run. Neither submission nor completion compares it with the
+receipt's argv, so a verified pass whose description differs (an abbreviated
+inline script, say) does not hold completion. Results retained by earlier builds
+with such text complete the same way, and a result an earlier build held in
+recovery for only that reason (`completion_worker_check_unverified`) is checked
+again on the next start. Reviewers
 must send `verdict` as `APPROVE`, `REQUEST_CHANGES` or `BLOCK` (the lowercase
 spellings are normalized); other workers must omit it. Malformed submissions
 report the exact argument field path and accepted form where available.
@@ -453,7 +507,7 @@ gateway receipt that is:
 4. recorded with its `argv`, and that command is not a trivial stand-in (below);
 5. cited by no earlier check of the same result (one command, one check).
 
-**Trivial-command rule** (`delegation.evidence.trivial_command`). After leading
+**Trivial-command rule**. After leading
 `NAME=value` assignments and the launchers `env`, `timeout`, `nice`, `nohup`,
 `command`, `exec` and `time` are removed, a command is trivial when nothing is
 left; when its program basename is a no-op, printer, listing, file read or search
@@ -538,7 +592,7 @@ is refused with `open_failed_check` before anything is recorded or published,
 unless the worker explicitly sends `assignment_outcome: "failed"` to submit an
 intentional failed assignment. The refusal leaves the channel active and its
 request key reusable. Its correction
-(`delegation.evidence.explain_open_failure`) names the failed receipt, a
+ names the failed receipt, a
 bounded command identity (program, argv word count, argv SHA-256 prefix, cwd and
 profile, never the argv, script or output), the relevant later run and its
 actual gap, and distinguishes: no later run of the same identity; a later run
@@ -600,7 +654,7 @@ candidates never close gaps.
 A long attempt often runs the same check several times: it fails, the worker
 fixes the code, and the rerun passes. The runtime keeps that run history
 separate from each check's current outcome
-(`delegation.evidence.current_outcomes`, over `command_history`, the
+(`current_outcomes`, over `command_history`, the
 attempt's gateway command runs in `TOOL_AUTHORIZED` order).
 
 Verification subprocess output is streamed from its temporary file into the
@@ -644,7 +698,7 @@ matches nothing. A run the gateway rejected before executing it
   `result_submit` retains, in its own transaction, each gateway receipt it
   cites as a passed or failed check that is a verified failed run of the
   attempt or a run of the attempt without a result yet (a
-  `CHECK_FAILURE_PRESENTED` runtime event; `delegation.evidence.record_presented_failures`).
+  `CHECK_FAILURE_PRESENTED` runtime event; `record_presented_failures`).
   Refused submissions count. A later submission must cite each retained
   receipt that is now a verified failure again with outcome `passed` or
   `failed`, also with `assignment_outcome: "failed"`; otherwise it is refused
@@ -671,8 +725,7 @@ matches nothing. A run the gateway rejected before executing it
   `unverified` with `later_run_unresolved` when the later run has no established
   result, even when the later run is not cited.
 - **The runtime re-derives closure.** `TaskMachine.record_result` (also on
-  recovery through `reconcile_results`) fails the node on any open failure
-  (`delegation.evidence.open_failure`). A stored `closed_by` counts only when
+  recovery through `reconcile_results`) fails the node on any open failure. A stored `closed_by` counts only when
   it equals the closing ref derived again from the runtime's own receipts, so a
   retained result without it, or with a forged one, still fails. A stored `retracted_by` is accepted the same way, only when it equals the retraction derived from the receipts.
 
@@ -732,7 +785,7 @@ close a command-bearing gap by argv alone. Every remaining synthesis
 `not_verified` item requires the gap's exact check name and a nonblank concrete
 blocker.
 Command verification runs literal argv in the read-only host profile
-(`sandbox.readonly_command`) in every access mode. The host and HOME are read-only except
+ in every access mode. The host and HOME are read-only except
 the tool-cache allowlist; scratch and `/tmp` are private or writable; the command has its own
 PID namespace; the protected control plane is read-only and the task store is masked; only
 the project's git-ignored directories (caches, builds, installed dependencies) are writable.
@@ -748,16 +801,24 @@ no shell); `plan_submit` needs at least one task and at least one verification c
 Submission rejects shell syntax before any work starts. The coordinator may call
 `verification_submit` only after a runtime verification failed and the work itself is
 correct: it replaces the verification commands and verifies again without redoing the
-reviewed work. Wrong code requires a new plan. A revision that is shorter than the
-failed run and no longer contains a command that failed records it in
-`VERIFICATION_REVISED.dropped_failed`. The runtime accumulates these obligations
+reviewed work. Wrong code requires a new plan. Any failed command of the failed
+run that the revision no longer contains, whatever the list length, is recorded
+in `VERIFICATION_REVISED.dropped_failed`. The runtime accumulates these obligations
 across later repairs until the next accepted plan. Completion requires either a
 complete passing runtime verification of the exact removed argv or an answer to
 a task-global question asked after that removal (`completion_dropped_failed_check`;
 the planning prompt tells the coordinator to ask which way to go). Answers to
 older questions, unknown questions and worker-local questions do not acknowledge
-removals. A one-for-one corrected command is not a new removal and cannot erase
-an earlier one.
+removals. A one-for-one corrected command is a replacement, so the failed command is
+recorded as dropped too, and cannot erase an earlier removal. The policy does not rest
+on recognizing weak commands: only the same argv (a re-run) clears a failed check. Any
+different command that replaces it, however strong or weak, leaves the failed command
+as an open obligation, so the task cannot complete until the exact command passes or the
+owner answers a task-global question asked after the replacement. As an extra signal, a
+new command that the plan did not already contain and that the evidence classifier
+treats as checking nothing (`true`, `:`, `echo ...`, `sh -c ...`) is refused outright as
+`verification_trivial_replacement`. At plan acceptance, a plan whose verification
+contains such a command is refused as `verification_trivial_command`.
 Twice a desktop placement check that failed only for environment reasons was removed
 and the task completed on lint and unit tests while the popup it should have checked
 still moved (2026-10-20/22). Runtime verification runs in one fixed sandbox; the
@@ -939,5 +1000,4 @@ recorded. Runtime access decisions never count as user input.
 
 The runtime records metadata-only startup, first-update and changing scheduler
 wait observations. They do not alter dependency, scope, capacity, review or
-release decisions. Use the [read-only phase timeline](../observability/index.md#orchestration-phase-measurement)
-to analyze delays; missing historical evidence is not inferred.
+release decisions. The former phase timeline reader was removed (see [removed readers](../observability/index.md#removed-python-era-readers)); missing historical evidence is not inferred.

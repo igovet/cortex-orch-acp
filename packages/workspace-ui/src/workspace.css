@@ -204,6 +204,13 @@ input.chk { display: inline-block; min-height: 0; }
 
 .ws-pill { display: inline-flex; }
 .dock > .ws-pill, .dock-w > .ws-pill, .d-dock > .ws-pill { display: flex; }
+/* The follow pill and the folded "Send a separate message" stand in an opaque band of the timeline's own surface, a row the
+   timeline reserves below its content (the dock's height is its bottom clearance). Floating over the feed they covered a
+   question's options and a result's footer; now content scrolls behind the band as it does behind the composer, and is never
+   under a control. The band is a little wider than the content column so no card edge shows past it. */
+.pill-band, .mc-fold { margin: 0 -12px; background: var(--bg-canvas); }
+.pill-band { display: flex; justify-content: center; padding: 4px 0 8px; }
+.pill-band > .new-pill { margin: 0; }
 /* The follow pill floats over the feed. In the dark theme a light primary pill would be the one bright block on the screen, so it
    takes the raised control surface like every other control there; the light theme keeps the approved primary pill. */
 :root:not([data-theme="light"]) .new-pill { background: var(--bg-input); color: var(--fg); box-shadow: var(--shadow-float), 0 0 0 1px var(--line-ctl); }
@@ -594,6 +601,20 @@ input, textarea, [contenteditable="true"] { -webkit-user-select: text; user-sele
 .ws-edit { display: block; max-width: 100%; overflow: hidden; font: inherit; line-height: inherit; text-align: left; white-space: nowrap; text-overflow: ellipsis; color: inherit; }
 .ws-edit[aria-disabled="true"] { cursor: default; }
 .ws-edit-in { width: 100%; height: 24px; }
+/* A text saved explicitly: the field, Save and Cancel on one line, and a refused save in words on its own line below. */
+.ws-fe { display: inline-flex; flex-direction: column; align-items: stretch; gap: 4px; min-width: 0; max-width: 100%; vertical-align: middle; white-space: normal; }
+.ws-fe-line { flex-wrap: wrap; }
+.ws-fe-line > .ws-fe-in { flex: 1 1 160px; width: auto; min-width: 96px; }
+.ws-fe[data-saving] .ws-fe-in { color: var(--fg-2); }
+.ws-fe-err { max-width: 420px; overflow-wrap: anywhere; }
+.ws-fe-err:empty { display: none; }
+.ws-name-edit .ws-fe-line > .ws-fe-in { flex-basis: 220px; }
+/* The title band is one fixed line: nothing wraps there, and a refused save opens its words in a box under the field. */
+.ws-fe-band { flex-direction: row; }
+.ws-fe-band .ws-fe-line { flex-wrap: nowrap; min-width: 0; }
+.ws-fe-band .ws-fe-line > .ws-fe-in { flex: 1 1 200px; min-width: 64px; }
+.tb-main > .crumbs > .ws-fe-band { flex: 0 1 420px; min-width: 180px; }
+.ws-fe-tip { color: var(--danger); }
 input.chk { margin-top: 1px; }
 
 /* The review decision: one bar with the version, its checks, Request changes and Accept, and under it the strip that says
@@ -625,7 +646,7 @@ input.chk { margin-top: 1px; }
 .rv-checks .l-row + .l-row, .rv-checks .rv-cmd + .l-row { border-top: 1px solid var(--line); }
 .rv-checks .l-row-end { line-height: 20px; }
 .rv-cmd { margin: 0 12px 6px 36px; font-size: var(--t-cap); color: var(--fg-2); }
-.rv-cmd pre { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.rv-cmd pre { margin: 4px 0; font-family: var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .chk .src { display: inline-flex; align-items: center; gap: 8px; }
 .chk .why { display: block; font-size: var(--t-cap); line-height: 16px; color: var(--fg-2); }
 .evid-b { display: block; padding: 0 0 4px; max-height: none; overflow: visible; }
@@ -665,6 +686,7 @@ input.chk { margin-top: 1px; }
 .ws-step-detail pre { margin: 0; white-space: break-spaces; }
 .ws-step-detail .args { margin: 0; white-space: pre-wrap; max-height: 280px; overflow: auto; }
 .ws-step-path { text-align: left; overflow-wrap: anywhere; }
+.ws-step-failure { white-space: pre-wrap; overflow-wrap: anywhere; }
 .ws-step-detail .diff { max-height: 320px; overflow: auto; white-space: pre-wrap; }
 /* Recorded output keeps its lines as written: a long line scrolls sideways inside its own box, which never grows past its column.
    The box is a named tab stop, so the arrow keys scroll it too; its focus line is drawn inside, where no parent cuts it. */
@@ -673,6 +695,10 @@ input.chk { margin-top: 1px; }
 .step-sub .ws-out.diff > div { overflow: visible; text-overflow: clip; }
 .ws-out:focus-visible { outline-offset: -1px; }
 .ws-working { display: flex; align-items: center; gap: 8px; min-height: 24px; margin: 12px 0; color: var(--fg-2); font-size: var(--t-sec); }
+/* A worker's long goal shows its first four lines, so its activity keeps the page; opened, it scrolls inside a bounded box. */
+.d-goal.ws-goal-folded { max-height: 72px; overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent); mask-image: linear-gradient(to bottom, #000 55%, transparent); }
+.d-goal.ws-goal-open { max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; }
+.ws-goal-toggle { display: block; margin: 2px 0 4px; font-size: var(--t-sec); }
 .card-error { padding: 8px 12px; color: var(--warn); overflow-wrap: anywhere; }
 .ws-drag-card { position: fixed !important; left: 0; top: 0; margin: 0 !important; box-sizing: border-box; pointer-events: none; z-index: -1; transform: none !important; contain: layout paint; }
 /* Semantic report blocks reuse the workspace type, spacing and neutral boundaries. */
@@ -698,6 +724,8 @@ input.chk { margin-top: 1px; }
 .ws-worker-result { margin-top: 8px; }
 .ws-worker-result .rcard-h .r .btn { font-size: var(--t-sec); }
 .ws-worker-result .res-sec { font-size: var(--t-sec); }
+/* Asking about a finished worker is the result card's last row, never a floating dock over the card's last lines. */
+.ws-worker-ask { display: flex; }
 body[data-tab="conversation"] .task-body { grid-template-columns: minmax(0, 1fr); }
 .ws-worker-picker { display: none; }
 @media (max-width: 900px) {
@@ -755,6 +783,7 @@ html[data-hidden] *, html[data-hidden] *::after { animation-play-state: paused !
 button.step-row:hover { background: var(--bg-hover); color: var(--fg); }
 .step-l { flex: none; color: var(--fg); }
 .step-t { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+button.step-t { text-align: left; font: inherit; }
 .step-r { flex: none; margin-left: auto; display: inline-flex; align-items: center; gap: 8px; font-size: var(--t-cap); }
 .step-sub { display: grid; gap: 6px; padding: 2px 6px 8px 28px; min-width: 0; }
 .ws-step-acts { display: flex; justify-content: flex-end; }
@@ -871,6 +900,9 @@ button.step-row:hover { background: var(--bg-hover); color: var(--fg); }
 .ws-tab-x:hover { background: var(--bg-hover); color: var(--fg); }
 .ws-tab-new { flex: none; align-self: center; margin: 0 4px; }
 .ws-panes { position: relative; flex: 1 1 auto; min-height: 0; }
+/* Background reconciliation must not move a control between pointer press and release. */
+.main { position: relative; }
+.ws-sync { position: absolute; right: 12px; bottom: 12px; z-index: 40; max-width: calc(100% - 24px); padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--r-ctl); background: var(--bg-raised); color: var(--fg-2); font-size: var(--t-sec); line-height: 18px; pointer-events: none; }
 .crumbs > .cur { flex: 0 1 auto; min-width: 64px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 /* The project crumb gives up its room first, so the task's own title stays readable; a press on either leads to all of it. */
 .crumbs > a { flex: 0 3 auto; min-width: 40px; overflow: hidden; text-overflow: ellipsis; }
@@ -916,7 +948,7 @@ button.step-row:hover { background: var(--bg-hover); color: var(--fg); }
 
 /* A composer's reason stands between its choices and its send controls, and takes no room from either until there is space. */
 .c-bar > .l-reason { order: 1; flex: 1 1 0; min-width: 0; margin-inline: 6px 4px; }
-.c-bar > .c-end { order: 2; }
+.c-bar > .c-end { order: 2; margin-inline-start: auto; }
 /* The choices keep most of the free room, so a reason never folds them to icons before the window would. */
 .c-bar > .c-route { flex-grow: 3; }
 /* The commit bar sits in a narrow pane: Ctrl+Enter stays the shortcut, and its words give way to why Commit is off. */
@@ -992,6 +1024,8 @@ button.step-row:hover { background: var(--bg-hover); color: var(--fg); }
 .mc-inline > textarea { min-height: 64px; font-size: var(--t-sec); }
 .dc-answer { margin: 0 8px 8px; box-shadow: none; }
 .dc-answer > textarea { min-height: 46px; font-size: var(--t-sec); }
+/* The answer line is always there and one line high, so choosing a long option never moves the page. The option shows it whole. */
+.dc-answer > .mc-effect { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .opt[aria-checked="true"] { border-color: var(--warn-line); background: var(--bg-raised); }
 .mc-fold { display: flex; justify-content: center; }
 .mc-fold .btn { height: 32px; background: var(--bg-raised); box-shadow: var(--shadow-float); }

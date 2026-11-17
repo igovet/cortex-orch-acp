@@ -1,20 +1,19 @@
 # Durable input history and replay
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 Extends [orchestration](../orchestration/index.md) (event log/process
 boundary) and [task lifecycle](../task-lifecycle/index.md)
 (delivery ledger/crash recovery) with complete source/attachment
 preservation, provenance-safe replay, and bounded reads. Covers
-`acp/replay_store.py` (the tenth optional schema group:
-`source_blocks`/`source_block_reads`/`host_transcript`), the `acp/agent.py`
-capture path, `acp/orchestrating_runtime.py`'s delivery-identity/crash
-recovery, and `session/load`.
+the tenth optional schema group
+(`source_blocks`/`source_block_reads`/`host_transcript`), the ACP capture
+path, the delivery-identity/crash recovery, and `session/load`.
 
 ## Imported history and route authorization
 
-Retained input and authorization are different. `routing.auto_route._user_authored`
+Retained input and authorization are different. `_user_authored`
 excludes terminated `<chat-history-summary>` blocks from model consent:
 Paseo's flattened, unescaped multiline entries cannot establish whether a
 `[User]` line was a real turn or assistant/tool text. This is an attribution
@@ -26,8 +25,7 @@ filtered. See [model requests](../routing-and-fallback/index.md#owner-model-requ
 
 ## Event identity and deduplication
 
-`source_events (origin, event_id)` (defined in
-`bootstrap.py`) is the identity for durable capture. `acp.agent.Agent`
+`source_events (origin, event_id)` is the identity for durable capture. `Agent`
 mints a fresh `event_id` (a UUID) per *accepted* `session/prompt` -- after
 its own JSON-RPC duplicate-request-id guard rejects a same-connection
 retry with `-32600` before any durable capture is attempted. Two distinct
@@ -58,21 +56,21 @@ Every source event flows through four durable states:
 2. **recorded** -- a `task_events` `user_message` row exists with
    `dedup_key='user_message:<origin>:<event_id>'` (the key is the source event's own identity, not a
    recomputed session-turn count --
-   see `acp.orchestrating_runtime._run`). Two source events with identical
+   see `_run`). Two source events with identical
    text get two distinct `dedup_key`s and are both recorded/delivered; a
    replay of the identical `(origin, event_id)` is a no-op insert
-   (`delegation.events.append_event`'s existing idempotency).
+   (`append_event`'s existing idempotency).
 3. **claimed** -- `task_events.consumed_by` set by
-   `delegation.events.claim_unconsumed` for one coordinator continuation.
+   `claim_unconsumed` for one coordinator continuation.
 4. **delivered** -- `task_events.delivered_at` set by
-   `delegation.events.mark_delivered` once the engine's `prompt()` call for
+   `mark_delivered` once the engine's `prompt()` call for
    that continuation actually returns.
 
 ### Crash recovery: persisted but never recorded
 
 If the process crashes after step 1 (source event durably captured) but
 before step 2 (recorded as a `task_events` row) -- for example a crash
-inside `acp.agent._run_prompt_body` after `bootstrap_task`/
+inside `_run_prompt_body` after `bootstrap_task`/
 `append_source_event` returns but before/during the `runtime.start_prompt`
 call -- the next `OrchestratingRuntime._run` for that task (a fresh prompt,
 or the same connection retried with a *new* event id) calls
@@ -100,7 +98,7 @@ again on the next continuation. A prompt that returns, including with a cancelle
 reason, still marks its events delivered.
 
 Crash windows are tested directly (new runtime/agent instance over the same
-store) in `tests/test_acp_input_history_and_replay.py`; the runtime never
+store) in the Rust incoming and store suites; the runtime never
 promises exactly-once *external* (engine-side) execution, only a
 reconcilable durable ledger.
 
@@ -139,7 +137,7 @@ See [synthesis display](../task-lifecycle/index.md#runtime-composed-synthesis).
 
 ## Attachments and availability
 
-`protocol.py` now advertises `promptCapabilities.embeddedContext=true`
+The ACP agent advertises `promptCapabilities.embeddedContext=true`
 (the capability set now includes `image: true`; `audio` stays `false`,
 still rejected `-32602`) and accepts an `EmbeddedResource` (`resource`)
 content block alongside `text`/`resource_link`. `acp.replay_store.
@@ -161,7 +159,7 @@ SQLite -- the same Markdown/binary-body-vs-SQLite-metadata split the rest
 of the store already uses. `source_blocks` holds only metadata (`kind`,
 `mime`, `name`, `uri`, `sha256`, `size_bytes`, `availability`, `reason`,
 `trust_label`, `body_ref`, `fetched_at`). Attachment capture is atomic with
-the source-text capture: `acp.agent._run_prompt_body` resolves blocks and
+the source-text capture: `_run_prompt_body` resolves blocks and
 stages their bodies under `.source_blocks_staging/` before any transaction
 (no database lock held during file I/O), then `bootstrap_task`/
 `append_source_event` rename the staged bodies and insert the
@@ -179,7 +177,7 @@ the engine's ACP `session/prompt` content array. `audio` remains rejected
 with `-32602` because it is unadvertised.
 
 Images travel inline as base64, so the whole `session/prompt` line must fit
-the transport's 15 MiB inbound frame limit (`acp.transport.MAX_FRAME_BYTES`):
+the transport's 15 MiB inbound frame limit:
 room for the full 10 MiB attachment budget once encoded, plus the prompt text,
 and below the Paseo relay's 16 MiB per-frame ceiling. A larger line is drained
 without being buffered or echoed and answered with `-32700` ("attach fewer or
@@ -220,13 +218,13 @@ normal recovery/assignment source descriptors and `list_sources`, then page
 their retained snapshots with `read_source`. Removing the original upload does
 not remove the retained snapshot. There is no new tool, general outside-project
 file reader, or storage schema. `project_read` still accepts project paths only.
-Source-backed no-paid tests are in `tests/test_paseo_upload_attachments.py`;
+Source-backed no-paid tests are in the Rust and Paseo plugin suites;
 this is not a live-client or production-deployment claim.
 
 ## Trust labels
 
 Vocabulary: `user_direct`, `file_content`, `worker_report`,
-`derived_summary` (`replay_store.TRUST_LABELS`). Every block captured from
+`derived_summary`. Every block captured from
 an inbound ACP prompt (the main text and every non-text block) is labeled
 `user_direct` -- there is no other origin for prompt content in the current design's
 scope. The other three labels are reserved vocabulary for later
@@ -244,7 +242,7 @@ text, or base64 (`encoding='base64'`) for a non-UTF-8 stored body.
 A stored `image` attachment is the one exception: it ignores `offset`/`limit`
 and always returns the whole image in `chunk`/`image_base64` (`kind='image'`),
 because a partial image cannot be rendered and the capture-time 10 MiB cap
-already bounds its size; the MCP server (`cortex_runtime.server`) renders that
+already bounds its size; the MCP server renders that
 case as a real `image` content block instead of inlining the base64 in the
 result's text.
 `source_ref` is the opaque string `<report_id>:<block_index>`
@@ -261,19 +259,18 @@ actually captured at prompt time" stays distinguishable from "what a later
 read observed".
 
 Exposed as MCP tools `list_sources`/`read_source` on **both** coordinator
-and worker channels (`delegation.contracts.SOURCE_OPERATIONS`,
-`delegation.mcp_tools._shared_list_sources`/`_shared_read_source`),
+and worker channels (`SOURCE_OPERATIONS`,
+`_shared_list_sources`/`_shared_read_source`),
 task-scoped by the caller's own `channel.task_id` -- a `source_ref` for a
 different task simply resolves to `unknown_source_ref`, never leaking
 whether it exists elsewhere. A coordinator continuation prompt
-(`acp.orchestrating_runtime._coalesce`) still only ever gives the
+ still only ever gives the
 coordinator the stored user text plus attachment descriptors
 (name/kind/availability/`source_ref`) -- never an inlined large body.
 
 User text itself is bounded the same way. A user text over 48 KiB of UTF-8
 (for example a pasted chat-history summary) is never inlined whole into a
-coordinator turn, `task_get_context` or `pipeline.md`
-(`orchestration.user_text`). It appears as its exact first 32 KiB and last
+coordinator turn, `task_get_context` or `pipeline.md`. It appears as its exact first 32 KiB and last
 8 KiB, separated by a runtime marker that gives the omitted byte count and
 the exact `read_source source_ref=<report_id>:-1 offset=<n>` that continues
 the text (`offset`/`next_offset` are byte offsets). The bounding covers the
@@ -321,8 +318,8 @@ for that session, in order) as `session/update` `user_message_chunk`/
 `agent_message_chunk` notifications, then replies. It performs **zero**
 `BEGIN IMMEDIATE` transactions and never calls `runtime.start_prompt`,
 opens an engine session, or writes `source_events`/`task_events`/
-`deliveries`/`reports` -- asserted directly in
-`tests/test_acp_input_history_and_replay.py` via before/after row-count
+`deliveries`/`reports` -- asserted in
+the Rust suites via before/after row-count
 equality and a runtime call-count assertion. A replayed
 `agent_message_chunk` is never captured as a new source event (there is no
 capture path anywhere near `_session_load`).
@@ -377,7 +374,7 @@ manifest. Building it only reads the store.
 
 `host_transcript` and the companion `host_updates` table (the sole read
 sources for replay) are written by
-`acp.agent`: once per accepted prompt (the exact captured user text plus
+the runtime: once per accepted prompt (the exact captured user text plus
 attachment descriptors) and once per runtime-produced
 `agent_message_chunk` offered to the host. Slash-command prompts and their
 text replies follow the same display-history path. Structured updates such as

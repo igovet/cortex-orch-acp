@@ -1,0 +1,1666 @@
+{
+  "now": "2026-11-14T01:02:03.456789+00:00",
+  "sources": {
+    "crates/workspace-service/machine_tools.py": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+    "src/cortex_runtime/configuration/management.py": "f035019940568b7b2881c7548e29f53a8e1ce0433eb5b7b1d2fc12e70f6ae8a2",
+    "src/cortex_runtime/connections/registry.py": "6c96df2025a2b3e73d81dbcfabb57f2d9fcd233c167b19b5684163c4986a1ce5",
+    "src/cortex_runtime/connections/model.py": "94d5fbb6fe33b126cae1ea57e6453414d7ed40c7ba9752da57d7b1f16806e97e",
+    "crates/workspace-service/tests/generate_config_action_fixture.py": "044f027f0070ea29d5607fbce72a76357574c53583e049df52fb20f64789ca43",
+    "src/cortex_runtime/configuration/routing_profiles.py": "2365f75d1fd1fdb0269b44932e3b666031d56e7e777191965d33ad7f78103971",
+    "crates/workspace-service/tests/generate_config_activate_fixture.py": "df886f6235075a2868ad242e4b803f280ee2711d1aab7cd1e6f96875845107db"
+  },
+  "processNetworkAttempts": 0,
+  "cases": [
+    {
+      "name": "missing-routing",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:fcf1a65238e24e657d3161ddce4460dd93fa049ccf77ddb9f8a83fdee318a410",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:f4cd01fd79bcd517bdf7ba0fe42888064f318f84ffa91897d4d1e6a9a7555d71",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "2026-11-14T01:02:03.456789+00:00",
+            "revisions": {
+              "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Routing only Ω",
+              "revision": "sha256:c2401128fe31808337cd432b56c7ee6ab65e79107c6309dc14b9b531fe649333",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {
+                  "model_policy_version": 2,
+                  "deny": [
+                    "codex-acp/fixture"
+                  ]
+                }
+              },
+              "created_at": "old",
+              "updated_at": "old",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"2026-11-14T01:02:03.456789+00:00\",\n    \"revisions\": {\n      \"routing\": \"sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"codex-acp/fixture\"\n  ]\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "already-matching",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+        "routing.json": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"codex-acp/fixture\"\n  ]\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:fcf1a65238e24e657d3161ddce4460dd93fa049ccf77ddb9f8a83fdee318a410",
+        "expected_revisions": {
+          "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:f4cd01fd79bcd517bdf7ba0fe42888064f318f84ffa91897d4d1e6a9a7555d71",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "2026-11-14T01:02:03.456789+00:00",
+            "revisions": {
+              "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Routing only Ω",
+              "revision": "sha256:c2401128fe31808337cd432b56c7ee6ab65e79107c6309dc14b9b531fe649333",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {
+                  "model_policy_version": 2,
+                  "deny": [
+                    "codex-acp/fixture"
+                  ]
+                }
+              },
+              "created_at": "old",
+              "updated_at": "old",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"2026-11-14T01:02:03.456789+00:00\",\n    \"revisions\": {\n      \"routing\": \"sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"codex-acp/fixture\"\n  ]\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "changed-routing",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+        "routing.json": "{\n  \"model_policy_version\": 2\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:fcf1a65238e24e657d3161ddce4460dd93fa049ccf77ddb9f8a83fdee318a410",
+        "expected_revisions": {
+          "routing": "sha256:f2cc2ccaa2d057162340916aed592b1d96d0583e9534888a9affaef9a7b720ca",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:f4cd01fd79bcd517bdf7ba0fe42888064f318f84ffa91897d4d1e6a9a7555d71",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "2026-11-14T01:02:03.456789+00:00",
+            "revisions": {
+              "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Routing only Ω",
+              "revision": "sha256:c2401128fe31808337cd432b56c7ee6ab65e79107c6309dc14b9b531fe649333",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {
+                  "model_policy_version": 2,
+                  "deny": [
+                    "codex-acp/fixture"
+                  ]
+                }
+              },
+              "created_at": "old",
+              "updated_at": "old",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"2026-11-14T01:02:03.456789+00:00\",\n    \"revisions\": {\n      \"routing\": \"sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"codex-acp/fixture\"\n  ]\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "preserve-unknown-current",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+        "routing.json": "{\n  \"model_policy_version\": 2,\n  \"metadata\": {\n    \"z\": 1.5,\n    \"a\": \"Ω\"\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:fcf1a65238e24e657d3161ddce4460dd93fa049ccf77ddb9f8a83fdee318a410",
+        "expected_revisions": {
+          "routing": "sha256:c5683d422ab290b18e64017a9919120554b0efc77ff7f7f3e1962af964bfd7aa",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:9caa3936cc3f5d18d0cad7b356cab4a3a853fb550ea4402f991125af6ff501ef",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "2026-11-14T01:02:03.456789+00:00",
+            "revisions": {
+              "routing": "sha256:4a3baf36e00c47d15147436bd72d91c08c50c3965c589ebdc2008eebc30e15da",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "sha256:4a3baf36e00c47d15147436bd72d91c08c50c3965c589ebdc2008eebc30e15da",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Routing only Ω",
+              "revision": "sha256:c2401128fe31808337cd432b56c7ee6ab65e79107c6309dc14b9b531fe649333",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {
+                  "model_policy_version": 2,
+                  "deny": [
+                    "codex-acp/fixture"
+                  ]
+                }
+              },
+              "created_at": "old",
+              "updated_at": "old",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:4a3baf36e00c47d15147436bd72d91c08c50c3965c589ebdc2008eebc30e15da",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"2026-11-14T01:02:03.456789+00:00\",\n    \"revisions\": {\n      \"routing\": \"sha256:4a3baf36e00c47d15147436bd72d91c08c50c3965c589ebdc2008eebc30e15da\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"codex-acp/fixture\"\n  ],\n  \"metadata\": {\n    \"z\": 1.5,\n    \"a\": \"Ω\"\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "saved-unknown-overrides-current",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ],\n          \"metadata\": {\n            \"extra\": true\n          }\n        }\n      }\n    }\n  }\n}\n",
+        "routing.json": "{\n  \"model_policy_version\": 2,\n  \"metadata\": \"old\"\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:17a7594a6fccdfa1e019fcca61dc907a9306155508ca751dc1436588082fd206",
+        "expected_revisions": {
+          "routing": "sha256:bd74669665f7a66e0fc25a0c89b274f0a0ade0f4cc82766ef9ee28fcc37d2a84",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:55d1a948efe849479007e0124488d148bf6fbc1d38953841175549e136a2daa3",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "modified",
+          "modified_sections": [
+            "routing"
+          ],
+          "differences": [
+            {
+              "section": "routing",
+              "key": "metadata"
+            }
+          ],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "2026-11-14T01:02:03.456789+00:00",
+            "revisions": {
+              "routing": "sha256:90344af718565d1903819b7f52ca2a67bff92e97b28899ec7ca365599694272c",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "sha256:90344af718565d1903819b7f52ca2a67bff92e97b28899ec7ca365599694272c",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Routing only Ω",
+              "revision": "sha256:aa86747c065bab8852dddd3b631511beb802c081fe3596bb4fc69d1a68b9c807",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {
+                  "model_policy_version": 2,
+                  "deny": [
+                    "codex-acp/fixture"
+                  ],
+                  "metadata": {
+                    "extra": true
+                  }
+                }
+              },
+              "created_at": "old",
+              "updated_at": "old",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:90344af718565d1903819b7f52ca2a67bff92e97b28899ec7ca365599694272c",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"2026-11-14T01:02:03.456789+00:00\",\n    \"revisions\": {\n      \"routing\": \"sha256:90344af718565d1903819b7f52ca2a67bff92e97b28899ec7ca365599694272c\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ],\n          \"metadata\": {\n            \"extra\": true\n          }\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"codex-acp/fixture\"\n  ],\n  \"metadata\": {\n    \"extra\": true\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "selected-modified-refused",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:b30eb939583cc6fb49b62306bc8416a808ea893e92ce4b19510d25d361164693",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_modified",
+        "message": "The selected profile 'a' has unsaved changes; save them, or activate with discard_modifications: true. Nothing was written."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "selected-modified-discard",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:b30eb939583cc6fb49b62306bc8416a808ea893e92ce4b19510d25d361164693",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        },
+        "discard_modifications": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:f4cd01fd79bcd517bdf7ba0fe42888064f318f84ffa91897d4d1e6a9a7555d71",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "2026-11-14T01:02:03.456789+00:00",
+            "revisions": {
+              "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Routing only Ω",
+              "revision": "sha256:c2401128fe31808337cd432b56c7ee6ab65e79107c6309dc14b9b531fe649333",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {
+                  "model_policy_version": 2,
+                  "deny": [
+                    "codex-acp/fixture"
+                  ]
+                }
+              },
+              "created_at": "old",
+              "updated_at": "old",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"2026-11-14T01:02:03.456789+00:00\",\n    \"revisions\": {\n      \"routing\": \"sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"codex-acp/fixture\"\n  ]\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "selected-matching",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+        "routing.json": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"codex-acp/fixture\"\n  ]\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:b30eb939583cc6fb49b62306bc8416a808ea893e92ce4b19510d25d361164693",
+        "expected_revisions": {
+          "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:f4cd01fd79bcd517bdf7ba0fe42888064f318f84ffa91897d4d1e6a9a7555d71",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "2026-11-14T01:02:03.456789+00:00",
+            "revisions": {
+              "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Routing only Ω",
+              "revision": "sha256:c2401128fe31808337cd432b56c7ee6ab65e79107c6309dc14b9b531fe649333",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {
+                  "model_policy_version": 2,
+                  "deny": [
+                    "codex-acp/fixture"
+                  ]
+                }
+              },
+              "created_at": "old",
+              "updated_at": "old",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"2026-11-14T01:02:03.456789+00:00\",\n    \"revisions\": {\n      \"routing\": \"sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"codex-acp/fixture\"\n  ]\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "recover-pending",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": {\n    \"operation\": \"activate\",\n    \"profile\": \"a\",\n    \"at\": \"old\"\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:a75043dea2af85051bc69f04c15d5da949181c4984237518a6778e114e3b935e",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:f4cd01fd79bcd517bdf7ba0fe42888064f318f84ffa91897d4d1e6a9a7555d71",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "2026-11-14T01:02:03.456789+00:00",
+            "revisions": {
+              "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Routing only Ω",
+              "revision": "sha256:c2401128fe31808337cd432b56c7ee6ab65e79107c6309dc14b9b531fe649333",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {
+                  "model_policy_version": 2,
+                  "deny": [
+                    "codex-acp/fixture"
+                  ]
+                }
+              },
+              "created_at": "old",
+              "updated_at": "old",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"2026-11-14T01:02:03.456789+00:00\",\n    \"revisions\": {\n      \"routing\": \"sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"codex-acp/fixture\"\n  ]\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "select-other-refused",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    },\n    \"b\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "b",
+        "expected_revision": "sha256:f05c941b0be8d540bf587120d154b6fbfa8d135ffc4e7fb60dc82a98d6f112b5",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_modified",
+        "message": "The selected profile 'a' has unsaved changes; save them, or activate with discard_modifications: true. Nothing was written."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    },\n    \"b\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "select-other-discard",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"old\",\n    \"revisions\": {\n      \"routing\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    },\n    \"b\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "b",
+        "expected_revision": "sha256:f05c941b0be8d540bf587120d154b6fbfa8d135ffc4e7fb60dc82a98d6f112b5",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        },
+        "discard_modifications": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:fc9768caa787520095c34116f9f81a0b3fd8376cd755ee48f66345dff7bf1b2b",
+          "format": 2,
+          "migrated_from": null,
+          "active": "b",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "b",
+            "at": "2026-11-14T01:02:03.456789+00:00",
+            "revisions": {
+              "routing": "sha256:f2cc2ccaa2d057162340916aed592b1d96d0583e9534888a9affaef9a7b720ca",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "sha256:f2cc2ccaa2d057162340916aed592b1d96d0583e9534888a9affaef9a7b720ca",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Routing only Ω",
+              "revision": "sha256:c2401128fe31808337cd432b56c7ee6ab65e79107c6309dc14b9b531fe649333",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {
+                  "model_policy_version": 2,
+                  "deny": [
+                    "codex-acp/fixture"
+                  ]
+                }
+              },
+              "created_at": "old",
+              "updated_at": "old",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            },
+            {
+              "name": "b",
+              "description": "Routing only Ω",
+              "revision": "sha256:13cd6b077b427f5778ea2c6223b2632eb913f18107c5354fbce583e831d443a2",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {
+                  "model_policy_version": 2
+                }
+              },
+              "created_at": "old",
+              "updated_at": "old",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:f2cc2ccaa2d057162340916aed592b1d96d0583e9534888a9affaef9a7b720ca",
+          "shadowed_by": null,
+          "matches_profile": [
+            "b"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"b\",\n  \"applied\": {\n    \"profile\": \"b\",\n    \"at\": \"2026-11-14T01:02:03.456789+00:00\",\n    \"revisions\": {\n      \"routing\": \"sha256:f2cc2ccaa2d057162340916aed592b1d96d0583e9534888a9affaef9a7b720ca\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    },\n    \"b\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "unselected-broken-section",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+        "defaults.json": "{broken"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:fcf1a65238e24e657d3161ddce4460dd93fa049ccf77ddb9f8a83fdee318a410",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "sha256:be302461cda285db3ed2d45fb767b23e08ca8808b35a638009937df22b332d73",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:bf4b37bc2a63373a70b476cc96dd0117da93fe7824f4f099b921041fbc5ffe43",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "user_defaults",
+              "code": "invalid_user_defaults",
+              "message": "defaults.json is not valid UTF-8 JSON; repair it by hand. Nothing was changed."
+            }
+          ],
+          "applied": {
+            "profile": "a",
+            "at": "2026-11-14T01:02:03.456789+00:00",
+            "revisions": {
+              "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+              "user_defaults": "sha256:be302461cda285db3ed2d45fb767b23e08ca8808b35a638009937df22b332d73",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+            "user_defaults": "sha256:be302461cda285db3ed2d45fb767b23e08ca8808b35a638009937df22b332d73",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Routing only Ω",
+              "revision": "sha256:c2401128fe31808337cd432b56c7ee6ab65e79107c6309dc14b9b531fe649333",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {
+                  "model_policy_version": 2,
+                  "deny": [
+                    "codex-acp/fixture"
+                  ]
+                }
+              },
+              "created_at": "old",
+              "updated_at": "old",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"2026-11-14T01:02:03.456789+00:00\",\n    \"revisions\": {\n      \"routing\": \"sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39\",\n      \"user_defaults\": \"sha256:be302461cda285db3ed2d45fb767b23e08ca8808b35a638009937df22b332d73\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"codex-acp/fixture\"\n  ]\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{broken",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "discard-False",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:fcf1a65238e24e657d3161ddce4460dd93fa049ccf77ddb9f8a83fdee318a410",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        },
+        "discard_modifications": false
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:f4cd01fd79bcd517bdf7ba0fe42888064f318f84ffa91897d4d1e6a9a7555d71",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "2026-11-14T01:02:03.456789+00:00",
+            "revisions": {
+              "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Routing only Ω",
+              "revision": "sha256:c2401128fe31808337cd432b56c7ee6ab65e79107c6309dc14b9b531fe649333",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {
+                  "model_policy_version": 2,
+                  "deny": [
+                    "codex-acp/fixture"
+                  ]
+                }
+              },
+              "created_at": "old",
+              "updated_at": "old",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"2026-11-14T01:02:03.456789+00:00\",\n    \"revisions\": {\n      \"routing\": \"sha256:4245bf5af02aad527c42032518f24b2b10a54ca23495b48d201d0d696d91eb39\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"codex-acp/fixture\"\n  ]\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "discard-None",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:fcf1a65238e24e657d3161ddce4460dd93fa049ccf77ddb9f8a83fdee318a410",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        },
+        "discard_modifications": null
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_value",
+        "message": "discard_modifications must be true or false."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "discard-1",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:fcf1a65238e24e657d3161ddce4460dd93fa049ccf77ddb9f8a83fdee318a410",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        },
+        "discard_modifications": 1
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_value",
+        "message": "discard_modifications must be true or false."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "discard-'true'",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:fcf1a65238e24e657d3161ddce4460dd93fa049ccf77ddb9f8a83fdee318a410",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        },
+        "discard_modifications": "true"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_value",
+        "message": "discard_modifications must be true or false."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "name-missing",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "missing",
+        "expected_revision": "sha256:fcf1a65238e24e657d3161ddce4460dd93fa049ccf77ddb9f8a83fdee318a410",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_not_found",
+        "message": "No profile has that name."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "name-../bad",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "../bad",
+        "expected_revision": "sha256:fcf1a65238e24e657d3161ddce4460dd93fa049ccf77ddb9f8a83fdee318a410",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profile_name",
+        "message": "Profile name must be 1-40 lowercase letters, digits or hyphens."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "name-",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "",
+        "expected_revision": "sha256:fcf1a65238e24e657d3161ddce4460dd93fa049ccf77ddb9f8a83fdee318a410",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profile_name",
+        "message": "Profile name must be 1-40 lowercase letters, digits or hyphens."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "stale-profile",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "revision_conflict",
+        "message": "The routing_profiles configuration changed after it was read (expected revision absent, current sha256:fcf1a65238e24e657d3161ddce4460dd93fa049ccf77ddb9f8a83fdee318a410); nothing was written. Re-read it and apply the change again."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-revision",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": false,
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_expected_revision",
+        "message": "expected_revision must be the exact revision a read returned ('absent' or 'sha256:<64 hex>')."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "stale-section",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:fcf1a65238e24e657d3161ddce4460dd93fa049ccf77ddb9f8a83fdee318a410",
+        "expected_revisions": {
+          "routing": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "revision_conflict",
+        "message": "The routing (user) configuration changed after it was read (expected revision sha256:0000000000000000000000000000000000000000000000000000000000000000, current absent); nothing was written. Re-read it and apply the change again."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-section",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:fcf1a65238e24e657d3161ddce4460dd93fa049ccf77ddb9f8a83fdee318a410",
+        "expected_revisions": {}
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_expected_revisions",
+        "message": "expected_revisions must hold the revision a read returned for each of routing, user_defaults, mcp_servers, connections ('absent' or 'sha256:<64 hex>')."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "disallowed-field",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "activate",
+        "name": "a",
+        "expected_revision": "sha256:fcf1a65238e24e657d3161ddce4460dd93fa049ccf77ddb9f8a83fdee318a410",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        },
+        "description": "not accepted"
+      },
+      "reply": {
+        "ok": false,
+        "code": "unsupported_request_field",
+        "message": "Unknown request field(s) description for this action."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Routing only Ω\",\n      \"created_at\": \"old\",\n      \"updated_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"model_policy_version\": 2,\n          \"deny\": [\n            \"codex-acp/fixture\"\n          ]\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    }
+  ]
+}

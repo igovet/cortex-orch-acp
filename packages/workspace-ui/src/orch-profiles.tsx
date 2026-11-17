@@ -1,7 +1,8 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
 import { configIssues, engineLabel, ENGINE_KEYS, matchesProfile, missingSections, PROFILE_SECTION_LABELS, PROFILE_SECTIONS, profileChanges, profileState, projectsWithRouting, routingSource, sessionsOf, type Profile } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
-import { A, I, MenuItem, NameEdit, Pop } from "./kit";
+import { NameEdit } from "./field-edit";
+import { A, I, Keyed, MenuItem, Pop } from "./kit";
 import { HELP } from "./orch-help";
 import { orchTo, Shell, useProjectName, useReadOnly, useSwitchProfile } from "./orch-shared";
 import { clock } from "./selectors";
@@ -58,25 +59,25 @@ export function Profiles() {
     <SetH title="Saved"><Hint text={HELP.profilesIntro} label="profiles" /></SetH>
     <div class="surface"><div class="gt">
       <div class="gr ofrow th"><span>Name</span><span>Description</span><span>Stored sections</span><span>Updated</span><span>Matches</span><span></span></div>
-      <For each={c().profiles}>{p => {
-        const isActive = () => p.id === c().active, matches = () => matchesProfile(c(), p, sessions()), missing = () => missingSections(p);
+      <Keyed each={c().profiles} by={p => p.id}>{p => {
+        const isActive = () => p().id === c().active, matches = () => matchesProfile(c(), p(), sessions()), missing = () => missingSections(p());
         return <div class="gr ofrow">
-          <span class="trunc"><NameEdit class="w500 mono" label="Profile name" hint="Lowercase letters, digits and dashes." value={p.name} disabled={off()} onSave={name => { void run({ type: "rename_profile", machineId: m().id, profileId: p.id, name }); }} /><Show when={isActive()}><span class="sub st-ok">Active</span></Show></span>
-          <span class="cap muted trunc">{p.description}</span>
-          <span class="cap muted ws-wrap">{stored(p)}<Show when={missing().length > 0}><span class="sub st-warn">Stores only {stored(p)}. Save to store every section.</span></Show></span>
-          <span class="cap muted tnum">{dayOf(p.updatedAt)}</span>
+          <span class="trunc"><NameEdit class="w500 mono" label="Profile name" hint="Lowercase letters, digits and dashes." value={p().name} disabled={off()} onSave={name => ws.run({ type: "rename_profile", machineId: m().id, profileId: p().id, name })} /><Show when={isActive()}><span class="sub st-ok">Active</span></Show></span>
+          <span class="cap muted trunc">{p().description}</span>
+          <span class="cap muted ws-wrap">{stored(p())}<Show when={missing().length > 0}><span class="sub st-warn">Stores only {stored(p())}. Save to store every section.</span></Show></span>
+          <span class="cap muted tnum">{dayOf(p().updatedAt)}</span>
           <span class="cap">{matches() ? "Matches" : ""}</span>
           <span class="row ws-gap4">
-            <Show when={!isActive()}>{btn("Activate…", () => switchTo(p.id))}</Show>
-            <button class="ib ws-ib" popovertarget={off() ? undefined : `m-prof-${p.id}`} aria-label={`More for ${p.name}`} aria-disabled={off() ? "true" : undefined} data-why={off()}><I n="more" s={14} /></button>
-            <Pop id={`m-prof-${p.id}`} class="pop-right" align="right" label={p.name}>
-              <MenuItem icon="pencil" label="Edit description…" onSelect={() => ws.open({ kind: "prompt", title: `Describe ${p.name}`, label: "Description", value: p.description, optional: true, action: "Save", go: description => run({ type: "describe_profile", machineId: m().id, profileId: p.id, description }) })} />
+            <Show when={!isActive()}>{btn("Activate…", () => switchTo(p().id))}</Show>
+            <button class="ib ws-ib" popovertarget={off() ? undefined : `m-prof-${p().id}`} aria-label={`More for ${p().name}`} aria-disabled={off() ? "true" : undefined} data-why={off()}><I n="more" s={14} /></button>
+            <Pop id={`m-prof-${p().id}`} class="pop-right" align="right" label={p().name}>
+              <MenuItem icon="pencil" label="Edit description…" onSelect={() => ws.open({ kind: "prompt", title: `Describe ${p().name}`, label: "Description", value: p().description, optional: true, action: "Save", go: description => run({ type: "describe_profile", machineId: m().id, profileId: p().id, description }) })} />
               <Show when={isActive()}><MenuItem icon="x" label="Detach" sub="Keeps the settings, with no active profile" needs="deactivate_profile" onSelect={() => run({ type: "deactivate_profile", machineId: m().id })} /></Show>
-              <MenuItem icon="trash" label="Delete…" danger disabled={isActive() ? "Activate another profile first" : undefined} onSelect={() => ws.open({ kind: "confirm", title: `Delete the profile ${p.name}?`, note: "Only this snapshot is removed.", action: "Delete", danger: true, go: () => run({ type: "delete_profile", machineId: m().id, profileId: p.id }) })} />
+              <MenuItem icon="trash" label="Delete…" danger disabled={isActive() ? "Activate another profile first" : undefined} onSelect={() => ws.open({ kind: "confirm", title: `Delete the profile ${p().name}?`, note: "Only this snapshot is removed.", action: "Delete", danger: true, go: () => run({ type: "delete_profile", machineId: m().id, profileId: p().id }) })} />
             </Pop>
           </span>
         </div>;
-      }}</For>
+      }}</Keyed>
     </div></div>
     <div class="note-box plain"><I n="lock" s={14} /><span>Profiles never hold project settings, MCP commands, arguments, environment or credentials.</span></div>
     <Show when={routingSource(m(), null).kind === "environment"}><div class="note-box"><I n="alert" s={14} /><span>An environment override takes priority over this profile's routing here.</span></div></Show>

@@ -1,0 +1,540 @@
+{
+  "cases": [
+    {
+      "name": "tracked-untracked-ignored",
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        },
+        {
+          "path": ".gitignore",
+          "kind": "f",
+          "text": "ignored/\n*.cache\n.gitignore\n"
+        },
+        {
+          "path": "ignored/file",
+          "kind": "f",
+          "text": "ignored"
+        },
+        {
+          "path": "loose.cache",
+          "kind": "f",
+          "text": "ignored"
+        }
+      ],
+      "listed": [
+        97,
+        108,
+        105,
+        97,
+        115,
+        0,
+        102,
+        111,
+        108,
+        100,
+        101,
+        114,
+        47,
+        206,
+        187,
+        46,
+        116,
+        120,
+        116,
+        0,
+        115,
+        111,
+        117,
+        114,
+        99,
+        101,
+        46,
+        116,
+        120,
+        116,
+        0
+      ],
+      "sandbox_list_available": false,
+      "actual": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "5e07c405c2e6008715c72970cf1bed1704be3cabcfb3bd27dcc25cd017c92ea2",
+        "detail": null,
+        "manifest": [
+          "d\tfolder\t-\t-",
+          "d\tignored\t-\t-",
+          "f\t.gitignore\t28\t79a83e535b3311185411657fe96bb60141a0f7cf1b1ac5ad3cc7c579d6f9ddea",
+          "f\tfolder/λ.txt\t13\t0b04824cf514e3363139deaf340e7780ff88239fd598df056849825fc7d3e5c0",
+          "f\tignored/file\t7\t3514cf816e5407a39cb7a1c1e1243f176dda121e06398a8934edb1dc426b0b34",
+          "f\tloose.cache\t7\t3514cf816e5407a39cb7a1c1e1243f176dda121e06398a8934edb1dc426b0b34",
+          "f\tsource.txt\t7\tb8bb034f9b63bd0254fbc7c157cae746c75853f4643d6cea844dc48ddb57f522",
+          "l\talias\t-\tsource.txt"
+        ]
+      },
+      "selected": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "c8159897cf04ba80f3f17b13a9b0b1e1aace9e63f4af8e30dde3bc00bf990c8f",
+        "detail": null,
+        "manifest": [
+          "d\tfolder\t-\t-",
+          "f\t.gitignore\t28\t79a83e535b3311185411657fe96bb60141a0f7cf1b1ac5ad3cc7c579d6f9ddea",
+          "f\tfolder/λ.txt\t13\t0b04824cf514e3363139deaf340e7780ff88239fd598df056849825fc7d3e5c0",
+          "f\tsource.txt\t7\tb8bb034f9b63bd0254fbc7c157cae746c75853f4643d6cea844dc48ddb57f522",
+          "l\talias\t-\tsource.txt"
+        ]
+      },
+      "fallback": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "5e07c405c2e6008715c72970cf1bed1704be3cabcfb3bd27dcc25cd017c92ea2",
+        "detail": null,
+        "manifest": [
+          "d\tfolder\t-\t-",
+          "d\tignored\t-\t-",
+          "f\t.gitignore\t28\t79a83e535b3311185411657fe96bb60141a0f7cf1b1ac5ad3cc7c579d6f9ddea",
+          "f\tfolder/λ.txt\t13\t0b04824cf514e3363139deaf340e7780ff88239fd598df056849825fc7d3e5c0",
+          "f\tignored/file\t7\t3514cf816e5407a39cb7a1c1e1243f176dda121e06398a8934edb1dc426b0b34",
+          "f\tloose.cache\t7\t3514cf816e5407a39cb7a1c1e1243f176dda121e06398a8934edb1dc426b0b34",
+          "f\tsource.txt\t7\tb8bb034f9b63bd0254fbc7c157cae746c75853f4643d6cea844dc48ddb57f522",
+          "l\talias\t-\tsource.txt"
+        ]
+      }
+    },
+    {
+      "name": "links-fifo-and-dependencies",
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        },
+        {
+          "path": "pipe",
+          "kind": "p"
+        },
+        {
+          "path": "node_modules/tracked",
+          "kind": "f",
+          "text": "dependency"
+        },
+        {
+          "path": ".claude/scheduled_tasks.lock",
+          "kind": "f",
+          "text": "volatile"
+        },
+        {
+          "path": ".claude/settings.json",
+          "kind": "f",
+          "text": "source"
+        }
+      ],
+      "listed": [
+        46,
+        99,
+        108,
+        97,
+        117,
+        100,
+        101,
+        47,
+        115,
+        99,
+        104,
+        101,
+        100,
+        117,
+        108,
+        101,
+        100,
+        95,
+        116,
+        97,
+        115,
+        107,
+        115,
+        46,
+        108,
+        111,
+        99,
+        107,
+        0,
+        46,
+        99,
+        108,
+        97,
+        117,
+        100,
+        101,
+        47,
+        115,
+        101,
+        116,
+        116,
+        105,
+        110,
+        103,
+        115,
+        46,
+        106,
+        115,
+        111,
+        110,
+        0,
+        97,
+        108,
+        105,
+        97,
+        115,
+        0,
+        102,
+        111,
+        108,
+        100,
+        101,
+        114,
+        47,
+        206,
+        187,
+        46,
+        116,
+        120,
+        116,
+        0,
+        110,
+        111,
+        100,
+        101,
+        95,
+        109,
+        111,
+        100,
+        117,
+        108,
+        101,
+        115,
+        47,
+        116,
+        114,
+        97,
+        99,
+        107,
+        101,
+        100,
+        0,
+        115,
+        111,
+        117,
+        114,
+        99,
+        101,
+        46,
+        116,
+        120,
+        116,
+        0
+      ],
+      "sandbox_list_available": false,
+      "actual": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "f3af2a6c392107495dfa5270b52eebedd085aa04fe999ba7308e6ac1e3283180",
+        "detail": null,
+        "manifest": [
+          "d\t.claude\t-\t-",
+          "d\tfolder\t-\t-",
+          "f\t.claude/settings.json\t6\t41cf6794ba4200b839c53531555f0f3998df4cbb01a4d5cb0b94e3ca5e23947d",
+          "f\tfolder/λ.txt\t13\t0b04824cf514e3363139deaf340e7780ff88239fd598df056849825fc7d3e5c0",
+          "f\tsource.txt\t7\tb8bb034f9b63bd0254fbc7c157cae746c75853f4643d6cea844dc48ddb57f522",
+          "l\talias\t-\tsource.txt",
+          "p\tpipe\t-\t-"
+        ]
+      },
+      "selected": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "aad4b0168af6f3ea2b895e0b98fb5300fc85b55b75b6e8c67ac1abdf2ddaa8eb",
+        "detail": null,
+        "manifest": [
+          "d\t.claude\t-\t-",
+          "d\tfolder\t-\t-",
+          "f\t.claude/settings.json\t6\t41cf6794ba4200b839c53531555f0f3998df4cbb01a4d5cb0b94e3ca5e23947d",
+          "f\tfolder/λ.txt\t13\t0b04824cf514e3363139deaf340e7780ff88239fd598df056849825fc7d3e5c0",
+          "f\tsource.txt\t7\tb8bb034f9b63bd0254fbc7c157cae746c75853f4643d6cea844dc48ddb57f522",
+          "l\talias\t-\tsource.txt"
+        ]
+      },
+      "fallback": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "f3af2a6c392107495dfa5270b52eebedd085aa04fe999ba7308e6ac1e3283180",
+        "detail": null,
+        "manifest": [
+          "d\t.claude\t-\t-",
+          "d\tfolder\t-\t-",
+          "f\t.claude/settings.json\t6\t41cf6794ba4200b839c53531555f0f3998df4cbb01a4d5cb0b94e3ca5e23947d",
+          "f\tfolder/λ.txt\t13\t0b04824cf514e3363139deaf340e7780ff88239fd598df056849825fc7d3e5c0",
+          "f\tsource.txt\t7\tb8bb034f9b63bd0254fbc7c157cae746c75853f4643d6cea844dc48ddb57f522",
+          "l\talias\t-\tsource.txt",
+          "p\tpipe\t-\t-"
+        ]
+      }
+    },
+    {
+      "name": "linked-worktree",
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        }
+      ],
+      "listed": [
+        97,
+        108,
+        105,
+        97,
+        115,
+        0,
+        102,
+        111,
+        108,
+        100,
+        101,
+        114,
+        47,
+        206,
+        187,
+        46,
+        116,
+        120,
+        116,
+        0,
+        115,
+        111,
+        117,
+        114,
+        99,
+        101,
+        46,
+        116,
+        120,
+        116,
+        0
+      ],
+      "sandbox_list_available": false,
+      "actual": {
+        "kind": "observed",
+        "head": "a97597fd966d24d71d43084451a86f0f081355ee",
+        "dirty_digest": "5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235",
+        "detail": null,
+        "manifest": [
+          "d\tfolder\t-\t-",
+          "f\tfolder/λ.txt\t13\t0b04824cf514e3363139deaf340e7780ff88239fd598df056849825fc7d3e5c0",
+          "f\tsource.txt\t7\tb8bb034f9b63bd0254fbc7c157cae746c75853f4643d6cea844dc48ddb57f522",
+          "l\talias\t-\tsource.txt"
+        ]
+      },
+      "selected": {
+        "kind": "observed",
+        "head": "a97597fd966d24d71d43084451a86f0f081355ee",
+        "dirty_digest": "5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235",
+        "detail": null,
+        "manifest": [
+          "d\tfolder\t-\t-",
+          "f\tfolder/λ.txt\t13\t0b04824cf514e3363139deaf340e7780ff88239fd598df056849825fc7d3e5c0",
+          "f\tsource.txt\t7\tb8bb034f9b63bd0254fbc7c157cae746c75853f4643d6cea844dc48ddb57f522",
+          "l\talias\t-\tsource.txt"
+        ]
+      },
+      "fallback": {
+        "kind": "observed",
+        "head": "a97597fd966d24d71d43084451a86f0f081355ee",
+        "dirty_digest": "5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235",
+        "detail": null,
+        "manifest": [
+          "d\tfolder\t-\t-",
+          "f\tfolder/λ.txt\t13\t0b04824cf514e3363139deaf340e7780ff88239fd598df056849825fc7d3e5c0",
+          "f\tsource.txt\t7\tb8bb034f9b63bd0254fbc7c157cae746c75853f4643d6cea844dc48ddb57f522",
+          "l\talias\t-\tsource.txt"
+        ]
+      }
+    },
+    {
+      "name": "odd-names-and-empty-folders",
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        },
+        {
+          "path": "tab\tand\nnewline",
+          "kind": "f",
+          "text": "source"
+        },
+        {
+          "path": "empty",
+          "kind": "d"
+        }
+      ],
+      "listed": [
+        97,
+        108,
+        105,
+        97,
+        115,
+        0,
+        102,
+        111,
+        108,
+        100,
+        101,
+        114,
+        47,
+        206,
+        187,
+        46,
+        116,
+        120,
+        116,
+        0,
+        116,
+        97,
+        98,
+        9,
+        97,
+        110,
+        100,
+        10,
+        110,
+        101,
+        119,
+        108,
+        105,
+        110,
+        101,
+        0,
+        115,
+        111,
+        117,
+        114,
+        99,
+        101,
+        46,
+        116,
+        120,
+        116,
+        0
+      ],
+      "sandbox_list_available": false,
+      "actual": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "be0660982b3c4e2400d661c2a9286a45b7e281aa6aeeeada7295a46422949e4a",
+        "detail": null,
+        "manifest": [
+          "d\tempty\t-\t-",
+          "d\tfolder\t-\t-",
+          "f\tfolder/λ.txt\t13\t0b04824cf514e3363139deaf340e7780ff88239fd598df056849825fc7d3e5c0",
+          "f\tsource.txt\t7\tb8bb034f9b63bd0254fbc7c157cae746c75853f4643d6cea844dc48ddb57f522",
+          "f\ttab\tand\nnewline\t6\t41cf6794ba4200b839c53531555f0f3998df4cbb01a4d5cb0b94e3ca5e23947d",
+          "l\talias\t-\tsource.txt"
+        ]
+      },
+      "selected": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "a60f81b22a1e4d0e01f49e9a1876eb44c7667babf27ce39d5ea196e648966341",
+        "detail": null,
+        "manifest": [
+          "d\tfolder\t-\t-",
+          "f\tfolder/λ.txt\t13\t0b04824cf514e3363139deaf340e7780ff88239fd598df056849825fc7d3e5c0",
+          "f\tsource.txt\t7\tb8bb034f9b63bd0254fbc7c157cae746c75853f4643d6cea844dc48ddb57f522",
+          "f\ttab\tand\nnewline\t6\t41cf6794ba4200b839c53531555f0f3998df4cbb01a4d5cb0b94e3ca5e23947d",
+          "l\talias\t-\tsource.txt"
+        ]
+      },
+      "fallback": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "be0660982b3c4e2400d661c2a9286a45b7e281aa6aeeeada7295a46422949e4a",
+        "detail": null,
+        "manifest": [
+          "d\tempty\t-\t-",
+          "d\tfolder\t-\t-",
+          "f\tfolder/λ.txt\t13\t0b04824cf514e3363139deaf340e7780ff88239fd598df056849825fc7d3e5c0",
+          "f\tsource.txt\t7\tb8bb034f9b63bd0254fbc7c157cae746c75853f4643d6cea844dc48ddb57f522",
+          "f\ttab\tand\nnewline\t6\t41cf6794ba4200b839c53531555f0f3998df4cbb01a4d5cb0b94e3ca5e23947d",
+          "l\talias\t-\tsource.txt"
+        ]
+      }
+    }
+  ],
+  "sources": {
+    "crates/workspace-service/machine_tools.py": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+    "src/cortex_runtime/delegation/revision.py": "f69d4f27986397d17e210225fcf88ebae0c4a35dac767bfa0d42ca1ac92e2880",
+    "src/cortex_runtime/workspace_api/projections.py": "2a12388eff6c93b2d4d6a19a1d250908c45f186a8de5880ba1556e2fb9d56109",
+    "src/cortex_runtime/orchestration/sandbox.py": "8c88d10c51d56479cba7d4cea45b167d04b9991f88fc583c02c6dbb0505f851a",
+    "src/cortex_runtime/orchestration/project_paths.py": "0a89d60d5bf4b8bbe43abb10a0c9a5ee0a3c848265f0cd54a48d504af40067ba"
+  }
+}

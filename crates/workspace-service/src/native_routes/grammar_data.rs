@@ -1,0 +1,27 @@
+// Legacy routing grammar vocabulary. Source: src/cortex_runtime/routing/auto_route.py.
+pub(super) const REQUEST_WORDS: &str = r#"use|run|execute|launch|route|delegate|assign|switch|prefer|pick|choose|select|requires?|requirement|request|использ(?:уй|уйте|овать|уем)|задейств(?:уй|уйте|овать|уем)|запуст(?:и|ите|ить|им)|запуска(?:й|йте|ть|ем)|прогон(?:и|ите|яй|яйте)|прогнать|выбер(?:и|ите|ем)|выбрать|выбира(?:й|йте|ть)|назнач(?:ь|ьте|ить|им|ай|айте)|отда(?:й|йте|ть|дим|вай|вайте)|переключ(?:и|ите|ись|итесь|ить|иться|им|имся|ай|айся)|постав(?:ь|ьте|ить|им)|возьм(?:и|ите|ём|ем)|взять|бери|берите|берём|берем|пусть|переда(?:й|йте|ть|дим|вай|вайте)|поруч(?:и|ите|ить|им|ай|айте)|треб(?:ование|ования|ованию|ованием|овании|ую|уем|ует|уется|уются|уй|уйте|овать)"#;
+pub(super) const WORK_VERBS: &str = r#"implement|build|fix|write|test|review|audit|perform|handle|redo|rerun|retry|debug|refactor|investigate|analy[sz]e|recheck|do|реализ(?:уй|уйте|овать|уем)|(?:с|пере|до)?дела(?:й|йте|ть)|(?:с|пере|до)делаем|выполн(?:и|ите|ить|им|яй|яйте|ять)|напиш(?:и|ите|ем)|написать|(?:пере)?провер(?:ь|ьте|ить|им|яй|яйте|ять)|исправ(?:ь|ьте|ить|им|ляй|ляйте|лять)|почин(?:и|ите|ить|им)|(?:про)?тестир(?:уй|уйте|овать|уем)|собер(?:и|ите|ём|ем)|собрать|провед(?:и|ите|ём|ем)|провести|отревью(?:й|йте|ить)"#;
+pub(super) const RU_SUBJUNCTIVE_REQUEST: &str = r#"(?:использова|задействова|запусти|запуска|прогна|прогоня|выбра|выбира|назначи|назнача|отда|отдава|переключи|переключа|постави|взя|бра|переда|передава|поручи|поруча)(?:л|ла|ло|ли|лся|лась|лось|лись)"#;
+pub(super) const RU_SUBJUNCTIVE_WORK: &str = r#"(?:(?:с|пере|до)?дела|реализова|выполни|выполня|написа|(?:пере)?провери|(?:пере)?проверя|исправи|исправля|почини|(?:про)?тестирова|собра|провё|прове|отревьюи)(?:л|ла|ло|ли|лся|лась|лось|лись)"#;
+pub(super) const MEANS_WORDS: &str = r#"on|via|through|using|на|через|посредством|силами|помощью"#;
+pub(super) const NEGATION_WORDS: &str = r#"not|never|without|avoid|except|cannot|unable|(?:do|does|did|is|are|was|were|has|have|had|ca|could|would|should|must|wo|shall|need)n'?t|instead|rather|than|versus|vs|over|compar\w*|based|depend\w*|не|без|никогда|кроме|нельзя|запрещ\w*|вместо|чем|сравн\w*|против|основан\w*|исходя"#;
+pub(super) const REFUSAL_WORDS: &str = r#"not|never|no|without|avoid|cannot|unable|unavailable|expensive|costly|overpriced|pricey|forbidden|banned|prohibited|disallowed|(?:do|does|did|is|are|was|were|has|have|had|ca|could|would|should|must|wo|shall|need)n'?t|не|нет|нельзя|никогда|без|запрещ\w*|недоступ\w*|дорог\w*"#;
+pub(super) const SUBSTITUTION_WORDS: &str = r#"instead|rather|replac\w*|substitut\w*|stop|quit|except|вместо|замен\w*|хватит|прекрат\w*|перестан\w*|отказ\w*|кроме"#;
+pub(super) const ROLE_OR_STAGE: &str = r#"(?:audit|аудит|review|ревью|code|код|design|дизайн|frontend|фронт|backend|бэк|test|тест|qa|plan|план|docs?|документ|security|безопасност|accessibility|доступност|architect|архитект|debug|отладк|verification|проверк|implementation|реализац|refactor|рефактор|research|исследован)\w*"#;
+pub(super) const PASSIVE_REQUIREMENT: &str = r#"(?:must|shall|should|(?:has|have|needs?)\s+to)\s+(?:always\s+|only\s+)?be\s+(?:\w+\s+(?:and|or)\s+)?(?:performed|done|handled|owned|conducted|run|executed|carried\s+out)\s+(?:only\s+|exclusively\s+|solely\s+)?by"#;
+pub(super) const RU_REQUIREMENT: &str = r#"(?:должен|должн\w*|обязан\w*)\s+(?:всегда\s+)?(?:выполнять|проводить|делать|вести)(?:\s+(?:только|лишь|исключительно))?"#;
+pub(super) const RU_PAST: &str = r#"[а-яё]+(?:л|ла|ло|ли|лся|лась|лось|лись)"#;
+pub(super) const RU_VERB_FORM: &str = r#"[а-яё]+(?:(?:ую|юю|[рл]ю|ешь|ёшь|ишь|ет|ёт|ит|ем|ём|им|ете|ёте|ите|ут|ют|ат|ят|ть|уй|уйте|юй|юйте|уя|юя|[бвгджзклмнпрстфхцчшщ]я|(?:ущ|ющ|ащ|ящ|вш|нн|ем|им)(?:ий|ый|ой|ая|яя|ое|ее|ие|ые|ого|его|ому|ему|ым|им|ом|ем|ую|юю|ых|их|ыми|ими|ей|ою|ею))(?:ся|сь)?|[аяеи]в(?:ши|шись)?|(?:ован|ен)[аоы]?)"#;
+pub(super) const RU_VERB_LOOKALIKE: &str = r#"аудит|аудите|[а-яё]+(?:ием|ия|ость|есть)"#;
+pub(super) const OPTION_WORK_OBJECTS: &str = r#"analysis|history|lists?|commits?|changes?|анализ(?:а|у|ом|е)?|истори(?:я|ю|и|ей)|спис(?:ок|ка|ку|ком|ке|ки|ков|кам|ками|ках)|коммит(?:ы|а|ов|у|ам|ом|ами|е|ах)?|изменени(?:я|й|ю|ям|ем|ями|и|ях)"#;
+pub(super) const CHOICE_REQUESTS: &str = r#"use|pick|choose|select|prefer|использ\w*|задейств\w*|выб[еи]р\w*|выбрать|взять|возьм\w*|бер(?:и|ите|ём|ем)"#;
+pub(super) const QUESTION_WHICH: &str =
+    r#"как(?:ой|ая|ое|ие|ую|им|ом|ого|ому|их|ими)|котор\w+|which|what"#;
+pub(super) const SELECTION_NOUN: &str =
+    r#"models?|routes?|engines?|модел\w*|маршрут\w*|движ(?:ок|ка|ку|ком|ке|ки|ков)"#;
+pub(super) const QUESTION_JUDGEMENT: &str = r#"чей|чь[яеёи]|чь(?:его|ему|ей|ею|им|их|ими|ю|ём|ем)|whose|лучш\w*|хуже|better|best|worse|worst|справ(?:ил|ля|ит|ят)\w*|found|нашл\w*|наш[её]л"#;
+pub(super) const QUESTION_RESULTS: &str = r#"результат\w*|мнени\w*|замечани\w*|вывод\w*|отч[её]т\w*|находк\w*|оценк\w*|предложени\w*|верси\w*|ответ(?:а|ы|ов|у|ом|е|ам|ами|ах)?|results?|findings?|opinions?|conclusions?|reports?|answers?|verdicts?|outputs?|suggestions?|proposals?|versions?"#;
+pub(super) const REQUIREMENT_MODALS: &str =
+    r#"must|shall|should|need|needs|required|должен|должн\w*|обязан\w*"#;
+pub(super) const USAGE_NOTE_WORDS: &str = r#"\d+|квот\w*|лимит\w*|план\w*|расход\w*|использован\w*|израсходован\w*|из|quota|limit|plan|usage|used|of|the"#;
+pub(super) const GENERIC_WORK: &str = r#"perform|handle|do|redo|rerun|retry|(?:с|пере|до)?дела(?:й|йте|ть|ем)|выполн\w*|провер\w*|провед\w*|провести"#;

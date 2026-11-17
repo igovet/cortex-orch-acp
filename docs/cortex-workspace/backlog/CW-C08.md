@@ -14,8 +14,8 @@ CW-R02 (actions express intent and never rewrite runtime facts), CW-R04 (version
 
 - [protocol](../protocol.md): planned commands, identity and expected-version fields.
 - [steering-and-questions](../../features/steering-and-questions/index.md) and [failures-and-cancellation](../../features/failures-and-cancellation/index.md): existing steering, cancellation and disconnect semantics.
-- `policy.steer` in `src/cortex_runtime/orchestration/policy.py` (lines 61-79): steering is a durable `USER_STEERING` event; it returns `False` for a cancelled task and for a second steer from the same identity. The docstring says it changes no grants, but the event payload records `deny_write` from parsed text. This is an open point to resolve in source before the contract states the effect of a steer.
-- `TaskMachine.recheck_after_foreign_change` in `src/cortex_runtime/orchestration/state.py`: the existing recheck path.
+- `policy.steer` in the former `orchestration/policy` module (lines 61-79): steering is a durable `USER_STEERING` event; it returns `False` for a cancelled task and for a second steer from the same identity. The docstring says it changes no grants, but the event payload records `deny_write` from parsed text. This is an open point to resolve in source before the contract states the effect of a steer.
+- `TaskMachine.recheck_after_foreign_change` in the former `orchestration/state` module: the existing recheck path.
 - [CW-C03](CW-C03.md) and [CW-C06](CW-C06.md): decision idempotency and stable execution identities.
 
 ## Deliverables

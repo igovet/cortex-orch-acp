@@ -6,9 +6,22 @@ This reference describes configuration the current ACP runtime actually reads. T
 
 ## Where configuration lives
 
+The paths below are the default/release layout. For a Rust Paseo launch, build
+`cortex-acp` and `cortex-paseo-tools` for the same channel (the checkout build
+default is dev). Settings, automatic setup and the agent resolve raw HOME/XDG
+roots through the same compiled-channel rule. Dev uses
+`$XDG_CONFIG_HOME/cortex-workspace-dev/cortex/`,
+`$XDG_STATE_HOME/cortex-workspace-dev/state/cortex/`, and project `.cortex-dev`;
+missing XDG values first default to `~/.config` and `~/.local/state`. Release
+uses the table's ordinary paths. `CORTEX_WORKSPACE_CHANNEL` at process launch
+does not override a Rust binary's compiled channel. Explicit `CORTEX_ROUTING`
+and native-account HOME keep their existing meaning. Settings displays the
+resolved binding reported by `cortex-paseo-tools config --host`, not an inferred
+release path. Existing configuration is not copied or migrated across channels.
+
 | Data | Default path | Scope and precedence |
 |---|---|---|
-| Connection registry | `$XDG_CONFIG_HOME/cortex/connections.json` or `~/.config/cortex/connections.json` | User-wide. Managed by `cortex_acp_setup.py`, by Settings > Connections (native-account connections only) and by the startup sync for an engine that has no connection; it has no project override. |
+| Connection registry | `$XDG_CONFIG_HOME/cortex/connections.json` or `~/.config/cortex/connections.json` | User-wide. Managed by `scripts/cortex-paseo-tools.sh` setup commands (`add-connection`, `add-opencode-connection`, `install-engine`), by Settings > Connections (native-account connections only) and by the startup sync for an engine that has no connection; it has no project override. |
 | Connection secrets | `$XDG_CONFIG_HOME/cortex/secrets/<connection-id>` | User-wide private files, written by setup. Native-account credentials can instead be referenced from the existing user engine directory. |
 | User defaults and policy ceiling | `$XDG_CONFIG_HOME/cortex/defaults.json` | User-wide base configuration. |
 | Routing rules | `<project>/.cortex/routing.json`, then `$CORTEX_ROUTING`, then `$XDG_CONFIG_HOME/cortex/routing.json` (or `~/.config/cortex/routing.json`) | First existing file wins; files are not merged. The bundled default preset is written only when the file is absent: by setup, at each agent start and by Settings' Apply action. Existing owner files are never overwritten. See [Default preset](#default-preset). |
@@ -19,7 +32,606 @@ This reference describes configuration the current ACP runtime actually reads. T
 | ssh password dialog (optional, off) | `$XDG_CONFIG_HOME/cortex/ssh-askpass.json` | User-wide, written by hand. See [ssh from workers](#ssh-from-workers). |
 | Task and report store | `<project>/.cortex/cortex.sqlite3` and sibling published Markdown | Project data, not operator configuration. |
 
+Workspace's `project.config.read` editor now reads project routing and the saved project ceiling in Rust, with unchanged editor fields and revision tokens. It never substitutes user/environment routing for an absent project override or initializes a missing store. Pre-save MCP discovery (`config.mcp.discover`) now lists tools through a contained Rust subprocess without saving a server or invoking a tool. Project saves (`project.config.save`) now also run in Rust, retaining revision conflicts, aggregated validation, routing bytes and project-default-preserving ceiling transactions. Machine-wide saves and the selected metadata/profile/reset actions now also run in Rust; unqualified activation/preset shapes and unported setup/catalog/keyring producers retain Python; see the [native machine boundary](cortex-workspace/local-task-execution.md#native-machine-boundary).
+
+The additive Rust [configuration observation foundation](project/native-config-read.md)
+parses profile formats 1/2 and connection snapshots, route fingerprints and
+advisory adapter/login/usage/context markers. Its composed reader now loads
+credential-redacted connection management metadata with exact byte revisions,
+Claude quota caches, bounded Codex rollouts and exact-model context, feeding the
+Workspace settings compositor without incidental writes or probes. MCP management
+is also loaded natively: exact byte revisions, ordered entries, per-entry problems
+and env presence only, with safe per-surface errors for malformed documents. The
+additional routing-composed path loads project/environment/user precedence,
+byte revisions, normalized rules and cached effort observations. It does not merge
+files or fall through an invalid earlier file. Its management-composed path now
+also reads defaults/ceilings and profiles with exact byte revisions, in-memory format-1
+conversion, cached coordinator binding, snapshot differences and unavailable/interrupted
+states. It never activates or rewrites a profile. Its catalog-composed path now
+loads the full cached route catalog/selector, including genuine snapshot fallback,
+default-alias presentation, exact owner-policy diagnostics and observed efforts.
+Stored connection states are display observations, not authorization or live
+validation; malformed/unsafe/ambiguous catalogs refuse the whole composition.
+The Workspace-composed path also loads mode/checkout from the explicit host-selected
+Workspace channel state root, distinct from user defaults and XDG engine state.
+Absent keys display guarded/main; explicit null or legacy values remain display
+values, not authorization. Missing state is not created, unknown keys are not
+returned, and unsafe/malformed storage refuses without partial settings. The further
+setup-composed path now supplies native prompt-free bundle/owned-adapter discovery,
+login-marker metadata, opt-outs and passive first-run diagnostics. It never launches
+an executable. Unprobed OpenCode discovery stays explicitly unavailable (or connected
+when a stored record exists), with a retained diagnostic and no invented version.
+Machine `config.read` now uses the native passive display compositor, with
+sanitized `diagnostics` added to its result. Socket parameters never select roots
+or trigger refresh, and a refusal never falls back to Python. Explicit
+`config.action` uses the [retained action boundary](#native-machine-actions);
+`config.save` uses the [native machine writer](#native-machine-saves). The native reader has no lazy Claude quota producer,
+so missing/expired usage stays unknown.
+The host-only dispatch accepts a typed display or explicit selected-connection
+refresh intent; the machine socket selects Display only.
+It preflights settings before effects, invokes the filesystem helper and re-reads.
+A failed/superseded post-refresh projection is unknown and must not be replayed.
+Native keyring refresh is explicitly unsupported: selected keyrings refuse the
+whole batch; display preserves stored state with a `keyring_not_observed` diagnostic,
+never a fresh authentication claim or a backend/keyring call. The separate host-only Rust `config_refresh::refresh_connections` helper now provides revision-locked,
+atomic revalidation for selected filesystem-backed connections. Display reads
+do not call it, and keyring refresh remains unsupported. It does not perform
+setup, approve a fingerprint or verify an account.
+
+### Retained engine connection setup
+
+Machine `engine.connection` is native Rust for every request shape: `login_command`,
+`recheck` and `add_key` run as below, and any other action is refused natively:
+
+| Action | Current behavior |
+| --- | --- |
+| `login_command` | Native Rust: discover a qualified channel-local bundled/owned adapter, verify its install and return its native login executable/argv; never execute the login command. |
+| `recheck` | Native Rust: run host-selected native status with discarded output and an eight-second timeout, then revision-lock create/reuse of a reference to the existing native account. No account credential contents are read or copied. |
+| `add_key` | Rust: validate name/key/revision, verify the host-selected install, create the connection, privately save its key and validate metadata. Known post-creation failures remove the new secret/record and persist the engine opt-out; uncertain writes never roll back by guess or replay. |
+| Unknown/missing action | Native Rust: `unsupported_action` ("Unsupported connection action."), no lookup or file effect. Truthy non-object params answer the ordinary `machine_tool_failed` RPC error, as the former Python helper's uncaught `AttributeError` did. |
+
+The passive Rust setup display is not a replacement for install verification,
+status checks or credential persistence. Login lookup uses a separate native
+handler on the bounded inspection lane, not a passive display stub. Native
+lookup/recheck/key-creation errors never retry through another implementation,
+and no request starts a helper process: the former Python helper was removed. The native path answers the intended
+refusal envelope for every refusal.
+Recheck uses the retained filtered child environment and original HOME; timeout or
+cancellation kills the direct status child. Registry files/lock/ignore remain 0600
+and the managed root 0700. Reuse does not rewrite an existing reference or rederive
+its state. API-key creation uses three separate shared-lock transactions (create,
+secret write/state update, metadata validation), not one multi-file transaction.
+Only the id-derived `$XDG_CONFIG_HOME/cortex/secrets/<connection-id>` is written,
+with a private 0700 parent and atomic 0600 replacement; symlink/hardlink/foreign/
+public secret targets refuse. Key bytes never enter the registry, replies, logs
+or process argv. Existing OS-keyring references are not converted into files.
+Failed cleanup or post-replacement durability is explicitly unknown; inspect
+settings before retrying. These are cooperative same-user filesystem fences,
+not protection against hostile concurrent same-user changes.
+See [native lookup limits](project/native-config-read.md#current-boundary). `config.action` installers, catalog refresh, presets and profile
+operations retain their separately documented providers below.
+
+The offline `engine_connection_service` regression retains the 64-case Python
+capture and compares complete replies/files/modes with zero helper calls for the
+three native actions. Two provider-only injected exceptions now compare their
+unchanged file effects and the real successful action reply: that artificial
+Python hook is not a native failure signal. Native fault tests separately prove
+unknown writes do not clean up or replay. A further immutable 36-case capture
+covers Unicode boundaries, install failures, private-write/validation failures and
+fake-keyring validation. Eight injected failure cases compare complete replies,
+configuration effects and write sequences in native units; the other 28 compare
+at the socket. Valid keyring-reference cases retain their Python provider and compare exact fake
+lookup sequences (including absent, empty, present and unavailable cases);
+stale-revision refusals are native and never look up the backend; malformed keyring identifiers refuse natively before any lookup. Only
+validated generated IDs/timestamps and trusted host paths are rebound;
+trust fingerprints are checked before rebinding. No real keyring, account, engine
+download or installed application is qualified by these offline checks.
+
+### Native machine actions
+
+Machine `config.action` selects Rust for connection rename, session-limit edits
+and confirmed default-preset reset, plus profile read/create/save/update/delete/
+deactivate, qualified four-section activation/preset apply, filesystem-backed
+connection validation and connection removal
+on the bounded action lane. Other variants retain Python. Provider selection
+happens before native admission, never after a failed or partially executed native
+action. Unported working workflows keep their existing provider; a changed credential
+shape after native admission refuses without replay.
+
+| Action | Current provider and preserved behavior |
+| --- | --- |
+| `connection_update` / `rename` | Rust; exact-revision metadata edit; 1–120 printable characters, retaining whitespace. |
+| `connection_update` / `set_max_concurrent_sessions` | Rust; exact-revision metadata edit; integer 1–64, never a boolean. |
+| `connection_update` / `validate` | Rust for filesystem references: canonical/collision checks and metadata-only state derivation; keyring-backed validation retains Python for valid requests. Stale-revision refusals are native and never look up the backend; an unavailable provider refuses without changing credential state. No fingerprint approval or credential-byte read. |
+| `connection_update` / `remove` | Rust: registry/history deletion, engine opt-out and default-route note; canonical owned regular single-link secret files are unlinked without reading bytes. Native directories/keyring entries are untouched. Unsupported defaults documents retain Python before admission. |
+| `apply_default_preset` | Rust for absent/public-payload backing files (also empty-object routing) and a valid connection registry; absent-only seeding including conditional default-profile capture. Other existing documents retain Python diagnostic behavior. Existing profiles, even malformed, are never overwritten. |
+| `reset_default_preset` | Rust; literal confirmation, freshly observed pair revision, private backups and in-process rollback. |
+| `refresh` | Rust for the prelaunch subset and qualified Codex/Claude native-account or secret-file launches, including qualified two-argument Codex/Claude installs, [described below](#native-launch-capable-catalog-producer). These observe without prompts and publish immutable snapshots. Unqualified Codex installs, OpenCode, keyrings, missing locks and unqualified roots/projections retain the whole Python request before effects. |
+| `install_engine` | Rust for every Codex/Claude request and the pre-effect refusals (unsupported engine; OpenCode needs its native installer). It installs only the manifest pin from `pinned-dependencies.json`, [described below](#native-pinned-engine-install). Python is kept before any effect only when an OpenCode binary candidate exists (its version probe in the reply runs in the namespace sandbox), a native login marker is not projectable, or the connection registry does not parse. |
+| `onboard_opencode` | Rust for the pre-effect refusals (missing `explicit_opt_in`, invalid `expected_revision` or `name`) and, when no OpenCode binary candidate exists, for the owner-lock and revision check followed by the retained `opencode_not_found` refusal. With a candidate (`~/.opencode/bin/opencode` or `opencode` on PATH) the request keeps Python: discovery runs the binary's version probe in a network-less namespace sandbox, then verification, registration and a catalog refresh follow. |
+| `profile` / `read`, `create`, `save`, `update`, `delete`, `deactivate` | Rust; complete snapshot reads, revision-locked capture/metadata/selection, format-1 backup/migration and verified deletion. `update` implements rename and description editing. |
+| Wider profile numbers | Rust for ignored top-level document metadata (including nested arrays/objects), with exact integers and Python-normalized nonfinite/overflowing floats. Wider modeled fields, all backing files and numeric tokens over 4,300 bytes retain Python before admission. |
+| `profile` / `activate` | Rust for qualified format-1/2 profiles and any subset of routing, defaults/ceiling, MCP usage policy and connection limits, including all four. Pending journal, four revision checks, modification/discard/recovery and installed-definition preservation remain. Unqualified/malformed backing documents retain Python. Routing activation still requires integer model-policy version 2; the current Python implementation rejects missing/other versions too. Those refusal shapes retain Python. |
+| `profile` / unknown verb | Rust: `unsupported_action` naming the verb with Python `repr` (`None`, `True`/`False`, integers, ASCII strings); a list/object verb is Python's `machine_tool_failed`/`TypeError` reply. A float or non-ASCII verb keeps Python: the socket's JSON parser loses the float literal, and non-ASCII escaping needs Unicode printability. |
+| `connection_update` / other operation | Rust: revision syntax, connection id, then `unsupported_operation`, in Python's order. |
+| Unknown/missing action | Rust: `unsupported_action` ("This machine does not support that yet."); a list/object action is `machine_tool_failed`/`TypeError`; truthy non-object params answer the `machine_tool_failed` RPC error. |
+
+#### Native pinned engine install
+
+Settings **Download engine** (`config.action` `install_engine` for `codex-acp` or
+`claude-agent-acp`) runs in Rust with the retained
+`engine_update.install_pinned_engine` steps: the qualified manifest pin; a current
+channel bundle reports that version without npm; otherwise `node` is found on the
+service PATH and `npm` beside it (or on PATH). Under the owned root's `.lock`
+(nonblocking: a concurrent install answers "unavailable, busy or failed
+verification"), stale `.tmp-*` directories are removed, an existing pinned
+install is verified without npm, and otherwise npm installs into a private
+`.tmp-<version>` staging with the retained environment, npm's directory first on
+PATH, cwd `/`, output discarded and an absolute kill deadline within the machine request budget. The staged manifest
+version, its contained declared `bin` (and, for an SDK-override Claude build, the
+SDK version) are verified before the rename; failed verification removes the
+staging, and a failed or timed-out npm leaves it for the next pass. The two newest
+installs and every qualified one are kept. Success records the `downloaded`
+first-run status (best effort) and returns the native setup discovery, with
+OpenCode `not_downloaded` because admission found no candidate. The service's
+30-second machine deadline includes queueing and preparation. npm uses the remaining
+budget, capped at 29 seconds, reserving one second for kill/reap and the reply;
+an exhausted budget launches nothing. A timed-out npm is killed and reaped before
+the install refusal returns, with no installed version or downloaded status published.
+These steps
+duplicate the Rust ACP first-run installer, which cannot be shared because that
+crate depends on the service.
+
+The recorded offline capture `crates/workspace-service/tests/fixtures/engine-install-python.json` (32 install and 6
+no-candidate onboarding cases, fake `node`/`npm` executables, no network; recorded once from the former Python implementation, whose generator was removed) is
+compared with complete replies, npm argv/PATH and home/config trees including
+modes. Real npm downloads and a real bundle are not exercised.
+
+#### Native prelaunch catalog refresh
+
+This is a read-only subset of explicit catalog refresh, **not** a native engine
+observation producer. It uses the shared existing `connections.lock` without
+creating a lock, ignore file or configuration directory. Registry bytes are
+checked across lock acquisition and again after composing the complete catalog.
+A changed launch shape after admission refuses without switching providers.
+The request's `expected_revision` and supplied paths/commands remain ignored,
+matching the existing refresh dispatcher; they cannot choose a storage target.
+
+For null/relative commands the outcome is
+`engine_unreachable:PortableError`; for an empty command list it is
+`engine_unreachable:IndexError`. An existing read-only engine-state directory
+instead yields `engine_home_read_only`, matching Python's metadata-only failure
+classification. No credential or marker contents or keyring backend are read.
+Existing snapshots remain byte-identical and the returned catalog remains cached:
+failed attempts never become successful observations.
+
+The recorded capture `crates/workspace-service/tests/fixtures/config-catalog-refresh-python.json`
+holds 21 cases recorded without processes, network or keyring access (its Python generator was removed and the capture can no longer be reproduced). Socket tests
+compare complete replies and complete configuration/home/catalog trees and modes;
+19 admitted cases require zero helper calls, two retained cases exactly one.
+The additional launch-capable boundary is described next. Installer and OpenCode
+onboarding requests outside the pre-effect refusals, and valid keyring-backed validation, still retain Python.
+**Settings still routes unported actions to the lazy Python provider.**
+
+#### OpenCode pre-probe rejection
+
+The native prelaunch subset also rejects OpenCode commands whose nonempty,
+absolute, NUL-free argv cannot resolve an install before any version probe:
+wrong arity/subcommand, absent binary, noncanonical path, known untrusted
+codeg root, nonregular/nonexecutable binary, or binary ownership/write-mode
+rejection. Metadata/I/O cases outside this classifier retain Python. The shared
+owner lock, registry-byte fences and qualified cached projection still apply.
+These are failed attempts (`engine_unreachable:PortableError`, or the existing
+read-only-home classification), not successful install/version observations.
+They create no engine logs, jail, provider files or snapshots and read no binary
+or credential contents. A newly launchable install after admission refuses
+without switching providers.
+
+**All potentially usable OpenCode installs still select Python before effects.**
+Native OpenCode version probing, successful verified launch, process-isolated
+jail, owner-provider/config import and Cortex-mode/per-model observations have
+not been implemented or qualified. No fake jail substitutes for that boundary.
+
+#### Native launch-capable catalog producer
+
+Rust observes `codex-acp` and `claude-agent-acp` connections with an absolute
+recorded executable and native-account or API-key/secret-file authentication.
+Direct commands and two-argument commands without package metadata are admitted.
+Two-argument Claude installs additionally require canonical regular node/entry/
+manifest files, executable node, a nonempty version and a matching declared bin.
+Their bytes are rechecked before spawn; manifests are bounded to 4 MiB and
+streamed content hashes to 512 MiB per regular file.
+Qualified Codex package candidates now resolve nested or npm-hoisted Codex and
+platform packages on the qualified Linux x86_64 path, verify the executable bundled binary,
+and create the same private manual-review adapter, dependency symlink and optional
+xdg-open bytes/modes as Python. The runtime-launcher content intentionally changes
+to a native-interpreter artifact; its private 0700 mode and atomic writes remain. Captured positive adapter
+versions are 1.12.0, 1.13.0, 2.0.1 and 2.1.1. Unsupported patch/version/layout
+shapes return the captured failed outcome without launching a peer.
+The exact-hash 2.3.0 and 2.6.0 bundles are now patched natively as well (2.6.0,
+SHA-256 `733b7521…db98b99`, re-derives four of the 14 rules for its permission-profile and
+effective-config call sites; see [Codex adapter support](features/codex-engine/index.md#current-support-260-2026-11-16)). Its rules are the
+ones recorded from the former Python adapter patch (the generator was removed), and an
+offline comparison against the real upstream bundle (SHA-256
+`d584cb7d…a3d8870`, installed under the owned engine directory) produced a
+patched adapter byte-identical to the recorded former patch. The producer still requires that
+digest and exactly one match of every patched call site; any other 2.3.0 bundle
+returns the failed outcome without launching a peer. A unit case qualifies the
+success and the digest refusal with a synthetic bundle standing in for that digest.
+
+Two-argument Codex package candidates that Python's install resolver certainly
+cannot build are admitted as **unverified direct launches**, as Python does:
+no resolvable `@openai/codex` manifest, or (Linux x86_64 only) a resolvable
+manifest without a vendored `codex-linux-x64` binary. Python then launches the
+recorded argv with no install, so Rust also writes no private adapter or
+launcher, sets no `CODEX_PATH`/`NO_BROWSER` and runs no `debug models`
+enrichment; environment allowlist, bounds, process-group cleanup, logs,
+snapshots and replies are the direct-launch ones. The entry must be absolute and
+lexically normal, and the adapter and Codex manifests bounded regular
+non-symlink files that parse as JSON, so Python's parser cannot fail outside its
+caught errors. The shape is re-classified at launch. The background first-run
+observation of the default Rust ACP entry uses the same producer, so a pinned
+owned Codex install without its bundle is observed instead of reporting
+`native_catalog_unavailable`. Each new session of that entry also refreshes
+every registered connection once through this producer, prompt-free, like
+Python's per-session refresh; shapes it does not admit are skipped, and an
+unfinished refresh ends with the process. A buildable install whose outcome depends on
+Python's verifier (trust roots, symlinked components, executability, drift,
+legacy bin shapes), malformed/symlinked manifests and other platforms keep
+Python (`codex_install_outcome_unqualified`).
+
+After a successful model observation, Rust runs only the verified binary's
+offline `debug models` command and overlays visible per-model efforts; models
+absent from that response keep their ACP-observed efforts. Malformed/empty JSON,
+nonzero exit or a reaped timeout skips this optional supplement. Each output
+stream is bounded to 4 MiB; overflow/I/O or uncertain cleanup refuses publication
+without provider replay. No debug output is retained. The debug command matches
+Python's ambient environment/cwd, not the ACP secret-injection environment.
+
+The generated launcher now uses the absolute path of the compiled binary that
+wrote it (`workspace-service`, `cortex-acp` or `cortex-paseo-tools`) as its Linux
+shebang interpreter (`--native-codex-runtime`), with an exactly validated JSON
+binary-path payload. Each of those binaries handles that mode first, through the
+same shared implementation, and the artifact is accepted only when its header
+names the running interpreter itself. It uses neither Python nor a shell/PATH lookup. Only
+`app-server` is accepted (otherwise exit 64). Rust preserves the ordered feature
+flags and MCP-disabling overrides, inherited allowlisted environment/cwd/stdio,
+Python's C-locale coercion, 20-second checks, generic exit-65 check failure, and
+final exec/PID/exit/signal behavior. The existing parent environment allowlist is
+unchanged; this mode is not a socket or model operation.
+
+Safe existing Python launcher artifacts migrate atomically during the next
+qualified refresh; already-open old files remain intact. Identical native files
+are reused. Unsafe leaves are not followed, and an uncertain write never retries
+or switches providers. A missing/relocated service executable cannot run the
+artifact; a subsequent qualified refresh regenerates its absolute interpreter
+path. Unsupported interpreter paths (whitespace/non-ASCII or a shebang longer
+than 255 bytes) retain Python before effects. The preexisting bundled-binary
+path restrictions still apply. This removes the launcher dependency for the
+qualified catalog slice, not the retained Python engine/session or Settings paths.
+
+39 actual native/Python execution comparisons use allowlisted native fake peers
+in disposable roots, with no Python on the native launcher's PATH. They cover
+argv/cwd/environment, feature/MCP rejection, stdio, timeouts/reaping, final PID,
+status and signals. The 67 catalog comparisons validate the exact legacy
+launcher template before comparing the new artifact; all other bytes/modes,
+replies and transcripts remain compared unchanged.
+`crates/workspace-service/tests/fixtures/codex-launcher-golden.json` retains the patch rules and launcher template recorded from the former Python oracle (its generator was removed).
+`timeout 90 cargo test --locked --offline -p workspace-service --test codex_launcher`
+runs the launcher execution comparisons.
+Package candidates outside canonical regular/matching-bin/size bounds, non-ASCII
+or control-bearing bundled-binary paths and unsafe existing artifact state retain
+the whole Python request. Existing connection-state ancestors may be owner-owned
+0755, matching Python's parent creation beneath the private Cortex state root;
+private adapter directories and files remain 0700/0600.
+
+Native-account references use existing canonical directories. API-key launches
+read only the id-derived private regular single-link secret file and inject the
+one engine-specific variable (`CODEX_API_KEY`, `ANTHROPIC_API_KEY` or
+`CLAUDE_CODE_OAUTH_TOKEN`), never argv, replies or lifecycle metadata. A missing,
+unsafe or invalid-UTF-8 secret produces a failed attempt. A noncanonical
+filesystem reference produces a failed attempt without reading its target or
+starting a peer; normal ignore/log effects still occur. Registry bytes and old
+snapshots are unchanged. Keyrings are not converted into files or another backend.
+
+Unicode connection names use the Python-compatible safety allowlist after NFKC
+normalization. Native labels use retained Unicode 15.0.0 tables, control/format
+removal, combining-mark handling, whitespace folding and code-point length caps.
+Model names/descriptions and original model identities remain unchanged.
+Config/state parents must exist as real directories; existing Cortex roots must
+be private and outside project Git trees (the home-dotfiles exception remains).
+Conflicting ignore files, credential-path collisions, missing private owner locks,
+unsafe secret parents or unqualified cached projections retain the whole Python
+request before effects.
+
+The producer uses a private disposable empty workspace, a fixed environment
+allowlist and only registered argv. It sends `initialize` and `session/new`,
+never `session/prompt`, forwards no MCP servers or channel credentials, and reads
+no native marker contents. Claude selects each model to observe its efforts and
+restores the initial selection. Observation has a 20-second overall budget;
+cleanup has bounded waits. Stored authorization state is never promoted merely
+because an engine answered.
+
+A validated observation publishes a fresh private `cs_` snapshot. Linux
+publication fsyncs staging bytes, uses no-replace atomic rename and syncs the
+directory; existing snapshots are never replaced. The shared owner lock spans
+observation/publication. Exact registry bytes are fenced across lock acquisition,
+before publication and after projection. Uncertain effects never switch providers
+or automatically replay; earlier per-connection publications may remain.
+
+Noisy peers now retain scrubbed diagnostics: credential-shaped text is redacted
+before writing, each line retains at most a 400-character prefix plus truncation
+metadata, and the private log is capped at 256 KiB, matching the qualified Python captures. UTF-8 decoding is lossy. A line
+over 64 KiB, failed diagnostic I/O or a known launch secret echo refuses
+without that connection's snapshot or provider replay; no raw diagnostic is
+persisted by those refusal paths.
+
+Qualification uses the recorded capture
+`crates/workspace-service/tests/fixtures/config-catalog-producer-python.json` (its Python generator was removed):
+67 captures of the former Python dispatcher/producer (54 prior cases, eight OpenCode
+pre-probe failures and five unverified Codex direct launches: no dependency,
+hoisted or nested dependency without a binary, API key, authorization required), with allowlisted synthetic shell ACP peers only, no
+network/accounts/keyring. Socket tests compare complete replies,
+surviving home/config/catalog/log bytes and modes and exact peer transcripts with
+zero helper calls. Disposable roots, fresh snapshot/engine identities and clocks,
+scratch paths, argv digests and independent EOF/reap ordering/poll races are
+explicitly bound before normalization. Failed outcomes and terminal exit codes
+are not normalized into success. Unicode tables and the former Python normalization/label
+vectors are recorded in `crates/workspace-service/tests/fixtures/catalog-unicode-python.json` (its generator was removed).
+
+**Remaining boundary:** unqualified Codex/Claude package candidates (including verifier-dependent
+Codex installs, unresolvable Claude packages and other Codex platforms),
+all potentially usable OpenCode launch/verified-install/jail/version/provider/config/mode
+paths (apart from the metadata-only pre-probe rejections above), OS-keyring launches,
+other auth/reference combinations, unsafe names/roots, missing locks and
+unqualified projections keep Python before effects. Claude same-name models
+without observed efforts still refuse after observation without replay.
+Finite captures do not prove universal malformed/noisy transport parity.
+Installer/onboarding requests outside the pre-effect refusals, valid OS-keyring validation, custom-document preset apply,
+unsupported removal-default documents, wider modeled/backing-file profile
+numbers or over-bound tokens, unqualified activation documents and unknown
+actions/verbs still use the lazy Python Settings provider.
+This is not the completed Settings migration.
+
+Native metadata edits retain canonical registry bytes, omitted-field normalization,
+sorted opt-outs and arbitrary numeric history, including large integers, floating
+point, negative zero and legacy nonfinite history. The configuration-root `.gitignore`
+is created privately with exactly `*` and a newline, or checked without replacement.
+A conflicting/unsafe ignore file refuses before the registry lock or write. Valid
+admission can create this ignore file and the owner lock even if a later revision
+or registry check refuses, matching transaction setup effects.
+
+Trusted service configuration selects roots; socket root/refresh parameters do
+not select a configuration directory. Native metadata uses the shared owner lock,
+exact revisions and complete redacted replies. Private bounded-file safety and
+reply budgets fail closed; registry replacement uses fsync, atomic rename and
+parent-directory sync. Post-replacement uncertainty never delegates or replays.
+Explicit producers may contact engines, keyrings or the network as before; opening
+settings does not invoke them. No second project owner or scheduler is started.
+Cooperative locking cannot isolate hostile same-user writers. Errors, timeouts,
+disconnects and unknown outcomes never trigger automatic provider switching or
+replay; inspect current settings before retrying.
+
+Offline captures retain 23 original and 46 additional real Python metadata cases.
+Unit comparisons include the fixed-clock no-op, complete replies, registry bytes,
+all configuration-directory files and modes. Socket tests compare 22 original and
+all 46 additional cases and assert that selected metadata variants never invoke
+Python, including refusals. Three remaining variants retain named offline
+producer fakes; these prove routing, not installation, credential validation or
+engine discovery. All use disposable HOME/XDG and process/network/keyring tripwires.
+Further socket checks retain real preset application, native profile reading, reset
+confirmation refusal and one unknown retained effect without replay; native unit
+checks exercise concurrent stale revisions, unsafe targets and post-commit uncertainty.
+Fourteen additional real Python reset captures compare complete replies, every
+configuration-directory file byte and mode, including malformed existing files,
+unchanged resets (which still back up), literal confirmation and ignored caller
+revision/root fields. Native socket reset cases require zero helper calls. Existing
+oracle captures are unchanged; only generated backup timestamps and trusted host
+paths are rebound. Unit checks also cover reset rollback/removal, failed rollback,
+shared-lock revision conflicts, unsafe targets and uncertain completed writes.
+
+Native reset uses the build-embedded `policy/model-settings-default.json`, with
+insertion-order serialization matching Python. The service re-reads the pair before
+confirmation and checks that fresh observation under the shared lock: as in the
+retained machine wrapper, a caller-supplied `expected_revision` is ignored. MCP,
+profiles and connections are not rewritten. Native private-file/reply limits still
+fail closed. Each replacement and backup is atomic and directory-synced, not a
+single two-file transaction; an unknown durability outcome is not replayed or
+silently rolled back. Existing backup-name collisions refuse instead of replacing
+an earlier recovery copy. No engine, keyring, network or project store is contacted.
+
+Connection validation/removal adds 71 real dispatcher captures with complete replies,
+configuration/home/state file contents, symlink targets and modes, and zero helper
+calls per native socket case. Filesystem validation never opens credential contents;
+unchanged state preserves exact original registry bytes. Non-secret removal commits
+record/history deletion and sorted opt-outs in one atomic registry replacement.
+The selected default-route note is prepared before commit and its observed defaults
+revision is rechecked. Unlike the retained two-lock wrapper, native admission holds
+the same owner lock through revision checking, derivation and replacement; this
+closes its intervening writer race without weakening the revision fence. Only
+representable defaults documents are admitted for native removal; malformed or
+unsupported defaults keep their Python behavior. Private-file/reply limits still
+fail closed. Pre-commit failure preserves registry bytes; post-replacement uncertainty
+never rolls back by guess, delegates or retries. Valid keyring validation remains a separate Python workflow with unchanged backend policy (stale-revision refusals are native);
+API-key creation uses the native workflow described above. Secret removal now uses descriptor-relative metadata and
+unlink, never opening credential contents. A linked/public parent refuses; leaf
+links, directories, multi-link files and noncanonical references are not deleted.
+Deletion still precedes registry replacement, as in Python: there is no secret
+rollback. A later registry failure is explicitly unknown, never a claim that the
+credential was restored or an invitation to replay.
+
+Native profile mutations select only the trusted owner root and check the exact
+profile revision under the shared owner lock. Create/save also check all four
+backing-file revisions and capture normalized snapshots, excluding MCP command,
+args and env. Read stays noncreating; update/delete/deactivate never rewrite
+backing settings. Format-2 metadata mutations replace only routing-profiles.json, with no
+extra backup (matching Python). First changes to format 1 retain a private
+.migration-backups copy, verify migrated bytes and untouched profiles, and restore
+on failed verification. Delete also verifies/restores its single-file change.
+Failed restoration is explicit; uncertain durability never rolls back by guess,
+falls back or replays. Backup-name collisions refuse. Private-file/reply bounds
+fail closed. Wider numeric metadata in ignored top-level profile-document keys is
+preserved natively, including nested values, without rounding. It is not a modeled
+setting and never enters a reply as a numeric surrogate. Wider numbers in modeled
+fields/backing files or tokens over 4,300 bytes still select Python passively. If a
+file changes into an unqualified numeric shape after admission, the locked parser
+refuses rather than rounding or replaying.
+
+The two recorded captures `config-profiles-python.json` and `config-profiles-edges-python.json` (under `crates/workspace-service/tests/fixtures/`; their Python generators were removed) retain 125
+cases, including success, refusal, interrupted selection, format-1 migration,
+malformed snapshots and ignored caller roots. Unit tests compare fixed-clock
+replies and all file bytes/modes. The config_action_service socket test compares
+complete replies, every file name/content/mode and backup-directory mode, with
+zero helper calls per case. Only validated native timestamps/backup names and
+trusted host paths are rebound; revision hashes are recalculated from the exact
+expanded expected bytes. Native fault tests cover changed revisions under the
+owner lock, unsafe files/locks, backup collisions, verification rollback, failed
+restoration and uncertain completed writes. Qualified format-1/2 activation prepares
+all candidates before journaling pending, then writes changed sections in fixed order.
+Defaults retain unknown metadata and merge the owner ceiling; MCP definitions/env
+stay installed while usage policy changes and extra servers are disabled; registered
+connection limits change without validating accounts, and missing connections produce
+notes. Format-1 journal publication is backed up and verified before backing writes.
+A known backing failure restores earlier completed writes in reverse order and clears
+pending best-effort. Unknown writes, failed rollback or finalization stay interrupted/
+unknown without replay. Missing/other routing model-policy versions are rejected by
+current Python, not silently migrated; their existing provider is retained.
+
+Three additional immutable recorded captures cover 19 preset-apply, 24 routing-only
+activation and 12 secret-removal cases:
+`config-apply-python.json`, `config-activate-python.json` and
+`config-secret-remove-python.json` under `crates/workspace-service/tests/fixtures/` (recorded from the former Python implementation; the generators were removed).
+Socket cases compare complete replies and file trees/modes and require zero helper
+calls, including refusals. Existing captures are not rewritten. Native fault checks
+exercise journal/target/finalization failures, no-overwrite publication races,
+secret hardlinks/linked parents and post-unlink registry failure.
+
+Additional immutable recorded captures are `config-activate-full-python.json` (including invalid-language refusals),
+`config-activate-materialize-python.json` (valid four-section materialization)
+and `config-profiles-wide-python.json` (wider ignored metadata and bound-route
+activation), recorded from the former Python implementation (the generators were removed). The socket compares full replies,
+file bytes/modes and backup directories, with zero helper calls for every admitted
+case; separately retained policy/malformed-document refusals call Python once.
+
+Preset apply uses complete private temporary inodes and no-replace hard-link
+publication under the owner lock. It never repairs/replaces existing files. Its
+configuration files are individually published, not one transaction: a failure or
+hard kill can leave an earlier subset created. No rollback is claimed; a concurrent
+publication or uncertain directory sync requires inspection. No engine, network,
+keyring, credential read or project-store change occurs in these native producers.
+
+There are no separate MCP add/remove/validate/enable verbs in config.action.
+Those Settings edits already run through native config.save/mcp_servers (whole
+registry edits with validation); explicit config.mcp.discover is also native.
+Neither a new MCP action spelling nor a profile validate verb is invented here.
+
+### Native machine saves
+
+Machine `config.save` selects Rust for all three surfaces before any effects;
+it is removed from Python migration classification and helper admission. There
+is no fallback on malformed input, refusal, disconnect or uncertain persistence.
+Trusted service HOME/XDG/channel roots supply paths, never socket fields.
+Saves do not open a project store, claim scheduler ownership, refresh credentials
+or launch engines/MCP definitions.
+
+The socket regression in
+[`config_save_defaults_service.rs`](../crates/workspace-service/tests/config_save_defaults_service.rs)
+compares 224 complete reply/file observations from disposable offline Python
+captures: 56 defaults and 168 routing/MCP observations. A forbidden helper
+asserts zero Python invocations. The five defaults AttributeError cases also
+have real retained-provider socket observations: clients received the ordinary
+JSON-RPC `-32000 / machine_tool_failed` error, not an exception name. Rust
+preserves that envelope without crashing. Other ordinary handler errors retain
+their existing `ok: false` machine result. Unknown surfaces remain unsupported.
+
+Native storage/frame/nesting/exact-number bounds remain deliberate fail-closed
+admission differences, not unrestricted arbitrary-JSON parity. Unsafe/oversized
+state, unrepresentable mapping keys and preserved out-of-range integers refuse
+rather than lose data. The parser's registry diagnostics remain native.
+This qualifies source/socket saves, not an installed app or the all-Rust product.
+
+### Native machine-routing persistence
+
+The internal `PreparedUserRouting` transaction in
+`crates/workspace-service/src/machine/project_config_save/user_routing.rs`
+prepares user routing bytes under the shared private owner lock. It preserves
+the editor conversion, exact/fallback revisions, validation and unknown metadata,
+then commits by private fsynced atomic replacement. Dropping a preparation does
+not save settings. A failed directory sync after replacement stays unknown.
+
+The native `user_routing::save` section now composes the complete machine-global
+routing reply, cached model efforts and post-save profile selection against the
+candidate bytes before commit. Offline Python comparisons cover complete replies,
+exact bytes/modes, environment shadowing, observed/conflicting/default-only efforts,
+format-1/2 profiles, modified/interrupted/unavailable selection and damaged/newer
+profile files. A profile failure remains best-effort status, not a save refusal.
+The configuration-root ignore-file effect uses the defaults section's helper.
+
+This section is selected by machine `config.save` for routing. Trusted host
+configuration selects roots; JSON cannot refresh an engine or select another
+directory. No Python fallback or route authorization is introduced.
+
+### Native machine-defaults section
+
+The internal `user_defaults::save` section now converts and validates the machine
+editor's portable coordinator, bound route, language and ceiling, preserves
+uneditable defaults/metadata, and builds the complete management update reply.
+It also prepares Workspace mode/checkout while retaining unrelated Workspace keys.
+Offline comparisons cover complete replies, both files' exact bytes/modes,
+no-ops, revisions and the private configuration-root `.gitignore` effect.
+
+The shared owner lock and Workspace `machine.lock` cover candidate preparation
+through atomic fsynced replacement. Both candidates and the complete reply are
+budgeted, and observed revisions are rechecked before writing. Invalid or unsafe
+Workspace storage refuses before either settings file is changed; this is
+deliberately stronger than the former provider's possible partial write.
+An error after the owner file commits is unknown, never a reason to replay or
+switch provider. The two files are not one atomic transaction. Directory/lock
+creation and ignore-file creation can precede a settings refusal.
+
+This section is selected by machine `config.save` for user defaults, including
+Workspace mode/checkout. All 56 complete captured observations now pass through
+the native socket regression, including malformed inputs; no Python helper,
+engine, project store or keyring is used.
+
+### Native machine-MCP section
+
+The internal `user_mcp::save` section implements the editor's implicit removals,
+ordered whole-entry upserts, duplicate-name updates, env keep/change/remove,
+revision fallback/conflicts and complete redacted replies. It preserves the
+`servers`/`mcpServers` root, unknown root metadata, entry order and private modes.
+An empty registry with no requested servers returns only `changed: false`, without
+a token check or creating settings/ignore files, just like the former provider.
+
+The section reuses the shared owner lock, defaults ignore-file helper and atomic
+fsynced replacement. Candidate bytes, loader validation and the whole reply are
+checked before saving; observed drift refuses. A post-rename sync failure stays
+unknown, never triggers a second write or provider switch. Offline captures use
+disposable HOME/XDG with process/network/keyring tripwires; definitions are never
+launched and env values never appear in replies. Native tests also cover unsafe
+files, reply limits, concurrent original revisions and uncertain durability.
+
+Routing, defaults and MCP are selected together by the native machine writer.
+Unknown-effect and single-owner fences are unchanged. The `config.action` shapes
+listed above as retained (keyring lookups with a startable provider, unqualified
+catalog/profile/preset documents, OpenCode candidates, float or non-ASCII profile
+verbs), plus legacy projection/evidence paths, are refused with `config_api_unavailable`
+(the on-demand Python provider was removed). See [startup](cortex-workspace/local-task-execution.md#python-independent-native-service-startup).
+No installed application or engine registration is changed.
+
 ### Manage settings in Paseo
+
+For the default Rust launch, the sibling `cortex-paseo-tools config` answers the
+complete API described below natively, with no Python fallback: every read, and user
+defaults, routing, profiles, MCP servers, connections, the project ceiling, the
+default preset, model-list refresh, engine discovery, onboarding and download. It
+uses the owner's configuration lock and revision checks, writes the same files as
+the Python launch, and does not write Workspace-specific defaults. Plugin activation
+runs its native automatic setup. A few shapes only the Python provider can answer
+(an OS-keyring connection check, an installed OpenCode binary's version probe, a
+model-list refresh for an engine with no qualified native catalogue producer) refuse
+with `config_api_unavailable` and say why; nothing is changed. See
+[Settings under the Rust launch](project/native-incoming-acp.md#paseo-settings-under-the-rust-launch).
 
 The plugin implements a **Cortex Settings** screen for supported Cortex configuration; this is not Paseo's plugin-settings document. However, independent desktop checks on installed Paseo 0.10.0 found the plugin enabled and running but did not find its screen in Settings or its command in the command palette. Earlier implementation/test evidence describes the screen, while live access in the tested host is inconsistent and remains unverified; do not assume an owner can reliably reach it. The screen has eight sections: user defaults, Models, Engines & models, project ceiling, routing, user routing profiles, MCP servers, and connections. **Models** switches individual models on or off for Cortex as a whole (routing `enabled` and exact `deny` entries, below) and has a **Refresh model lists** button that re-reads every connection's model list from its engine; **Engines & models** lists only the models switched on there. Editable fields use typed controls (such as text, number, selectors, switches, and lists), not JSON text editors; values the form cannot safely represent are read-only rather than rewritten. Select a project for project-scoped settings: the picker lists one entry per project directory (project name and path, worktrees marked), built from Paseo workspaces, whose titles are task titles and are not shown. Every field or group of similar fields (rows, per-model controls) has help that says what it does and recommends a setting; the **Help language / Язык подсказок** selector at the top shows it in English, Russian or both (default both, remembered by the client when local storage is available). The help texts live in `integrations/paseo/client/settings-help.ts` and name no model. Ceiling values this version accepts but does not apply — `permission_level`, the `calls`/`tokens`/`concurrency` limits and the spend limit — are not shown as fields; stored values are kept unchanged on save and listed in a read-only note. Only the `attempts` limit is editable. This is a bounded management interface, not a control for every runtime or task setting. Use the documented setup CLI as a fallback where a supported command exists; for OpenCode onboarding, see [the OpenCode adapter](features/opencode-engine/index.md#onboarding). See [verification guidance](project/verification.md) for the desktop findings and untested flows.
 
@@ -31,7 +643,7 @@ In **Routing**, pin effort, `effort_floor`, `max_effort` and the ordered `effort
 
 User profiles snapshot current owner settings, not just routing. Edit working settings through their own sections, then explicitly save into the selected profile or create a new profile. Ordinary settings saves do not overwrite the saved profile. Activation restores its captured user sections; project/environment routing still takes precedence. See [User routing profiles](#user-routing-profiles) for states, revision checks and restore behavior. Rendered access remains subject to the host limitation above.
 
-The owner API is version 1: `cortex_runtime.configuration.management`. The typed plugin RPCs are `cortex.config.read`, `cortex.config.update`, `cortex.config.opencode.discover`, `cortex.config.opencode.onboard`, `cortex.config.connections.discover`, `cortex.config.connections.onboard`, `cortex.config.connections.install`, `cortex.config.preset.read`, `cortex.config.preset.apply`, `cortex.config.preset.reset`, and `cortex.config.catalog.refresh` (the management action `refresh` on the read-only `route_catalog` surface: a prompt-free re-read of every connection's model list, returning the fresh catalog with one outcome per connection). The plugin runs this API through its selected Cortex launch, using that launch's HOME/XDG configuration. Projects are resolved from the selected Paseo workspace; requests do not supply paths, commands, or binaries. Paseo RPC invocation is gated by its daemon authorization, and writes require the read's current revision. A stale revision returns a conflict; reload the latest value before retrying rather than overwriting it. A timed-out write can have an unknown outcome: re-read before retry.
+The owner API is version 1 and is served natively. The typed plugin RPCs are `cortex.config.read`, `cortex.config.update`, `cortex.config.opencode.discover`, `cortex.config.opencode.onboard`, `cortex.config.connections.discover`, `cortex.config.connections.onboard`, `cortex.config.connections.install`, `cortex.config.preset.read`, `cortex.config.preset.apply`, `cortex.config.preset.reset`, and `cortex.config.catalog.refresh` (the management action `refresh` on the read-only `route_catalog` surface: a prompt-free re-read of every connection's model list, returning the fresh catalog with one outcome per connection). The plugin runs this API through its selected Cortex launch, using that launch's HOME/XDG configuration. Projects are resolved from the selected Paseo workspace; requests do not supply paths, commands, or binaries. Paseo RPC invocation is gated by its daemon authorization, and writes require the read's current revision. A stale revision returns a conflict; reload the latest value before retrying rather than overwriting it. A timed-out write can have an unknown outcome: re-read before retry.
 
 The API is intentionally closed rather than a general JSON editor. It patches supported user defaults and ceiling fields; replaces supported routing keys while preserving unknown keys; uses the existing project SQLite row for the project ceiling; and validates MCP and connection updates with runtime loaders. It never writes the project task/report database except that existing SQLite configuration row. Routing precedence remains project `.cortex/routing.json`, then read-only `$CORTEX_ROUTING`, then user `routing.json`; sources do not merge, and a UI write to a shadowed file is surfaced as such. MCP environment values and connection credential values/paths are redacted. When editing MCP env, use `{"keep": true}` to preserve an existing secret; the API does not return it.
 
@@ -41,9 +653,9 @@ The **Engines: download and connect** group under Connections shows installed/lo
 
 Connections polls retain mounted rows, pending input and removal confirmation; surviving rows keep their order, and new connections are appended. Structurally unchanged reads do not update client state. Failed background reads retain last known connections/engine status with a visible warning and retry controls; they do not clear save conflicts or retry writes. Explicit conflict reload still discards edits.
 
-For API details and current restrictions, see `src/cortex_runtime/configuration/management.py` and `integrations/paseo/shared/config.ts`. Changes are consumed by the next Cortex session; they do not retroactively reconfigure active tasks. Saving settings does not restart active Cortex sessions. Conversely, a plugin code update/reload is not needed for a settings edit, but it restarts the plugin process and can close open provider connections; apply plugin updates between active tasks until recovery has been qualified on the deployed Paseo version.
+For API details and current restrictions, see the native settings API (`crates/workspace-service/src/machine`, served by `cortex-paseo-tools config`) and `integrations/paseo/shared/config.ts`. Changes are consumed by the next Cortex session; they do not retroactively reconfigure active tasks. Saving settings does not restart active Cortex sessions. Conversely, a plugin code update/reload is not needed for a settings edit, but it restarts the plugin process and can close open provider connections; apply plugin updates between active tasks until recovery has been qualified on the deployed Paseo version.
 
-`HOME`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME` must resolve to absolute paths. The user roots cannot be placed inside a project workspace. Cortex creates managed directories owner-only and validates existing files before trusting them. See `connections.registry.config_root/state_root`, `configuration.store`, `routing.auto_route._routing_path`, `configuration.mcp_servers._global_path`, and `scripts/cortex_acp_setup.py::_write_paseo_launch_config`.
+`HOME`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME` must resolve to absolute paths. The user roots cannot be placed inside a project workspace. Cortex creates managed directories owner-only and validates existing files before trusting them. The roots are resolved by the shared host-channel resolver in `crates/cortex-paseo-tools` and `crates/workspace-service`; the launch record is written by `cortex-paseo-tools configure-paseo-plugin-launch`.
 
 ## Connections
 
@@ -90,17 +702,17 @@ connection rewrite is needed; its existing version checks still apply.
 
 ### Claude ACP adapter updates and instruction-delivery qualification
 
-Claude engine auto-updates may install an adapter release before Cortex has an exact instruction-delivery registration for it. Discovery therefore selects the newest installed version with an exact registration ahead of newer unregistered versions, and pruning retains registered installs as fallbacks. If no registered install is available, diagnostics can still identify the installed version, but critical-role dispatch refuses it before launch. This qualification applies to instruction delivery, not proof of effective model/tool enforcement. Exact current registrations include Codex ACP 2.3.0 and Claude ACP 0.97.0, retaining 2.1.1 and 0.88.0 for rollback. Startup follows newer approved installed adapters for existing connections; see the following policy. See [Claude adapter support](features/claude-engine/index.md#current-support-0970-2026-10-27) and [Codex adapter support](features/codex-engine/index.md#current-support-230-2026-10-27) for the current registrations and limits. One owner-requested Desktop check on 0.88.0 (2026-10-08) completed a resumed scenario; its bounded, not-clean evidence is on the Desktop evidence page.
- Authentication modes are `native_account` and `api_key`; `gateway` is represented in the type enum but has no implemented launch path and is not usable. Codex API-key kind is `openai_api_key`; Claude accepts `anthropic_api_key` or `claude_oauth_token`. Native account connections may reference the user's existing `~/.codex` or `~/.claude` directory, or use Cortex-managed isolated engine state. OpenCode supports only `native_account`, referencing the login `opencode auth login` wrote to `~/.local/share/opencode`, and is added only with `add-opencode-connection` (below). The supported combinations come from `connections.model.SUPPORT_MATRIX`; onboarding is in `connections.onboarding`.
+Claude engine auto-updates may install an adapter release before Cortex has an exact instruction-delivery registration for it. Discovery therefore selects the newest installed version with an exact registration ahead of newer unregistered versions, and pruning retains registered installs as fallbacks. If no registered install is available, diagnostics can still identify the installed version, but critical-role dispatch refuses it before launch. This qualification applies to instruction delivery, not proof of effective model/tool enforcement. Exact current registrations include Codex ACP 2.6.0 and Claude ACP 0.107.0, retaining 2.3.0, 2.1.1, 0.97.0 and 0.88.0 for rollback. Startup follows newer approved installed adapters for existing connections; see the following policy. See [Claude adapter support](features/claude-engine/index.md#current-support-01070-2026-11-16) and [Codex adapter support](features/codex-engine/index.md#current-support-260-2026-11-16) for the current registrations and limits. One owner-requested Desktop check on 0.88.0 (2026-10-08) completed a resumed scenario; its bounded, not-clean evidence is on the Desktop evidence page.
+ Authentication modes are `native_account` and `api_key` (the Rust setup registers only the former); `gateway` is represented in the type enum but has no implemented launch path and is not usable. Codex API-key kind is `openai_api_key`; Claude accepts `anthropic_api_key` or `claude_oauth_token`. Native account connections may reference the user's existing `~/.codex` or `~/.claude` directory, or use Cortex-managed isolated engine state. OpenCode supports only `native_account`, referencing the login `opencode auth login` wrote to `~/.local/share/opencode`, and is added only with `add-opencode-connection` (below). The supported combinations are fixed in the connection model and enforced by onboarding.
 
 Typical setup:
 
 ```bash
-python3 -B scripts/cortex_acp_setup.py status
-python3 -B scripts/cortex_acp_setup.py add-connection --help
+scripts/cortex-paseo-tools.sh status
+scripts/cortex-paseo-tools.sh add-connection --engine codex-acp
 ```
 
-An API key should be supplied with `--api-key-file PATH` or `--api-key-stdin`, never inline in arguments. For native login, check the engine's native login state before depending on it. The CLI's `status` output reports IDs and credential kind, not credential values.
+The Rust setup registers native-account connections only: `add-connection --engine ENGINE` refuses `--api-key-file`, `--api-key-stdin` and `--install-record` (API-key connections and install records are not offered). For native login, check the engine's native login state before depending on it. The CLI's `status` output reports IDs and credential kind, not credential values.
 
 The registry JSON is intentionally an implementation format, not a hand-authored config API. Its currently accepted root keys are `schema_version` (integer, exactly `1`), `connections` (object keyed by connection ID), and optional `override_history` (object). Each generated connection record has the fields below; records are written by setup and should be treated as read-only:
 
@@ -115,13 +727,13 @@ The registry JSON is intentionally an implementation format, not a hand-authored
 - `created_at`, `updated_at`: ISO timestamp strings.
 - `max_concurrent_sessions`: integer from 1 to 64; defaults to 4 when absent in an older record.
 
-The closed fields and defaults are enforced by `connections.registry._parse_registry_bytes/_record_from_dict` and `connections.model.ConnectionRecord`. Unknown fields fail closed.
+The closed fields and defaults are enforced by `connections.registry._parse_registry_bytes/_record_from_dict` and `ConnectionRecord`. Unknown fields fail closed.
 
 ### Engine install records
 
-Setup commands install no engine. The Settings **Download engine** action, and the background updater, install the manifest-pinned `codex-acp` or `claude-agent-acp` npm package into Cortex's own owned root, `$XDG_DATA_HOME/cortex/engines` (or `~/.local/share/cortex/engines`). The Settings action is bounded to 60 seconds, takes no package, version, path or binary from the request, never changes an existing connection and needs no install record. At plugin or agent start, Cortex also registers a native-account connection for an engine that has none once its owned qualified adapter and native login marker are present, unless the owner previously removed a connection for that engine. It observes models in the same background pass; no second session or manual refresh is needed on success. If npm or Node is missing or the install fails, Settings reports that the pinned installation failed and shows no npm output. OpenCode is a standalone binary, not an npm package, has no Cortex installer, and takes no install record: `python3 -B scripts/cortex_acp_setup.py add-opencode-connection [--binary PATH]` finds a trusted binary, reads its version in a network-less sandbox and registers the connection. `$CORTEX_OPENCODE_BINARY` names a binary for that search. For the npm engines: `add-connection --install-record FILE` takes an operator-recorded install of an engine you already installed by other means (for example `npm install @agentclientprotocol/codex-acp`). It holds absolute paths without symlink components and the SHA-256 of each pinned file. `verify_install()` re-hashes every file before launch. The JSON shape follows `engine.codex_install.CodexAcpInstall` or `engine.claude_install.ClaudeAcpInstall`: `node_binary`, `adapter_entry`, `package_json`, `package_version` (must equal the package's own `"version"`) and their digests, plus the bundled Codex binary and version for Codex only. `tests/fixtures/engine/codex/install-record.template.json` shows the shape without real hashes. The field-by-field recipes are in the [Codex adapter](features/codex-engine/index.md#current-runtime-gateway-policy) and [Claude adapter](features/claude-engine/index.md#pinned-install-requirements-manual-recipe-placeholder) pages.
+Setup commands install no engine. The Settings **Download engine** action, and the background updater, install the manifest-pinned `codex-acp` or `claude-agent-acp` npm package into Cortex's own owned root, `$XDG_DATA_HOME/cortex/engines` (or `~/.local/share/cortex/engines`). The Settings action is bounded to 60 seconds in the former Python implementation; native Workspace npm instead uses the remaining 30-second machine request budget with one second reserved for cleanup and reply. The action takes no package, version, path or binary from the request, never changes an existing connection and needs no install record. At plugin or agent start, Cortex also registers a native-account connection for an engine that has none once its owned qualified adapter and native login marker are present, unless the owner previously removed a connection for that engine. It observes models in the same background pass; no second session or manual refresh is needed on success. If npm or Node is missing or the install fails, Settings reports that the pinned installation failed and shows no npm output. OpenCode is a standalone binary, not an npm package, has no Cortex installer, and takes no install record: `scripts/cortex-paseo-tools.sh add-opencode-connection [--binary PATH] [--name NAME]` finds a trusted binary, reads its version in a network-less sandbox and registers the connection. `$CORTEX_OPENCODE_BINARY` names a binary for that search. For the npm engines: `add-connection --install-record FILE` takes an operator-recorded install of an engine you already installed by other means (for example `npm install @agentclientprotocol/codex-acp`). It holds absolute paths without symlink components and the SHA-256 of each pinned file. `verify_install()` re-hashes every file before launch. The JSON shape follows `CodexAcpInstall` or `ClaudeAcpInstall`: `node_binary`, `adapter_entry`, `package_json`, `package_version` (must equal the package's own `"version"`) and their digests, plus the bundled Codex binary and version for Codex only. `tests/fixtures/engine/codex/install-record.template.json` shows the shape without real hashes. The field-by-field recipes are in the [Codex adapter](features/codex-engine/index.md#current-runtime-gateway-policy) and [Claude adapter](features/claude-engine/index.md#pinned-install-requirements-manual-recipe-placeholder) pages.
 
-Accepted adapter versions (`connections.discovery.QUALIFIED_ADAPTER_VERSIONS`): Codex exactly `1.12.0`, `1.13.0`, `2.0.1`, `2.1.1` and `2.3.0`; Claude requires exact instruction-delivery registration (`0.78.0`, `0.87.0`, `0.88.0`, `0.97.0`). These are not minimum-version floors. OpenCode accepts any `2.x.x` release, checked from the sandboxed `--version` output before launch and again from the engine's own `initialize` `agentInfo.version`; 1.x, 3.x and malformed versions are refused.
+Accepted adapter versions: Codex exactly `1.12.0`, `1.13.0`, `2.0.1`, `2.1.1`, `2.3.0` and `2.6.0`; Claude requires exact instruction-delivery registration (`0.78.0`, `0.87.0`, `0.88.0`, `0.97.0`, `0.107.0`). These are not minimum-version floors. OpenCode accepts any `2.x.x` release, checked from the sandboxed `--version` output before launch and again from the engine's own `initialize` `agentInfo.version`; 1.x, 3.x and malformed versions are refused.
 
 ## Default preset
 
@@ -135,7 +747,7 @@ An existing file is left unchanged even when it is malformed or from an older sc
 
 The MCP examples are `codebase-memory-mcp`, `playwright` (Claude workers only), and `vivaldi` (workers). All start with `enabled: false`; the runtime loader excludes them before launch. Settings lists them as disabled, editable and toggleable. Commands, arguments and filesystem grants contain only `/path/to/...` examples; environment maps are empty. Registering these definitions does not install binaries or browser extensions. Install the corresponding tools, replace example paths and review grants before enabling. The named profile captures only MCP usage policy, never commands, arguments or environment values.
 
-**Reset to default preset** in Settings replaces `routing.json` and `defaults.json` together. It requires a confirmation that names the overwrite, and it sends the combined revision of both files, so a file changed elsewhere is refused with a conflict. Before writing, it keeps a private owner-only backup of each existing file, named `<name>.json.cortex-backup-<time_ns>` in the same configuration directory. Reset overwrites all routing rules, the coordinator default, the language and the owner ceiling. Project and `$CORTEX_ROUTING` overrides are not changed. If a write fails, completed replacements are rolled back. A hard process kill between the two replacements can leave the pair mixed; the backups allow manual restoration.
+**Reset to default preset** in Settings replaces `routing.json` and `defaults.json` together. It requires a confirmation that names the overwrite, and the machine action re-reads the combined revision of both files before confirmation and checks it again under the owner lock, so a concurrent change after that observation is refused. The machine wrapper ignores a caller-supplied revision; it does not enforce the age of the Settings card's earlier read. Before writing, it keeps a private owner-only backup of each existing file, named `<name>.json.cortex-backup-<time_ns>` in the same configuration directory. Reset overwrites all routing rules, the coordinator default, the language and the owner ceiling. Project and `$CORTEX_ROUTING` overrides are not changed. If an ordinary pre-replacement write fails, completed replacements are rolled back; uncertain durability is reported without replay. A hard process kill between the two replacements can leave the pair mixed; the backups allow manual restoration.
 
 ## Defaults and policy ceiling
 
@@ -154,7 +766,7 @@ A route default has this shape:
 }
 ```
 
-The model, connection ID and parameters must correspond to an observed selectable route. Parameter values such as `thought_level`, `effort`, `mode`, `model_config` and `summarizer` are accepted only when the selected route's observed catalog advertises that exact name/value pair. Do not copy a made-up route ID or assume all engines accept the same parameters. Configuration selection is revalidated by `configuration.resolution` and `configuration.service.ConfigurationService`.
+The model, connection ID and parameters must correspond to an observed selectable route. Parameter values such as `thought_level`, `effort`, `mode`, `model_config` and `summarizer` are accepted only when the selected route's observed catalog advertises that exact name/value pair. Do not copy a made-up route ID or assume all engines accept the same parameters. Configuration selection is revalidated by the runtime and `ConfigurationService`. When a session starts, the selected effort (`thought_level` or `effort`) is sent under the effort option the engine session itself advertises: `reasoning_effort` for codex-acp and `effort` for claude-agent-acp. Both use the `thought_level` category. A value the session does not offer is refused before any engine call.
 
 The optional `ceiling` object may only narrow permissions and route access. Its exact fields are:
 
@@ -182,9 +794,9 @@ The optional `ceiling` object may only narrow permissions and route access. Its 
 - `spend_limit` is a number or null; `spend_limit_enforceable` is a boolean.
 - Fallback route/failure lists are arrays of strings or null; `budget` is an integer and `data_recipient_consent` is boolean. Fallback remains disabled without the required policy and any required per-recipient consent record.
 
-The accepted ceiling model is `configuration.policy.PolicyCeiling`; serialization/loading is `configuration.store.serialize_ceiling/deserialize_ceiling/read_user_defaults`. A project ceiling is stored in the project's SQLite configuration table and may further restrict the user ceiling. There is no second project JSON file for defaults. Task and assignment configuration can narrow the effective ceiling but cannot grant more.
+The accepted ceiling model is `PolicyCeiling`; serialization/loading is `configuration.store.serialize_ceiling/deserialize_ceiling/read_user_defaults`. A project ceiling is stored in the project's SQLite configuration table and may further restrict the user ceiling. There is no second project JSON file for defaults. Task and assignment configuration can narrow the effective ceiling but cannot grant more.
 
-Access mode is a separate client-owned choice, not a user-default JSON option: fresh ACP sessions durably start Development, with host-writable brokered commands for writing workers. Guarded keeps workers inside the project with consent for every outside action; Auto uses the same host-writable commands as Development and answers every permission card itself. Existing sessions/tasks without initialization and unknown/unreadable state remain Guarded. Pre-task choices persist per session and win at atomic task binding; reconnect/load preserves them without rewriting owner settings. The additive session record and task events live in the project database (`acp.sessions`, `configuration.access_mode`). See [permissions and limits](features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
+Access mode is a separate client-owned choice, not a user-default JSON option: fresh ACP sessions durably start Development, with host-writable brokered commands for writing workers. Guarded keeps workers inside the project with consent for every outside action; Auto uses the same host-writable commands as Development and answers every permission card itself. Existing sessions/tasks without initialization and unknown/unreadable state remain Guarded. Pre-task choices persist per session and win at atomic task binding; reconnect/load preserves them without rewriting owner settings. The additive session record and task events live in the project database. See [permissions and limits](features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
 
 ACP's first pending/saved-default selection and later route/effort selections
 read the owner defaults/ceiling and project SQLite layer. Only parameter maps
@@ -199,8 +811,7 @@ idempotent: absent native parameters are not a request to clear them. It keeps
 the saved portable coordinator and configured effort/mode unchanged. An actual
 route change still resets dependent parameters; an explicit effort selection
 still changes that field. No ACP reset signal or catalog-order inference is
-introduced. See [bound inspection](features/observability/index.md#bound-task-inspection)
-for configuration states and engine confirmation references, not just UI values.
+introduced. Configuration states and engine confirmation references, not just UI values, are the evidence (the former bound inspector was removed; see [removed readers](features/observability/index.md#removed-python-era-readers)).
 
 For automatic worker/reviewer routing, `allowed_routes`, `allowed_connections`
 and `allowed_data_recipients` (connection provider IDs) filter the observed
@@ -211,7 +822,7 @@ coordinator's route; an unavailable or ambiguous identity fails closed.
 
 ## Routing rules
 
-The routing loader reads eight keys: `pin`, `deny`, `enabled`, `auto_allow`, `tiers`, `providers`, `engine_affinity` and `models`; additional JSON keys are currently ignored. Its validation and selection logic are in `routing.auto_route` and `routing.model_policy`. These are the eight supported routing keys (unknown keys are ignored):
+The routing loader reads eight keys: `pin`, `deny`, `enabled`, `auto_allow`, `tiers`, `providers`, `engine_affinity` and `models`; additional JSON keys are currently ignored. Its validation and selection logic are in `auto_route` and `model_policy`. These are the eight supported routing keys (unknown keys are ignored):
 
 ```json
 {
@@ -256,8 +867,8 @@ writing configuration or dispatching work.
 - `auto_allow`: tokens of the same form that may enter automatic selection despite the built-in Haiku and OpenCode exclusions (on an engine without a `models` selection list; a list replaces these exclusions). OpenCode model IDs name their provider, so an OpenCode entry is the exact route, for example `"opencode/anthropic/claude-sonnet-4-5"`. It does not override `deny`, `providers`, catalog availability, connection readiness or quota limits.
 - `tiers`: object mapping model names to `flagship`, `deep`, `standard`, or `light`, for every engine. Built-in known families/models are classified automatically; this key overrides that classification, and a per-engine `models` tier overrides this key. A Luna model moved out of `light` routes like any model of its new tier; only the Luna effort floor (`high`) and `max` still apply.
 - `providers`: array restricted to `codex-acp`, `claude-agent-acp` and/or `opencode`. When absent, every configured provider is considered. It restricts automatic routing, failover and pins; it does not hide models from the selector or disable manual selection. A disallowed pin is refused.
-- `engine_affinity`: object mapping a work kind or `*` to `codex-acp`, `claude-agent-acp`, `opencode`, or `null` (no lean). Work kinds are `implementation_backend`, `implementation_frontend`, `implementation_frontend_design`, `operations`, `debugging`, `testing`, `investigation`, `review`, `design`, `writing`, `planning`, and `analysis` (each worker role's kind is `routing.auto_route.ROLE_WORK_KINDS`; an unlisted role is `implementation_backend`). A kind named here wins, then `*`, then the built-in default: `implementation_backend`, `implementation_frontend` and `operations` lean to `codex-acp`; `implementation_frontend_design`, `investigation`, `review`, `design`, `writing`, `planning` and `analysis` lean to `claude-agent-acp`; `debugging` and `testing` are neutral. Affinity breaks ties only after the 95% quota band and retry diversification (rank version 15): a known route at or above 95% ranks behind any non-hot route, so affinity never overrides that band. Plan usage is only the last tie-breaker after affinity (see [usage switching](#explicit-user-model-priority-and-usage-switching)). Affinity never overrides a pin, `deny`, `providers`, availability or the 100% quota exclusion. An unknown kind or engine makes the file invalid.
-- `models`: object mapping a supported engine id to an object with any of `auto`, `tiers` and `policy`, each keyed by the exact model id the engine reports (OpenCode ids are `<provider>/<model>`). Validation (`routing.model_policy.validate_models`) reports every problem with its field path.
+- `engine_affinity`: object mapping a work kind or `*` to `codex-acp`, `claude-agent-acp`, `opencode`, or `null` (no lean). Work kinds are `implementation_backend`, `implementation_frontend`, `implementation_frontend_design`, `operations`, `debugging`, `testing`, `investigation`, `review`, `design`, `writing`, `planning`, and `analysis` (each worker role's kind is `ROLE_WORK_KINDS`; an unlisted role is `implementation_backend`). A kind named here wins, then `*`, then the built-in default: `implementation_backend`, `implementation_frontend` and `operations` lean to `codex-acp`; `implementation_frontend_design`, `investigation`, `review`, `design`, `writing`, `planning` and `analysis` lean to `claude-agent-acp`; `debugging` and `testing` are neutral. Affinity breaks ties only after the 95% quota band and retry diversification (rank version 15): a known route at or above 95% ranks behind any non-hot route, so affinity never overrides that band. Plan usage is only the last tie-breaker after affinity (see [usage switching](#explicit-user-model-priority-and-usage-switching)). Affinity never overrides a pin, `deny`, `providers`, availability or the 100% quota exclusion. An unknown kind or engine makes the file invalid.
+- `models`: object mapping a supported engine id to an object with any of `auto`, `tiers` and `policy`, each keyed by the exact model id the engine reports (OpenCode ids are `<provider>/<model>`). Validation reports every problem with its field path.
   - `auto`: array of unique model ids. Present, it is the complete list of that engine's models automatic routing may use (`[]`: none), replacing the built-in Haiku/optional-engine exclusions, `auto_allow` and newest-version-only routing for that engine; absent, the built-in rules apply. `deny` and `providers` still win; a `pin` or the model selector can still use any offered model.
   - `tiers`: model id to `flagship`, `deep`, `standard` or `light`, or to a non-empty list of them (for example `["standard", "deep"]`); it wins over the legacy top-level `tiers`, which wins over the built-in classification. A model given several tiers is an automatic-routing candidate of each (it is listed under each in `list_route_options`) and runs at the effort of the tier it was chosen for; a pin or explicit effort may use any effort one of its tiers permits, and it counts as flagship for a user's explicit flagship request when `flagship` is one of its tiers. Only this per-engine key takes a list; the legacy top-level `tiers` stays one tier per model. In Settings > Engines & models the tier control is a multi-select; clearing every tier removes the setting.
   - `policy`: model id to an object of optional attributes, each overriding the model's built-in value (`null` removes it): `effort_floor` and `max_effort` (efforts `low`..`max`; without `max_effort` a flagship-tier model stops at `high`), `effort_ladder` (1-3 strictly ascending efforts a light model runs at for light work, standard work, and standard work that fell short once), `also_standard_for` (work kinds for which a light model is also a standard-tier candidate, as the built-in Luna rule does for `testing`), `preferred_for` (work kinds this model is preferred for: rank version 9 puts it ahead of new plan hints, plan usage and retry diversification within its tier; it yields for quota only when at least 95% used and more than 10 points worse than a known usable alternative; plan usage compares only the preferred models while they are honoured, and none once they are used up), `preferred_when` (optional owner-written condition, non-blank text of at most 500 characters, for example `"frontend changes without design work"`; see below) and `request_names` (1-16 lowercase extra spellings, Cyrillic stems taking Russian endings, that count as the user naming this model's family in an explicit flagship request; ordinary request, work or negation words are refused).
@@ -277,7 +888,7 @@ writing configuration or dispatching work.
   is a text field next to the preferred-work switches.
 
   `preferred_for` uses the same twelve work kinds as `engine_affinity`. The API's
-  `routing.builtin` includes English `work_kind_labels`, the worker-role list
+  the runtime includes English `work_kind_labels`, the worker-role list
   `work_kind_roles`, and `builtin_affinity` for each kind. A model with a
   non-empty `preferred_for` must appear in its engine's explicit `models.auto`
   list when that list exists (`preferred_not_selected` otherwise). Without a
@@ -372,7 +983,7 @@ not a universal preset; exact model/connection identifiers must exist locally.
 | Per-model automatic selection | Defines the full set of models an engine may automatically route when `models.<engine>.auto` is present | User or project routing | User: yes; project: no | `{"opencode":{"auto":["provider/model-id"]}}` |
 | Per-model policy and work-kind preference | Sets effort/tier behavior and preferred work kinds for an exact model | User or project routing | User: yes; project: no | `{"opencode":{"policy":{"provider/model-id":{"preferred_for":["review"]}}}}` |
 | MCP enabled and usage limits | Controls whether a registered server and its tools, paths, networks, roles or engines may be used | User MCP policy | Yes | `enabled: true` |
-| MCP command, arguments and environment | Defines how an MCP server is installed/launched and its environment | User MCP definition | No | `command: "python3"` |
+| MCP command, arguments and environment | Defines how an MCP server is installed/launched and its environment | User MCP definition | No | `command: "node"` |
 | Connection session limit | Caps concurrent sessions on one registered connection | User connection policy | Yes | `max_concurrent_sessions: 2` |
 | Connection name and onboarding | Changes display metadata or explicitly opts into connection setup | User connection metadata | No | `name: "Work"` |
 | Connection credentials and login state | Authenticates to a provider; stored/referenced separately from profile data | User secret/engine state | No | Existing native login |
@@ -385,12 +996,19 @@ The screen's inline help describes each control's effect and scope; this table
 summarizes the underlying settings rather than every repeated row in a dynamic
 list.
 
+In the default Rust ACP entry, `/cortex-new-task` resolves the default route (a
+session's pending route choice applies only to that session's own task) and refuses
+before creating anything when no route resolves. `/harvest` and `/harvest-refresh`
+word their request in the session language; a pre-task language choice is also
+saved as the default language, as in Python. See
+[task commands](project/native-incoming-acp.md#task-commands).
+
 
 ## MCP servers for Cortex and workers
 
-Cortex may pass session MCP entries supplied by the ACP client, and it can load owner-managed stdio servers from `$XDG_CONFIG_HOME/cortex/mcp-servers.json`. A project-local MCP registry is deliberately unsupported: changing project contents must not install a persistent executable capability. The loader is `configuration.mcp_servers.load_mcp_servers`; setup and engine sessions validate explicit tool grants and containment.
+Cortex may pass session MCP entries supplied by the ACP client, and it can load owner-managed stdio servers from `$XDG_CONFIG_HOME/cortex/mcp-servers.json`. A project-local MCP registry is deliberately unsupported: changing project contents must not install a persistent executable capability. The loader is `load_mcp_servers`; setup and engine sessions validate explicit tool grants and containment.
 
-An owner entry whose `command`, or any `read_paths`/`write_paths` value, does not exist on the host is not forwarded to engine sessions: the checkout drops it and logs `external_mcp_server_path_missing`. A deployed package that predates this filter forwards it, and the client then sees the server close at once (`CONNECTION_CLOSED`). Correct the path or refresh the deployed package; see [browser and Playwright status](features/design-workflow/index.md#browser-and-playwright-status).
+An owner entry whose `command`, or (for a contained entry) any `read_paths`/`write_paths` value, does not exist on the host is not forwarded to engine sessions: the checkout drops it and logs `external_mcp_server_path_missing`. A deployed package that predates this filter forwards it, and the client then sees the server close at once (`CONNECTION_CLOSED`). Correct the path or refresh the deployed package; see [browser and Playwright status](features/design-workflow/index.md#browser-and-playwright-status).
 
 Example (replace executable, tool names and paths with values appropriate to your installed server):
 
@@ -419,13 +1037,15 @@ Example (replace executable, tool names and paths with values appropriate to you
 Fields:
 
 - Root `version`: integer, exactly `1`; `servers`: object keyed by server name. The loader also accepts `mcpServers` as an alias for the server map.
+- Root `containment`: optional registry default for entries without their own `containment`, `"contained"` (the default when absent) or `"none"`.
+- `containment`: optional, `"contained"` or `"none"`; overrides the root default. Any other value, at either level, makes the registry invalid. `"none"` runs the server without the Cortex sandbox, with the owner's full user authority: no Landlock, seccomp or network restriction. `read_paths`, `write_paths`, `network` and `runtime_dir_env` are then ignored (a missing grant path no longer drops the server), and the server gets the owner's `HOME`, a `PATH` of its executable's directory, `~/.local/bin`, `~/bin`, `/usr/local/bin`, `/usr/bin` and `/bin`, and the Cortex process's `XDG_RUNTIME_DIR`. Tool grants and the relay still apply, and Cortex stops the server's process group when the session ends; a daemon that detaches from that group is not stopped by Cortex. Use it only for a server you trust like any program you run yourself, typically one that cannot start inside the sandbox. It is machine-local: profiles neither capture nor replace it. The Settings switch **Run without the sandbox** writes it per server, omitting it when it equals the registry default.
 - Required `command`: non-empty executable string; `args`: optional string array, default `[]`.
 - Optional `enabled`: boolean; `false` skips this registry entry. When omitted it defaults to true.
 - `env`: optional environment object or array of `{"name":"KEY","value":"VALUE"}` objects; names and values must be strings without NUL. Reserved launch variables cannot be overridden. Do not put real credentials in this file; protect this owner-only registry and prefer a server's supported external secret source.
 - Required `allowed_tools`: non-empty list of exact tool names granted to Cortex. Unknown or omitted tools are not implicitly granted.
 - `read_only_tools`: optional array, default `[]`, subset of `allowed_tools`.
 - `coordinator_tools`: optional array, subset of `read_only_tools`; use this to limit which read-only tools the coordinator receives.
-- `read_paths`, `write_paths`: optional arrays of absolute paths, default `[]`. Writes are limited to explicit grants and the engine jail's scope.
+- `read_paths`, `write_paths`: optional arrays of absolute paths, default `[]`. Writes are limited to explicit grants and the engine jail's scope. A writing worker's scope path that does not exist yet when its session starts is not granted to the server.
 - `network`: optional boolean, default `false`.
 - `runtime_dir_env`: optional unique array of environment-variable names. The runtime provides a private per-server directory through these names. `PATH`, `HOME`, `TMPDIR`, and `XDG_RUNTIME_DIR` are reserved.
 - `always_load_tools`: optional array, subset of `allowed_tools`. The gateway marks these tools with MCP `_meta` `"anthropic/alwaysLoad": true` in `tools/list`, so Claude keeps their schemas in the prompt instead of deferring them behind `ToolSearch`. Codex ignores the mark. Each listed schema costs prompt context in every Claude session that receives the tool.
@@ -434,18 +1054,23 @@ Fields:
 
 Cortex-owned entries take precedence over client-supplied MCP entries with the same name; other client entries pass through for that session. MCP server values are loaded into memory for engine sessions, not copied into task reports. External tools still pass the gateway's channel, role, tool, path and network checks. The gateway forwards each external `tools/list` schema unchanged except that it adds a description to an argument the server leaves undescribed when Cortex knows its semantics (currently `codebase-memory-mcp` `search_graph` `file_pattern`, `name_pattern` and `qn_pattern`; see [Codex adapter](features/codex-engine/index.md#mcp-bridge)); it never replaces a description the server supplies. Claude defers MCP tool schemas behind its native `ToolSearch`. Cortex marks every tool of its own `cortex` server channel catalogue as always loaded, and external tools only when listed in `always_load_tools`. Every engine session that receives external servers also gets an "Attached MCP servers" section after its role instructions naming them (see [unified system prompt](features/unified-system-prompt/index.md)). The full `codebase-memory-mcp` procedure appears only when that role is granted `list_projects`, `search_graph`, `trace_path` and `get_code_snippet`; a partial grant yields a limited-capability note instead. For coordinators, include those tools and `index_status`/`check_index_coverage` in `coordinator_tools` if the full lookup procedure is intended; keep `index_repository` worker-only. List read-only index tools in `always_load_tools` so Claude need not discover their schemas through `ToolSearch`. Read [permissions and containment](features/permissions-and-containment/index.md) for the enforcement boundary.
 
+The additive Rust native host reads the same owner-global registry and grant fields.
+Its incoming client accepts configured names only; unlike the retained adapter's
+session fallback, an unconfigured client entry is refused. Native containment uses
+Landlock/seccomp with narrower local-socket and project-scope support, not Python's
+namespace launcher. See [native external MCP boundaries](project/native-incoming-acp.md#external-mcp-boundary)
+before selecting that optional entry point; this does not change installed clients.
+
 ## ssh from workers
 
 ssh in a worker's native shell and in `command_run` behaves as it does in your terminal. HOME is your own, read-only, so `~/.ssh/config`, `known_hosts` and host aliases apply. Cortex passes your running ssh-agent (`SSH_AUTH_SOCK` from the environment Cortex was started with) to every engine process and command, provided it names a socket you own. Keys unlocked in that agent, such as a desktop keyring's, work without a passphrase prompt. System ssh configuration that root owns, such as `/etc/ssh/ssh_config.d/*.conf`, is accepted as on the host even though the sandbox shows root's files as `nobody`'s (see [SECURITY.md](../SECURITY.md#owners-ssh-agent)). Nothing needs configuring. Without an agent, a key with a passphrase needs the optional password dialog below.
 
-For prompts the agent cannot answer (a key passphrase, a password, a new host-key confirmation), `{"enabled": true}` in `$XDG_CONFIG_HOME/cortex/ssh-askpass.json` shows ssh's own prompt in a desktop dialog. See [SECURITY.md](../SECURITY.md#owners-ssh-agent) and `orchestration.ssh_askpass`. Both apply to engine processes started after the change, so open a new session.
+For prompts the agent cannot answer (a key passphrase, a password, a new host-key confirmation), `{"enabled": true}` in `$XDG_CONFIG_HOME/cortex/ssh-askpass.json` shows ssh's own prompt in a desktop dialog. See [SECURITY.md](../SECURITY.md#owners-ssh-agent) and `ssh_askpass`. Both apply to engine processes started after the change, so open a new session.
 
 ## Temporary files and engine updates
 
-Cortex keeps its temporary files in `/var/tmp`, which is on disk
-(`cortex_runtime.tempdirs`). On many hosts `/tmp` is a tmpfs, which lives in
-RAM and swap. Every entry point (`cortex_acp.py`, `cortex.py` and the
-`scripts/`) points `TMPDIR` at `/var/tmp` when it is unset or is `/tmp`
+Cortex keeps its temporary files in `/var/tmp`, which is on disk. On many hosts `/tmp` is a tmpfs, which lives in
+RAM and swap. Every entry point points `TMPDIR` at `/var/tmp` when it is unset or is `/tmp`
 itself. An explicit `TMPDIR` is kept: a sandbox's own scratch, an isolated
 test run, or your own choice. Child processes inherit it.
 
@@ -467,25 +1092,11 @@ sandbox tests rely on the shared, writable `/tmp`, while a sandbox's
 Check the current user registry and engine discovery without printing secret values:
 
 ```bash
-python3 -B scripts/cortex_acp_setup.py status
+scripts/cortex-paseo-tools.sh status
 ```
 
-For a broader offline check (storage layout and permissions, pinned-dependency digests, connection and route availability, adapter qualification and, with `--project`, that project's policy ceiling), run the non-paid diagnostics. They make no model call. JSON is the default output; use `--format text` for a summary. Exit code `0` means ok, `1` degraded (a repairable gap) and `2` failed:
+The former offline diagnostics report (`cortex_diagnose`) and the Python loader examples were removed on 2026-11-16 without replacement. To check configuration without a model call, use the read-only `status` above, or read the same data through the settings API (`cortex-paseo-tools config`, one JSON request on stdin) under isolated `HOME`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME` outside every repository, with owner-only JSON files under `$XDG_CONFIG_HOME/cortex`. For routing, `CORTEX_ROUTING` may name a JSON file containing the documented routing shape. A read creates neither example registry files nor the project store.
 
-```bash
-python3 -B scripts/cortex_diagnose.py --format text
-python3 -B scripts/cortex_diagnose.py --project /path/to/project
-```
-
-To validate the documented loader examples without reading the real user registry, set isolated `HOME`, `XDG_CONFIG_HOME`, and `XDG_STATE_HOME` outside every repository and call the project loaders. For example:
-
-```bash
-env PYTHONPATH=src HOME=/tmp/cortex-config-check/home XDG_CONFIG_HOME=/tmp/cortex-config-check/config XDG_STATE_HOME=/tmp/cortex-config-check/state python3 -B -c 'from cortex_runtime.configuration.store import read_user_defaults; from cortex_runtime.configuration.mcp_servers import load_mcp_servers; print(read_user_defaults()); print(load_mcp_servers("/tmp/cortex-config-check/project"))'
-```
-
-Create owner-only JSON files under `$XDG_CONFIG_HOME/cortex` before running that command. For routing, set `CORTEX_ROUTING` to a JSON file containing the documented routing shape and call `routing.auto_route.load_overrides(project_root)`. The loader creates neither example registry files nor the project directory. Invalid existing registries fail closed; routing rejects malformed values in supported keys and ignores unknown routing keys.
-
-Relevant source: `connections.registry`, `connections.model`, `connections.onboarding`, `configuration.store`, `configuration.resolution`, `configuration.policy`, `configuration.mcp_servers`, and `routing.auto_route`.
 
 ## Settings-only model policy
 
@@ -674,7 +1285,7 @@ qualification was performed.
 
 ### Exact quota-window associations
 
-Version-2 routing also accepts optional `quota_windows`: an engine id to an ordered list of `{ "window": <exact reported label>, "models": <null or list of exact model ids> }` rules. Configuration API version 1 accepts the same field under `routing.rules`; the public installation envelope stays schema version 1. For example (this policy fragment does not enable any models):
+Version-2 routing also accepts optional `quota_windows`: an engine id to an ordered list of `{ "window": <exact reported label>, "models": <null or list of exact model ids> }` rules. Configuration API version 1 accepts the same field through the settings API; the public installation envelope stays schema version 1. For example (this policy fragment does not enable any models):
 
 ```json
 {
@@ -696,9 +1307,7 @@ Version-2 routing also accepts optional `quota_windows`: an engine id to an orde
 
 **Editing and migration:** Routing → Quota window associations provides typed exact-label, shared/exact-model and model-list controls. Unknown/unrepresentable rule data makes the form read-only; it is not dropped on save. Revision conflicts require reload and explicit resubmission. CLI access remains independent of Paseo screen reachability: send configuration API v1 routing updates or use the explicit candidate migration script. For a file without mappings, copy its complete current settings to an owner candidate, add reviewed associations, preview, then apply against the preview's `expected_revision` and `candidate_sha256` with `--i-consent`. Existing decisions are preserved; the migration refuses changes to an existing association list, which instead requires a deliberate configuration update. Example preview:
 
-```sh
-python3 -B scripts/cortex_model_policy_migrate.py preview --candidate /absolute/owner-candidate.json
-```
+The former candidate-migration helper (`cortex_model_policy_migrate`) was removed on 2026-11-16 without replacement; apply a candidate through the Settings API under the revision rules above.
 
 Saved profiles capture this field on explicit save/create and restore it on activation; older snapshots are not silently rewritten or filled from working settings/template data. Migrate a saved snapshot from its own candidate with `--profile`, or save the intended current working settings explicitly. Deleting a selected profile still only unlinks it, without resetting materialized settings.
 

@@ -18,9 +18,9 @@ See [requirements](../requirements.md).
 
 ## Inputs
 
-- Precedent: the command-stop reason is delivered inside a gateway tool result (`src/cortex_runtime/orchestration/command_control.py`, the "Stopped by user" message).
-- Existing user steering is a durable event keyed by message identity and requirement revision ([steering and questions](../../features/steering-and-questions/index.md)). `record_steering` (`src/cortex_runtime/acp/steering.py`) records task-level steering for the coordinator; it does not route text to a worker.
-- The event enums already name a `coordinator_clarification` type (`src/cortex_runtime/delegation/events.py`, `src/cortex_runtime/delegation/events_store.py`), and the recovery capsule reads it (`src/cortex_runtime/recovery/capsule.py`). No producer exists in `src/`. Reusing it is a design decision to record in [protocol](../protocol.md); a dedicated worker-message event type is the default.
+- Precedent: the command-stop reason is delivered inside a gateway tool result (the former `orchestration/command_control` module, the "Stopped by user" message).
+- Existing user steering is a durable event keyed by message identity and requirement revision ([steering and questions](../../features/steering-and-questions/index.md)). `record_steering` (the former `acp/steering` module) records task-level steering for the coordinator; it does not route text to a worker.
+- The event enums already name a `coordinator_clarification` type (the former `delegation/events` module, the former `delegation/events_store` module), and the recovery capsule reads it (the former `recovery/capsule` module). No producer exists in `src/`. Reusing it is a design decision to record in [protocol](../protocol.md); a dedicated worker-message event type is the default.
 - Engine limit: native engine tools (read, edit, shell) are not mediated by the runtime. A worker that uses only native tools receives a message at its next Cortex tool call, and the UI must say so.
 - [CW-C08](CW-C08.md) (steer command shape), [CW-C03](CW-C03.md) (idempotency), [CW-C06](CW-C06.md) (stable execution identities).
 

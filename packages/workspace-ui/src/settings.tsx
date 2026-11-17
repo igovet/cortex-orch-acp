@@ -4,11 +4,12 @@ import type { ThemePref } from "./theme";
 import { sizeText } from "./archive-model";
 import { useWs } from "./ctx";
 import { ScreenActive } from "./freshness";
-import { A, I, MenuItem, NameEdit, Pop } from "./kit";
+import { FieldEdit, NameEdit } from "./field-edit";
+import { A, I, Keyed, MenuItem, OverviewShown, Pop, useOverviewWait, useWantOverview } from "./kit";
 import { Page as Frame, revealCutIn } from "./layout";
 import { Orchestration, useReadOnly } from "./orchestration";
 import type { Route } from "./router";
-import { clock, dayClock, engineLimits, plainVersion, projectsOn } from "./selectors";
+import { asOf, clock, dayClock, engineLimits, limitsText, plainVersion, projectsOn } from "./selectors";
 import { HELP } from "./orch-help";
 import { Adv, Hint, Pick, SaveBar, Seg, SetH, Srow, Stepper, Sw } from "./settings-kit";
 import { useDraft } from "./settings-state";
@@ -54,6 +55,7 @@ function Machines() {
   const list = () => ws.store.state().machines;
   const count = (m: Machine) => projectsOn(ws.store.index(), m.id).length;
   const reconnect = (m: Machine) => ws.demo ? ws.demo.reconnect(m.id) : void ws.store.reload();
+  useWantOverview();
   return <Page title="Machines" lead="A machine is a running copy of this app. Projects live on a machine. You work on one at a time, while Inbox and Archive cover them all.">
     <SetH title={<>{list().length} machine{list().length === 1 ? "" : "s"}</>}><button class="btn btn-primary" {...ws.needs("pair_machine")} onClick={() => ws.open({ kind: "add-machine" })}><I n="plus" s={14} />Add remote machine…</button></SetH>
     <div class="surface"><For each={list()}>{m => <div class="mcard">
@@ -61,7 +63,7 @@ function Machines() {
       <span class="ws-free"><span class="tt">{m.name}</span><span class="ds">
         <span>{m.kind === "local" ? "Local" : "Remote, through the server connector"}</span>
         <span>{count(m)} project{count(m) === 1 ? "" : "s"}{m.connection === "connected" ? "" : ", last known"}</span>
-        <Show when={m.version}><span>Version {plainVersion(m.version!)}</span></Show>
+        <Show when={m.version && ws.store.overviewLoaded()}><span>Version {plainVersion(m.version!)}</span></Show>
         <Show when={m.latencyMs !== null && m.connection === "connected"}><span>{m.latencyMs} ms observed</span></Show>
       </span></span>
       <span class="row">
@@ -80,26 +82,27 @@ function Machines() {
 function Overview() {
   const ws = useWs();
   const m = () => ws.machine(), off = useReadOnly();
-  const limits = createMemo(() => engineLimits(ws.store.state(), m()).rows.filter(r => r.usedPercent !== null));
+  const limits = createMemo(() => engineLimits(ws.store.state(), m()).rows);
   const count = () => projectsOn(ws.store.index(), m().id).length;
-  const rename = (name: string) => { if (name.trim() && name !== m().name) ws.run({ type: "rename_machine", machineId: m().id, name }); };
+  useWantOverview();
+  const loaded = () => ws.store.overviewLoaded();
   const remove = () => ws.open({ kind: "confirm", title: `Remove ${m().name}?`, danger: true, action: "Remove machine", note: `This app forgets the machine, its ${count()} projects and their tasks. Nothing on the machine itself is touched.`, go() { const id = m().id; const local = ws.store.state().machines.find(x => x.kind === "local")!; ws.go({ name: "home", machine: local.id }); return ws.run({ type: "remove_machine", machineId: id, confirmed: true }).then(r => r.ok); } });
   return <Page title={m().name} lead={m().kind === "local" ? "The process you started on this computer." : "A remote process you connected to through the server connector."}>
     <div class="surface">
-      <Srow t="Name" d="Shown in the machine switcher."><input class="inp ws-name" aria-label="Machine name" value={m().name} disabled={!!off()} onChange={e => rename(e.currentTarget.value)} /></Srow>
+      <Srow t="Name" d="Shown in the machine switcher."><OverviewShown inline><FieldEdit class="ws-name-edit" label="Machine name" value={m().name} off={off() ?? ws.gate("rename_machine")} save={name => ws.run({ type: "rename_machine", machineId: m().id, name })} /></OverviewShown></Srow>
       <Srow t="Connection" d={m().kind === "local" ? "Local process, no connector involved." : "Through the server connector."}>
         <Show when={m().connection === "connected"} fallback={<span class="st st-idle"><I n="wifi-off" s={12} />Offline</span>}><span class="st st-ok"><I n="check-circle" s={12} />Connected</span></Show>
       </Srow>
       <Show when={m().lastConfirmedAt}><Srow t="Last confirmed" d="Latest answer from the process."><span class="tnum">{clock(m().lastConfirmedAt)}</span></Srow></Show>
       <Srow t="Projects" d="Repositories added to this machine."><A class="lnk" to={{ name: "home", machine: m().id }}>{count()} project{count() === 1 ? "" : "s"}</A></Srow>
-      <Show when={m().version}><Srow t="Version" d="What is installed on this machine."><span class="tnum">{plainVersion(m().version!)}</span></Srow></Show>
-      <Show when={m().diskMb !== null}><Srow t="Disk used" d="Database and saved reports."><A class="lnk" to={{ name: "settings", section: "storage", machine: m().id }}>{sizeText(m().diskMb!)}</A></Srow></Show>
-      <Show when={limits().length > 0}><Srow t="Engine limits" d="Used this week."><A class="lnk" to={{ name: "settings", section: "connections", machine: m().id }}>{limits().map(l => `${l.label} ${l.usedPercent}%`).join(", ")}</A></Srow></Show>
+      <Show when={!loaded() || m().version}><Srow t="Version" d="What is installed on this machine."><OverviewShown inline><span class="tnum">{plainVersion(m().version!)}</span></OverviewShown></Srow></Show>
+      <Show when={!loaded() || m().diskMb !== null}><Srow t="Disk used" d="Database and saved reports."><OverviewShown inline><A class="lnk" to={{ name: "settings", section: "storage", machine: m().id }}>{sizeText(m().diskMb!)}</A></OverviewShown></Srow></Show>
+      <Show when={limits().length > 0}><Srow t="Engine limits" d="Used this week."><A class="lnk" to={{ name: "settings", section: "connections", machine: m().id }}>{limitsText(limits())}</A></Srow></Show>
     </div>
     <SetH title="Open machine settings" />
     <div class="two">
       <A class="rc" to={{ name: "settings", section: "orchestration", machine: m().id }}><span><span class="t">Orchestration</span><span class="d">Models, effort, access and routing for new tasks</span></span></A>
-      <A class="rc" to={{ name: "settings", section: "storage", machine: m().id }}><span><span class="t">Storage and archive</span><span class="d">{m().retentionDays} days retention, {m().autoArchiveDays} days before auto archive</span></span></A>
+      <A class="rc" to={{ name: "settings", section: "storage", machine: m().id }}><span><span class="t">Storage and archive</span><span class="d"><OverviewShown inline><>{m().retentionDays} days retention, {m().autoArchiveDays} days before auto archive</></OverviewShown></span></span></A>
     </div>
     <Show when={m().kind === "remote"}><div class="row"><button class="btn btn-line btn-sm" {...ws.needs("remove_machine")} onClick={remove}>Remove machine…</button></div></Show>
   </Page>;
@@ -126,34 +129,37 @@ function Connections() {
     <Show when={waiting().length > 0}><div class="note-box"><I n="alert" s={14} class="st-warn" /><span>To finish setup, sign in to {waiting().map(c => c.label).join(", ")} on this machine, then press Check.</span></div></Show>
     <div class="surface"><div class="gt">
       <div class="gr crow th"><span>Connection</span><span>State</span><span></span><span></span></div>
-      <For each={m().connections}>{c => <div class="gr crow">
-        <span class="trunc"><NameEdit class="w500" label="Connection name" value={c.label} disabled={off() ?? ws.gate("rename_connection")} onSave={name => { void ws.run({ type: "rename_connection", machineId: m().id, connectionId: c.id, name }); }} /><span class="sub">{c.note}, {c.sessions} session{c.sessions === 1 ? "" : "s"} max{c.checkedAt ? `, checked ${clock(c.checkedAt)}` : ""}</span></span>
-        <span><span class={`st ${stateOf(c).tone}`}><I n={stateOf(c).icon} s={12} />{stateOf(c).text}</span></span>
-        <span class="row ws-gap4"><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs("check_connection")} onClick={guard(() => ws.run({ type: "check_connection", machineId: m().id, connectionId: c.id, now: ws.store.clock() }))}>Check</button>
+      <Keyed each={m().connections} by={c => c.id}>{c => <div class="gr crow">
+        <span class="trunc"><NameEdit class="w500" label="Connection name" value={c().label} disabled={off() ?? ws.gate("rename_connection")} onSave={name => ws.run({ type: "rename_connection", machineId: m().id, connectionId: c().id, name })} /><span class="sub">{c().note}, {c().sessions} session{c().sessions === 1 ? "" : "s"} max{c().checkedAt ? `, checked ${clock(c().checkedAt)}` : ""}</span></span>
+        <span><span class={`st ${stateOf(c()).tone}`}><I n={stateOf(c()).icon} s={12} />{stateOf(c()).text}</span></span>
+        <span class="row ws-gap4"><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs("check_connection")} onClick={guard(() => ws.run({ type: "check_connection", machineId: m().id, connectionId: c().id, now: ws.store.clock() }))}>Check</button>
           <button class="btn btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs("refresh_models")} onClick={guard(() => ws.run({ type: "refresh_models", machineId: m().id, now: ws.store.clock() }))}>Refresh models</button></span>
-        <button class="ib ws-ib" popovertarget={off() ? undefined : `m-conn-${c.id}`} aria-label={`More for ${c.label}`} aria-disabled={off() ? "true" : undefined} data-why={off()}><I n="more" s={14} /></button>
-        <Pop id={`m-conn-${c.id}`} class="pop-right" align="right" label={c.label}>
-          <MenuItem icon="sliders" label="Maximum sessions…" needs="set_sessions" onSelect={() => ws.open({ kind: "prompt", title: `Maximum sessions on ${c.label}`, label: "Sessions, 1 to 64", value: String(c.sessions), action: "Save", go: text => ws.run({ type: "set_sessions", machineId: m().id, connectionId: c.id, sessions: Number(text) }).then(r => r.ok) })} />
-          <MenuItem icon="trash" label="Remove…" danger needs="remove_connection" onSelect={() => ws.open({ kind: "confirm", title: `Remove ${c.label}?`, danger: true, action: "Remove", note: "Tasks already running keep their route. New tasks can no longer use it.", go: () => ws.run({ type: "remove_connection", machineId: m().id, connectionId: c.id }).then(r => r.ok) })} />
+        <button class="ib ws-ib" popovertarget={off() ? undefined : `m-conn-${c().id}`} aria-label={`More for ${c().label}`} aria-disabled={off() ? "true" : undefined} data-why={off()}><I n="more" s={14} /></button>
+        <Pop id={`m-conn-${c().id}`} class="pop-right" align="right" label={c().label}>
+          <MenuItem icon="sliders" label="Maximum sessions…" needs="set_sessions" onSelect={() => ws.open({ kind: "prompt", title: `Maximum sessions on ${c().label}`, label: "Sessions, 1 to 64", value: String(c().sessions), action: "Save", go: text => ws.run({ type: "set_sessions", machineId: m().id, connectionId: c().id, sessions: Number(text) }).then(r => r.ok) })} />
+          <MenuItem icon="trash" label="Remove…" danger needs="remove_connection" onSelect={() => ws.open({ kind: "confirm", title: `Remove ${c().label}?`, danger: true, action: "Remove", note: "Tasks already running keep their route. New tasks can no longer use it.", go: () => ws.run({ type: "remove_connection", machineId: m().id, connectionId: c().id }).then(r => r.ok) })} />
         </Pop>
-      </div>}</For>
+      </div>}</Keyed>
     </div></div>
     <A class="lnk" to={{name:"settings", section:"orchestration", machine:m().id, page:"models"}}>Engine models and observed context</A>
     <For each={m().connections}>{c => <Adv id={`conn-${c.id}`} label={`Details of ${c.label}`}><div class="surface ws-pad ws-kv">
       <For each={[["Engine", engineLabel(CONNECTION_ENGINE[c.engine])], ["Provider", c.detail.provider], ["Sign-in", c.detail.authMode], ["Key kind", c.detail.keyKind], ["Endpoint", c.detail.endpoint], ["Launch command", c.detail.launchCommand], ["Credential", c.detail.credential], ["Qualified", c.detail.qualified ? "Yes" : "No"], ["Created", c.detail.createdAt], ["Updated", c.detail.updatedAt]].filter(([, v]) => v)}>{([k, v]) => <><span class="cap muted">{k}</span><span class="cap mono trunc">{v}</span></>}</For>
     </div></Adv>}</For>
     <SetH title="Limits" />
-    <Show when={limits().rows.some(r => r.usedPercent !== null)} fallback={<div class="surface ws-empty">{limits().note}</div>}>
+    <Show when={limits().rows.length > 0} fallback={<div class="surface ws-empty">{limits().note}</div>}>
       <div class="surface"><div class="gt">
         <div class="gr urow th"><span>Engine</span><span>Window</span><span>Used</span><span>Resets</span><span>Basis</span></div>
-        <For each={limits().rows.filter(r => r.usedPercent !== null)}>{r => <div class="gr urow">
-          <span class="w500">{r.label}</span><span>This week</span>
-          <Show when={r.usedPercent !== null} fallback={<span class="muted">Unavailable</span>}><span class="u-used"><span class="bar"><i style={{ width: `${r.usedPercent}%` }}></i></span><span class="tnum">{r.usedPercent}% used</span></span></Show>
-          <span class="tnum">{r.resetAt ? dayClock(r.resetAt) : ""}</span><span class="cap muted">{r.observedAt ? `Observed ${clock(r.observedAt)}` : ""}</span>
-        </div>}</For>
+        <For each={limits().rows.flatMap(r => r.windows.map(w => ({ r, w })))}>{({ r, w }) => {
+          const seen = () => asOf(w.observedAt, ws.store.clock());
+          return <div class="gr urow">
+            <span class="w500">{r.label}</span><span>{w.name}</span>
+            <Show when={w.usedPercent !== null} fallback={<span class="muted">Not reported</span>}><span class="u-used"><span class="bar"><i style={{ width: `${w.usedPercent}%` }}></i></span><span class="tnum">{w.usedPercent}% used</span></span></Show>
+            <span class="tnum">{w.resetAt ? dayClock(w.resetAt) : ""}</span><span class={`cap ${seen()?.stale ? "st-warn" : "muted"}`}>{seen()?.text ?? ""}</span>
+          </div>;
+        }}</For>
       </div></div>
     </Show>
-    <p class="hint">Percentages come from each provider and are a snapshot, not a live meter. An unknown value is never counted as zero.</p>
+    <p class="hint">Percentages come from each provider and are a snapshot, read again every few minutes while the app is open, not a live meter. A snapshot older than 15 minutes is marked stale. An unknown value is never counted as zero.</p>
   </Page>;
 }
 
@@ -164,14 +170,15 @@ function Worktrees() {
   const d = useDraft<string>({ key: () => `${m().id}:worktrees`, saved: () => m().worktreeRoot, name: () => "Worktrees", where: () => m().name, commit: path => ws.run({ type: "set_worktree_root", machineId: m().id, path }) });
   const defaultRoot = () => m().defaultWorktreeRoot ?? (ws.store.mode === "demo" ? DEFAULT_WORKTREE_ROOT : undefined);
   const example = () => `${d.value().replace(/\/+$/, "")}/<project-key>/<task-id>`;
+  useWantOverview();
   return <Page title="Worktrees" lead="Where this machine keeps the separate checkouts of tasks that do not run in the project folder." bar={<SaveBar d={d} />}>
-    <div class="surface">
+    <div class="surface"><OverviewShown>
       <Srow t="Folder" d="New worktrees go here, one folder per project. Existing worktrees stay where they are.">
         <input class="inp mono ws-path" aria-label="Worktree folder" value={d.value()} disabled={!!off()} onInput={e => d.set(e.currentTarget.value)} />
         <button class="btn btn-line btn-sm" aria-disabled={off() || !defaultRoot() || d.value() === defaultRoot() ? "true" : undefined} data-why={defaultRoot() ? undefined : "The machine has not reported its default folder yet"} onClick={() => { const path = defaultRoot(); if (!off() && path) d.set(path); }}>Use default</button>
       </Srow>
       <div class="srow" style={{ "grid-template-columns": "minmax(0, 1fr) minmax(0, 1.5fr)" }}><span><span class="t">Example path</span><span class="d">What a new worktree would look like.</span></span><span class="mono cap muted trunc">{example()}</span></div>
-    </div>
+    </OverviewShown></div>
   </Page>;
 }
 
@@ -181,17 +188,20 @@ function Storage() {
   const d = useDraft<{ retention: number; auto: number }>({ key: () => `${m().id}:storage`, saved: () => ({ retention: m().retentionDays, auto: m().autoArchiveDays }), name: () => "Storage and archive", where: () => m().name, commit: v => ws.run({ type: "save_storage", machineId: m().id, retentionDays: v.retention, autoArchiveDays: v.auto }) });
   const total = () => m().storage.reduce((sum, s) => sum + s.mb, 0);
   const last = () => m().cleanup;
+  useWantOverview();
+  const wait = useOverviewWait();
   return <Page title="Storage and archive" lead="How long this machine keeps finished work, and what it uses." bar={<SaveBar d={d} />}>
     <SetH title="Archive rules" />
-    <div class="surface">
+    <div class="surface"><OverviewShown>
       <Srow t="Auto archive" d="Tasks move from Done to Archive after this many days. Unmerged work asks you first."><Stepper label="Auto archive" value={d.value().auto} suffix="days" min={1} max={90} disabled={off()} onChange={auto => d.set({ ...d.value(), auto })} /></Srow>
       <Srow t="Retention" d="Archived tasks are cleaned up after this many days. 30 by default, set per machine."><Stepper label="Retention" value={d.value().retention} suffix="days" min={1} max={365} disabled={off()} onChange={retention => d.set({ ...d.value(), retention })} /></Srow>
       <Srow t="Space reclamation failures" d="Deleted records whose SQLite space could not be reclaimed. Deletion is not rolled back; close readers before maintenance."><span class={m().reclamationFailures ? "st st-warn" : "cap muted"}>{m().reclamationFailures ?? 0} records</span></Srow>
-      <Srow t="Last cleanup" d={last() ? `${clock(last()!.at)}: removed ${last()!.removed} task${last()!.removed === 1 ? "" : "s"}, ${last()!.skipped} skipped and waiting for you. ${last()!.reclamationFailed ?? 0} records failed space reclamation.${last()!.freedMb ? ` ${sizeText(last()!.freedMb)} freed.` : ""}` : "No cleanup has run on this machine yet."}>
+      </OverviewShown>
+      <Srow t="Last cleanup" d={wait() ?? (last() ? `${clock(last()!.at)}: removed ${last()!.removed} task${last()!.removed === 1 ? "" : "s"}, ${last()!.skipped} skipped and waiting for you. ${last()!.reclamationFailed ?? 0} records failed space reclamation.${last()!.freedMb ? ` ${sizeText(last()!.freedMb)} freed.` : ""}` : "No cleanup has run on this machine yet.")}>
         <button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs("run_cleanup")} onClick={() => { if (!off()) ws.run({ type: "run_cleanup", machineId: m().id, now: ws.store.clock() }); }}>Run cleanup now</button>
       </Srow>
     </div>
-    <Show when={m().storage.length > 0}>
+    <Show when={ws.store.overviewLoaded() && m().storage.length > 0}>
       <SetH title="Space used"><span class="cap muted tnum">{sizeText(total())} in total</span></SetH>
       <div class="surface ws-pad"><For each={m().storage}>{s => <div class="dbar"><span class="trunc">{s.label}</span><span class="bar"><i style={{ width: `${Math.round(s.mb / total() * 100)}%` }}></i></span><span class="tnum muted ws-right">{sizeText(s.mb)}</span></div>}</For></div>
     </Show>
@@ -206,17 +216,21 @@ function Diagnostics() {
   const run = () => m().diagnostics;
   const items = () => run()?.items ?? [];
   const recovery = (item: NonNullable<NonNullable<Machine["diagnostics"]>["items"]>[number]) => item.action || (item.ok ? "" : item.name === "npm" ? "Make npm available to the desktop service (not just your terminal), restart the service, then run diagnostics again." : "Run diagnostics again for current details and recovery steps.");
+  useWantOverview();
+  const wait = useOverviewWait();
   const report = () => `Diagnostics. Machine: ${m().name}. Runtime: ${m().version ?? "unknown"}. Result: ${run()?.status ?? "not run"}, ${run()?.checks ?? 0} checks.\n${items().map(item => `${item.name}: ${item.ok ? "OK" : "Needs attention"}. ${item.detail}. ${recovery(item)}`).join("\n")}${!items().length && run() ? "\nDetails were not retained. Run diagnostics again." : ""}${ws.t("reportNote")}`;
   return <Page title="Diagnostics" lead="Check that this machine can run tasks.">
     <div class="surface">
-      <Srow t="Run diagnostics" d={run() ? `Last run ${clock(run()!.at)}: ${run()!.status}, ${run()!.checks} checks.` : "Not run on this machine yet."}>
-        <Show when={run()}>{r => <span class={`st ${r().status === "ok" ? "st-ok" : "st-warn"}`}><I n={r().status === "ok" ? "check-circle" : "alert"} s={12} />{r().status === "ok" ? "Ok" : r().status === "degraded" ? "Degraded" : "Failed"}</span>}</Show>
+      <Srow t="Run diagnostics" d={wait() ?? (run() ? `Last run ${clock(run()!.at)}: ${run()!.status}, ${run()!.checks} checks.` : "Not run on this machine yet.")}>
+        <Show when={!wait() && run()}>{r => <span class={`st ${r().status === "ok" ? "st-ok" : "st-warn"}`}><I n={r().status === "ok" ? "check-circle" : "alert"} s={12} />{r().status === "ok" ? "Ok" : r().status === "degraded" ? "Degraded" : "Failed"}</span>}</Show>
         <button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs("run_diagnostics")} onClick={() => { if (!off()) ws.run({ type: "run_diagnostics", machineId: m().id, now: ws.store.clock() }); }}>Run</button>
       </Srow>
+      <OverviewShown><>
       <For each={items()}>{item => <Srow t={item.name} d={`${item.detail || (item.ok ? "Available" : "Needs attention")}${recovery(item) ? `. ${recovery(item)}` : ""}`}><span class={item.ok ? "st st-ok" : "st st-warn"}>{item.ok ? "OK" : "Needs attention"}</span></Srow>}</For>
       <Show when={run() && !items().length}><Srow t="Details unavailable" d="This older diagnostic did not retain details. Run diagnostics again to see which checks need attention and what to do." /></Show>
       <Srow t="Report" d="Copies a report with no secrets in it."><button class="btn btn-line btn-sm" onClick={() => { void navigator.clipboard?.writeText(report()); }}><I n="copy" s={12} />Copy report</button></Srow>
       <Show when={m().version}><Srow t="Build" d="The exact package on this machine."><span class="mono cap">{m().version}</span></Srow></Show>
+      </></OverviewShown>
       <For each={m().connections}>{c => <Srow t={`${c.label} connection`} d="Identifier for support."><span class="mono cap">{c.detail.connectionId}</span></Srow>}</For>
       <Srow t="Logs" d="Private, rotating service events only: timestamps and fixed status categories. No prompts, environment, commands or credentials."><button class="btn btn-line btn-sm" aria-disabled={ws.noOpener("workspace.open_logs", "noLogOpener") ? "true" : undefined} data-why={ws.noOpener("workspace.open_logs", "noLogOpener")} onClick={() => { if (!ws.noOpener("workspace.open_logs", "noLogOpener")) ws.run({ type: "open_logs", machineId: m().id }); }}>Open logs</button></Srow>
     </div>

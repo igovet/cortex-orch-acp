@@ -15,7 +15,7 @@ function Answer(props: { onSend: (text: string, files: unknown[]) => void }) {
     send={{ label: "Send answer", why: text().trim() ? undefined : "Write an answer first", go: () => props.onSend(text(), files.files()) }} />;
 }
 
-// jsdom has no layout, so this stands in for the box a browser would compute. It proves the logic, not the rendered result: layout-fit.py has that.
+// jsdom has no layout, so this stands in for the box a browser would compute. It proves the logic, not the rendered result: layout-fit.driver.mjs has that.
 const FLOOR = 46, CAP = 200, LINE = 22;
 function laidOut(el: HTMLTextAreaElement) {
   const state = { hidden: false, width: 600, measured: () => {} };

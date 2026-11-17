@@ -1,0 +1,2736 @@
+{
+  "oracle": "machine_tools.main",
+  "sourceSha256": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+  "cases": [
+    {
+      "name": "engine-empty",
+      "op": "engine.connection",
+      "params": {},
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Unsupported connection action."
+      }
+    },
+    {
+      "name": "engine-status",
+      "op": "engine.connection",
+      "params": {
+        "action": "status"
+      },
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Unsupported connection action."
+      }
+    },
+    {
+      "name": "engine-null-action",
+      "op": "engine.connection",
+      "params": {
+        "action": null
+      },
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Unsupported connection action."
+      }
+    },
+    {
+      "name": "engine-number-action",
+      "op": "engine.connection",
+      "params": {
+        "action": 5
+      },
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Unsupported connection action."
+      }
+    },
+    {
+      "name": "engine-list-action",
+      "op": "engine.connection",
+      "params": {
+        "action": [
+          "recheck"
+        ]
+      },
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Unsupported connection action."
+      }
+    },
+    {
+      "name": "engine-object-action",
+      "op": "engine.connection",
+      "params": {
+        "action": {
+          "a": 1
+        }
+      },
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Unsupported connection action."
+      }
+    },
+    {
+      "name": "engine-null-params",
+      "op": "engine.connection",
+      "params": null,
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Unsupported connection action."
+      }
+    },
+    {
+      "name": "engine-empty-list",
+      "op": "engine.connection",
+      "params": [],
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Unsupported connection action."
+      }
+    },
+    {
+      "name": "engine-false-params",
+      "op": "engine.connection",
+      "params": false,
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Unsupported connection action."
+      }
+    },
+    {
+      "name": "engine-zero-params",
+      "op": "engine.connection",
+      "params": 0,
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Unsupported connection action."
+      }
+    },
+    {
+      "name": "engine-empty-string",
+      "op": "engine.connection",
+      "params": "",
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Unsupported connection action."
+      }
+    },
+    {
+      "name": "engine-string-params",
+      "op": "engine.connection",
+      "params": "recheck",
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": null
+    },
+    {
+      "name": "engine-list-params",
+      "op": "engine.connection",
+      "params": [
+        1
+      ],
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": null
+    },
+    {
+      "name": "engine-number-params",
+      "op": "engine.connection",
+      "params": 3,
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": null
+    },
+    {
+      "name": "engine-true-params",
+      "op": "engine.connection",
+      "params": true,
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": null
+    },
+    {
+      "name": "engine-login-other-engine",
+      "op": "engine.connection",
+      "params": {
+        "action": "remove",
+        "engine": "codex-acp"
+      },
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Unsupported connection action."
+      }
+    },
+    {
+      "name": "task-unknown",
+      "op": "product.task",
+      "params": {
+        "action": "bogus",
+        "taskId": "t1"
+      },
+      "project": true,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/machine.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      }
+    },
+    {
+      "name": "task-missing-action",
+      "op": "product.task",
+      "params": {
+        "taskId": "t1"
+      },
+      "project": true,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/machine.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      }
+    },
+    {
+      "name": "task-number-action",
+      "op": "product.task",
+      "params": {
+        "action": 7,
+        "taskId": "t1"
+      },
+      "project": true,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/machine.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      }
+    },
+    {
+      "name": "task-list-action",
+      "op": "product.task",
+      "params": {
+        "action": [
+          "edit"
+        ],
+        "taskId": "t1"
+      },
+      "project": true,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/machine.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      }
+    },
+    {
+      "name": "task-unknown-invalid-task",
+      "op": "product.task",
+      "params": {
+        "action": "bogus",
+        "taskId": "../x"
+      },
+      "project": true,
+      "production": {
+        "ok": false,
+        "code": "invalid_task",
+        "message": "Unknown task."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "invalid_task",
+        "message": "Unknown task."
+      }
+    },
+    {
+      "name": "task-unknown-missing-task",
+      "op": "product.task",
+      "params": {
+        "action": "bogus"
+      },
+      "project": true,
+      "production": {
+        "ok": false,
+        "code": "invalid_task",
+        "message": "Unknown task."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "invalid_task",
+        "message": "Unknown task."
+      }
+    },
+    {
+      "name": "task-null-params",
+      "op": "product.task",
+      "params": null,
+      "project": true,
+      "production": {
+        "ok": false,
+        "code": "invalid_task",
+        "message": "Unknown task."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "invalid_task",
+        "message": "Unknown task."
+      }
+    },
+    {
+      "name": "task-false-params",
+      "op": "product.task",
+      "params": false,
+      "project": true,
+      "production": {
+        "ok": false,
+        "code": "invalid_task",
+        "message": "Unknown task."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "invalid_task",
+        "message": "Unknown task."
+      }
+    },
+    {
+      "name": "task-list-params",
+      "op": "product.task",
+      "params": [
+        1
+      ],
+      "project": true,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": null
+    },
+    {
+      "name": "task-string-params",
+      "op": "product.task",
+      "params": "edit",
+      "project": true,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": null
+    },
+    {
+      "name": "task-number-params",
+      "op": "product.task",
+      "params": 2,
+      "project": true,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": null
+    },
+    {
+      "name": "config-unknown",
+      "op": "config.action",
+      "params": {
+        "action": "bogus"
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      }
+    },
+    {
+      "name": "config-empty",
+      "op": "config.action",
+      "params": {},
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      }
+    },
+    {
+      "name": "config-null-action",
+      "op": "config.action",
+      "params": {
+        "action": null
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      }
+    },
+    {
+      "name": "config-list-action",
+      "op": "config.action",
+      "params": {
+        "action": [
+          "refresh"
+        ]
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "machine_tool_failed",
+        "message": "TypeError"
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "machine_tool_failed",
+        "message": "TypeError"
+      }
+    },
+    {
+      "name": "config-null-params",
+      "op": "config.action",
+      "params": null,
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      }
+    },
+    {
+      "name": "config-false-params",
+      "op": "config.action",
+      "params": false,
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "This machine does not support that yet."
+      }
+    },
+    {
+      "name": "config-list-params",
+      "op": "config.action",
+      "params": [
+        1
+      ],
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": null
+    },
+    {
+      "name": "config-string-params",
+      "op": "config.action",
+      "params": "refresh",
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": null
+    },
+    {
+      "name": "config-number-params",
+      "op": "config.action",
+      "params": 9,
+      "project": false,
+      "production": null,
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": null
+    },
+    {
+      "name": "config-profile-rename",
+      "op": "config.action",
+      "params": {
+        "action": "profile",
+        "verb": "rename",
+        "expected_revision": "absent"
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action 'rename' is not supported for surface 'routing_profiles'."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action 'rename' is not supported for surface 'routing_profiles'."
+      }
+    },
+    {
+      "name": "config-profile-missing-verb",
+      "op": "config.action",
+      "params": {
+        "action": "profile",
+        "name": "x"
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action None is not supported for surface 'routing_profiles'."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action None is not supported for surface 'routing_profiles'."
+      }
+    },
+    {
+      "name": "config-profile-null-verb",
+      "op": "config.action",
+      "params": {
+        "action": "profile",
+        "verb": null
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action None is not supported for surface 'routing_profiles'."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action None is not supported for surface 'routing_profiles'."
+      }
+    },
+    {
+      "name": "config-profile-true-verb",
+      "op": "config.action",
+      "params": {
+        "action": "profile",
+        "verb": true
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action True is not supported for surface 'routing_profiles'."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action True is not supported for surface 'routing_profiles'."
+      }
+    },
+    {
+      "name": "config-profile-false-verb",
+      "op": "config.action",
+      "params": {
+        "action": "profile",
+        "verb": false
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action False is not supported for surface 'routing_profiles'."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action False is not supported for surface 'routing_profiles'."
+      }
+    },
+    {
+      "name": "config-profile-int-verb",
+      "op": "config.action",
+      "params": {
+        "action": "profile",
+        "verb": 42
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action 42 is not supported for surface 'routing_profiles'."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action 42 is not supported for surface 'routing_profiles'."
+      }
+    },
+    {
+      "name": "config-profile-negative-verb",
+      "op": "config.action",
+      "params": {
+        "action": "profile",
+        "verb": -3
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action -3 is not supported for surface 'routing_profiles'."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action -3 is not supported for surface 'routing_profiles'."
+      }
+    },
+    {
+      "name": "config-profile-list-verb",
+      "op": "config.action",
+      "params": {
+        "action": "profile",
+        "verb": [
+          "read"
+        ]
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "machine_tool_failed",
+        "message": "TypeError"
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "machine_tool_failed",
+        "message": "TypeError"
+      }
+    },
+    {
+      "name": "config-profile-object-verb",
+      "op": "config.action",
+      "params": {
+        "action": "profile",
+        "verb": {
+          "read": 1
+        }
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "machine_tool_failed",
+        "message": "TypeError"
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "machine_tool_failed",
+        "message": "TypeError"
+      }
+    },
+    {
+      "name": "config-profile-quote-verb",
+      "op": "config.action",
+      "params": {
+        "action": "profile",
+        "verb": "it's"
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action \"it's\" is not supported for surface 'routing_profiles'."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action \"it's\" is not supported for surface 'routing_profiles'."
+      }
+    },
+    {
+      "name": "config-profile-both-quotes-verb",
+      "op": "config.action",
+      "params": {
+        "action": "profile",
+        "verb": "it's \"x\""
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action 'it\\'s \"x\"' is not supported for surface 'routing_profiles'."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action 'it\\'s \"x\"' is not supported for surface 'routing_profiles'."
+      }
+    },
+    {
+      "name": "config-profile-escape-verb",
+      "op": "config.action",
+      "params": {
+        "action": "profile",
+        "verb": "a\\b\tc\nd\re\u0001f"
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action 'a\\\\b\\tc\\nd\\re\\x01f\\x7f' is not supported for surface 'routing_profiles'."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action 'a\\\\b\\tc\\nd\\re\\x01f\\x7f' is not supported for surface 'routing_profiles'."
+      }
+    },
+    {
+      "name": "config-profile-empty-verb",
+      "op": "config.action",
+      "params": {
+        "action": "profile",
+        "verb": ""
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action '' is not supported for surface 'routing_profiles'."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action '' is not supported for surface 'routing_profiles'."
+      }
+    },
+    {
+      "name": "config-profile-case-verb",
+      "op": "config.action",
+      "params": {
+        "action": "profile",
+        "verb": "Read"
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action 'Read' is not supported for surface 'routing_profiles'."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_action",
+        "message": "Action 'Read' is not supported for surface 'routing_profiles'."
+      }
+    },
+    {
+      "name": "config-connection-unknown-operation",
+      "op": "config.action",
+      "params": {
+        "action": "connection_update",
+        "expected_revision": "absent",
+        "connection_id": "cn_0123456789ab",
+        "operation": "bogus"
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_operation",
+        "message": "operation must be one of rename, set_max_concurrent_sessions, validate, remove."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_operation",
+        "message": "operation must be one of rename, set_max_concurrent_sessions, validate, remove."
+      }
+    },
+    {
+      "name": "config-connection-missing-operation",
+      "op": "config.action",
+      "params": {
+        "action": "connection_update",
+        "expected_revision": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "connection_id": "cn_0123456789ab"
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_operation",
+        "message": "operation must be one of rename, set_max_concurrent_sessions, validate, remove."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_operation",
+        "message": "operation must be one of rename, set_max_concurrent_sessions, validate, remove."
+      }
+    },
+    {
+      "name": "config-connection-list-operation",
+      "op": "config.action",
+      "params": {
+        "action": "connection_update",
+        "expected_revision": "absent",
+        "connection_id": "cn_0123456789ab",
+        "operation": [
+          "rename"
+        ]
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "unsupported_operation",
+        "message": "operation must be one of rename, set_max_concurrent_sessions, validate, remove."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unsupported_operation",
+        "message": "operation must be one of rename, set_max_concurrent_sessions, validate, remove."
+      }
+    },
+    {
+      "name": "config-connection-unknown-operation-bad-id",
+      "op": "config.action",
+      "params": {
+        "action": "connection_update",
+        "expected_revision": "absent",
+        "connection_id": "cn_X",
+        "operation": "bogus"
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "invalid_connection_id",
+        "message": "connection_id must be cn_<12 hex>."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "invalid_connection_id",
+        "message": "connection_id must be cn_<12 hex>."
+      }
+    },
+    {
+      "name": "config-connection-unknown-operation-bad-revision",
+      "op": "config.action",
+      "params": {
+        "action": "connection_update",
+        "expected_revision": "old",
+        "connection_id": "cn_0123456789ab",
+        "operation": "bogus"
+      },
+      "project": false,
+      "production": {
+        "ok": false,
+        "code": "invalid_expected_revision",
+        "message": "expected_revision must be the exact revision a read returned ('absent' or 'sha256:<64 hex>')."
+      },
+      "files": [
+        [
+          "config",
+          null
+        ],
+        [
+          "home",
+          null
+        ],
+        [
+          "repo",
+          null
+        ],
+        [
+          "state",
+          null
+        ],
+        [
+          "state/logs",
+          null
+        ],
+        [
+          "state/logs/service.log",
+          [
+            "helper_refused"
+          ]
+        ],
+        [
+          "state/service-log.lock",
+          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ],
+        [
+          "xstate",
+          null
+        ]
+      ],
+      "expected": {
+        "ok": false,
+        "code": "invalid_expected_revision",
+        "message": "expected_revision must be the exact revision a read returned ('absent' or 'sha256:<64 hex>')."
+      }
+    }
+  ]
+}

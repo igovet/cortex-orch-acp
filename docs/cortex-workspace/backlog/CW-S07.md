@@ -46,7 +46,7 @@ Negative:
 
 ## Validation
 
-- Targeted new decision tests, with the existing `tests/test_question_batches.py`, `tests/test_acp_elicitation.py` and `tests/test_acp_host_permission_requester.py` as regression.
+- Targeted new decision tests, with the existing the former Python test `test_question_batches`, the former Python test `test_acp_elicitation` and the former Python test `test_acp_host_permission_requester` as regression.
 - Fake engines only. No paid call.
 
 ## Documentation impact

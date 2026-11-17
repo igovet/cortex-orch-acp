@@ -9,6 +9,8 @@ const cortexTools = [
   "list_reports", "read_report", "task_get_context", "plan_submit", "synthesis_submit",
   "user_question_request", "result_submit", "list_sources", "read_source",
   "read_skill", "read_capsule", "read_large_output", "read_diagnostics", "ask_question",
+  "list_route_options", "read_batch", "tools_discover", "check_preflight", "verification_submit",
+  "access_request", "project_skill_link", "outside_write", "outside_command",
 ];
 
 test("maps every advertised Cortex MCP operation to a human semantic row", () => {

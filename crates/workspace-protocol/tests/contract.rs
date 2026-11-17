@@ -76,8 +76,14 @@ fn older_peers_have_no_new_limit_fields() {
     let mut old = current.clone();
     old["protocol"]["minor"] = json!(6);
     old["limits"]["frameBytes"] = json!(1048576);
-    old["limits"].as_object_mut().unwrap().remove("attachmentBytes");
-    old["limits"].as_object_mut().unwrap().remove("attachmentFiles");
+    old["limits"]
+        .as_object_mut()
+        .unwrap()
+        .remove("attachmentBytes");
+    old["limits"]
+        .as_object_mut()
+        .unwrap()
+        .remove("attachmentFiles");
     let result = workspace_protocol::negotiate(&current, &old).unwrap();
     assert_eq!(result["limits"]["frameBytes"], 1048576);
     assert!(result["limits"].get("attachmentBytes").is_none());

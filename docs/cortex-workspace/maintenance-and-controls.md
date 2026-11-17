@@ -59,6 +59,8 @@ changed previous bytes refuse rollback. It does not restore project databases or
 guarantee schema compatibility; never use it across an incompatible storage
 migration. There is no automatic rollback or invented successful health check.
 
+The machine maintenance provider is native Rust. Clone/download workers use a trusted same-binary entry point; installers retain the separate systemd user unit. A private exclusive worker claim prevents replay of an already-launched identity, including after a crash. HTTPS transfer uses installed `/usr/bin/curl` with TLS-only redirects, size/deadline bounds and no caller-supplied executable; a missing executable refuses the operation. Native desktop Start and work-restarting controls share the maintenance admission fence with installation jobs; unknown installers continue to hold work until the explicit owner acknowledgement.
+
 Operation identities and progress survive navigation/window reopening. A lost
 reply is inspected by the same identity, never automatically resubmitted.
 Unconfirmed installation stays unconfirmed; inspect the system package manager
@@ -86,11 +88,41 @@ for Codex and Claude. OpenCode retains its separate explicit Enable flow.
   the native CLI status command without retaining its output before onboarding. A terminal
   launch is not proof of authentication. HOME stays the owner's native HOME;
   credentials are never copied. Missing adapter/terminal/login is reported.
-- Models come from the observed route catalogue. Refresh models is explicit.
+- Models come from the observed route catalogue. Refresh models is explicit, but
+  the service also observes a connection's models on its own, without a model
+  prompt, whenever a settings read finds a configured connection with no saved list
+  (or one older than 24 hours, which stays served meanwhile). Each connection is
+  observed once in the background, side by side, under its refresh lock, with the
+  startup engine launch shape; a connection observed (or failed) is not started
+  again by a read for ten minutes. `CORTEX_WORKSPACE_CATALOG_AUTOREFRESH=off`
+  disables it.
   Model details show a context window only when cached engine telemetry reported
   it for that exact connection/model. No model-name-based size is inferred.
-- Weekly usage comes only from the provider's retained weekly window. Unknown
-  percentages are hidden in Connections. OpenCode has no plan-usage meter.
+- Weekly usage comes only from the provider's reported weekly windows. Connected
+  engines remain visible in Connections, the sidebar and inspector when usage is
+  unknown, explicitly marked Unavailable rather than zero. OpenCode has no
+  plan-usage meter and therefore shows Unavailable. Claude shows two weekly
+  windows side by side: the general window (all models) and the Fable window,
+  each with its own percentage and reset time, and each "Not reported" when the
+  provider did not report it.
+- Limits refresh in the background while settings are read (the app reads them
+  every five minutes). A read never waits: the first one starts a service loop
+  that makes a pass at most once a minute and stops after 15 minutes without a
+  read; each connection is read at most once per five minutes, failures included,
+  one connection after another. Both reads are free and start no model turn:
+  Claude Code's local `/usage` (trusted only when its JSON shows
+  `local_command: "usage"`, zero turns, zero cost and zero tokens) and the Codex
+  app server's `account/rateLimits/read` account request. Each runs the verified
+  native CLI of the qualified adapter with the owner's real `HOME` and the
+  connection's own `CLAUDE_CONFIG_DIR`/`CODEX_HOME`; credentials are never copied
+  and nothing logs in. A Codex rollout newer than the last read still wins. Every
+  value shows when it was observed ("As of 14:05"); one older than 15 minutes is
+  marked stale. `CORTEX_WORKSPACE_USAGE_REFRESH=off` disables the refresh.
+- Coordinator defaults and exact-route pickers exclude models denied by Use
+  engine or model policy. The service route catalogue marks denied routes
+  unselectable; connection readiness remains separate so Models can re-enable
+  observed models. New sprint validation uses the same allowed choices as the
+  composer. Disabling an engine does not rewrite an existing task's route.
 
 ## Voice and titles
 
@@ -109,8 +141,8 @@ the saved task. No paid engine generation is established by fixture tests.
 
 ## Command-to-control map
 
-Source inventory: `src/cortex_runtime/acp/commands.py::AVAILABLE_COMMANDS`
-(14 entries) and `scripts/cortex_commands.py` (two owner subcommands). These
+Source inventory: the ACP command list in `crates/cortex-acp/src/commands.rs`
+(14 entries when this table was written) and the two owner subcommands of the former `cortex_commands` script (removed). These
 are intent mappings, not an arbitrary command console.
 
 | ACP command | Desktop control / owning path |
@@ -135,10 +167,10 @@ instruction used by the ACP command, then save it as a normal task. Task
 descriptions intentionally do **not** dispatch slash commands. Start is still
 explicit, and normal runtime permissions/review apply.
 
-| Owner CLI | Desktop control |
+| Former owner CLI (removed) | Desktop control |
 | --- | --- |
-| cortex_commands.py list | Task → Workers → selected worker activity and retained command rows |
-| cortex_commands.py stop | Stop command on that exact row, with a reason; native engine shell actions without a Cortex receipt remain unavailable |
+| `cortex_commands list` | Task → Workers → selected worker activity and retained command rows |
+| `cortex_commands stop` | Stop command on that exact row, with a reason; native engine shell actions without a Cortex receipt remain unavailable |
 
 Desktop Clear old tasks is intentionally narrower than legacy cortex-clear:
 only shown finished tasks without unmerged work are eligible; archived tasks use
@@ -156,7 +188,7 @@ and credentials are not included in those profile sections.
 
 The native PTY is a registered-project shell, even when opened from a task. A
 worktree-local terminal action is disabled because the service does not offer a
-checkout-bound PTY. New pending questions notify through the Linux desktop session bus when their task or sprint is not open (or the document is hidden). Appearance can disable notifications; they are on by default in a new profile. Notification text names the work, not the question body. A missing notification daemon produces an explicit delivery error; Inbox and sidebar remain available. Duplicate refreshes do not resend the same question. Browser-only builds disable the native notification switch.
+checkout-bound PTY. New pending questions notify through the Linux desktop session bus when their task or sprint is not open (or the document is hidden). Appearance can disable notifications; they are on by default in a new profile. Notification text names the work, not the question body. A missing notification daemon produces an explicit delivery error; Inbox and sidebar remain available. Duplicate refreshes do not resend the same question, and neither does a relaunch: the question identities already seen (the newest 500) are kept in the app's local storage, so only a question not seen before, including one that arrived while the app was closed, is announced. Browser-only builds disable the native notification switch.
 
 ## Diagnostics and local desktop actions
 

@@ -1,0 +1,3688 @@
+{
+  "cases": [
+    {
+      "cache": {},
+      "contexts": {
+        "exact/model": 200000,
+        "invalid": true,
+        "other": 100
+      },
+      "expected": {
+        "config": {
+          "active": null,
+          "catalogue": {
+            "claude-agent-acp": {
+              "failed": false,
+              "models": [],
+              "observedAt": null
+            },
+            "codex-acp": {
+              "failed": false,
+              "models": [
+                {
+                  "contextWindow": 200000,
+                  "efforts": [],
+                  "id": "exact/model",
+                  "label": "exact/model",
+                  "observed": true,
+                  "routeId": "xr_fixture"
+                }
+              ],
+              "observedAt": null
+            },
+            "opencode": {
+              "failed": false,
+              "models": [],
+              "observedAt": null
+            }
+          },
+          "files": {
+            "askpass": false,
+            "backups": 0,
+            "env": {
+              "engineFollow": null,
+              "engineUpdate": null,
+              "opencodeBinary": null
+            },
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "preservedDefaults": [],
+            "preservedRouting": []
+          },
+          "interrupted": false,
+          "mcpObserved": {},
+          "profiles": [],
+          "projects": {},
+          "quotaObserved": {
+            "claude-agent-acp": [],
+            "codex-acp": [
+              {
+                "percent": 53.0,
+                "window": "secondary"
+              }
+            ],
+            "opencode": []
+          },
+          "revisions": {
+            "mcp_servers": 0,
+            "project_ceiling": 0,
+            "routing": 0,
+            "user_defaults": 0
+          },
+          "setup": {
+            "claude-agent-acp": {
+              "autoConnectDisabled": false,
+              "automatic": false,
+              "reason": null,
+              "status": "not_downloaded"
+            },
+            "codex-acp": {
+              "autoConnectDisabled": false,
+              "automatic": false,
+              "reason": null,
+              "status": "not_downloaded"
+            },
+            "opencode": {
+              "autoConnectDisabled": false,
+              "automatic": false,
+              "reason": null,
+              "status": "not_downloaded"
+            }
+          },
+          "surfaces": {
+            "mcp_servers": [],
+            "routing": {
+              "affinity": {},
+              "autoAllow": [],
+              "deny": [],
+              "engines": {
+                "claude-agent-acp": {
+                  "auto": [],
+                  "enabled": [],
+                  "policy": {},
+                  "quota": [],
+                  "tiers": {}
+                },
+                "codex-acp": {
+                  "auto": [],
+                  "enabled": [],
+                  "policy": {},
+                  "quota": [],
+                  "tiers": {}
+                },
+                "opencode": {
+                  "auto": [],
+                  "enabled": [],
+                  "policy": {},
+                  "quota": [],
+                  "tiers": {}
+                }
+              },
+              "legacyTiers": [],
+              "pins": {},
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "version": 2
+            },
+            "user_defaults": {
+              "ceiling": {
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "allowedRoutes": null,
+                "attempts": null,
+                "budget": null,
+                "consent": false,
+                "failureClasses": null,
+                "stored": {
+                  "calls": null,
+                  "concurrency": null,
+                  "permissionLevel": null,
+                  "spendEnforceable": false,
+                  "spendLimit": null,
+                  "tokens": null
+                },
+                "targetRoutes": null
+              },
+              "checkout": "main",
+              "coordinator": null,
+              "language": "auto",
+              "mode": "guarded",
+              "preserved": [],
+              "routeDefault": null
+            }
+          },
+          "unavailable": null
+        },
+        "connections": [
+          {
+            "checkedAt": null,
+            "detail": {
+              "authMode": "native_account",
+              "connectionId": "cn_000000000002",
+              "createdAt": "now",
+              "credential": "engine_native_dir",
+              "endpoint": null,
+              "keyKind": null,
+              "launchCommand": "",
+              "provider": "Fixture",
+              "qualified": true,
+              "updatedAt": "now"
+            },
+            "engine": "claude",
+            "id": "cn_000000000002",
+            "label": "Connection 2",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "connected"
+          },
+          {
+            "checkedAt": null,
+            "detail": {
+              "authMode": "native_account",
+              "connectionId": "cn_000000000001",
+              "createdAt": "now",
+              "credential": "engine_native_dir",
+              "endpoint": null,
+              "keyKind": null,
+              "launchCommand": "",
+              "provider": "Fixture",
+              "qualified": true,
+              "updatedAt": "now"
+            },
+            "engine": "codex",
+            "id": "cn_000000000001",
+            "label": "Connection 1",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "connected"
+          },
+          {
+            "checkedAt": null,
+            "detail": {
+              "authMode": "native_account",
+              "connectionId": "cn_000000000003",
+              "createdAt": "now",
+              "credential": "engine_native_dir",
+              "endpoint": null,
+              "keyKind": null,
+              "launchCommand": "",
+              "provider": "Fixture",
+              "qualified": true,
+              "updatedAt": "now"
+            },
+            "engine": "opencode",
+            "id": "cn_000000000003",
+            "label": "Connection 3",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "connected"
+          }
+        ],
+        "tokens": {
+          "connections": "@CONNECTION_REVISION@",
+          "mcp_servers": "absent",
+          "profile_sections": {
+            "connections": "absent",
+            "mcp_servers": "absent",
+            "routing": "absent",
+            "user_defaults": "absent"
+          },
+          "routing": "absent",
+          "routing_profiles": "absent",
+          "user_defaults": "absent"
+        },
+        "usage": [
+          {
+            "connected": true,
+            "engine": "codex",
+            "observedAt": null,
+            "resetAt": "2027-01-15T10:30:00Z",
+            "usedPercent": 53.0,
+            "window": "weekly"
+          },
+          {
+            "connected": true,
+            "engine": "claude",
+            "observedAt": null,
+            "resetAt": null,
+            "usedPercent": null,
+            "window": "weekly",
+            "windows": []
+          }
+        ]
+      },
+      "input": {
+        "discovery": null,
+        "entries": [
+          {
+            "connection_id": "cn_000000000001",
+            "connection_name": "Connection 1",
+            "context_window": 200000,
+            "efforts": [],
+            "model": "exact/model",
+            "route_id": "xr_fixture"
+          }
+        ],
+        "routes": {
+          "engines": [],
+          "routes": [
+            {
+              "engine": "codex-acp",
+              "model": "exact/model",
+              "observed": true,
+              "route_id": "xr_fixture",
+              "selectable": true
+            }
+          ]
+        },
+        "surfaces": {
+          "mcp_servers": {
+            "ok": true,
+            "result": {
+              "editable_keys": [
+                "command",
+                "args",
+                "env",
+                "enabled",
+                "allowed_tools",
+                "read_only_tools",
+                "coordinator_tools",
+                "always_load_tools",
+                "read_paths",
+                "write_paths",
+                "network",
+                "runtime_dir_env",
+                "roles",
+                "engines"
+              ],
+              "engines": [
+                "codex-acp",
+                "claude-agent-acp",
+                "opencode"
+              ],
+              "exists": false,
+              "path": "@ROOT@/config/cortex/mcp-servers.json",
+              "revision": "absent",
+              "root_key": "servers",
+              "servers": [],
+              "surface": "mcp_servers",
+              "version": 1
+            }
+          },
+          "routing": {
+            "ok": true,
+            "result": {
+              "builtin": {
+                "builtin_affinity": {
+                  "analysis": "claude-agent-acp",
+                  "debugging": null,
+                  "design": "claude-agent-acp",
+                  "implementation_backend": "codex-acp",
+                  "implementation_frontend": "codex-acp",
+                  "implementation_frontend_design": "claude-agent-acp",
+                  "investigation": "claude-agent-acp",
+                  "operations": "codex-acp",
+                  "planning": "claude-agent-acp",
+                  "review": "claude-agent-acp",
+                  "testing": null,
+                  "writing": "claude-agent-acp"
+                },
+                "default_auto_deny_engines": [],
+                "default_auto_deny_families": [],
+                "default_user_deny": [],
+                "efforts": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max",
+                  "ultra"
+                ],
+                "max_request_names": 16,
+                "model_efforts": {},
+                "model_policy_version": 2,
+                "optional_engines": [
+                  "opencode"
+                ],
+                "policy_attributes": [
+                  "effort_floor",
+                  "max_effort",
+                  "effort_ladder",
+                  "also_standard_for",
+                  "preferred_for",
+                  "preferred_when",
+                  "request_names"
+                ],
+                "policy_efforts": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "selection_modes": [
+                  "listed"
+                ],
+                "supported_engines": [
+                  "codex-acp",
+                  "claude-agent-acp",
+                  "opencode"
+                ],
+                "tier_sources": [
+                  "configured"
+                ],
+                "tiers": [
+                  "flagship",
+                  "deep",
+                  "standard",
+                  "light"
+                ],
+                "work_kind_labels": {
+                  "analysis": "Analysis",
+                  "debugging": "Debugging",
+                  "design": "Design and architecture",
+                  "implementation_backend": "Backend implementation",
+                  "implementation_frontend": "Frontend implementation (no design)",
+                  "implementation_frontend_design": "Frontend implementation with UI design",
+                  "investigation": "Investigation",
+                  "operations": "Operations",
+                  "planning": "Planning",
+                  "review": "Review",
+                  "testing": "Testing",
+                  "writing": "Documentation and writing"
+                },
+                "work_kind_roles": {
+                  "analysis": [],
+                  "debugging": [
+                    "worker-debugger",
+                    "worker-performance-engineer"
+                  ],
+                  "design": [
+                    "worker-architect",
+                    "worker-database-architect",
+                    "worker-senior-consultant",
+                    "worker-ux-designer"
+                  ],
+                  "implementation_backend": [
+                    "worker-backend-dev",
+                    "worker-data-engineer",
+                    "worker-fullstack-dev",
+                    "worker-general",
+                    "worker-refactorer"
+                  ],
+                  "implementation_frontend": [
+                    "worker-accessibility-fixer",
+                    "worker-frontend-dev",
+                    "worker-mobile-dev"
+                  ],
+                  "implementation_frontend_design": [],
+                  "investigation": [
+                    "worker-explorer"
+                  ],
+                  "operations": [
+                    "worker-devops-engineer"
+                  ],
+                  "planning": [
+                    "worker-planner"
+                  ],
+                  "review": [
+                    "worker-accessibility-auditor",
+                    "worker-code-reviewer",
+                    "worker-security-auditor"
+                  ],
+                  "testing": [
+                    "worker-build-verification",
+                    "worker-qa-engineer"
+                  ],
+                  "writing": [
+                    "worker-technical-writer"
+                  ]
+                },
+                "work_kinds": [
+                  "implementation_backend",
+                  "implementation_frontend",
+                  "implementation_frontend_design",
+                  "operations",
+                  "debugging",
+                  "testing",
+                  "investigation",
+                  "review",
+                  "design",
+                  "writing",
+                  "planning",
+                  "analysis"
+                ]
+              },
+              "effective_rules": {},
+              "effective_source": "missing",
+              "effective_valid": false,
+              "precedence": [
+                "user"
+              ],
+              "project_root": null,
+              "sources": [
+                {
+                  "exists": false,
+                  "path": "@ROOT@/config/cortex/routing.json",
+                  "revision": "absent",
+                  "source": "user",
+                  "writable": true
+                }
+              ],
+              "surface": "routing"
+            }
+          },
+          "routing_profiles": {
+            "ok": true,
+            "result": {
+              "active": null,
+              "applied": null,
+              "current_revisions": {
+                "connections": "absent",
+                "mcp_servers": "absent",
+                "routing": "absent",
+                "user_defaults": "absent"
+              },
+              "differences": [],
+              "format": 2,
+              "matches_profile": [],
+              "migrated_from": null,
+              "modified_sections": [],
+              "notes": [],
+              "path": "@ROOT@/config/cortex/routing-profiles.json",
+              "pending": null,
+              "problems": [],
+              "profiles": [],
+              "revision": "absent",
+              "shadowed_by": null,
+              "state": "none",
+              "surface": "routing_profiles",
+              "user_routing_revision": "absent"
+            }
+          },
+          "user_defaults": {
+            "ok": true,
+            "result": {
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": false,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "exists": false,
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "path": "@ROOT@/config/cortex/defaults.json",
+              "preserved_keys": [],
+              "revision": "absent",
+              "surface": "user_defaults"
+            }
+          }
+        },
+        "workspace": {}
+      },
+      "limits": {
+        "primary": {
+          "resets_at": 1800000900,
+          "used_percent": 12,
+          "window_minutes": 300
+        },
+        "secondary": {
+          "resets_at": 1800009000,
+          "used_percent": 53,
+          "window_minutes": 10080
+        }
+      },
+      "name": "usage-and-settings-0",
+      "raw": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Connection 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/.codex\", \"owned\": false}, \"approved_fingerprint\": \"untrusted\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"now\", \"updated_at\": \"now\"}, \"cn_000000000002\": {\"id\": \"cn_000000000002\", \"name\": \"Connection 2\", \"engine\": \"claude-agent-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/.claude\", \"owned\": false}, \"approved_fingerprint\": \"untrusted\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"now\", \"updated_at\": \"now\"}, \"cn_000000000003\": {\"id\": \"cn_000000000003\", \"name\": \"Connection 3\", \"engine\": \"opencode\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/.local/share/opencode\", \"owned\": false}, \"approved_fingerprint\": \"untrusted\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"now\", \"updated_at\": \"now\"}}}"
+    },
+    {
+      "cache": {
+        "expired_week": {
+          "resets_at": 1800000000,
+          "used": 90
+        },
+        "five_hour": {
+          "resets_at": 1800000030,
+          "used": 99
+        },
+        "overage": {
+          "used": 100
+        },
+        "seven_day": {
+          "observed_at": 1800000000,
+          "resets_at": 1800086400,
+          "used": 42.5
+        }
+      },
+      "contexts": {
+        "exact/model": 200000,
+        "invalid": true,
+        "other": 100
+      },
+      "expected": {
+        "config": {
+          "active": null,
+          "catalogue": {
+            "claude-agent-acp": {
+              "failed": false,
+              "models": [],
+              "observedAt": null
+            },
+            "codex-acp": {
+              "failed": false,
+              "models": [
+                {
+                  "contextWindow": 200000,
+                  "efforts": [],
+                  "id": "exact/model",
+                  "label": "exact/model",
+                  "observed": true,
+                  "routeId": "xr_fixture"
+                }
+              ],
+              "observedAt": null
+            },
+            "opencode": {
+              "failed": false,
+              "models": [],
+              "observedAt": null
+            }
+          },
+          "files": {
+            "askpass": false,
+            "backups": 0,
+            "env": {
+              "engineFollow": null,
+              "engineUpdate": null,
+              "opencodeBinary": null
+            },
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "preservedDefaults": [],
+            "preservedRouting": []
+          },
+          "interrupted": false,
+          "mcpObserved": {},
+          "profiles": [],
+          "projects": {},
+          "quotaObserved": {
+            "claude-agent-acp": [
+              {
+                "percent": 42.5,
+                "window": "seven_day"
+              }
+            ],
+            "codex-acp": [
+              {
+                "percent": 54.0,
+                "window": "secondary"
+              }
+            ],
+            "opencode": []
+          },
+          "revisions": {
+            "mcp_servers": 0,
+            "project_ceiling": 0,
+            "routing": 0,
+            "user_defaults": 0
+          },
+          "setup": {
+            "claude-agent-acp": {
+              "autoConnectDisabled": false,
+              "automatic": false,
+              "reason": null,
+              "status": "not_downloaded"
+            },
+            "codex-acp": {
+              "autoConnectDisabled": false,
+              "automatic": false,
+              "reason": null,
+              "status": "not_downloaded"
+            },
+            "opencode": {
+              "autoConnectDisabled": false,
+              "automatic": false,
+              "reason": null,
+              "status": "not_downloaded"
+            }
+          },
+          "surfaces": {
+            "mcp_servers": [],
+            "routing": {
+              "affinity": {},
+              "autoAllow": [],
+              "deny": [],
+              "engines": {
+                "claude-agent-acp": {
+                  "auto": [],
+                  "enabled": [],
+                  "policy": {},
+                  "quota": [],
+                  "tiers": {}
+                },
+                "codex-acp": {
+                  "auto": [],
+                  "enabled": [],
+                  "policy": {},
+                  "quota": [],
+                  "tiers": {}
+                },
+                "opencode": {
+                  "auto": [],
+                  "enabled": [],
+                  "policy": {},
+                  "quota": [],
+                  "tiers": {}
+                }
+              },
+              "legacyTiers": [],
+              "pins": {},
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "version": 2
+            },
+            "user_defaults": {
+              "ceiling": {
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "allowedRoutes": null,
+                "attempts": null,
+                "budget": null,
+                "consent": false,
+                "failureClasses": null,
+                "stored": {
+                  "calls": null,
+                  "concurrency": null,
+                  "permissionLevel": null,
+                  "spendEnforceable": false,
+                  "spendLimit": null,
+                  "tokens": null
+                },
+                "targetRoutes": null
+              },
+              "checkout": "main",
+              "coordinator": null,
+              "language": "auto",
+              "mode": "guarded",
+              "preserved": [],
+              "routeDefault": null
+            }
+          },
+          "unavailable": null
+        },
+        "connections": [
+          {
+            "checkedAt": null,
+            "detail": {
+              "authMode": "native_account",
+              "connectionId": "cn_000000000002",
+              "createdAt": "now",
+              "credential": "engine_native_dir",
+              "endpoint": null,
+              "keyKind": null,
+              "launchCommand": "",
+              "provider": "Fixture",
+              "qualified": true,
+              "updatedAt": "now"
+            },
+            "engine": "claude",
+            "id": "cn_000000000002",
+            "label": "Connection 2",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "connected"
+          },
+          {
+            "checkedAt": null,
+            "detail": {
+              "authMode": "native_account",
+              "connectionId": "cn_000000000001",
+              "createdAt": "now",
+              "credential": "engine_native_dir",
+              "endpoint": null,
+              "keyKind": null,
+              "launchCommand": "",
+              "provider": "Fixture",
+              "qualified": true,
+              "updatedAt": "now"
+            },
+            "engine": "codex",
+            "id": "cn_000000000001",
+            "label": "Connection 1",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "connected"
+          },
+          {
+            "checkedAt": null,
+            "detail": {
+              "authMode": "native_account",
+              "connectionId": "cn_000000000003",
+              "createdAt": "now",
+              "credential": "engine_native_dir",
+              "endpoint": null,
+              "keyKind": null,
+              "launchCommand": "",
+              "provider": "Fixture",
+              "qualified": true,
+              "updatedAt": "now"
+            },
+            "engine": "opencode",
+            "id": "cn_000000000003",
+            "label": "Connection 3",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "connected"
+          }
+        ],
+        "tokens": {
+          "connections": "@CONNECTION_REVISION@",
+          "mcp_servers": "absent",
+          "profile_sections": {
+            "connections": "absent",
+            "mcp_servers": "absent",
+            "routing": "absent",
+            "user_defaults": "absent"
+          },
+          "routing": "absent",
+          "routing_profiles": "absent",
+          "user_defaults": "absent"
+        },
+        "usage": [
+          {
+            "connected": true,
+            "engine": "codex",
+            "observedAt": null,
+            "resetAt": "2027-01-15T10:30:00Z",
+            "usedPercent": 54.0,
+            "window": "weekly"
+          },
+          {
+            "connected": true,
+            "engine": "claude",
+            "observedAt": "2027-01-15T08:00:00Z",
+            "resetAt": "2027-01-16T08:00:00Z",
+            "usedPercent": 42.5,
+            "window": "weekly",
+            "windows": [{"name": "seven_day", "observedAt": "2027-01-15T08:00:00Z", "resetAt": "2027-01-16T08:00:00Z", "usedPercent": 42.5}]
+          }
+        ]
+      },
+      "input": {
+        "discovery": null,
+        "entries": [
+          {
+            "connection_id": "cn_000000000001",
+            "connection_name": "Connection 1",
+            "context_window": 200000,
+            "efforts": [],
+            "model": "exact/model",
+            "route_id": "xr_fixture"
+          }
+        ],
+        "routes": {
+          "engines": [],
+          "routes": [
+            {
+              "engine": "codex-acp",
+              "model": "exact/model",
+              "observed": true,
+              "route_id": "xr_fixture",
+              "selectable": true
+            }
+          ]
+        },
+        "surfaces": {
+          "mcp_servers": {
+            "ok": true,
+            "result": {
+              "editable_keys": [
+                "command",
+                "args",
+                "env",
+                "enabled",
+                "allowed_tools",
+                "read_only_tools",
+                "coordinator_tools",
+                "always_load_tools",
+                "read_paths",
+                "write_paths",
+                "network",
+                "runtime_dir_env",
+                "roles",
+                "engines"
+              ],
+              "engines": [
+                "codex-acp",
+                "claude-agent-acp",
+                "opencode"
+              ],
+              "exists": false,
+              "path": "@ROOT@/config/cortex/mcp-servers.json",
+              "revision": "absent",
+              "root_key": "servers",
+              "servers": [],
+              "surface": "mcp_servers",
+              "version": 1
+            }
+          },
+          "routing": {
+            "ok": true,
+            "result": {
+              "builtin": {
+                "builtin_affinity": {
+                  "analysis": "claude-agent-acp",
+                  "debugging": null,
+                  "design": "claude-agent-acp",
+                  "implementation_backend": "codex-acp",
+                  "implementation_frontend": "codex-acp",
+                  "implementation_frontend_design": "claude-agent-acp",
+                  "investigation": "claude-agent-acp",
+                  "operations": "codex-acp",
+                  "planning": "claude-agent-acp",
+                  "review": "claude-agent-acp",
+                  "testing": null,
+                  "writing": "claude-agent-acp"
+                },
+                "default_auto_deny_engines": [],
+                "default_auto_deny_families": [],
+                "default_user_deny": [],
+                "efforts": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max",
+                  "ultra"
+                ],
+                "max_request_names": 16,
+                "model_efforts": {},
+                "model_policy_version": 2,
+                "optional_engines": [
+                  "opencode"
+                ],
+                "policy_attributes": [
+                  "effort_floor",
+                  "max_effort",
+                  "effort_ladder",
+                  "also_standard_for",
+                  "preferred_for",
+                  "preferred_when",
+                  "request_names"
+                ],
+                "policy_efforts": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "selection_modes": [
+                  "listed"
+                ],
+                "supported_engines": [
+                  "codex-acp",
+                  "claude-agent-acp",
+                  "opencode"
+                ],
+                "tier_sources": [
+                  "configured"
+                ],
+                "tiers": [
+                  "flagship",
+                  "deep",
+                  "standard",
+                  "light"
+                ],
+                "work_kind_labels": {
+                  "analysis": "Analysis",
+                  "debugging": "Debugging",
+                  "design": "Design and architecture",
+                  "implementation_backend": "Backend implementation",
+                  "implementation_frontend": "Frontend implementation (no design)",
+                  "implementation_frontend_design": "Frontend implementation with UI design",
+                  "investigation": "Investigation",
+                  "operations": "Operations",
+                  "planning": "Planning",
+                  "review": "Review",
+                  "testing": "Testing",
+                  "writing": "Documentation and writing"
+                },
+                "work_kind_roles": {
+                  "analysis": [],
+                  "debugging": [
+                    "worker-debugger",
+                    "worker-performance-engineer"
+                  ],
+                  "design": [
+                    "worker-architect",
+                    "worker-database-architect",
+                    "worker-senior-consultant",
+                    "worker-ux-designer"
+                  ],
+                  "implementation_backend": [
+                    "worker-backend-dev",
+                    "worker-data-engineer",
+                    "worker-fullstack-dev",
+                    "worker-general",
+                    "worker-refactorer"
+                  ],
+                  "implementation_frontend": [
+                    "worker-accessibility-fixer",
+                    "worker-frontend-dev",
+                    "worker-mobile-dev"
+                  ],
+                  "implementation_frontend_design": [],
+                  "investigation": [
+                    "worker-explorer"
+                  ],
+                  "operations": [
+                    "worker-devops-engineer"
+                  ],
+                  "planning": [
+                    "worker-planner"
+                  ],
+                  "review": [
+                    "worker-accessibility-auditor",
+                    "worker-code-reviewer",
+                    "worker-security-auditor"
+                  ],
+                  "testing": [
+                    "worker-build-verification",
+                    "worker-qa-engineer"
+                  ],
+                  "writing": [
+                    "worker-technical-writer"
+                  ]
+                },
+                "work_kinds": [
+                  "implementation_backend",
+                  "implementation_frontend",
+                  "implementation_frontend_design",
+                  "operations",
+                  "debugging",
+                  "testing",
+                  "investigation",
+                  "review",
+                  "design",
+                  "writing",
+                  "planning",
+                  "analysis"
+                ]
+              },
+              "effective_rules": {},
+              "effective_source": "missing",
+              "effective_valid": false,
+              "precedence": [
+                "user"
+              ],
+              "project_root": null,
+              "sources": [
+                {
+                  "exists": false,
+                  "path": "@ROOT@/config/cortex/routing.json",
+                  "revision": "absent",
+                  "source": "user",
+                  "writable": true
+                }
+              ],
+              "surface": "routing"
+            }
+          },
+          "routing_profiles": {
+            "ok": true,
+            "result": {
+              "active": null,
+              "applied": null,
+              "current_revisions": {
+                "connections": "absent",
+                "mcp_servers": "absent",
+                "routing": "absent",
+                "user_defaults": "absent"
+              },
+              "differences": [],
+              "format": 2,
+              "matches_profile": [],
+              "migrated_from": null,
+              "modified_sections": [],
+              "notes": [],
+              "path": "@ROOT@/config/cortex/routing-profiles.json",
+              "pending": null,
+              "problems": [],
+              "profiles": [],
+              "revision": "absent",
+              "shadowed_by": null,
+              "state": "none",
+              "surface": "routing_profiles",
+              "user_routing_revision": "absent"
+            }
+          },
+          "user_defaults": {
+            "ok": true,
+            "result": {
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": false,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "exists": false,
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "path": "@ROOT@/config/cortex/defaults.json",
+              "preserved_keys": [],
+              "revision": "absent",
+              "surface": "user_defaults"
+            }
+          }
+        },
+        "workspace": {}
+      },
+      "limits": {
+        "primary": {
+          "resets_at": 1800000900,
+          "used_percent": 13,
+          "window_minutes": 300
+        },
+        "secondary": {
+          "resets_at": 1800009000,
+          "used_percent": 54,
+          "window_minutes": 10080
+        }
+      },
+      "name": "usage-and-settings-1",
+      "raw": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Connection 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/.codex\", \"owned\": false}, \"approved_fingerprint\": \"untrusted\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"now\", \"updated_at\": \"now\"}, \"cn_000000000002\": {\"id\": \"cn_000000000002\", \"name\": \"Connection 2\", \"engine\": \"claude-agent-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/.claude\", \"owned\": false}, \"approved_fingerprint\": \"untrusted\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"now\", \"updated_at\": \"now\"}, \"cn_000000000003\": {\"id\": \"cn_000000000003\", \"name\": \"Connection 3\", \"engine\": \"opencode\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/.local/share/opencode\", \"owned\": false}, \"approved_fingerprint\": \"untrusted\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"now\", \"updated_at\": \"now\"}}}"
+    },
+    {
+      "cache": {
+        "bad": {
+          "used": 101
+        },
+        "scoped_week": {
+          "resets_at": true,
+          "used": 64
+        },
+        "seven_day": {
+          "used": true
+        },
+        "seven_extra": {
+          "resets_at": null,
+          "used": 0
+        },
+        "str": {
+          "used": "2"
+        }
+      },
+      "contexts": {
+        "exact/model": 200000,
+        "invalid": true,
+        "other": 100
+      },
+      "expected": {
+        "config": {
+          "active": null,
+          "catalogue": {
+            "claude-agent-acp": {
+              "failed": false,
+              "models": [],
+              "observedAt": null
+            },
+            "codex-acp": {
+              "failed": false,
+              "models": [
+                {
+                  "contextWindow": 200000,
+                  "efforts": [],
+                  "id": "exact/model",
+                  "label": "exact/model",
+                  "observed": true,
+                  "routeId": "xr_fixture"
+                }
+              ],
+              "observedAt": null
+            },
+            "opencode": {
+              "failed": false,
+              "models": [],
+              "observedAt": null
+            }
+          },
+          "files": {
+            "askpass": false,
+            "backups": 0,
+            "env": {
+              "engineFollow": null,
+              "engineUpdate": null,
+              "opencodeBinary": null
+            },
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "preservedDefaults": [],
+            "preservedRouting": []
+          },
+          "interrupted": false,
+          "mcpObserved": {},
+          "profiles": [],
+          "projects": {},
+          "quotaObserved": {
+            "claude-agent-acp": [
+              {
+                "percent": 64.0,
+                "window": "scoped_week"
+              },
+              {
+                "percent": 0.0,
+                "window": "seven_extra"
+              }
+            ],
+            "codex-acp": [
+              {
+                "percent": 55.0,
+                "window": "secondary"
+              }
+            ],
+            "opencode": []
+          },
+          "revisions": {
+            "mcp_servers": 0,
+            "project_ceiling": 0,
+            "routing": 0,
+            "user_defaults": 0
+          },
+          "setup": {
+            "claude-agent-acp": {
+              "autoConnectDisabled": false,
+              "automatic": false,
+              "reason": null,
+              "status": "not_downloaded"
+            },
+            "codex-acp": {
+              "autoConnectDisabled": false,
+              "automatic": false,
+              "reason": null,
+              "status": "not_downloaded"
+            },
+            "opencode": {
+              "autoConnectDisabled": false,
+              "automatic": false,
+              "reason": null,
+              "status": "not_downloaded"
+            }
+          },
+          "surfaces": {
+            "mcp_servers": [],
+            "routing": {
+              "affinity": {},
+              "autoAllow": [],
+              "deny": [],
+              "engines": {
+                "claude-agent-acp": {
+                  "auto": [],
+                  "enabled": [],
+                  "policy": {},
+                  "quota": [],
+                  "tiers": {}
+                },
+                "codex-acp": {
+                  "auto": [],
+                  "enabled": [],
+                  "policy": {},
+                  "quota": [],
+                  "tiers": {}
+                },
+                "opencode": {
+                  "auto": [],
+                  "enabled": [],
+                  "policy": {},
+                  "quota": [],
+                  "tiers": {}
+                }
+              },
+              "legacyTiers": [],
+              "pins": {},
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "version": 2
+            },
+            "user_defaults": {
+              "ceiling": {
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "allowedRoutes": null,
+                "attempts": null,
+                "budget": null,
+                "consent": false,
+                "failureClasses": null,
+                "stored": {
+                  "calls": null,
+                  "concurrency": null,
+                  "permissionLevel": null,
+                  "spendEnforceable": false,
+                  "spendLimit": null,
+                  "tokens": null
+                },
+                "targetRoutes": null
+              },
+              "checkout": "main",
+              "coordinator": null,
+              "language": "auto",
+              "mode": "guarded",
+              "preserved": [],
+              "routeDefault": null
+            }
+          },
+          "unavailable": null
+        },
+        "connections": [
+          {
+            "checkedAt": null,
+            "detail": {
+              "authMode": "native_account",
+              "connectionId": "cn_000000000002",
+              "createdAt": "now",
+              "credential": "engine_native_dir",
+              "endpoint": null,
+              "keyKind": null,
+              "launchCommand": "",
+              "provider": "Fixture",
+              "qualified": true,
+              "updatedAt": "now"
+            },
+            "engine": "claude",
+            "id": "cn_000000000002",
+            "label": "Connection 2",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "connected"
+          },
+          {
+            "checkedAt": null,
+            "detail": {
+              "authMode": "native_account",
+              "connectionId": "cn_000000000001",
+              "createdAt": "now",
+              "credential": "engine_native_dir",
+              "endpoint": null,
+              "keyKind": null,
+              "launchCommand": "",
+              "provider": "Fixture",
+              "qualified": true,
+              "updatedAt": "now"
+            },
+            "engine": "codex",
+            "id": "cn_000000000001",
+            "label": "Connection 1",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "connected"
+          },
+          {
+            "checkedAt": null,
+            "detail": {
+              "authMode": "native_account",
+              "connectionId": "cn_000000000003",
+              "createdAt": "now",
+              "credential": "engine_native_dir",
+              "endpoint": null,
+              "keyKind": null,
+              "launchCommand": "",
+              "provider": "Fixture",
+              "qualified": true,
+              "updatedAt": "now"
+            },
+            "engine": "opencode",
+            "id": "cn_000000000003",
+            "label": "Connection 3",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "connected"
+          }
+        ],
+        "tokens": {
+          "connections": "@CONNECTION_REVISION@",
+          "mcp_servers": "absent",
+          "profile_sections": {
+            "connections": "absent",
+            "mcp_servers": "absent",
+            "routing": "absent",
+            "user_defaults": "absent"
+          },
+          "routing": "absent",
+          "routing_profiles": "absent",
+          "user_defaults": "absent"
+        },
+        "usage": [
+          {
+            "connected": true,
+            "engine": "codex",
+            "observedAt": null,
+            "resetAt": "2027-01-15T10:30:00Z",
+            "usedPercent": 55.0,
+            "window": "weekly"
+          },
+          {
+            "connected": true,
+            "engine": "claude",
+            "observedAt": null,
+            "resetAt": null,
+            "usedPercent": 64.0,
+            "window": "weekly",
+            "windows": []
+          }
+        ]
+      },
+      "input": {
+        "discovery": null,
+        "entries": [
+          {
+            "connection_id": "cn_000000000001",
+            "connection_name": "Connection 1",
+            "context_window": 200000,
+            "efforts": [],
+            "model": "exact/model",
+            "route_id": "xr_fixture"
+          }
+        ],
+        "routes": {
+          "engines": [],
+          "routes": [
+            {
+              "engine": "codex-acp",
+              "model": "exact/model",
+              "observed": true,
+              "route_id": "xr_fixture",
+              "selectable": true
+            }
+          ]
+        },
+        "surfaces": {
+          "mcp_servers": {
+            "ok": true,
+            "result": {
+              "editable_keys": [
+                "command",
+                "args",
+                "env",
+                "enabled",
+                "allowed_tools",
+                "read_only_tools",
+                "coordinator_tools",
+                "always_load_tools",
+                "read_paths",
+                "write_paths",
+                "network",
+                "runtime_dir_env",
+                "roles",
+                "engines"
+              ],
+              "engines": [
+                "codex-acp",
+                "claude-agent-acp",
+                "opencode"
+              ],
+              "exists": false,
+              "path": "@ROOT@/config/cortex/mcp-servers.json",
+              "revision": "absent",
+              "root_key": "servers",
+              "servers": [],
+              "surface": "mcp_servers",
+              "version": 1
+            }
+          },
+          "routing": {
+            "ok": true,
+            "result": {
+              "builtin": {
+                "builtin_affinity": {
+                  "analysis": "claude-agent-acp",
+                  "debugging": null,
+                  "design": "claude-agent-acp",
+                  "implementation_backend": "codex-acp",
+                  "implementation_frontend": "codex-acp",
+                  "implementation_frontend_design": "claude-agent-acp",
+                  "investigation": "claude-agent-acp",
+                  "operations": "codex-acp",
+                  "planning": "claude-agent-acp",
+                  "review": "claude-agent-acp",
+                  "testing": null,
+                  "writing": "claude-agent-acp"
+                },
+                "default_auto_deny_engines": [],
+                "default_auto_deny_families": [],
+                "default_user_deny": [],
+                "efforts": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max",
+                  "ultra"
+                ],
+                "max_request_names": 16,
+                "model_efforts": {},
+                "model_policy_version": 2,
+                "optional_engines": [
+                  "opencode"
+                ],
+                "policy_attributes": [
+                  "effort_floor",
+                  "max_effort",
+                  "effort_ladder",
+                  "also_standard_for",
+                  "preferred_for",
+                  "preferred_when",
+                  "request_names"
+                ],
+                "policy_efforts": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "selection_modes": [
+                  "listed"
+                ],
+                "supported_engines": [
+                  "codex-acp",
+                  "claude-agent-acp",
+                  "opencode"
+                ],
+                "tier_sources": [
+                  "configured"
+                ],
+                "tiers": [
+                  "flagship",
+                  "deep",
+                  "standard",
+                  "light"
+                ],
+                "work_kind_labels": {
+                  "analysis": "Analysis",
+                  "debugging": "Debugging",
+                  "design": "Design and architecture",
+                  "implementation_backend": "Backend implementation",
+                  "implementation_frontend": "Frontend implementation (no design)",
+                  "implementation_frontend_design": "Frontend implementation with UI design",
+                  "investigation": "Investigation",
+                  "operations": "Operations",
+                  "planning": "Planning",
+                  "review": "Review",
+                  "testing": "Testing",
+                  "writing": "Documentation and writing"
+                },
+                "work_kind_roles": {
+                  "analysis": [],
+                  "debugging": [
+                    "worker-debugger",
+                    "worker-performance-engineer"
+                  ],
+                  "design": [
+                    "worker-architect",
+                    "worker-database-architect",
+                    "worker-senior-consultant",
+                    "worker-ux-designer"
+                  ],
+                  "implementation_backend": [
+                    "worker-backend-dev",
+                    "worker-data-engineer",
+                    "worker-fullstack-dev",
+                    "worker-general",
+                    "worker-refactorer"
+                  ],
+                  "implementation_frontend": [
+                    "worker-accessibility-fixer",
+                    "worker-frontend-dev",
+                    "worker-mobile-dev"
+                  ],
+                  "implementation_frontend_design": [],
+                  "investigation": [
+                    "worker-explorer"
+                  ],
+                  "operations": [
+                    "worker-devops-engineer"
+                  ],
+                  "planning": [
+                    "worker-planner"
+                  ],
+                  "review": [
+                    "worker-accessibility-auditor",
+                    "worker-code-reviewer",
+                    "worker-security-auditor"
+                  ],
+                  "testing": [
+                    "worker-build-verification",
+                    "worker-qa-engineer"
+                  ],
+                  "writing": [
+                    "worker-technical-writer"
+                  ]
+                },
+                "work_kinds": [
+                  "implementation_backend",
+                  "implementation_frontend",
+                  "implementation_frontend_design",
+                  "operations",
+                  "debugging",
+                  "testing",
+                  "investigation",
+                  "review",
+                  "design",
+                  "writing",
+                  "planning",
+                  "analysis"
+                ]
+              },
+              "effective_rules": {},
+              "effective_source": "missing",
+              "effective_valid": false,
+              "precedence": [
+                "user"
+              ],
+              "project_root": null,
+              "sources": [
+                {
+                  "exists": false,
+                  "path": "@ROOT@/config/cortex/routing.json",
+                  "revision": "absent",
+                  "source": "user",
+                  "writable": true
+                }
+              ],
+              "surface": "routing"
+            }
+          },
+          "routing_profiles": {
+            "ok": true,
+            "result": {
+              "active": null,
+              "applied": null,
+              "current_revisions": {
+                "connections": "absent",
+                "mcp_servers": "absent",
+                "routing": "absent",
+                "user_defaults": "absent"
+              },
+              "differences": [],
+              "format": 2,
+              "matches_profile": [],
+              "migrated_from": null,
+              "modified_sections": [],
+              "notes": [],
+              "path": "@ROOT@/config/cortex/routing-profiles.json",
+              "pending": null,
+              "problems": [],
+              "profiles": [],
+              "revision": "absent",
+              "shadowed_by": null,
+              "state": "none",
+              "surface": "routing_profiles",
+              "user_routing_revision": "absent"
+            }
+          },
+          "user_defaults": {
+            "ok": true,
+            "result": {
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": false,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "exists": false,
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "path": "@ROOT@/config/cortex/defaults.json",
+              "preserved_keys": [],
+              "revision": "absent",
+              "surface": "user_defaults"
+            }
+          }
+        },
+        "workspace": {}
+      },
+      "limits": {
+        "primary": {
+          "resets_at": 1800000900,
+          "used_percent": 14,
+          "window_minutes": 300
+        },
+        "secondary": {
+          "resets_at": 1800009000,
+          "used_percent": 55,
+          "window_minutes": 10080
+        }
+      },
+      "name": "usage-and-settings-2",
+      "raw": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Connection 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/.codex\", \"owned\": false}, \"approved_fingerprint\": \"untrusted\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"now\", \"updated_at\": \"now\"}, \"cn_000000000002\": {\"id\": \"cn_000000000002\", \"name\": \"Connection 2\", \"engine\": \"claude-agent-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/.claude\", \"owned\": false}, \"approved_fingerprint\": \"untrusted\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"now\", \"updated_at\": \"now\"}, \"cn_000000000003\": {\"id\": \"cn_000000000003\", \"name\": \"Connection 3\", \"engine\": \"opencode\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/.local/share/opencode\", \"owned\": false}, \"approved_fingerprint\": \"untrusted\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"now\", \"updated_at\": \"now\"}}}"
+    },
+    {
+      "cache": {
+        "seven_day": {
+          "resets_at": 1800000001,
+          "used": 100,
+          "window_minutes": 10080
+        }
+      },
+      "contexts": {
+        "exact/model": 200000,
+        "invalid": true,
+        "other": 100
+      },
+      "expected": {
+        "config": {
+          "active": null,
+          "catalogue": {
+            "claude-agent-acp": {
+              "failed": false,
+              "models": [],
+              "observedAt": null
+            },
+            "codex-acp": {
+              "failed": false,
+              "models": [
+                {
+                  "contextWindow": 200000,
+                  "efforts": [],
+                  "id": "exact/model",
+                  "label": "exact/model",
+                  "observed": true,
+                  "routeId": "xr_fixture"
+                }
+              ],
+              "observedAt": null
+            },
+            "opencode": {
+              "failed": false,
+              "models": [],
+              "observedAt": null
+            }
+          },
+          "files": {
+            "askpass": false,
+            "backups": 0,
+            "env": {
+              "engineFollow": null,
+              "engineUpdate": null,
+              "opencodeBinary": null
+            },
+            "envRouting": null,
+            "invalidRouting": false,
+            "migration": false,
+            "missing": [
+              "routing.json",
+              "defaults.json",
+              "mcp-servers.json"
+            ],
+            "preservedDefaults": [],
+            "preservedRouting": []
+          },
+          "interrupted": false,
+          "mcpObserved": {},
+          "profiles": [],
+          "projects": {},
+          "quotaObserved": {
+            "claude-agent-acp": [
+              {
+                "percent": 100.0,
+                "window": "seven_day"
+              }
+            ],
+            "codex-acp": [
+              {
+                "percent": 56.0,
+                "window": "secondary"
+              }
+            ],
+            "opencode": []
+          },
+          "revisions": {
+            "mcp_servers": 0,
+            "project_ceiling": 0,
+            "routing": 0,
+            "user_defaults": 0
+          },
+          "setup": {
+            "claude-agent-acp": {
+              "autoConnectDisabled": false,
+              "automatic": false,
+              "reason": null,
+              "status": "not_downloaded"
+            },
+            "codex-acp": {
+              "autoConnectDisabled": false,
+              "automatic": false,
+              "reason": null,
+              "status": "not_downloaded"
+            },
+            "opencode": {
+              "autoConnectDisabled": false,
+              "automatic": false,
+              "reason": null,
+              "status": "not_downloaded"
+            }
+          },
+          "surfaces": {
+            "mcp_servers": [],
+            "routing": {
+              "affinity": {},
+              "autoAllow": [],
+              "deny": [],
+              "engines": {
+                "claude-agent-acp": {
+                  "auto": [],
+                  "enabled": [],
+                  "policy": {},
+                  "quota": [],
+                  "tiers": {}
+                },
+                "codex-acp": {
+                  "auto": [],
+                  "enabled": [],
+                  "policy": {},
+                  "quota": [],
+                  "tiers": {}
+                },
+                "opencode": {
+                  "auto": [],
+                  "enabled": [],
+                  "policy": {},
+                  "quota": [],
+                  "tiers": {}
+                }
+              },
+              "legacyTiers": [],
+              "pins": {},
+              "providers": [
+                "claude-agent-acp",
+                "codex-acp",
+                "opencode"
+              ],
+              "version": 2
+            },
+            "user_defaults": {
+              "ceiling": {
+                "allowedConnections": null,
+                "allowedRecipients": null,
+                "allowedRoutes": null,
+                "attempts": null,
+                "budget": null,
+                "consent": false,
+                "failureClasses": null,
+                "stored": {
+                  "calls": null,
+                  "concurrency": null,
+                  "permissionLevel": null,
+                  "spendEnforceable": false,
+                  "spendLimit": null,
+                  "tokens": null
+                },
+                "targetRoutes": null
+              },
+              "checkout": "main",
+              "coordinator": null,
+              "language": "auto",
+              "mode": "guarded",
+              "preserved": [],
+              "routeDefault": null
+            }
+          },
+          "unavailable": null
+        },
+        "connections": [
+          {
+            "checkedAt": null,
+            "detail": {
+              "authMode": "native_account",
+              "connectionId": "cn_000000000002",
+              "createdAt": "now",
+              "credential": "engine_native_dir",
+              "endpoint": null,
+              "keyKind": null,
+              "launchCommand": "",
+              "provider": "Fixture",
+              "qualified": true,
+              "updatedAt": "now"
+            },
+            "engine": "claude",
+            "id": "cn_000000000002",
+            "label": "Connection 2",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "connected"
+          },
+          {
+            "checkedAt": null,
+            "detail": {
+              "authMode": "native_account",
+              "connectionId": "cn_000000000001",
+              "createdAt": "now",
+              "credential": "engine_native_dir",
+              "endpoint": null,
+              "keyKind": null,
+              "launchCommand": "",
+              "provider": "Fixture",
+              "qualified": true,
+              "updatedAt": "now"
+            },
+            "engine": "codex",
+            "id": "cn_000000000001",
+            "label": "Connection 1",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "connected"
+          },
+          {
+            "checkedAt": null,
+            "detail": {
+              "authMode": "native_account",
+              "connectionId": "cn_000000000003",
+              "createdAt": "now",
+              "credential": "engine_native_dir",
+              "endpoint": null,
+              "keyKind": null,
+              "launchCommand": "",
+              "provider": "Fixture",
+              "qualified": true,
+              "updatedAt": "now"
+            },
+            "engine": "opencode",
+            "id": "cn_000000000003",
+            "label": "Connection 3",
+            "note": "native_account",
+            "sessions": 4,
+            "state": "connected"
+          }
+        ],
+        "tokens": {
+          "connections": "@CONNECTION_REVISION@",
+          "mcp_servers": "absent",
+          "profile_sections": {
+            "connections": "absent",
+            "mcp_servers": "absent",
+            "routing": "absent",
+            "user_defaults": "absent"
+          },
+          "routing": "absent",
+          "routing_profiles": "absent",
+          "user_defaults": "absent"
+        },
+        "usage": [
+          {
+            "connected": true,
+            "engine": "codex",
+            "observedAt": null,
+            "resetAt": "2027-01-15T10:30:00Z",
+            "usedPercent": 56.0,
+            "window": "weekly"
+          },
+          {
+            "connected": true,
+            "engine": "claude",
+            "observedAt": null,
+            "resetAt": "2027-01-15T08:00:01Z",
+            "usedPercent": 100.0,
+            "window": "weekly",
+            "windows": [{"name": "seven_day", "observedAt": null, "resetAt": "2027-01-15T08:00:01Z", "usedPercent": 100.0}]
+          }
+        ]
+      },
+      "input": {
+        "discovery": null,
+        "entries": [
+          {
+            "connection_id": "cn_000000000001",
+            "connection_name": "Connection 1",
+            "context_window": 200000,
+            "efforts": [],
+            "model": "exact/model",
+            "route_id": "xr_fixture"
+          }
+        ],
+        "routes": {
+          "engines": [],
+          "routes": [
+            {
+              "engine": "codex-acp",
+              "model": "exact/model",
+              "observed": true,
+              "route_id": "xr_fixture",
+              "selectable": true
+            }
+          ]
+        },
+        "surfaces": {
+          "mcp_servers": {
+            "ok": true,
+            "result": {
+              "editable_keys": [
+                "command",
+                "args",
+                "env",
+                "enabled",
+                "allowed_tools",
+                "read_only_tools",
+                "coordinator_tools",
+                "always_load_tools",
+                "read_paths",
+                "write_paths",
+                "network",
+                "runtime_dir_env",
+                "roles",
+                "engines"
+              ],
+              "engines": [
+                "codex-acp",
+                "claude-agent-acp",
+                "opencode"
+              ],
+              "exists": false,
+              "path": "@ROOT@/config/cortex/mcp-servers.json",
+              "revision": "absent",
+              "root_key": "servers",
+              "servers": [],
+              "surface": "mcp_servers",
+              "version": 1
+            }
+          },
+          "routing": {
+            "ok": true,
+            "result": {
+              "builtin": {
+                "builtin_affinity": {
+                  "analysis": "claude-agent-acp",
+                  "debugging": null,
+                  "design": "claude-agent-acp",
+                  "implementation_backend": "codex-acp",
+                  "implementation_frontend": "codex-acp",
+                  "implementation_frontend_design": "claude-agent-acp",
+                  "investigation": "claude-agent-acp",
+                  "operations": "codex-acp",
+                  "planning": "claude-agent-acp",
+                  "review": "claude-agent-acp",
+                  "testing": null,
+                  "writing": "claude-agent-acp"
+                },
+                "default_auto_deny_engines": [],
+                "default_auto_deny_families": [],
+                "default_user_deny": [],
+                "efforts": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max",
+                  "ultra"
+                ],
+                "max_request_names": 16,
+                "model_efforts": {},
+                "model_policy_version": 2,
+                "optional_engines": [
+                  "opencode"
+                ],
+                "policy_attributes": [
+                  "effort_floor",
+                  "max_effort",
+                  "effort_ladder",
+                  "also_standard_for",
+                  "preferred_for",
+                  "preferred_when",
+                  "request_names"
+                ],
+                "policy_efforts": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "selection_modes": [
+                  "listed"
+                ],
+                "supported_engines": [
+                  "codex-acp",
+                  "claude-agent-acp",
+                  "opencode"
+                ],
+                "tier_sources": [
+                  "configured"
+                ],
+                "tiers": [
+                  "flagship",
+                  "deep",
+                  "standard",
+                  "light"
+                ],
+                "work_kind_labels": {
+                  "analysis": "Analysis",
+                  "debugging": "Debugging",
+                  "design": "Design and architecture",
+                  "implementation_backend": "Backend implementation",
+                  "implementation_frontend": "Frontend implementation (no design)",
+                  "implementation_frontend_design": "Frontend implementation with UI design",
+                  "investigation": "Investigation",
+                  "operations": "Operations",
+                  "planning": "Planning",
+                  "review": "Review",
+                  "testing": "Testing",
+                  "writing": "Documentation and writing"
+                },
+                "work_kind_roles": {
+                  "analysis": [],
+                  "debugging": [
+                    "worker-debugger",
+                    "worker-performance-engineer"
+                  ],
+                  "design": [
+                    "worker-architect",
+                    "worker-database-architect",
+                    "worker-senior-consultant",
+                    "worker-ux-designer"
+                  ],
+                  "implementation_backend": [
+                    "worker-backend-dev",
+                    "worker-data-engineer",
+                    "worker-fullstack-dev",
+                    "worker-general",
+                    "worker-refactorer"
+                  ],
+                  "implementation_frontend": [
+                    "worker-accessibility-fixer",
+                    "worker-frontend-dev",
+                    "worker-mobile-dev"
+                  ],
+                  "implementation_frontend_design": [],
+                  "investigation": [
+                    "worker-explorer"
+                  ],
+                  "operations": [
+                    "worker-devops-engineer"
+                  ],
+                  "planning": [
+                    "worker-planner"
+                  ],
+                  "review": [
+                    "worker-accessibility-auditor",
+                    "worker-code-reviewer",
+                    "worker-security-auditor"
+                  ],
+                  "testing": [
+                    "worker-build-verification",
+                    "worker-qa-engineer"
+                  ],
+                  "writing": [
+                    "worker-technical-writer"
+                  ]
+                },
+                "work_kinds": [
+                  "implementation_backend",
+                  "implementation_frontend",
+                  "implementation_frontend_design",
+                  "operations",
+                  "debugging",
+                  "testing",
+                  "investigation",
+                  "review",
+                  "design",
+                  "writing",
+                  "planning",
+                  "analysis"
+                ]
+              },
+              "effective_rules": {},
+              "effective_source": "missing",
+              "effective_valid": false,
+              "precedence": [
+                "user"
+              ],
+              "project_root": null,
+              "sources": [
+                {
+                  "exists": false,
+                  "path": "@ROOT@/config/cortex/routing.json",
+                  "revision": "absent",
+                  "source": "user",
+                  "writable": true
+                }
+              ],
+              "surface": "routing"
+            }
+          },
+          "routing_profiles": {
+            "ok": true,
+            "result": {
+              "active": null,
+              "applied": null,
+              "current_revisions": {
+                "connections": "absent",
+                "mcp_servers": "absent",
+                "routing": "absent",
+                "user_defaults": "absent"
+              },
+              "differences": [],
+              "format": 2,
+              "matches_profile": [],
+              "migrated_from": null,
+              "modified_sections": [],
+              "notes": [],
+              "path": "@ROOT@/config/cortex/routing-profiles.json",
+              "pending": null,
+              "problems": [],
+              "profiles": [],
+              "revision": "absent",
+              "shadowed_by": null,
+              "state": "none",
+              "surface": "routing_profiles",
+              "user_routing_revision": "absent"
+            }
+          },
+          "user_defaults": {
+            "ok": true,
+            "result": {
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": false,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "exists": false,
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "path": "@ROOT@/config/cortex/defaults.json",
+              "preserved_keys": [],
+              "revision": "absent",
+              "surface": "user_defaults"
+            }
+          }
+        },
+        "workspace": {}
+      },
+      "limits": {
+        "primary": {
+          "resets_at": 1800000900,
+          "used_percent": 15,
+          "window_minutes": 300
+        },
+        "secondary": {
+          "resets_at": 1800009000,
+          "used_percent": 56,
+          "window_minutes": 10080
+        }
+      },
+      "name": "usage-and-settings-3",
+      "raw": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Connection 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/.codex\", \"owned\": false}, \"approved_fingerprint\": \"untrusted\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"now\", \"updated_at\": \"now\"}, \"cn_000000000002\": {\"id\": \"cn_000000000002\", \"name\": \"Connection 2\", \"engine\": \"claude-agent-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/.claude\", \"owned\": false}, \"approved_fingerprint\": \"untrusted\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"now\", \"updated_at\": \"now\"}, \"cn_000000000003\": {\"id\": \"cn_000000000003\", \"name\": \"Connection 3\", \"engine\": \"opencode\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/.local/share/opencode\", \"owned\": false}, \"approved_fingerprint\": \"untrusted\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"now\", \"updated_at\": \"now\"}}}"
+    }
+  ],
+  "evidence": {
+    "lazy_cli_suppressed": true,
+    "process_attempts": 0,
+    "real_engine_calls": 0
+  },
+  "metadata": [
+    {
+      "expected": {
+        "connections": [],
+        "engines": [
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "codex-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "1.12.0",
+              "1.13.0",
+              "2.0.1",
+              "2.1.1",
+              "2.3.0",
+              "2.6.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "claude-agent-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "0.78.0",
+              "0.87.0",
+              "0.88.0",
+              "0.97.0",
+              "0.107.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "opencode",
+            "onboarding": "explicit_opt_in",
+            "optional": true,
+            "qualified_versions": [
+              "2.x.x"
+            ]
+          }
+        ],
+        "exists": false,
+        "max_concurrent_sessions_limit": 64,
+        "operations": [
+          "rename",
+          "set_max_concurrent_sessions",
+          "validate",
+          "remove"
+        ],
+        "revision": "absent",
+        "surface": "connections"
+      },
+      "name": "metadata-0",
+      "raw": null
+    },
+    {
+      "expected": {
+        "connections": [],
+        "engines": [
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "codex-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "1.12.0",
+              "1.13.0",
+              "2.0.1",
+              "2.1.1",
+              "2.3.0",
+              "2.6.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "claude-agent-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "0.78.0",
+              "0.87.0",
+              "0.88.0",
+              "0.97.0",
+              "0.107.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "opencode",
+            "onboarding": "explicit_opt_in",
+            "optional": true,
+            "qualified_versions": [
+              "2.x.x"
+            ]
+          }
+        ],
+        "exists": true,
+        "max_concurrent_sessions_limit": 64,
+        "operations": [
+          "rename",
+          "set_max_concurrent_sessions",
+          "validate",
+          "remove"
+        ],
+        "revision": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "surface": "connections"
+      },
+      "name": "metadata-1",
+      "raw": ""
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-2",
+      "raw": "{}"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-3",
+      "raw": "{"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-4",
+      "raw": "[]"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-5",
+      "raw": "null"
+    },
+    {
+      "expected": {
+        "connections": [
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "engine_native_dir",
+              "owned": true
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_123456789abc",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "optional_engine": false,
+            "provider": "OpenAI",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          }
+        ],
+        "engines": [
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [
+              "cn_123456789abc"
+            ],
+            "engine": "codex-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "1.12.0",
+              "1.13.0",
+              "2.0.1",
+              "2.1.1",
+              "2.3.0",
+              "2.6.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "claude-agent-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "0.78.0",
+              "0.87.0",
+              "0.88.0",
+              "0.97.0",
+              "0.107.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "opencode",
+            "onboarding": "explicit_opt_in",
+            "optional": true,
+            "qualified_versions": [
+              "2.x.x"
+            ]
+          }
+        ],
+        "exists": true,
+        "max_concurrent_sessions_limit": 64,
+        "operations": [
+          "rename",
+          "set_max_concurrent_sessions",
+          "validate",
+          "remove"
+        ],
+        "revision": "sha256:75e499cb4a25cfb6393a75e15750c469696eb8e7f379d2b02917cb303b51d214",
+        "surface": "connections"
+      },
+      "name": "metadata-6",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "connections": [
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "engine_native_dir",
+              "owned": true
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_123456789abc",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 64,
+            "name": "Fixture",
+            "optional_engine": false,
+            "provider": "OpenAI",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          }
+        ],
+        "engines": [
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [
+              "cn_123456789abc"
+            ],
+            "engine": "codex-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "1.12.0",
+              "1.13.0",
+              "2.0.1",
+              "2.1.1",
+              "2.3.0",
+              "2.6.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "claude-agent-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "0.78.0",
+              "0.87.0",
+              "0.88.0",
+              "0.97.0",
+              "0.107.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "opencode",
+            "onboarding": "explicit_opt_in",
+            "optional": true,
+            "qualified_versions": [
+              "2.x.x"
+            ]
+          }
+        ],
+        "exists": true,
+        "max_concurrent_sessions_limit": 64,
+        "operations": [
+          "rename",
+          "set_max_concurrent_sessions",
+          "validate",
+          "remove"
+        ],
+        "revision": "sha256:64420b9b6bf60753eea9c5ee82451180e57018764bf77de558248df88f4779de",
+        "surface": "connections"
+      },
+      "name": "metadata-7",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"max_concurrent_sessions\": 64, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-8",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"max_concurrent_sessions\": 0, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-9",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"max_concurrent_sessions\": true, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-10",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"max_concurrent_sessions\": 65, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "connections": [
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "engine_native_dir",
+              "owned": true
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_123456789abc",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "optional_engine": false,
+            "provider": "OpenAI",
+            "qualified": true,
+            "state": "authorization_required",
+            "updated_at": "now"
+          }
+        ],
+        "engines": [
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [
+              "cn_123456789abc"
+            ],
+            "engine": "codex-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "1.12.0",
+              "1.13.0",
+              "2.0.1",
+              "2.1.1",
+              "2.3.0",
+              "2.6.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "claude-agent-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "0.78.0",
+              "0.87.0",
+              "0.88.0",
+              "0.97.0",
+              "0.107.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "opencode",
+            "onboarding": "explicit_opt_in",
+            "optional": true,
+            "qualified_versions": [
+              "2.x.x"
+            ]
+          }
+        ],
+        "exists": true,
+        "max_concurrent_sessions_limit": 64,
+        "operations": [
+          "rename",
+          "set_max_concurrent_sessions",
+          "validate",
+          "remove"
+        ],
+        "revision": "sha256:744ba9b71672342ad04849cc28fe36d960efbf8d131ec243dc5d2c0c7fb51c04",
+        "surface": "connections"
+      },
+      "name": "metadata-11",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"authorization_required\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "connections": [
+          {
+            "auth_mode": "gateway",
+            "created_at": "now",
+            "credential": {
+              "kind": "engine_native_dir",
+              "owned": true
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_123456789abc",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "optional_engine": false,
+            "provider": "OpenAI",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          }
+        ],
+        "engines": [
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [
+              "cn_123456789abc"
+            ],
+            "engine": "codex-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "1.12.0",
+              "1.13.0",
+              "2.0.1",
+              "2.1.1",
+              "2.3.0",
+              "2.6.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "claude-agent-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "0.78.0",
+              "0.87.0",
+              "0.88.0",
+              "0.97.0",
+              "0.107.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "opencode",
+            "onboarding": "explicit_opt_in",
+            "optional": true,
+            "qualified_versions": [
+              "2.x.x"
+            ]
+          }
+        ],
+        "exists": true,
+        "max_concurrent_sessions_limit": 64,
+        "operations": [
+          "rename",
+          "set_max_concurrent_sessions",
+          "validate",
+          "remove"
+        ],
+        "revision": "sha256:cc8bddb1d0932ba3486d9fcae9676f087a424957b2dc5e70c39bba2b9ee95ee0",
+        "surface": "connections"
+      },
+      "name": "metadata-12",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"gateway\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-13",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": 1, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "connections": [
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "engine_native_dir",
+              "owned": true
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_123456789abc",
+            "key_kind": null,
+            "launch_command": [],
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "optional_engine": false,
+            "provider": "OpenAI",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          }
+        ],
+        "engines": [
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [
+              "cn_123456789abc"
+            ],
+            "engine": "codex-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "1.12.0",
+              "1.13.0",
+              "2.0.1",
+              "2.1.1",
+              "2.3.0",
+              "2.6.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "claude-agent-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "0.78.0",
+              "0.87.0",
+              "0.88.0",
+              "0.97.0",
+              "0.107.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "opencode",
+            "onboarding": "explicit_opt_in",
+            "optional": true,
+            "qualified_versions": [
+              "2.x.x"
+            ]
+          }
+        ],
+        "exists": true,
+        "max_concurrent_sessions_limit": 64,
+        "operations": [
+          "rename",
+          "set_max_concurrent_sessions",
+          "validate",
+          "remove"
+        ],
+        "revision": "sha256:73c66183632f35587ee48399da2bd30fb2c220ffed4688855cfe85e28fa744a7",
+        "surface": "connections"
+      },
+      "name": "metadata-14",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": [], \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-15",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": [\"\"], \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-16",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": \"\", \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "connections": [
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "secret_file"
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_123456789abc",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "optional_engine": false,
+            "provider": "OpenAI",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          }
+        ],
+        "engines": [
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [
+              "cn_123456789abc"
+            ],
+            "engine": "codex-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "1.12.0",
+              "1.13.0",
+              "2.0.1",
+              "2.1.1",
+              "2.3.0",
+              "2.6.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "claude-agent-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "0.78.0",
+              "0.87.0",
+              "0.88.0",
+              "0.97.0",
+              "0.107.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "opencode",
+            "onboarding": "explicit_opt_in",
+            "optional": true,
+            "qualified_versions": [
+              "2.x.x"
+            ]
+          }
+        ],
+        "exists": true,
+        "max_concurrent_sessions_limit": 64,
+        "operations": [
+          "rename",
+          "set_max_concurrent_sessions",
+          "validate",
+          "remove"
+        ],
+        "revision": "sha256:6e4013d95c3be11d81466f65900e638946bdd47e6fed5d130e726ae58a7e1429",
+        "surface": "connections"
+      },
+      "name": "metadata-17",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"secret_file\", \"path\": \"/fixture/secret\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "connections": [
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "os_keyring"
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_123456789abc",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "optional_engine": false,
+            "provider": "OpenAI",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          }
+        ],
+        "engines": [
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [
+              "cn_123456789abc"
+            ],
+            "engine": "codex-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "1.12.0",
+              "1.13.0",
+              "2.0.1",
+              "2.1.1",
+              "2.3.0",
+              "2.6.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "claude-agent-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "0.78.0",
+              "0.87.0",
+              "0.88.0",
+              "0.97.0",
+              "0.107.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "opencode",
+            "onboarding": "explicit_opt_in",
+            "optional": true,
+            "qualified_versions": [
+              "2.x.x"
+            ]
+          }
+        ],
+        "exists": true,
+        "max_concurrent_sessions_limit": 64,
+        "operations": [
+          "rename",
+          "set_max_concurrent_sessions",
+          "validate",
+          "remove"
+        ],
+        "revision": "sha256:334775171920a6e00f687e0273e9cbe779b2ee1391d022bfbf78d5aea553905c",
+        "surface": "connections"
+      },
+      "name": "metadata-18",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"account\": \"user\", \"kind\": \"os_keyring\", \"service\": \"test\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-19",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"account\": \"user\", \"kind\": \"os_keyring\", \"service\": \"../bad\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-20",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"relative\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-21",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"unknown\": true, \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-22",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"unknown\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "connections": [
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "engine_native_dir",
+              "owned": true
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_123456789abc",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "optional_engine": false,
+            "provider": "OpenAI",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          }
+        ],
+        "engines": [
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [
+              "cn_123456789abc"
+            ],
+            "engine": "codex-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "1.12.0",
+              "1.13.0",
+              "2.0.1",
+              "2.1.1",
+              "2.3.0",
+              "2.6.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "claude-agent-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "0.78.0",
+              "0.87.0",
+              "0.88.0",
+              "0.97.0",
+              "0.107.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "native_account": true
+            },
+            "connection_ids": [],
+            "engine": "opencode",
+            "onboarding": "explicit_opt_in",
+            "optional": true,
+            "qualified_versions": [
+              "2.x.x"
+            ]
+          }
+        ],
+        "exists": true,
+        "max_concurrent_sessions_limit": 64,
+        "operations": [
+          "rename",
+          "set_max_concurrent_sessions",
+          "validate",
+          "remove"
+        ],
+        "revision": "sha256:4e62022f71632335bc813ee3ba2e920da894d5115ed7d4a8e83514a35ce59959",
+        "surface": "connections"
+      },
+      "name": "metadata-23",
+      "raw": "{\"auto_connect_disabled\": [\"opencode\", \"codex-acp\"], \"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-24",
+      "raw": "{\"auto_connect_disabled\": [\"codex-acp\", \"codex-acp\"], \"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-25",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1, \"unknown\": 1}"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-26",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 2}"
+    },
+    {
+      "expected": {
+        "refused": true
+      },
+      "name": "metadata-27",
+      "raw": "{\"connections\": [], \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "connections": [
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "engine_native_dir",
+              "owned": true
+            },
+            "endpoint": null,
+            "engine": "claude-agent-acp",
+            "id": "cn_000000000002",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Ω",
+            "optional_engine": false,
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          },
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "engine_native_dir",
+              "owned": true
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_000000000003",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "A",
+            "optional_engine": false,
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          },
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "engine_native_dir",
+              "owned": true
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_000000000005",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "A",
+            "optional_engine": false,
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          },
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "engine_native_dir",
+              "owned": true
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_123456789abc",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "optional_engine": false,
+            "provider": "OpenAI",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          },
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "engine_native_dir",
+              "owned": true
+            },
+            "endpoint": null,
+            "engine": "opencode",
+            "id": "cn_000000000004",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "A",
+            "optional_engine": true,
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          }
+        ],
+        "engines": [
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [
+              "cn_000000000003",
+              "cn_000000000005",
+              "cn_123456789abc"
+            ],
+            "engine": "codex-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "1.12.0",
+              "1.13.0",
+              "2.0.1",
+              "2.1.1",
+              "2.3.0",
+              "2.6.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [
+              "cn_000000000002"
+            ],
+            "engine": "claude-agent-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "0.78.0",
+              "0.87.0",
+              "0.88.0",
+              "0.97.0",
+              "0.107.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "native_account": true
+            },
+            "connection_ids": [
+              "cn_000000000004"
+            ],
+            "engine": "opencode",
+            "onboarding": "explicit_opt_in",
+            "optional": true,
+            "qualified_versions": [
+              "2.x.x"
+            ]
+          }
+        ],
+        "exists": true,
+        "max_concurrent_sessions_limit": 64,
+        "operations": [
+          "rename",
+          "set_max_concurrent_sessions",
+          "validate",
+          "remove"
+        ],
+        "revision": "sha256:d0a547ad468390a030188c198add2b7e9302119012484f9084c8ac6aeca5cd4e",
+        "surface": "connections"
+      },
+      "name": "metadata-28",
+      "raw": "{\"connections\": {\"cn_123456789abc\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_123456789abc\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Fixture\", \"provider\": \"OpenAI\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}, \"cn_000000000002\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"claude-agent-acp\", \"id\": \"cn_000000000002\", \"key_kind\": null, \"launch_command\": null, \"name\": \"Ω\", \"provider\": \"Fixture\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}, \"cn_000000000003\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_000000000003\", \"key_kind\": null, \"launch_command\": null, \"name\": \"A\", \"provider\": \"Fixture\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}, \"cn_000000000004\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"opencode\", \"id\": \"cn_000000000004\", \"key_kind\": null, \"launch_command\": null, \"name\": \"A\", \"provider\": \"Fixture\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}, \"cn_000000000005\": {\"approved_fingerprint\": \"untrusted\", \"auth_mode\": \"native_account\", \"created_at\": \"now\", \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"/fixture/.codex\"}, \"endpoint\": null, \"engine\": \"codex-acp\", \"id\": \"cn_000000000005\", \"key_kind\": null, \"launch_command\": null, \"name\": \"A\", \"provider\": \"Fixture\", \"qualified\": true, \"state\": \"configured\", \"updated_at\": \"now\"}}, \"schema_version\": 1}"
+    },
+    {
+      "expected": {
+        "connections": [
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "engine_native_dir",
+              "owned": true
+            },
+            "endpoint": null,
+            "engine": "claude-agent-acp",
+            "id": "cn_000000000002",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Ω",
+            "optional_engine": false,
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          },
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "engine_native_dir",
+              "owned": true
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_000000000003",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "A",
+            "optional_engine": false,
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          },
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "engine_native_dir",
+              "owned": true
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_000000000005",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "A",
+            "optional_engine": false,
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          },
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "engine_native_dir",
+              "owned": true
+            },
+            "endpoint": null,
+            "engine": "codex-acp",
+            "id": "cn_123456789abc",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "Fixture",
+            "optional_engine": false,
+            "provider": "OpenAI",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          },
+          {
+            "auth_mode": "native_account",
+            "created_at": "now",
+            "credential": {
+              "kind": "engine_native_dir",
+              "owned": true
+            },
+            "endpoint": null,
+            "engine": "opencode",
+            "id": "cn_000000000004",
+            "key_kind": null,
+            "launch_command": null,
+            "max_concurrent_sessions": 4,
+            "name": "A",
+            "optional_engine": true,
+            "provider": "Fixture",
+            "qualified": true,
+            "state": "configured",
+            "updated_at": "now"
+          }
+        ],
+        "engines": [
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [
+              "cn_000000000003",
+              "cn_000000000005",
+              "cn_123456789abc"
+            ],
+            "engine": "codex-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "1.12.0",
+              "1.13.0",
+              "2.0.1",
+              "2.1.1",
+              "2.3.0",
+              "2.6.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "api_key": true,
+              "gateway": false,
+              "native_account": true
+            },
+            "connection_ids": [
+              "cn_000000000002"
+            ],
+            "engine": "claude-agent-acp",
+            "onboarding": "discovery_or_setup",
+            "optional": false,
+            "qualified_versions": [
+              "0.78.0",
+              "0.87.0",
+              "0.88.0",
+              "0.97.0",
+              "0.107.0"
+            ]
+          },
+          {
+            "auth_modes": {
+              "native_account": true
+            },
+            "connection_ids": [
+              "cn_000000000004"
+            ],
+            "engine": "opencode",
+            "onboarding": "explicit_opt_in",
+            "optional": true,
+            "qualified_versions": [
+              "2.x.x"
+            ]
+          }
+        ],
+        "exists": true,
+        "max_concurrent_sessions_limit": 64,
+        "operations": [
+          "rename",
+          "set_max_concurrent_sessions",
+          "validate",
+          "remove"
+        ],
+        "revision": "sha256:fb37788090de5fb82a732895bd74a3f1787564d0e23fbfd6bb407c216f895981",
+        "surface": "connections"
+      },
+      "name": "metadata-29",
+      "raw": "{\n  \"connections\": {\n    \"cn_123456789abc\": {\n      \"approved_fingerprint\": \"untrusted\",\n      \"auth_mode\": \"native_account\",\n      \"created_at\": \"now\",\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fixture/.codex\"\n      },\n      \"endpoint\": null,\n      \"engine\": \"codex-acp\",\n      \"id\": \"cn_123456789abc\",\n      \"key_kind\": null,\n      \"launch_command\": null,\n      \"name\": \"Fixture\",\n      \"provider\": \"OpenAI\",\n      \"qualified\": true,\n      \"state\": \"configured\",\n      \"updated_at\": \"now\"\n    },\n    \"cn_000000000002\": {\n      \"approved_fingerprint\": \"untrusted\",\n      \"auth_mode\": \"native_account\",\n      \"created_at\": \"now\",\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fixture/.codex\"\n      },\n      \"endpoint\": null,\n      \"engine\": \"claude-agent-acp\",\n      \"id\": \"cn_000000000002\",\n      \"key_kind\": null,\n      \"launch_command\": null,\n      \"name\": \"Ω\",\n      \"provider\": \"Fixture\",\n      \"qualified\": true,\n      \"state\": \"configured\",\n      \"updated_at\": \"now\"\n    },\n    \"cn_000000000003\": {\n      \"approved_fingerprint\": \"untrusted\",\n      \"auth_mode\": \"native_account\",\n      \"created_at\": \"now\",\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fixture/.codex\"\n      },\n      \"endpoint\": null,\n      \"engine\": \"codex-acp\",\n      \"id\": \"cn_000000000003\",\n      \"key_kind\": null,\n      \"launch_command\": null,\n      \"name\": \"A\",\n      \"provider\": \"Fixture\",\n      \"qualified\": true,\n      \"state\": \"configured\",\n      \"updated_at\": \"now\"\n    },\n    \"cn_000000000004\": {\n      \"approved_fingerprint\": \"untrusted\",\n      \"auth_mode\": \"native_account\",\n      \"created_at\": \"now\",\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fixture/.codex\"\n      },\n      \"endpoint\": null,\n      \"engine\": \"opencode\",\n      \"id\": \"cn_000000000004\",\n      \"key_kind\": null,\n      \"launch_command\": null,\n      \"name\": \"A\",\n      \"provider\": \"Fixture\",\n      \"qualified\": true,\n      \"state\": \"configured\",\n      \"updated_at\": \"now\"\n    },\n    \"cn_000000000005\": {\n      \"approved_fingerprint\": \"untrusted\",\n      \"auth_mode\": \"native_account\",\n      \"created_at\": \"now\",\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fixture/.codex\"\n      },\n      \"endpoint\": null,\n      \"engine\": \"codex-acp\",\n      \"id\": \"cn_000000000005\",\n      \"key_kind\": null,\n      \"launch_command\": null,\n      \"name\": \"A\",\n      \"provider\": \"Fixture\",\n      \"qualified\": true,\n      \"state\": \"configured\",\n      \"updated_at\": \"now\"\n    }\n  },\n  \"schema_version\": 1\n}\n"
+    }
+  ],
+  "sources": {
+    "crates/workspace-service/machine_tools.py": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+    "crates/workspace-service/tests/fixtures/config-read-python.json": "f5bf63c70f6d7e402abc3e6301c0ff370736c68bf93ee868af9d6403a9fa4527",
+    "crates/workspace-service/tests/generate_config_readers_fixture.py": "c6f7460a4c75496c2ceec72a14ee7ddc9f5923936fe9fca9c4cc7fbdcfb1fa72",
+    "src/cortex_runtime/configuration/management.py": "f035019940568b7b2881c7548e29f53a8e1ce0433eb5b7b1d2fc12e70f6ae8a2",
+    "src/cortex_runtime/connections/context_window.py": "4c11f7c18608be296f9bb29b5349409faef562b39161701b159ce3f373a36ee4",
+    "src/cortex_runtime/connections/discovery.py": "a70769b2a1fc667699cd5011baf7a11cea8e9e3f97428771ab73989e51c95360",
+    "src/cortex_runtime/connections/model.py": "94d5fbb6fe33b126cae1ea57e6453414d7ed40c7ba9752da57d7b1f16806e97e",
+    "src/cortex_runtime/connections/quota.py": "66ccc50372c1f49fd8e509aa8289c1cb1ac011b9a268f207c312f860779a766d",
+    "src/cortex_runtime/connections/registry.py": "6c96df2025a2b3e73d81dbcfabb57f2d9fcd233c167b19b5684163c4986a1ce5"
+  }
+}

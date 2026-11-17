@@ -1,0 +1,2857 @@
+{
+  "format": 1,
+  "sources": {
+    "crates/workspace-service/tests/generate_config_catalog_refresh_fixture.py": "b6d1d11c12f139608fb4c958707106edb65c1718b9b00caecfb9e7fc65b62be2",
+    "crates/workspace-service/machine_tools.py": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+    "src/cortex_runtime/configuration/management.py": "f035019940568b7b2881c7548e29f53a8e1ce0433eb5b7b1d2fc12e70f6ae8a2",
+    "src/cortex_runtime/catalog/refresh.py": "9feaea6d25f2adc5080eabaee4f61e4cfb67a97ce6a8f06c26ff024f28bc97e7",
+    "src/cortex_runtime/catalog/store.py": "7a4135c33ff212d2d9016dc9aaead5ef7801673df89b4c4a1e08d5f73459fdf5",
+    "src/cortex_runtime/catalog/discovery.py": "7e3c66fea7bef4b616756adb9106b194525362c7c92522da2f94333ade251c29",
+    "src/cortex_runtime/engine/process.py": "ad3936d9760bb3e47e6b6efb943254da7621aeda3e0011ebcc30071d2d84f051",
+    "src/cortex_runtime/engine/install_resolution.py": "374ae7d4285ba140cc4fd44a2d58afd0187fbb7bd7b5466e9bc6e9ae041b2590",
+    "src/cortex_runtime/connections/model.py": "94d5fbb6fe33b126cae1ea57e6453414d7ed40c7ba9752da57d7b1f16806e97e",
+    "src/cortex_runtime/connections/registry.py": "6c96df2025a2b3e73d81dbcfabb57f2d9fcd233c167b19b5684163c4986a1ce5",
+    "src/cortex_runtime/connections/environment.py": "ab78ec0b85e78d74f6943f552f1e399927aa8f3d7d02532a3f00053628a16fcd",
+    "src/cortex_runtime/catalog/model.py": "63485f855420006f2fc58a9c6e64dd31e9e5bfcd7d896bac5d86e413e917be4e",
+    "src/cortex_runtime/catalog/labels.py": "bf0d896f697996c40ba6407d308bdd10cc70b89d958b31f6b16295d402f24ea0",
+    "src/cortex_runtime/catalog/evidence.py": "c8c7a5a7c79721708e3537a76ad27e9c36ad45f8a4762d39d678983226d6abbc",
+    "src/cortex_runtime/routing/auto_route.py": "ab06e8edd30ce92cfac51bcf7ce7639f6ccb22c7b50848c59b8985abdf905211",
+    "src/cortex_runtime/routing/model_policy.py": "90b31fa8b8648a1892f5024044e70cc312a84a48adf72934ba9f6582ed572627",
+    "crates/workspace-service/tests/fixtures/catalog-selector-python.json": "301678518c3b1fa693349f3c86c047ff0751333a61cd025add7195ad5e89f794"
+  },
+  "processNetworkKeyringAttempts": 0,
+  "cases": [
+    {
+      "name": "absent-registry",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": []
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "empty-bytes",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": ""
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": []
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": ""
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "empty-registry",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": []
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "codex-acp-null",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000001",
+                  "name": "Fixture 1",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000001",
+              "success": false,
+              "reason": "engine_unreachable:PortableError"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "codex-acp-empty",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": [], \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000001",
+                  "name": "Fixture 1",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000001",
+              "success": false,
+              "reason": "engine_unreachable:IndexError"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": [], \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "codex-acp-relative",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": [\"never-run\", \"acp\"], \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000001",
+                  "name": "Fixture 1",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000001",
+              "success": false,
+              "reason": "engine_unreachable:PortableError"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": [\"never-run\", \"acp\"], \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "claude-agent-acp-null",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000002\": {\"id\": \"cn_000000000002\", \"name\": \"Fixture 2\", \"engine\": \"claude-agent-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000002",
+                  "name": "Fixture 2",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000002",
+              "success": false,
+              "reason": "engine_unreachable:PortableError"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000002\": {\"id\": \"cn_000000000002\", \"name\": \"Fixture 2\", \"engine\": \"claude-agent-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "claude-agent-acp-empty",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000002\": {\"id\": \"cn_000000000002\", \"name\": \"Fixture 2\", \"engine\": \"claude-agent-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": [], \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000002",
+                  "name": "Fixture 2",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000002",
+              "success": false,
+              "reason": "engine_unreachable:IndexError"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000002\": {\"id\": \"cn_000000000002\", \"name\": \"Fixture 2\", \"engine\": \"claude-agent-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": [], \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "claude-agent-acp-relative",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000002\": {\"id\": \"cn_000000000002\", \"name\": \"Fixture 2\", \"engine\": \"claude-agent-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": [\"never-run\", \"acp\"], \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000002",
+                  "name": "Fixture 2",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000002",
+              "success": false,
+              "reason": "engine_unreachable:PortableError"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000002\": {\"id\": \"cn_000000000002\", \"name\": \"Fixture 2\", \"engine\": \"claude-agent-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": [\"never-run\", \"acp\"], \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "opencode-null",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000003\": {\"id\": \"cn_000000000003\", \"name\": \"Fixture 3\", \"engine\": \"opencode\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000003",
+                  "name": "Fixture 3",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000003",
+              "success": false,
+              "reason": "engine_unreachable:PortableError"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000003\": {\"id\": \"cn_000000000003\", \"name\": \"Fixture 3\", \"engine\": \"opencode\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "opencode-empty",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000003\": {\"id\": \"cn_000000000003\", \"name\": \"Fixture 3\", \"engine\": \"opencode\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": [], \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000003",
+                  "name": "Fixture 3",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000003",
+              "success": false,
+              "reason": "engine_unreachable:IndexError"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000003\": {\"id\": \"cn_000000000003\", \"name\": \"Fixture 3\", \"engine\": \"opencode\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": [], \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "opencode-relative",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000003\": {\"id\": \"cn_000000000003\", \"name\": \"Fixture 3\", \"engine\": \"opencode\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": [\"never-run\", \"acp\"], \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000003",
+                  "name": "Fixture 3",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000003",
+              "success": false,
+              "reason": "engine_unreachable:PortableError"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000003\": {\"id\": \"cn_000000000003\", \"name\": \"Fixture 3\", \"engine\": \"opencode\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": [\"never-run\", \"acp\"], \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "stored-authorization_required",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"authorization_required\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000001",
+                  "name": "Fixture 1",
+                  "state": "authorization_required",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000001",
+              "success": false,
+              "reason": "engine_unreachable:PortableError"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"authorization_required\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "stored-unavailable",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"unavailable\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000001",
+                  "name": "Fixture 1",
+                  "state": "unavailable",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000001",
+              "success": false,
+              "reason": "engine_unreachable:PortableError"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"unavailable\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "stored-invalid",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"invalid\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000001",
+                  "name": "Fixture 1",
+                  "state": "invalid",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000001",
+              "success": false,
+              "reason": "engine_unreachable:PortableError"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"invalid\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "keyring-not-read",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"api_key\", \"key_kind\": \"openai_api_key\", \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"os_keyring\", \"service\": \"fixture\", \"account\": \"synthetic\"}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000001",
+                  "name": "Fixture 1",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000001",
+              "success": false,
+              "reason": "engine_unreachable:PortableError"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"api_key\", \"key_kind\": \"openai_api_key\", \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"os_keyring\", \"service\": \"fixture\", \"account\": \"synthetic\"}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "read-only-native-directory",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "home/native": {
+          "mode": 320,
+          "directory": true
+        },
+        "home/native/marker": {
+          "mode": 384,
+          "content": "synthetic marker; never opened"
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000001",
+                  "name": "Fixture 1",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000001",
+              "success": false,
+              "reason": "engine_home_read_only"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "home/native": {
+          "mode": 320,
+          "directory": true
+        },
+        "home/native/marker": {
+          "mode": 384,
+          "content": "synthetic marker; never opened"
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "sorted-failures",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000004\": {\"id\": \"cn_000000000004\", \"name\": \"Fixture 4\", \"engine\": \"opencode\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": [], \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}, \"cn_000000000003\": {\"id\": \"cn_000000000003\", \"name\": \"Alpha\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}, \"cn_000000000002\": {\"id\": \"cn_000000000002\", \"name\": \"Fixture 2\", \"engine\": \"claude-agent-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}, \"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Zulu\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": [\"relative\"], \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000003",
+                  "name": "Alpha",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                },
+                {
+                  "id": "cn_000000000001",
+                  "name": "Zulu",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000002",
+                  "name": "Fixture 2",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000004",
+                  "name": "Fixture 4",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000002",
+              "success": false,
+              "reason": "engine_unreachable:PortableError"
+            },
+            {
+              "connection_id": "cn_000000000003",
+              "success": false,
+              "reason": "engine_unreachable:PortableError"
+            },
+            {
+              "connection_id": "cn_000000000001",
+              "success": false,
+              "reason": "engine_unreachable:PortableError"
+            },
+            {
+              "connection_id": "cn_000000000004",
+              "success": false,
+              "reason": "engine_unreachable:IndexError"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000004\": {\"id\": \"cn_000000000004\", \"name\": \"Fixture 4\", \"engine\": \"opencode\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": [], \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}, \"cn_000000000003\": {\"id\": \"cn_000000000003\", \"name\": \"Alpha\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}, \"cn_000000000002\": {\"id\": \"cn_000000000002\", \"name\": \"Fixture 2\", \"engine\": \"claude-agent-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}, \"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Zulu\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": [\"relative\"], \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    },
+    {
+      "name": "cached-snapshot-preserved",
+      "native": true,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        },
+        "config/cortex/routing.json": {
+          "mode": 384,
+          "content": "{\"model_policy_version\": 2, \"enabled\": {\"codex-acp\": [\"exact\"], \"claude-agent-acp\": [\"exact\"], \"opencode\": [\"provider/exact\"]}, \"models\": {\"codex-acp\": {\"auto\": [\"exact\"], \"tiers\": {\"exact\": \"standard\"}}, \"claude-agent-acp\": {\"auto\": [\"exact\"], \"tiers\": {\"exact\": \"standard\"}}, \"opencode\": {\"auto\": [\"provider/exact\"], \"tiers\": {\"provider/exact\": \"standard\"}}}}"
+        },
+        "state/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "state/cortex/catalog": {
+          "mode": 448,
+          "directory": true
+        },
+        "state/cortex/catalog/cn_000000000001": {
+          "mode": 448,
+          "directory": true
+        },
+        "state/cortex/catalog/cn_000000000001/cs_000000000001.json": {
+          "mode": 384,
+          "content": "{\"snapshot_id\": \"cs_000000000001\", \"created_at\": \"2026-11-01T01:02:03Z\", \"entries\": [{\"route\": {\"id\": \"xr_4b2d1dc649e2a812bfa3b83a\", \"engine\": \"codex-acp\", \"connection_id\": \"cn_000000000001\", \"model\": \"exact\", \"supported_parameters\": [[\"mode\", \"agent\"], [\"thought_level\", \"engine_default\"], [\"thought_level\", \"high\"], [\"thought_level\", \"low\"]]}, \"connection_id\": \"cn_000000000001\", \"label\": \"exact\", \"disambiguated_label\": \"exact\", \"catalog_snapshot_id\": \"cs_000000000001\", \"evidence\": {\"catalog_obtained\": {\"source\": \"discovery\", \"adapter_version\": \"fixture\", \"observed_at\": \"now\", \"evidence_ref\": null}}}]}"
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "user",
+          "effective_valid": true,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [
+                "exact"
+              ],
+              "unmatched_selected": [],
+              "enabled_models": [
+                "exact"
+              ],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000001",
+                  "name": "Fixture 1",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": "2026-11-01T01:02:03Z"
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 1,
+              "matches": {
+                "user": {
+                  "disabled": false,
+                  "automatic": true
+                }
+              }
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [
+                "exact"
+              ],
+              "unmatched_selected": [
+                "exact"
+              ],
+              "enabled_models": [
+                "exact"
+              ],
+              "enabled_default": false,
+              "unmatched_enabled": [
+                "exact"
+              ],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {
+                "user": {
+                  "disabled": false,
+                  "automatic": true
+                }
+              }
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [
+                "provider/exact"
+              ],
+              "unmatched_selected": [
+                "provider/exact"
+              ],
+              "enabled_models": [
+                "provider/exact"
+              ],
+              "enabled_default": false,
+              "unmatched_enabled": [
+                "provider/exact"
+              ],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {
+                "user": {
+                  "disabled": false,
+                  "automatic": true
+                }
+              }
+            }
+          ],
+          "routes": [
+            {
+              "route_id": "xr_4b2d1dc649e2a812bfa3b83a",
+              "engine": "codex-acp",
+              "model": "exact",
+              "model_name": "exact",
+              "connection_id": "cn_000000000001",
+              "connection_name": "Fixture 1",
+              "connection_state": "configured",
+              "qualified": true,
+              "observed": true,
+              "tier": null,
+              "tiers": [],
+              "tier_source": null,
+              "configured_tier": "standard",
+              "selection": "listed",
+              "auto_selected": true,
+              "policy": {
+                "effort_floor": null,
+                "max_effort": null,
+                "effort_ladder": [],
+                "also_standard_for": [],
+                "preferred_for": [],
+                "preferred_when": null,
+                "request_names": [],
+                "attribute_sources": {}
+              },
+              "preferred_for": [],
+              "preferred_when": null,
+              "preferred_inactive": false,
+              "selectable": true,
+              "in_selector": true,
+              "disabled": false,
+              "deny_tokens": [],
+              "enabled": true,
+              "engine_disabled": false,
+              "default_auto_excluded": null,
+              "auto_allow_tokens": [],
+              "automatic": "no_launch_command",
+              "superseded_by": null,
+              "matches": {
+                "user": {
+                  "deny": [],
+                  "auto_allow": []
+                }
+              }
+            }
+          ],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000001",
+              "success": false,
+              "reason": "engine_unreachable:PortableError"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        },
+        "config/cortex/routing.json": {
+          "mode": 384,
+          "content": "{\"model_policy_version\": 2, \"enabled\": {\"codex-acp\": [\"exact\"], \"claude-agent-acp\": [\"exact\"], \"opencode\": [\"provider/exact\"]}, \"models\": {\"codex-acp\": {\"auto\": [\"exact\"], \"tiers\": {\"exact\": \"standard\"}}, \"claude-agent-acp\": {\"auto\": [\"exact\"], \"tiers\": {\"exact\": \"standard\"}}, \"opencode\": {\"auto\": [\"provider/exact\"], \"tiers\": {\"provider/exact\": \"standard\"}}}}"
+        },
+        "state/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "state/cortex/catalog": {
+          "mode": 448,
+          "directory": true
+        },
+        "state/cortex/catalog/cn_000000000001": {
+          "mode": 448,
+          "directory": true
+        },
+        "state/cortex/catalog/cn_000000000001/cs_000000000001.json": {
+          "mode": 384,
+          "content": "{\"snapshot_id\": \"cs_000000000001\", \"created_at\": \"2026-11-01T01:02:03Z\", \"entries\": [{\"route\": {\"id\": \"xr_4b2d1dc649e2a812bfa3b83a\", \"engine\": \"codex-acp\", \"connection_id\": \"cn_000000000001\", \"model\": \"exact\", \"supported_parameters\": [[\"mode\", \"agent\"], [\"thought_level\", \"engine_default\"], [\"thought_level\", \"high\"], [\"thought_level\", \"low\"]]}, \"connection_id\": \"cn_000000000001\", \"label\": \"exact\", \"disambiguated_label\": \"exact\", \"catalog_snapshot_id\": \"cs_000000000001\", \"evidence\": {\"catalog_obtained\": {\"source\": \"discovery\", \"adapter_version\": \"fixture\", \"observed_at\": \"now\", \"evidence_ref\": null}}}]}"
+        }
+      }
+    },
+    {
+      "name": "no-existing-lock-retains-python",
+      "native": false,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "route_catalog",
+          "project_root": null,
+          "precedence": [
+            "user"
+          ],
+          "effective_source": "missing",
+          "effective_valid": false,
+          "providers": null,
+          "engines": [
+            {
+              "engine": "codex-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [
+                {
+                  "id": "cn_000000000001",
+                  "name": "Fixture 1",
+                  "state": "configured",
+                  "qualified": true,
+                  "catalog_observed_at": null
+                }
+              ],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "claude-agent-acp",
+              "optional": false,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            },
+            {
+              "engine": "opencode",
+              "optional": true,
+              "selection": "listed",
+              "selected_models": [],
+              "unmatched_selected": [],
+              "enabled_models": [],
+              "enabled_default": false,
+              "unmatched_enabled": [],
+              "connections": [],
+              "disabled": false,
+              "automatic": true,
+              "default_auto_excluded": false,
+              "route_count": 0,
+              "matches": {}
+            }
+          ],
+          "routes": [],
+          "catalog_problems": [],
+          "not_shown": [
+            "recorded_unavailability",
+            "quota"
+          ],
+          "refresh": [
+            {
+              "connection_id": "cn_000000000001",
+              "success": false,
+              "reason": "engine_unreachable:PortableError"
+            }
+          ]
+        }
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{\"schema_version\": 1, \"connections\": {\"cn_000000000001\": {\"id\": \"cn_000000000001\", \"name\": \"Fixture 1\", \"engine\": \"codex-acp\", \"provider\": \"Fixture\", \"auth_mode\": \"native_account\", \"key_kind\": null, \"endpoint\": null, \"launch_command\": null, \"credential_ref\": {\"kind\": \"engine_native_dir\", \"path\": \"@ROOT@/home/native\", \"owned\": false}, \"approved_fingerprint\": \"not-approved\", \"state\": \"configured\", \"qualified\": true, \"created_at\": \"2026-11-01T00:00:00Z\", \"updated_at\": \"2026-11-01T00:00:00Z\"}}}"
+        }
+      }
+    },
+    {
+      "name": "malformed-registry-retains-python",
+      "native": false,
+      "initial": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      },
+      "params": {
+        "action": "refresh",
+        "root": "/ignored",
+        "expected_revision": "ignored",
+        "command": [
+          "/ignored"
+        ],
+        "_fixture_real": true
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_registry",
+        "message": "connections.json is not valid UTF-8 JSON."
+      },
+      "after": {
+        "home": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex": {
+          "mode": 448,
+          "directory": true
+        },
+        "config/cortex/connections.json": {
+          "mode": 384,
+          "content": "{"
+        },
+        "config/cortex/connections.lock": {
+          "mode": 384,
+          "content": ""
+        }
+      }
+    }
+  ]
+}

@@ -3,8 +3,8 @@
   "version": "1.0.6",
   "private": true,
   "dependencies": {
-    "@agentclientprotocol/codex-acp": "2.3.0",
-    "@openai/codex": "0.164.0",
-    "@agentclientprotocol/claude-agent-acp": "0.97.0"
+    "@agentclientprotocol/codex-acp": "2.6.0",
+    "@openai/codex": "0.166.0",
+    "@agentclientprotocol/claude-agent-acp": "0.107.0"
   }
 }

@@ -57,6 +57,10 @@ export function StartupScreen(props: { logo?: JSX.Element; notice?: JSX.Element 
           <Show when={reason()}>{why => <span class="l-startup-why">{why()}</span>}</Show>
           <button class="btn btn-line" onClick={() => void ws.store.reload()}>Try again</button>
         </Match>
+        <Match when={ws.store.modelsPending()}>
+          <span class="ws-loading"><I n="loader" s={12} class="spin" />{ws.t("modelsLoading")}</span>
+          <span class="l-startup-why">{ws.t("modelsLoadingNote")}</span>
+        </Match>
         <Match when={waited() === "long"}><span class="ws-loading"><I n="loader" s={12} class="spin" />Still waiting for the service. The first start can take longer.</span></Match>
         <Match when={waited() === "slow"}><span class="ws-loading"><I n="loader" s={12} class="spin" />Loading workspace…</span></Match>
       </Switch>

@@ -92,7 +92,11 @@ it("refreshes cached Git on open, parked-tab return, focus and periodic reads wi
 
   failProduct = true;
   await open(HOME); await open(GIT);
-  expect(document.body.textContent).toContain("Workspace refresh failed.");
+  expect(document.body.textContent).not.toContain("This project\'s data could not be read.");
+  await open(HOME); await open(GIT);
+  await open(HOME); await open(GIT);
+  expect(document.body.textContent).toContain("This project's data could not be read.");
+  expect(document.body.textContent).not.toContain("Not connected to the service.");
   expect(shown()).toContain("periodic.txt");
   failProduct = false;
   await open(HOME); await open(GIT);

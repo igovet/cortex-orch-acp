@@ -27,7 +27,7 @@ For example, preview tasks with last activity before 1 October 2026 at 00:00 UTC
 /cortex-clear before 2026-10-01
 ```
 
-The runtime preview reports deletion/protection counts and cutoff. Manual CLI JSON includes `deleted_tasks`, `retention_days`, `skipped_protected`, `cutoff` (ISO-8601 UTC), `force`, `deleted_orphan_sessions`, `vacuum_status`, and `reclaimed_bytes`; after actual reclamation it also includes `db_bytes_before` and `db_bytes_after` (and `vacuum_error` on failure). Dry runs add `would_delete_tasks` and `would_delete_orphan_sessions` instead of deleting or vacuuming. The runtime also gives the exact command to confirm:
+The runtime preview reports deletion/protection counts and cutoff. The retention result includes `deleted_tasks`, `retention_days`, `skipped_protected`, `cutoff` (ISO-8601 UTC), `force`, `deleted_orphan_sessions`, `vacuum_status`, and `reclaimed_bytes`; after actual reclamation it also includes `db_bytes_before` and `db_bytes_after` (and `vacuum_error` on failure). Dry runs add `would_delete_tasks` and `would_delete_orphan_sessions` instead of deleting or vacuuming. The runtime also gives the exact command to confirm:
 
 ```
 /cortex-clear before 2026-10-01 confirm
@@ -57,23 +57,6 @@ Their last activity includes creation, close and latest transcript/update times.
 Preview reports `would_delete_orphan_sessions`; confirmation reports
 `deleted_orphan_sessions`, `reclaimed_bytes`, and before/after DB sizes after
 SQLite `VACUUM`. A vacuum failure leaves deletion committed and is stated separately.
-
-The bundled [CLI](../../src/cortex_clear.py) remains an alternative the owner
-runs manually in their shell from the Cortex installation directory (its path
-is relative to that directory, not to the target project), not something the
-coordinator executes:
-
-```
-python3 -B src/cortex_clear.py --project-root <path> --days N [--keep-thread <id>]
-```
-
-`--project-root` is the canonical project directory; `--days` is 0..36500.
-`--keep-thread <id>` is repeatable and protects the exact known thread.
-The CLI retains its manual retention/keep-thread contract: it is not the
-chat preview/confirm workflow and does not automatically protect active tasks.
-Optional `--force` explicitly marks stale live-state rows released/terminated;
-the CLI already ignores active protection without it. `--dry-run` previews only.
-Use it only when the project runtime is idle and name every thread to keep.
 
 Cleanup removes matching old task records and project task directories, plus
 only drafts whose stored task relationship and accepted SHA-256 make the

@@ -46,7 +46,7 @@ Negative:
 
 ## Validation
 
-- Targeted `tests/test_workspace_outbox.py`: fault injection, monotonic sequence, coverage inventory, floor expiry and bounded paging.
+- Targeted the former Python test `test_workspace_outbox`: fault injection, monotonic sequence, coverage inventory, floor expiry and bounded paging.
 - Existing store and migration tests, unchanged in expectation.
 
 ## Documentation impact

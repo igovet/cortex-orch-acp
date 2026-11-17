@@ -3,7 +3,7 @@
 Source: `skills/design-workflow/` (`SKILL.md` and `references/`), the five design
 specialist sources under `agent-sources/` (`ux-designer`, `frontend-dev`, `mobile-dev`,
 `qa-engineer`, `accessibility-auditor`), the `design-*` skill directories under
-`skills/`, and the registration in `src/cortex_runtime/portable/roles.py`.
+`skills/`, and the role registration (`profiles.json`).
 
 The design workflow is coordinator guidance that arranges existing roles. It adds no
 agent, no new profile, no MCP tool, no design store and no acceptance gate. The runtime
@@ -65,7 +65,7 @@ independent review are explicit in the plan objectives and dependencies.
 | 5. Refine | The same implementation owner | Fixes, then recaptured and rechecked affected states. At most two planned refinement rounds; material findings still open afterwards go to a scope decision or replan. |
 
 Runtime code review is separate and mandatory; visual review supplements it and never
-replaces it. Read-only roles are listed in `orchestration.contracts.READ_ONLY`
+replaces it. Read-only roles are listed in `READ_ONLY`
 (`ux-designer` and `accessibility-auditor` among them).
 
 ## Visual quality gate and evidence
@@ -101,7 +101,7 @@ Evidence rules:
 
 The five skills are shared Cortex package content under `skills/design-*/`. They are
 worker-only; coordinator channels cannot read them. Each is readable only by the roles in
-`DESIGN_SKILL_ROLES` (`src/cortex_runtime/portable/roles.py`), and backend workers and the
+`DESIGN_SKILL_ROLES`, and backend workers and the
 senior consultant do not receive them. The runtime does not gate their use; they are read
 on demand through `read_skill` when their trigger arises.
 
@@ -165,11 +165,9 @@ repository defect:
 
 1. Make the `playwright` entry's `command` and its matching `read_paths` entry point at a
    Node executable that exists. Either edit those two values by hand, keeping the existing
-   `args`, or re-run `python3 -B scripts/cortex_install_playwright_mcp.py` from the checkout.
-   The installer pins `@playwright/mcp` 0.0.81, probes the server, and needs an existing
-   pinned Playwright Chromium or Google Chrome; it does not download a browser. It
-   **replaces** `args` with its defaults (headless, isolated, Chromium), so a custom
-   configuration such as the `--extension` bridge mode is lost.
+   `args`. The former installer script (`cortex_install_playwright_mcp`, which pinned
+   `@playwright/mcp` 0.0.81 and replaced `args` with headless, isolated Chromium defaults)
+   was removed without replacement; edit the entry by hand.
 2. Refresh the deployed Cortex package so it includes the missing-path filter. Do this while
    no session is running.
 
@@ -181,7 +179,7 @@ Until both are done, browser evidence for the design workflow remains unverified
   reviewer behavior are model behavior; the runtime's controls are the plan, the mandatory
   independent review and verification.
 - Registration, access by role, package content and the presence of the design rules are
-  covered by `tests/test_portable_roles.py` and `tests/test_prompt_drift.py`. Rendered
+  covered by `scripts/cortex-xtask.sh profiles check` and `crates/cortex-xtask/tests/repo.rs`. Rendered
   design quality is not covered by any automated test in this repository.
 - Upstream licenses and provenance were checked at the commits named above; later upstream
   changes are not tracked.

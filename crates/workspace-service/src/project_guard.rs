@@ -24,8 +24,9 @@ fn refused() -> io::Error {
 }
 fn store(root: &Path) -> io::Result<Option<(u64, u64)>> {
     match fs::symlink_metadata(root.join(STORE)) {
-        Ok(m) if m.is_dir() && m.uid() == uid() && m.mode() & 0o077 == 0 =>
-            Ok(Some((m.dev(), m.ino()))),
+        Ok(m) if m.is_dir() && m.uid() == uid() && m.mode() & 0o077 == 0 => {
+            Ok(Some((m.dev(), m.ino())))
+        }
         Ok(_) => Err(refused()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
@@ -39,8 +40,12 @@ fn read_owner(root: &Path, path: &Path) -> io::Result<Option<Owner>> {
         Err(e) => return Err(e),
     }
     let mut bytes = Vec::new();
-    OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)?
-        .take(4097).read_to_end(&mut bytes)?;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?
+        .take(4097)
+        .read_to_end(&mut bytes)?;
     if bytes.len() > 4096 {
         return Err(refused());
     }
@@ -75,8 +80,12 @@ pub fn check(root: &Path) -> io::Result<()> {
     }
 }
 fn write_new(path: &Path, value: &Owner) -> io::Result<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW).open(path)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
     file.write_all(&serde_json::to_vec(value).map_err(|_| refused())?)?;
     file.sync_all()
 }
@@ -110,8 +119,10 @@ pub fn reserve(root: &Path) -> io::Result<()> {
         fs::DirBuilder::new().mode(0o700).create(root.join(STORE))?;
     }
     let value = Owner {
-        channel: "dev".into(), root: root.to_string_lossy().into_owned(),
-        uid: uid(), store: store(root)?,
+        channel: "dev".into(),
+        root: root.to_string_lossy().into_owned(),
+        uid: uid(),
+        store: store(root)?,
     };
     if read_owner(root, &marker(root))?.is_none() {
         write_new(&marker(root), &value)?;
@@ -137,22 +148,33 @@ mod tests {
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
-            let root = std::env::temp_dir().join(format!("workspace-markers-{}-{}",
-                std::process::id(), std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let root = std::env::temp_dir().join(format!(
+                "workspace-markers-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
             fs::create_dir(&root).unwrap();
             fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
             Self(root)
         }
     }
     impl Drop for Fixture {
-        fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
     #[test]
     fn unbound_legacy_reservation_and_interrupted_migration_are_retryable() {
         let f = Fixture::new();
-        let old = Owner { channel:"dev".into(), root:f.0.to_string_lossy().into_owned(),
-                          uid:uid(), store:None };
+        let old = Owner {
+            channel: "dev".into(),
+            root: f.0.to_string_lossy().into_owned(),
+            uid: uid(),
+            store: None,
+        };
         write_new(&f.0.join(LEGACY), &old).unwrap();
         reserve(&f.0).unwrap();
         assert!(marker(&f.0).is_file() && !f.0.join(LEGACY).exists());
@@ -181,4 +203,3 @@ mod tests {
         assert!(!f.0.join(STORE).join("legacy-workspace.json").exists());
     }
 }
-

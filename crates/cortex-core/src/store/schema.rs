@@ -1,0 +1,168 @@
+use crate::{error::refuse, CoreResult};
+use rusqlite::{Connection, OptionalExtension};
+use std::collections::BTreeSet;
+pub const APPLICATION_ID: i64 = 1129467218;
+pub const FORMAT: i64 = 12;
+pub const SQL: &str = include_str!("schema.sql");
+pub fn tables(db: &Connection) -> CoreResult<BTreeSet<String>> {
+    Ok(db
+        .prepare("SELECT name FROM sqlite_master WHERE type='table'")?
+        .query_map([], |r| r.get(0))?
+        .collect::<Result<_, _>>()?)
+}
+pub fn validate_groups(db: &Connection) -> CoreResult<()> {
+    let names = tables(db)?;
+    let groups: Vec<Vec<String>> = serde_json::from_str(include_str!("groups.json"))?;
+    for group in groups {
+        let n = group.iter().filter(|s| names.contains(*s)).count();
+        if n != 0 && n != group.len() {
+            return refuse("partial_storage_schema");
+        }
+    }
+    if !names.contains("tasks") {
+        return refuse("unsupported_storage");
+    }
+    let columns: std::collections::BTreeMap<String, Vec<String>> =
+        serde_json::from_str(include_str!("columns.json"))?;
+    for (table, expected) in columns {
+        if !names.contains(&table) {
+            continue;
+        }
+        let actual = db
+            .prepare(&format!("PRAGMA table_info({table})"))?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if expected.iter().any(|c| !actual.contains(c)) {
+            return refuse("incomplete_storage_schema");
+        }
+    }
+    Ok(())
+}
+pub fn validate_header(db: &Connection, initialize: bool) -> CoreResult<i64> {
+    let app: i64 = db.pragma_query_value(None, "application_id", |r| r.get(0))?;
+    let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if initialize && app == 0 && version == 0 && tables(db)?.is_empty() {
+        return Ok(0);
+    }
+    if app != APPLICATION_ID {
+        return refuse("unsupported_storage");
+    }
+    if version == 11 {
+        return Ok(11);
+    }
+    if version != FORMAT {
+        return refuse("unsupported_storage");
+    }
+    Ok(version)
+}
+pub fn validate_project(db: &Connection, root: &str) -> CoreResult<()> {
+    if !tables(db)?.contains("tasks") {
+        return Ok(());
+    }
+    let bounds: (Option<String>, Option<String>) = db.query_row(
+        "SELECT min(project_root),max(project_root) FROM tasks",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if bounds.0.iter().chain(bounds.1.iter()).any(|s| s != root) {
+        return refuse("project_storage_mismatch");
+    }
+    Ok(())
+}
+fn add(db: &Connection, table: &str, column: &str, decl: &str) -> CoreResult<bool> {
+    let exists = db
+        .prepare(&format!("PRAGMA table_info({table})"))?
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|s| s == column);
+    if !exists {
+        db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl};"))?;
+    }
+    Ok(!exists)
+}
+/// Called only under BEGIN IMMEDIATE / exclusive migration. No nested commits.
+pub fn install(db: &Connection) -> CoreResult<()> {
+    let old_triggers=db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'workspace_outbox_%'")?
+        .query_map([],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+    for name in old_triggers {
+        if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            return refuse("unsupported_storage");
+        }
+        db.execute_batch(&format!("DROP TRIGGER {name};"))?;
+    }
+    db.execute_batch(SQL)?;
+    for (t, c, d) in [
+        (
+            "work_requirement_revisions",
+            "requirement_type",
+            "TEXT NOT NULL DEFAULT 'legacy_unclassified'",
+        ),
+        (
+            "work_assignments",
+            "requirement_state",
+            "TEXT NOT NULL DEFAULT 'legacy_unclassified'",
+        ),
+        (
+            "work_graph_operations",
+            "request_json",
+            "TEXT NOT NULL DEFAULT '{}'",
+        ),
+        ("task_events", "delivered_at", "TEXT"),
+        ("task_orchestration", "wait_reason", "TEXT"),
+        ("task_orchestration", "wait_detail_json", "TEXT"),
+        (
+            "task_orchestration",
+            "no_progress_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "task_orchestration",
+            "requirement_revision",
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        ("task_orchestration", "stopped_at", "TEXT"),
+        ("task_orchestration", "language", "TEXT"),
+        ("source_events", "meta_json", "TEXT"),
+        ("attempt_revisions", "manifest_json", "TEXT"),
+    ] {
+        add(db, t, c, d)?;
+    }
+    if add(db, "source_events", "ledger_state", "TEXT")? {
+        db.execute(
+            "UPDATE source_events SET ledger_state='legacy_recorded' WHERE ledger_state IS NULL",
+            [],
+        )?;
+    }
+    db.execute("UPDATE attempt_revisions SET manifest_json=NULL WHERE manifest_json IS NOT NULL AND
+        (phase LIKE 'worker_publish:%' OR (phase LIKE 'worker_start:%' AND attempt_id IN
+        (SELECT attempt_id FROM attempt_process_registry WHERE terminated_at IS NOT NULL AND termination_reason IS NOT 'timeout_alive')))",[])?;
+    legacy_requirements(db)?;
+    db.pragma_update(None, "application_id", APPLICATION_ID)?;
+    db.pragma_update(None, "user_version", FORMAT)?;
+    Ok(())
+}
+fn legacy_requirements(db: &Connection) -> CoreResult<()> {
+    let key = "__migration__:legacy-requirement-state:v1";
+    let tasks=db.prepare("SELECT id FROM tasks WHERE id NOT IN (SELECT task_id FROM work_graph_operations WHERE idempotency_key=?)")?
+        .query_map([key],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+    for task in tasks {
+        let events=db.prepare("SELECT assignment_ref,payload_json,created_at FROM task_events WHERE task_id=? AND event_type='delegation_requested' AND superseded=0 AND assignment_ref IS NOT NULL")?
+            .query_map([&task],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<Result<Vec<_>,_>>()?;
+        for (assignment, payload, at) in events {
+            let value: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
+            if value["structured_requirement_state"] == "structured" {
+                continue;
+            }
+            let old:Option<String>=db.query_row("SELECT requirement_state FROM work_assignments WHERE task_id=? AND assignment_id=?",(&task,&assignment),|r|r.get(0)).optional()?;
+            if old.is_some() {
+                db.execute("UPDATE work_assignments SET requirement_state='legacy_unclassified' WHERE task_id=? AND assignment_id=? AND requirement_state='structured'",(&task,&assignment))?;
+            } else {
+                db.execute("INSERT INTO work_assignments(assignment_id,task_id,node_key,requirement_bindings_json,candidate_ref,status,requirement_state,idempotency_key,created_at) VALUES (?,?,?,'{}',NULL,'planned','legacy_unclassified',?,?)",
+                    (&assignment,&task,format!("legacy:{assignment}"),format!("legacy-assignment:{assignment}"),&at))?;
+            }
+        }
+        db.execute("INSERT INTO work_graph_operations(task_id,idempotency_key,operation,request_json,response_json,created_at) VALUES (?,?,'legacy_requirement_state_migration','{}','{}',?)",(&task,key,crate::now()))?;
+    }
+    Ok(())
+}

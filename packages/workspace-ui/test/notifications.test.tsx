@@ -4,11 +4,11 @@ import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
 import { emptyWorkspace, emptySession, type WorkspaceState } from "@cortex/workspace-domain";
 import { WsContext, type Ws } from "../src/ctx";
-import { QuestionNotifications } from "../src/notifications";
+import { QuestionNotifications, SEEN_QUESTIONS_KEY } from "../src/notifications";
 import { draftTask, flush } from "./support";
 
 let dispose: (()=>void) | undefined;
-afterEach(()=>{dispose?.(); document.body.innerHTML="";});
+afterEach(()=>{dispose?.(); document.body.innerHTML=""; localStorage.clear();});
 function mount(open=false, enabled=true, failure=false) {
   const initial=emptyWorkspace();
   initial.machines[0].connection="connected";
@@ -45,4 +45,18 @@ it("notifies for a hidden planning run through its visible sprint",async()=>{
   const h=mount(false); h.notify.mockClear();
   h.setState(s=>({...s,tasks:[],sprints:[{id:"sprint",projectId:"p",description:"Plan",title:"Sprint work",planningTaskId:"t",runMode:"manual",targetBranch:null,planning:"question",conversation:[],plan:null,materializedVersion:null,taskIds:[],queueState:"idle",pauseReason:null}],sessions:s.sessions.map(t=>({...t,decisions:t.decisions.map(d=>({...d,id:"planning-q"}))}))}));
   await flush(); expect(h.notify).toHaveBeenCalledWith("Sprint work");
+});
+// Live run: after an app relaunch the OS notification for a question shown and announced before the restart fired again.
+it("does not announce a question again after a relaunch, but announces one that arrived while the app was closed",async()=>{
+  const first=mount(); await flush(); expect(first.notify).toHaveBeenCalledTimes(1);
+  expect(JSON.parse(localStorage.getItem(SEEN_QUESTIONS_KEY)!)).toEqual(["q"]);
+  dispose?.(); document.body.innerHTML="";
+  const relaunched=mount(); await flush(); expect(relaunched.notify).not.toHaveBeenCalled();
+  relaunched.setState(s=>({...s,sessions:s.sessions.map(t=>({...t,decisions:[...t.decisions,{...t.decisions[0],id:"while-closed"}]}))}));
+  await flush(); expect(relaunched.notify).toHaveBeenCalledTimes(1);
+  expect(JSON.parse(localStorage.getItem(SEEN_QUESTIONS_KEY)!)).toEqual(["q","while-closed"]);
+});
+it("still notifies when the saved list is unreadable",async()=>{
+  localStorage.setItem(SEEN_QUESTIONS_KEY,"{not json");
+  const h=mount(); await flush(); expect(h.notify).toHaveBeenCalledWith("Fix the race");
 });

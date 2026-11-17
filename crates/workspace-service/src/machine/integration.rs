@@ -1,0 +1,330 @@
+//! Integration admission and effects: squash merge, pull request and same-branch
+//! commit. Admission refuses before any effect; the durable intent precedes Git and
+//! nothing is ever delegated to another runtime.
+mod conflicts;
+mod effects;
+use super::{
+    context, git::Git, native::*, settings::Lock, task_facts_git, workers::truthy as truth,
+};
+use cortex_core::OpenMode;
+use serde_json::Value;
+use std::path::Path;
+
+/// Saved state or request JSON of a shape the current app never produces.
+fn malformed() -> Refused {
+    refuse(
+        "invalid_request",
+        "This integration request or the saved task state is malformed. Refresh the task and try again.",
+    )
+}
+fn stale() -> Refused {
+    refuse(
+        "stale_result",
+        "Review and accept the current result before finishing.",
+    )
+}
+fn unavailable(message: &str) -> Refused {
+    refuse("result_unavailable", message)
+}
+pub async fn run(
+    root: &Path,
+    project: &str,
+    state: &Path,
+    params: &Value,
+    git: &mut Git,
+) -> Result<Value> {
+    if !params.is_object() {
+        return Err(malformed());
+    }
+    if params["confirmed"] != true {
+        return Err(refuse(
+            "confirmation_required",
+            "Confirm this Git action first.",
+        ));
+    }
+    let lock = Lock::new(state, "machine.lock")?;
+    // Integrate reads the saved overlay, not the enriched product projection.
+    let mut product = super::native::product(state, project)?;
+    let tasks = product["tasks"].as_object().ok_or_else(malformed)?;
+    let record = match params["taskId"].as_str() {
+        Some(task) => tasks.get(task).unwrap_or(&Value::Null),
+        None if params["taskId"].is_null() => &Value::Null,
+        None => return Err(malformed()),
+    };
+    if !truth(record) {
+        return Err(stale());
+    }
+    if !record.is_object() {
+        return Err(malformed());
+    }
+    if record["status"] != "ready_to_merge" || !truth(&record["acceptance"]) {
+        return Err(stale());
+    }
+    if !record["acceptance"].is_object()
+        || !(params["digest"].is_null() || params["digest"].is_string())
+        || !(record["acceptance"]["digest"].is_null() || record["acceptance"]["digest"].is_string())
+    {
+        return Err(malformed());
+    }
+    if record["acceptance"]["digest"] != params["digest"] {
+        return Err(stale());
+    }
+    let task = params["taskId"].as_str().ok_or_else(malformed)?;
+    // Unsupported legacy shapes retain their interpreter before inspection.
+    let mut inspected = record.clone();
+    if truth(&params["targetBranch"]) {
+        inspected["targetBranch"] = params["targetBranch"].clone();
+    }
+    if truth(&inspected["targetBranch"]) && !inspected["targetBranch"].is_string()
+        || truth(&record["baseRevision"]) && !record["baseRevision"].is_string()
+        || truth(&record["checkout"]) && !record["checkout"].is_object()
+        || record["checkout"].is_object() && !record["checkout"]["kind"].is_string()
+    {
+        return Err(malformed());
+    }
+    let facts = task_facts_git::read(root, &inspected, task, git).await?;
+    if facts["alreadyInTarget"] == true {
+        return Err(refuse(
+            "already_in_target",
+            format!(
+                "Already in {}. Confirm Close task instead; no Git operation is needed.",
+                facts["targetBranch"].as_str().ok_or_else(malformed)?
+            ),
+        ));
+    }
+    let Some(store) = context::open(root, OpenMode::LiveReadOnly)? else {
+        return Err(unavailable(
+            "Activate Cortex and review its runtime result first.",
+        ));
+    };
+    // Exactly the result-state part of retained _facts: a quiet/failed/paused
+    // execution is not a completed result. No synthesis/check/receipt is inferred.
+    let completed = store
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT EXISTS(
+             SELECT 1 FROM workspace_executions e JOIN workspace_tasks t USING(task_id)
+             JOIN runtime_tasks r ON r.task_id=e.runtime_task_id
+             JOIN tasks base ON base.id=r.task_id
+             JOIN acp_host_sessions s ON s.session_id=e.acp_session_id
+             JOIN task_owners o ON o.task_id=r.task_id
+             WHERE t.project_id=? AND e.task_id=? AND e.execution_id=t.execution_id
+             AND r.state='COMPLETED' AND r.revision>=0 AND (r.blocker IS NULL OR r.blocker='')
+             AND base.project_root=? AND s.project_root=base.project_root
+             AND s.task_id=r.task_id AND o.epoch=e.owner_epoch
+             AND NOT EXISTS(SELECT 1 FROM workspace_starts w
+                 WHERE w.execution_id=e.execution_id AND w.state='unknown'))",
+                (project, task, root.to_string_lossy().as_ref()),
+                |row| row.get::<_, bool>(0),
+            )?)
+        })
+        .map_err(context::core)?;
+    if !completed {
+        return Err(unavailable(
+            "Only a completed runtime result can be accepted.",
+        ));
+    }
+    let execution = store
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT execution_id FROM workspace_tasks WHERE project_id=? AND task_id=?",
+                (project, task),
+                |r| r.get::<_, String>(0),
+            )?)
+        })
+        .map_err(context::core)?;
+    let native = super::task_facts::native_observation(root).await;
+    let verified = match super::task_facts::integration_result(
+        &store,
+        root,
+        project,
+        &execution,
+        &params["digest"],
+        native.as_deref(),
+        record,
+    ) {
+        value => value?,
+    };
+    let path = super::retention::task_path(root, record, git).await?;
+    if record["requiresFreshResult"]
+        == serde_json::json!({"resultId":verified["resultId"],"version":verified["version"]})
+    {
+        return Err(refuse("review_required", "The source changed after this result. Run fresh checks and review the new result before integration."));
+    }
+    if truth(&record["acceptedRevision"]) {
+        let current = super::legacy_source::capture(&path).map_err(context::core)?;
+        if current.as_deref() != record["acceptedRevision"].as_str() {
+            return Err(refuse(
+                "workspace_drift",
+                "Files changed after acceptance. Rerun checks and accept the new result.",
+            ));
+        }
+    }
+    if !git.is_repo(&path).await? {
+        return Err(refuse("git_required", "The accepted changes are already in the project folder. Close the task as-is, or initialize Git before using merge or PR operations."));
+    }
+    let source = git
+        .out(&path, &["branch", "--show-current"])
+        .await?
+        .trim()
+        .to_owned();
+    let target = facts["targetBranch"]
+        .as_str()
+        .ok_or_else(malformed)?
+        .to_owned();
+    let target = target.as_str();
+    if target.starts_with('-')
+        || !git
+            .success(root, &["check-ref-format", "--branch", target])
+            .await?
+    {
+        return Err(refuse("invalid_branch", "Choose a valid target branch."));
+    }
+    if !git
+        .success(
+            root,
+            &[
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{target}"),
+            ],
+        )
+        .await?
+    {
+        return Err(refuse(
+            "unknown_branch",
+            "The target branch must exist locally.",
+        ));
+    }
+    if let Some(base) = record["baseRevision"].as_str().filter(|s| !s.is_empty()) {
+        if !git
+            .success(&path, &["merge-base", "--is-ancestor", base, target])
+            .await?
+        {
+            return Err(refuse("incompatible_target", "This target predates the task base. Choose a descendant branch, or integrate this patch manually."));
+        }
+    }
+    let message = params["message"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| refuse("empty_message", "Write a commit message first."))?;
+    if source.is_empty() {
+        return Err(refuse(
+            "detached_checkout",
+            "A task must have a branch before merging.",
+        ));
+    }
+    if !git
+        .out(&path, &["diff", "--name-only", "--diff-filter=U"])
+        .await?
+        .trim()
+        .is_empty()
+    {
+        return Err(refuse(
+            "merge_conflict",
+            "Resolve the task's conflict first.",
+        ));
+    }
+    let method = params["method"].as_str().unwrap_or("");
+    if source == target {
+        if method != "commit" {
+            return Err(refuse("same_branch", format!("This task is already on {target}. Use Commit to this branch, or confirm Close task; there is no branch integration.")));
+        }
+        if facts["commitAvailable"] != true {
+            return Err(refuse(
+                "task_content_unknown",
+                facts["reason"]
+                    .as_str()
+                    .unwrap_or("Refresh the task before committing."),
+            ));
+        }
+    } else if method != "squash" && method != "pr" {
+        return Err(refuse(
+            "unsupported_action",
+            "Choose squash merge or pull request.",
+        ));
+    }
+    if method == "pr" && !super::settings::available("gh") {
+        return Err(refuse(
+            "gh_unavailable",
+            "Install and sign in to GitHub CLI (gh) to create a pull request.",
+        ));
+    }
+    let same = |a: &Path, b: &Path| {
+        a == b
+            || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b)
+    };
+    let target_tree = git
+        .trees(root)
+        .await?
+        .iter()
+        .find(|t| t["branch"] == target)
+        .and_then(|t| t["path"].as_str())
+        .map(std::path::PathBuf::from);
+    if let Some(tree) = target_tree.as_deref().filter(|t| !same(t, &path)) {
+        if !git.clean(tree).await? {
+            return Err(refuse(
+                "dirty_target",
+                "The target checkout has uncommitted work. Commit or move it yourself first.",
+            ));
+        }
+    }
+    // Read-only recheck before the durable intent: helper data in the index, and
+    // for a shared branch the exact task-owned paths about to be committed.
+    effects::private_index(&path, git).await?;
+    let mut pending_paths = Vec::new();
+    if method == "commit" {
+        let current = task_facts_git::read(root, &inspected, task, git).await?;
+        if current["commitAvailable"] != true || current["pendingPaths"] != facts["pendingPaths"] {
+            return Err(refuse(
+                "task_content_unknown",
+                "Task files changed. Refresh before committing.",
+            ));
+        }
+        pending_paths = facts["pendingPaths"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|p| p.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    // The durable intent is committed before Git. Drop/cancellation leaves it
+    // dispatched; neither a helper nor a retry may reinterpret that as failure.
+    let intent = match super::ledger::Intent::begin_locked(
+        state,
+        "product.integrate",
+        project,
+        Some(root),
+        params,
+        &lock,
+    )? {
+        super::ledger::Begin::Run(intent) => intent,
+        super::ledger::Begin::Replay(reply) => return super::integration_squash::replay(reply),
+    };
+    let plan = effects::Plan {
+        root,
+        project,
+        state,
+        task,
+        path: &path,
+        source: &source,
+        target,
+        method,
+        message,
+        params,
+        verified: &verified,
+        pending_paths,
+        target_tree,
+    };
+    let outcome = effects::apply(&plan, &mut product, git).await;
+    // An overlay failure after Git is ambiguous, not safe to rerun.
+    let reply = super::native::envelope(outcome);
+    intent.finish_locked(&reply, &lock)?;
+    super::integration_squash::replay(reply)
+}
+
+#[cfg(test)]
+mod tests;

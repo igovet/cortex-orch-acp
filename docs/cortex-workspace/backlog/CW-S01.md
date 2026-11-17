@@ -21,7 +21,7 @@ CW-R12 (Ubuntu first; other platforms need separate qualification) and CW-R14 (m
 
 - `rust-toolchain.toml` with an exact stable version, and a root `Cargo.toml` with a committed `Cargo.lock`. Default workspace members exclude the Tauri application, so service and protocol tests need no GTK or WebKitGTK.
 - A pin check that fails on a floating toolchain channel, an unpinned crate range, or drift between the toolchain file, the lock file and the CLI pin.
-- A host prerequisite probe that records, for each item, present or missing with the observed command and exit code: Node, npm, Python test dependencies and the user service manager. It prints no environment values and no process command lines.
+- A host prerequisite probe that records, for each item, present or missing with the observed command and exit code: Node, npm, the Rust toolchain and the user service manager (`scripts/cortex-xtask.sh prerequisite-probe` is the shipped probe). It prints no environment values and no process command lines.
 - Document reconciliation for the Workspace index, roadmap, backlog index, platforms and the Gate D and Gate M records, as listed under documentation impact.
 
 ## Acceptance

@@ -154,7 +154,7 @@ describe("focus and panel styles", () => {
     expect(shared).toContain("-webkit-tap-highlight-color: transparent");
   });
   it("lets a click anywhere on a switch reach its hidden input, with or without a label", () => {
-    // Real clicks are measured in focus.measure.py; this keeps the two rules that make them land.
+    // Real clicks are measured in focus.measure.mjs; this keeps the two rules that make them land.
     const body = (selector: string) => all.find(r => r.selector === selector)!.body;
     expect(body(".sw i")).toContain("pointer-events: none");
     expect(body(".sw input")).toMatch(/inset: 0;.*width: 100%;.*height: 100%;/);

@@ -44,40 +44,46 @@ upstream source components independently.
 ## Distribution units
 
 Node.js **24.14.1** — MIT plus the third-party licences in its distribution LICENSE.
-The table below records the **124 installed npm distribution units** observed in the
-Linux amd64 build, including nested duplicate versions and both installed Claude
-glibc/musl native variants. An arm64 build selects the corresponding
-`codex-linux-arm64` (`0.164.0-linux-arm64`) and
-`claude-agent-sdk-linux-arm64[-musl]` (`0.3.310`) with the same respective
+The table below records the **125 installed npm distribution units** that
+`bundle-engines` produced in its `bundle-manifest.json` for the Linux amd64
+glibc build, including nested duplicate versions (two `@agentclientprotocol/sdk`
+releases). The lock also lists `claude-agent-sdk-linux-x64-musl` (`0.3.323`),
+not installed on a glibc build, and an arm64 build selects the corresponding
+`codex-linux-arm64` (`0.166.0-linux-arm64`) and
+`claude-agent-sdk-linux-arm64[-musl]` (`0.3.323`) with the same respective
 Apache-2.0 and Anthropic licence declarations; arm64 execution is not qualified.
 Non-Linux optional packages in the lock are not shipped on Linux.
 
 | Name | Version | Declared licence |
 | --- | --- | --- |
-| @agentclientprotocol/claude-agent-acp | 0.97.0 | Apache-2.0 |
-| @agentclientprotocol/codex-acp | 2.3.0 | Apache-2.0 |
-| @agentclientprotocol/sdk | 2.0.2 | Apache-2.0 |
-| @anthropic-ai/claude-agent-sdk | 0.3.310 | SEE LICENSE IN README.md |
-| @anthropic-ai/claude-agent-sdk-linux-x64 | 0.3.310 | SEE LICENSE IN LICENSE.md |
-| @anthropic-ai/sdk | 1.6.0 | Apache-2.0 |
-| @babel/runtime | 7.29.13 | MIT |
-| @hono/node-server | 2.1.6 | MIT |
+| @agentclientprotocol/claude-agent-acp | 0.107.0 | Apache-2.0 |
+| @agentclientprotocol/codex-acp | 2.6.0 | Apache-2.0 |
+| @agentclientprotocol/sdk | 2.4.0 | Apache-2.0 |
+| @agentclientprotocol/sdk | 2.6.0 | Apache-2.0 |
+| @anthropic-ai/claude-agent-sdk | 0.3.323 | SEE LICENSE IN README.md |
+| @anthropic-ai/claude-agent-sdk-linux-x64 | 0.3.323 | SEE LICENSE IN LICENSE.md |
+| @anthropic-ai/sdk | 1.8.0 | Apache-2.0 |
+| @babel/runtime | 7.29.14 | MIT |
+| @hono/node-server | 2.1.8 | MIT |
 | @modelcontextprotocol/sdk | 1.32.2 | MIT |
-| @openai/codex | 0.164.0 | Apache-2.0 |
-| @openai/codex-linux-x64 | 0.164.0-linux-x64 | Apache-2.0 |
+| @openai/codex | 0.166.0 | Apache-2.0 |
+| @openai/codex-linux-x64 | 0.166.0-linux-x64 | Apache-2.0 |
 | @opentelemetry/api | 1.10.0 | Apache-2.0 |
 | @stablelib/base64 | 1.0.1 | MIT |
 | accepts | 2.0.0 | MIT |
 | ajv | 8.20.0 | MIT |
 | ajv-formats | 3.0.1 | MIT |
 | body-parser | 2.4.0 | MIT |
-| content-type | 2.1.0 | MIT |
 | bundle-name | 4.1.1 | MIT |
 | bytes | 3.1.2 | MIT |
 | call-bind-apply-helpers | 1.0.2 | MIT |
 | call-bound | 1.0.4 | MIT |
 | content-disposition | 2.0.1 | MIT |
+| content-type | 2.1.0 | MIT |
 | content-type | 1.0.5 | MIT |
+| content-type | 2.1.0 | MIT |
+| content-type | 2.1.0 | MIT |
+| content-type | 2.1.0 | MIT |
 | cookie | 0.7.2 | MIT |
 | cookie-signature | 1.2.2 | MIT |
 | cors | 2.8.6 | MIT |
@@ -90,7 +96,7 @@ Non-Linux optional packages in the lock are not shipped on Linux.
 | diff | 9.0.0 | BSD-3-Clause |
 | dunder-proto | 1.0.1 | MIT |
 | ee-first | 1.1.1 | MIT |
-| encodeurl | 2.0.1 | MIT |
+| encodeurl | 2.0.3 | MIT |
 | es-define-property | 1.0.1 | MIT |
 | es-errors | 1.3.0 | MIT |
 | es-object-atoms | 1.1.2 | MIT |
@@ -99,8 +105,7 @@ Non-Linux optional packages in the lock are not shipped on Linux.
 | eventsource | 3.0.7 | MIT |
 | eventsource-parser | 3.1.1 | MIT |
 | express | 5.3.0 | MIT |
-| express-rate-limit | 8.7.3 | MIT |
-| content-type | 2.1.0 | MIT |
+| express-rate-limit | 8.7.4 | MIT |
 | fast-deep-equal | 3.1.3 | MIT |
 | fast-sha256 | 1.3.0 | Unlicense |
 | fast-uri | 3.1.9 | BSD-3-Clause |
@@ -113,7 +118,7 @@ Non-Linux optional packages in the lock are not shipped on Linux.
 | gopd | 1.2.0 | MIT |
 | has-symbols | 1.1.0 | MIT |
 | hasown | 2.0.4 | MIT |
-| hono | 4.13.16 | MIT |
+| hono | 4.13.18 | MIT |
 | http-errors | 2.0.1 | MIT |
 | iconv-lite | 0.7.3 | MIT |
 | inherits | 2.0.4 | ISC |
@@ -125,7 +130,7 @@ Non-Linux optional packages in the lock are not shipped on Linux.
 | is-promise | 4.0.0 | MIT |
 | is-wsl | 3.1.1 | MIT |
 | isexe | 2.0.0 | ISC |
-| jose | 6.2.15 | MIT |
+| jose | 6.2.17 | MIT |
 | json-schema-to-ts | 3.1.1 | MIT |
 | json-schema-traverse | 1.0.0 | MIT |
 | json-schema-typed | 8.0.2 | BSD-2-Clause |
@@ -136,7 +141,6 @@ Non-Linux optional packages in the lock are not shipped on Linux.
 | mime-types | 3.0.2 | MIT |
 | ms | 2.1.3 | MIT |
 | negotiator | 1.1.0 | MIT |
-| content-type | 2.1.0 | MIT |
 | object-assign | 4.1.1 | MIT |
 | object-inspect | 1.13.4 | MIT |
 | on-finished | 2.4.2 | MIT |
@@ -169,7 +173,6 @@ Non-Linux optional packages in the lock are not shipped on Linux.
 | toidentifier | 1.0.1 | MIT |
 | ts-algebra | 2.0.0 | MIT |
 | type-is | 2.1.0 | MIT |
-| content-type | 2.1.0 | MIT |
 | unpipe | 1.0.0 | MIT |
 | vary | 1.1.2 | MIT |
 | vscode-jsonrpc | 9.0.3 | MIT |

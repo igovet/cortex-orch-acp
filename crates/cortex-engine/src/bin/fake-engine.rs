@@ -1,0 +1,1031 @@
+//! No-paid test peer. Never starts a model, engine or network connection.
+use cortex_engine::wire;
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use tokio::io::{AsyncWriteExt, BufReader};
+fn config(value: &str) -> Value {
+    config_with(value, "medium")
+}
+/// Effort option ids exactly as the bundled engines advertise them, selected by
+/// the native account variable the launcher sets: codex-acp 2.3.0/2.6.0
+/// `reasoning_effort`, claude-agent-acp 0.97.0/0.107.0 `effort`; both use the
+/// `thought_level` category. OpenCode fixtures advertise no effort option.
+fn effort_option() -> Option<&'static str> {
+    if std::env::var_os("CODEX_HOME").is_some() {
+        Some("reasoning_effort")
+    } else if std::env::var_os("CLAUDE_CONFIG_DIR").is_some() {
+        Some("effort")
+    } else {
+        None
+    }
+}
+fn config_with(value: &str, effort: &str) -> Value {
+    let select = |id: &str, category: &str, current: &str, values: &[&str]| {
+        json!({"id":id,"name":id,"category":category,"type":"select","currentValue":current,
+            "options":values.iter().map(|v| json!({"value":v,"name":v})).collect::<Vec<_>>()})
+    };
+    let mut options = json!([{"id":"model","type":"select","currentValue":value,"options":[{"value":"fixture-model","name":"Fixture"},{"value":"fixture-other","name":"Other fixture"}]}, {"id":"mode","type":"select","currentValue":"agent","options":(["agent","agent-full-access","default","acceptEdits","bypassPermissions","cortex"].map(|m|json!({"value":m,"name":m})))}]);
+    let list = options.as_array_mut().unwrap();
+    // Each shape also advertises the real model id its owner catalog lists.
+    let real_model = match effort_option() {
+        Some("reasoning_effort") => Some("gpt-6.1-sol"),
+        Some(_) => Some("claude-sonnet-5"),
+        None => None,
+    };
+    if let Some(model) = real_model {
+        list[0]["options"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"value":model,"name":model}));
+    }
+    match effort_option() {
+        Some("reasoning_effort") => {
+            list.push(select(
+                "collaboration_mode",
+                "collaboration_mode",
+                "default",
+                &["default", "plan"],
+            ));
+            list.push(select(
+                "reasoning_effort",
+                "thought_level",
+                effort,
+                &["low", "medium", "high", "xhigh"],
+            ));
+            list.push(json!({"id":"fast-mode","name":"Fast mode","category":"model_config","type":"boolean","currentValue":false}));
+        }
+        Some(_) => {
+            list.push(select(
+                "effort",
+                "thought_level",
+                effort,
+                &["low", "medium", "high"],
+            ));
+            list.push(select("fast", "model_config", "off", &["on", "off"]));
+            list.push(select("ultracode", "model_config", "off", &["on", "off"]));
+        }
+        None => {}
+    }
+    options
+}
+fn reconciliation_fixture(mode: &str, scenario: &str, context: &Value) -> Option<Value> {
+    if mode != "desktop-coordinator" || !scenario.starts_with("reconcile-") {
+        return None;
+    }
+    let gap = json!([{"item":"Live behavior","description":"Live behavior","blocker":"paid live check not requested by the owner"}]);
+    let events = context["retained_decisions"].as_array().unwrap();
+    let has = |kind: &str| events.iter().any(|e| e["type"] == kind);
+    if context["state"] == "PLANNING" && has("USER_ANSWER_RECEIVED") {
+        assert!(context["questions"]
+            .to_string()
+            .contains("Explain and finish"));
+        assert!(context["original_goal"]
+            .as_str()
+            .unwrap()
+            .contains("Never lose constraint α"));
+        return Some(
+            json!({"name":"answer_submit","arguments":{"text":"Owner decision explained.","not_verified":gap,"request_key":"released-answer"}}),
+        );
+    }
+    if context["state"] == "PLANNING" && has("VERIFICATION_FAILED") && !has("VERIFICATION_REVISED")
+    {
+        return Some(
+            // A repair that replaces the failed check must be a real command: a
+        // trivial one such as `true` is refused (KI-03).
+        json!({"name":"verification_submit","arguments":{"verification":[["/usr/bin/cmp","/dev/null","/dev/null"]],"request_key":"repair"}}),
+        );
+    }
+    if context["state"] != "RECONCILING" {
+        return None;
+    }
+    assert!(context["original_goal"]
+        .as_str()
+        .unwrap()
+        .contains("Never lose constraint α"));
+    assert!(has("VERIFICATION_PASSED"));
+    let incomplete = context["current_nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n["status"] != "completed");
+    assert!(!incomplete);
+    // The replaced failed check stays an open obligation until the owner answers.
+    // "reconcile-repair-late" asks only once the runtime returned the refused
+    // completion to the coordinator (ASK_USER_REQUIRED).
+    if (scenario == "reconcile-question"
+        || scenario == "reconcile-repair" && has("VERIFICATION_REVISED")
+        || scenario == "reconcile-repair-late" && has("VERIFICATION_REVISED") && has("ASK_USER_REQUIRED"))
+        && !has("USER_ANSWER_RECEIVED")
+    {
+        return Some(
+            json!({"name":"user_question_request","arguments":{"question":"How should we finish?","options":["Explain and finish","Plan changes"],"request_key":"reconcile-question"}}),
+        );
+    }
+    if context["revision"] == 1 && !has("REPLAN_REQUEST_ACCEPTED") {
+        let operation = match scenario {
+            "reconcile-replan" => Some("replan_request"),
+            "reconcile-scope" => Some("scope_request"),
+            "reconcile-escalation" => Some("escalation_request"),
+            _ => None,
+        };
+        if let Some(operation) = operation {
+            let mut args = json!({"reason":"Independent retained evidence needs a new decomposition","request_key":"reconcile-replan"});
+            if operation == "scope_request" {
+                args["scope"] = json!(["work.txt"]);
+            }
+            if operation == "escalation_request" {
+                args["report_ids"] = json!(["r_000000000000"]);
+                args["question"] = json!("What should change?");
+            }
+            return Some(json!({"name":operation,"arguments":args}));
+        }
+    }
+    let continuation_count = events
+        .iter()
+        .rev()
+        .take_while(|e| e["type"] != "VERIFICATION_PASSED")
+        .filter(|e| e["type"] == "NATIVE_COORDINATOR_CONTINUED")
+        .count();
+    if scenario == "reconcile-reject" && continuation_count == 1 {
+        return Some(
+            json!({"name":"synthesis_submit","arguments":{"text":"Omitted gaps must refuse."},"__fixture_expect":{
+                "/result/isError":true,
+                "/result/structuredContent/code":"synthesis_gaps_undisclosed",
+                "/result/structuredContent/recorded":false,
+                "/result/structuredContent/required_not_verified":["Live behavior"]}}),
+        );
+    }
+    Some(
+        json!({"name":"synthesis_submit","arguments":{"text":"Verified work reconciled.","not_verified":gap},
+        "__fixture_expect":{"/result/structuredContent/recorded":true}}),
+    )
+}
+#[tokio::main]
+pub async fn main() {
+    let mode = std::env::args().nth(1).unwrap_or_default();
+    if mode.starts_with('/') {
+        cortex_engine::broker::relay(std::path::Path::new(&mode))
+            .await
+            .unwrap();
+        return;
+    }
+    let mut servers = HashMap::new();
+    let mut external_entries = HashMap::new();
+    let mut input = BufReader::new(tokio::io::stdin());
+    let mut output = tokio::io::stdout();
+    let mut count = 0;
+    let mut permissions: HashMap<String, (Value, String)> = HashMap::new();
+    let mut held = HashMap::new();
+    let mut prompts = HashMap::<String, usize>::new();
+    // `desktop-auto` infers a session's role from its first prompt only. Later prompts of that
+    // session (an owner answer or steering text delivered as the whole prompt tail) carry no
+    // assignment, so re-inferring the role per prompt turns a resumed worker into a coordinator.
+    let mut auto_roles = HashMap::<String, &'static str>::new();
+    let mut models = HashMap::<String, String>::new();
+    let mut efforts = HashMap::<String, String>::new();
+    while let Ok(Some(r)) = wire::read_frame(&mut input).await {
+        let id = r.get("id").cloned().unwrap_or(Value::Null);
+        let method = r["method"].as_str().unwrap_or("");
+        let sid = r["params"]["sessionId"].as_str().unwrap_or("").to_owned();
+        if method.is_empty() {
+            if let Some((prompt_id, sid)) = permissions.remove(&id.to_string()) {
+                // Only the offered allow option approves; a selected reject denies.
+                let selected = r["result"]["outcome"]["outcome"] == "selected"
+                    && r["result"]["outcome"]["optionId"] != "no";
+                wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":if selected{"approved"}else{"denied"}}}}})).await.unwrap();
+                wire::write_frame(
+                    &mut output,
+                    &json!({"jsonrpc":"2.0","id":prompt_id,"result":{"stopReason":"end_turn"}}),
+                )
+                .await
+                .unwrap();
+            }
+            continue;
+        }
+        if mode == "external" || mode == "mismatch" {
+            if method == "notifications/initialized" {
+                continue;
+            }
+            if method == "tools/call" && r["params"]["name"] == "hang" {
+                continue;
+            }
+            let result = match method {
+                "initialize" => {
+                    json!({"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}})
+                }
+                "tools/list" => {
+                    json!({"tools":[{"name":"lookup","inputSchema":{"type":"object"}},{"name":"write","inputSchema":{"type":"object"}}]})
+                }
+                _ => json!({"content":[{"type":"text","text":"fixture"}]}),
+            };
+            wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","id":if mode=="mismatch"{json!(999)}else{id},"result":result})).await.unwrap();
+            continue;
+        }
+        match method {
+            "initialize" => {
+                if mode == "initialize-hang" {
+                    continue;
+                }
+                if mode == "stderr-exit" {
+                    // More than the retained tail, then a synthetic secret in the last line.
+                    eprintln!("{}", "x".repeat(20_000));
+                    eprintln!("fixture crash: apiKey=\"sk-fixture-abcdefghijklmnop0123\" Bearer fixture-bearer-value \u{1b}[0m session 89a921a6-3f1e-42ed-9a9e-aaec73cb7ed6");
+                    std::process::exit(5);
+                }
+                // A project holding `initialize-after` answers only once the marker
+                // path it names exists, plus a settle margin, to order host events.
+                if let Ok(marker) = std::fs::read_to_string("initialize-after") {
+                    let marker = std::path::Path::new(marker.trim()).to_owned();
+                    for _ in 0..1000 {
+                        if marker.exists() {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","id":id,"result":{"protocolVersion":1,"agentCapabilities":
+                    if std::fs::read_to_string("prompt-caps.txt").is_ok_and(|v|v.trim()=="none"){json!({})}
+                    else{json!({"promptCapabilities":{"image":true,"embeddedContext":true}})}}})).await.unwrap();
+            }
+            "session/new" => {
+                if mode == "session-hang" {
+                    continue;
+                }
+                if mode == "relay" {
+                    let entry = &r["params"]["mcpServers"][0];
+                    let args = entry["args"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_str().unwrap())
+                        .collect::<Vec<_>>();
+                    let mut child =
+                        tokio::process::Command::new(entry["command"].as_str().unwrap())
+                            .args(args)
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::piped())
+                            .kill_on_drop(true)
+                            .spawn()
+                            .unwrap();
+                    let mut stdin = child.stdin.take().unwrap();
+                    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+                    wire::write_frame(
+                        &mut stdin,
+                        &json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+                    )
+                    .await
+                    .unwrap();
+                    let reply = wire::read_frame(&mut stdout).await.unwrap().unwrap();
+                    assert!(reply["result"]["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|v| v["name"] == "result_submit"));
+                    wire::write_frame(&mut stdin,&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"project_read","arguments":{"path":"fixture.txt"}}})).await.unwrap();
+                    let reply = wire::read_frame(&mut stdout).await.unwrap().unwrap();
+                    assert!(reply.get("result").is_some());
+                    child.kill().await.unwrap();
+                    child.wait().await.unwrap();
+                }
+                count += 1;
+                let sid = format!("fixture-{count}");
+                // Behind Cortex's native Codex launcher the relays reach App Server as its
+                // own config (the launcher hand-over), never also as ACP servers.
+                let acp = r["params"]["mcpServers"].as_array().unwrap().clone();
+                let listed = match std::env::var("CORTEX_CODEX_MCP_SERVERS") {
+                    Ok(handed) => {
+                        assert!(
+                            acp.is_empty(),
+                            "relays sent both through the launcher and ACP"
+                        );
+                        // codex-acp spreads this config's features into every thread's
+                        // `features` table, which replaces the launcher's feature layers.
+                        assert_eq!(
+                            std::env::var(cortex_engine::environment::CODEX_CONFIG).ok(),
+                            Some(cortex_engine::environment::codex_thread_config()),
+                            "a launcher-backed session without its thread feature config"
+                        );
+                        serde_json::from_str::<Vec<Value>>(&handed).unwrap()
+                    }
+                    Err(_) => acp,
+                };
+                servers.insert(sid.clone(), listed.first().cloned().unwrap_or(Value::Null));
+                external_entries.insert(
+                    sid.clone(),
+                    listed.iter().skip(1).cloned().collect::<Vec<_>>(),
+                );
+                let reply = json!({"jsonrpc":"2.0","id":id,"result":{"sessionId":sid,"configOptions":config("initial")}});
+                // claude-agent-acp 0.107.0 (`afterSetupResponse`) sends the new session's
+                // `available_commands_update` right behind the `session/new` reply. One write
+                // puts both frames in the reader's buffer at once.
+                if mode == "commands-after-new"
+                    || std::path::Path::new("commands-after-new").exists()
+                {
+                    let update = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,
+                        "update":{"sessionUpdate":"available_commands_update","availableCommands":[]}}});
+                    output
+                        .write_all(format!("{reply}\n{update}\n").as_bytes())
+                        .await
+                        .unwrap();
+                    output.flush().await.unwrap();
+                } else {
+                    wire::write_frame(&mut output, &reply).await.unwrap();
+                }
+            }
+            "session/set_config_option" => {
+                // An adapter that dies while configuring: once (`configure-crash-once`,
+                // remembered by `configure-crashed`) or every time (`configure-crash`).
+                // Its stderr carries a synthetic secret that diagnostics must redact.
+                let once = std::path::Path::new("configure-crash-once").exists()
+                    && !std::path::Path::new("configure-crashed").exists();
+                if once || std::path::Path::new("configure-crash").exists() {
+                    if once {
+                        std::fs::write("configure-crashed", "").unwrap();
+                    }
+                    eprintln!("fixture adapter: configure crashed; token=sk-fixture-0123456789abcdefghijklmnop Authorization: Bearer fixture-bearer-value");
+                    std::process::exit(3);
+                }
+                let value = r["params"]["value"].as_str().unwrap().to_owned();
+                if effort_option().is_some_and(|id| r["params"]["configId"] == id) {
+                    efforts.insert(sid.clone(), value.clone());
+                } else if r["params"]["configId"] != "mode" {
+                    models.insert(sid.clone(), value.clone());
+                }
+                let mut options = config_with(
+                    models
+                        .get(&sid)
+                        .map(String::as_str)
+                        .unwrap_or("fixture-model"),
+                    efforts.get(&sid).map(String::as_str).unwrap_or("medium"),
+                );
+                if r["params"]["configId"] == "mode" {
+                    options[1]["currentValue"] = json!(value);
+                }
+                let scenario = std::fs::read_to_string("scenario.txt").unwrap_or_default();
+                if scenario == "mode-not-confirmed" && r["params"]["configId"] == "mode" {
+                    options[1]["currentValue"] = json!("wrong");
+                }
+                wire::write_frame(
+                    &mut output,
+                    &json!({"jsonrpc":"2.0","id":id,"result":{"configOptions":options}}),
+                )
+                .await
+                .unwrap();
+            }
+            "session/prompt" => {
+                // A project that holds `record-prompts` gets every received prompt
+                // appended to `prompt-log.jsonl`, so tests can inspect the exact blocks.
+                // A read-only session (a reviewer) cannot write there and is simply not recorded.
+                if std::path::Path::new("record-prompts").exists() {
+                    use std::io::Write as _;
+                    if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open("prompt-log.jsonl") {
+                        let _ = writeln!(log, "{}", json!({"session":sid,"prompt":r["params"]["prompt"]}));
+                    }
+                }
+                let raw = r["params"]["prompt"][0]["text"].as_str().unwrap_or("");
+                if mode == "mcp-host" {
+                    let expectation = raw.rsplit_once("\n\n").map_or(raw, |(_, v)| v);
+                    let entries = &external_entries[&sid];
+                    if expectation == "none" {
+                        assert!(entries.is_empty());
+                    } else {
+                        assert_eq!(entries.len(), 1);
+                        let entry = &entries[0];
+                        assert_eq!(entry["name"], "fixture");
+                        assert!(entry["env"].as_array().unwrap().is_empty());
+                        assert!(!entry.to_string().contains("external-fixture"));
+                        let mut child =
+                            tokio::process::Command::new(entry["command"].as_str().unwrap())
+                                .args(
+                                    entry["args"]
+                                        .as_array()
+                                        .unwrap()
+                                        .iter()
+                                        .map(|v| v.as_str().unwrap()),
+                                )
+                                .stdin(std::process::Stdio::piped())
+                                .stdout(std::process::Stdio::piped())
+                                .kill_on_drop(true)
+                                .spawn()
+                                .unwrap();
+                        let mut stdin = child.stdin.take().unwrap();
+                        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+                        for (id, method, params) in [
+                            (
+                                1,
+                                "initialize",
+                                json!({"protocolVersion":"2025-11-25","capabilities":{}}),
+                            ),
+                            (2, "tools/list", json!({})),
+                            (3, "tools/call", json!({"name":"lookup","arguments":{}})),
+                            (3, "tools/call", json!({"name":"lookup","arguments":{}})),
+                            (
+                                3,
+                                "tools/call",
+                                json!({"name":"lookup","arguments":{"changed":true}}),
+                            ),
+                            (4, "tools/call", json!({"name":"write","arguments":{}})),
+                        ] {
+                            wire::write_frame(
+                                &mut stdin,
+                                &json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}),
+                            )
+                            .await
+                            .unwrap();
+                            let reply = wire::read_frame(&mut stdout).await.unwrap().unwrap();
+                            std::fs::write(
+                                "mcp-probe",
+                                json!({"id":id,"method":method,"reply":reply}).to_string(),
+                            )
+                            .unwrap();
+                            match (id, method) {
+                                (2, _) => {
+                                    let names: Vec<_> = reply["result"]["tools"]
+                                        .as_array()
+                                        .unwrap()
+                                        .iter()
+                                        .map(|t| t["name"].as_str().unwrap())
+                                        .collect();
+                                    assert_eq!(
+                                        names,
+                                        if expectation == "write" {
+                                            vec!["lookup", "write"]
+                                        } else {
+                                            vec!["lookup"]
+                                        }
+                                    );
+                                }
+                                (3, _) => {
+                                    if params["arguments"]["changed"] == true {
+                                        assert!(reply.get("error").is_some());
+                                    } else {
+                                        assert_eq!(reply["result"]["count"], 1);
+                                    }
+                                }
+                                (4, _) => {
+                                    if expectation == "write" {
+                                        assert_eq!(reply["result"]["count"], 2);
+                                    } else {
+                                        assert!(reply.get("error").is_some());
+                                    }
+                                }
+                                _ => assert!(reply.get("result").is_some()),
+                            }
+                        }
+                        child.kill().await.unwrap();
+                        child.wait().await.unwrap();
+                    }
+                    wire::write_frame(
+                        &mut output,
+                        &json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}),
+                    )
+                    .await
+                    .unwrap();
+                    continue;
+                }
+                if std::fs::read_to_string("scenario.txt")
+                    .unwrap_or_default()
+                    .trim()
+                    == "attachments"
+                {
+                    let blocks = r["params"]["prompt"].as_array().unwrap();
+                    assert!(blocks.iter().any(|b| b["type"] == "image"
+                        && b["data"] == "YWJj"
+                        && b["mimeType"] == "image/png"));
+                    // input.txt is text: embedded as text, never as base64.
+                    assert!(blocks.iter().any(
+                        |b| b["type"] == "resource" && b["resource"]["text"] == "snapshot"
+                    ));
+                }
+                if std::fs::read_to_string("scenario.txt")
+                    .unwrap_or_default()
+                    .trim()
+                    == "followup-attachments"
+                {
+                    // Start's image (revision 1), then the follow-up's (revision 2).
+                    let blocks = r["params"]["prompt"].as_array().unwrap();
+                    let images: Vec<_> = blocks
+                        .iter()
+                        .filter(|b| b["type"] == "image")
+                        .map(|b| b["data"].as_str().unwrap())
+                        .collect();
+                    assert_eq!(images, ["YWJj", "ZGVm"]);
+                    assert!(blocks.iter().any(|b| b["type"] == "resource"
+                        && b["resource"]["text"] == "ghi"
+                        && b["resource"]["uri"] == "file:///notes.txt"));
+                }
+                let mode = if mode == "desktop-auto" {
+                    let tail = raw.rsplit_once("\n\n").map_or(raw, |(_, text)| text);
+                    let inferred = match serde_json::from_str::<Value>(tail).ok() {
+                        Some(v) if v["stage"] == "review" => "desktop-reviewer",
+                        Some(v) if v["assignment_ref"].is_string() => "desktop-worker",
+                        _ => "desktop-coordinator",
+                    };
+                    *auto_roles.entry(sid.clone()).or_insert(inferred)
+                } else {
+                    mode.as_str()
+                };
+                let assignment = serde_json::from_str::<Value>(
+                    raw.rsplit_once("\n\n").map_or(raw, |(_, tail)| tail),
+                )
+                .unwrap_or(Value::Null);
+                let is_second = assignment["node"] == "second";
+                let n = prompts.entry(sid.clone()).or_default();
+                *n += 1;
+                let full_scenario = std::fs::read_to_string("scenario.txt").unwrap_or_default();
+                // Reports whether this worker or reviewer session was given the owner's
+                // task language, in words the test can find in the retained transcript.
+                if full_scenario.trim() == "language-ru"
+                    && matches!(mode, "desktop-worker" | "desktop-reviewer")
+                {
+                    let observed = raw.contains("Owner-selected response language: ru.");
+                    wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":format!("{mode} language observed: {observed}.")}}}})).await.unwrap();
+                }
+                let context = raw
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .find(|v| v["original_goal"].is_string() && v["recipient"].is_object())
+                    .unwrap_or(Value::Null);
+                if matches!(
+                    full_scenario.as_str(),
+                    "compaction-start-only" | "compaction-title-only"
+                ) && mode == "desktop-coordinator"
+                {
+                    let mut update = json!({"sessionUpdate":"tool_call","toolCallId":"not-completed","title":"Compact conversation","status":"in_progress"});
+                    if full_scenario == "compaction-start-only" {
+                        update["_meta"] = json!({"contextCompaction":{"version":1}});
+                    }
+                    wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})).await.unwrap();
+                }
+                let compact = (matches!(
+                    full_scenario.as_str(),
+                    "compaction-coordinator" | "compaction-claude"
+                ) && mode == "desktop-coordinator")
+                    || (full_scenario == "compaction-worker" && mode == "desktop-worker");
+                if compact && *n == 1 {
+                    assert!(raw.contains("Never lose constraint α"));
+                    for (kind, status) in [
+                        ("tool_call", "in_progress"),
+                        ("tool_call_update", "completed"),
+                        ("tool_call_update", "completed"),
+                    ] {
+                        let meta = if full_scenario == "compaction-claude" {
+                            json!({"claudeCode":{"toolName":"compact"}})
+                        } else {
+                            json!({"contextCompaction":{"version":1}})
+                        };
+                        wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,
+                            "update":{"sessionUpdate":kind,"toolCallId":"compact-once","title":"Not ordinary tool evidence",
+                                "status":status,"_meta":meta}}})).await.unwrap();
+                    }
+                    wire::write_frame(
+                        &mut output,
+                        &json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}),
+                    )
+                    .await
+                    .unwrap();
+                    continue;
+                }
+                if compact {
+                    assert_eq!(*n, 2);
+                    assert!(raw.contains("Never lose constraint α"));
+                    assert!(raw.contains("NATIVE_CONTEXT_COMPACTED"));
+                    if full_scenario != "compaction-claude" {
+                        assert!(raw.contains("Derived from this channel's served schemas"));
+                    }
+                }
+                if mode == "desktop-coordinator" && full_scenario.trim() == "saved-settings" {
+                    // Record what Start configured for this coordinator, then hold it.
+                    std::fs::write(
+                        "observed-settings.json",
+                        json!({"model":models.get(&sid),"effort":efforts.get(&sid),"option":effort_option(),
+                            "language":raw.contains("Owner-selected response language: ru.")})
+                        .to_string(),
+                    )
+                    .unwrap();
+                    held.insert(sid, id);
+                    continue;
+                }
+                let scenario = std::fs::read_to_string("scenario.txt").unwrap_or_default();
+                let scenario = if mode == "desktop-worker"
+                    || mode == "desktop-reviewer" && scenario.trim() == "review-hold"
+                {
+                    scenario
+                } else {
+                    String::new()
+                };
+                if mode == "desktop-reviewer" && scenario.trim() == "review-hold" {
+                    std::fs::write("review-entered", "ready").unwrap();
+                    held.insert(sid, id);
+                    continue;
+                }
+                if scenario.trim() == "hold" {
+                    std::fs::write("worker-entered", "ready").unwrap();
+                }
+                if scenario.trim() == "separate-task-hold" {
+                    std::fs::write("separate-worker-entered", "ready").unwrap();
+                }
+                if matches!(scenario.trim(), "hold" | "separate-task-hold")
+                    || scenario.trim() == "guidance" && *n == 1
+                    || scenario.trim() == "guidance-preempt" && *n <= 2
+                    || scenario.trim() == "stop-siblings" && !is_second
+                {
+                    held.insert(sid, id);
+                    continue;
+                }
+                if scenario.trim() == "incoming-permission" {
+                    let pid = json!(format!("permission-{sid}"));
+                    permissions.insert(pid.to_string(), (id, sid.clone()));
+                    wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","id":pid,"method":"session/request_permission",
+                        "params":{"sessionId":sid,"toolCall":{"toolCallId":"fixture-permission","title":"Fixture permission"},
+                        "options":[{"optionId":"yes","name":"Allow once","kind":"allow_once"},{"optionId":"no","name":"Reject once","kind":"reject_once"}]}})).await.unwrap();
+                    continue;
+                }
+                if scenario.trim() == "exit" {
+                    std::process::exit(17);
+                }
+                let automatic = if mode.starts_with("desktop-") {
+                    let proposal = std::fs::read_to_string("proposal.json").ok();
+                    let params = if let Some(params) =
+                        reconciliation_fixture(mode, &full_scenario, &context)
+                    {
+                        params
+                    } else if mode == "desktop-coordinator"
+                        && full_scenario == "slow-check"
+                        && context["state"] == "PLANNING"
+                        && context["retained_decisions"]
+                            .as_array()
+                            .is_some_and(|a| a.iter().any(|e| e["type"] == "VERIFICATION_FAILED"))
+                    {
+                        json!({"name":"user_question_request","arguments":{"question":"The owner stopped verification. How should we continue?",
+                            "options":["Keep the stopped result","Plan another check"],"request_key":"stopped-verification"}})
+                    } else if mode == "desktop-coordinator" && proposal.is_some() {
+                        if *n == 1 {
+                            json!({"name":"user_question_request","arguments":serde_json::from_str::<Value>(&proposal.unwrap()).unwrap()})
+                        } else {
+                            let expected =
+                                std::fs::read_to_string("expected-decision.txt").unwrap();
+                            if expected == "approved" {
+                                assert!(raw.contains("/skill-management Create the project skill"));
+                                assert!(raw.contains(
+                                    "Read the coordinator-only shared skill skill-management"
+                                ));
+                            } else {
+                                assert!(raw.contains("Do not create, update or link it"));
+                                assert!(raw.contains(expected.trim()));
+                                assert!(!raw.contains("/skill-management Create"));
+                            }
+                            json!({"name":"answer_submit","arguments":{"text":"Recorded decision; fixture leaves files unchanged.","request_key":"answer"}})
+                        }
+                    } else if mode == "desktop-coordinator" {
+                        if std::fs::read_to_string("scenario.txt").unwrap_or_default()
+                            == "recovery-context"
+                        {
+                            assert!(raw.contains("Coordinator recovery on a new engine session."));
+                            assert!(raw.contains("Retained startup goal"));
+                            assert!(raw.contains("Retained recovery instruction"));
+                        }
+                        if std::fs::read_to_string("scenario.txt")
+                            .unwrap_or_default()
+                            .trim()
+                            == "settings-ru"
+                        {
+                            assert!(raw.contains("Owner-selected response language: ru."));
+                            assert_eq!(models.get(&sid).map(String::as_str), Some("fixture-other"));
+                            wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Observed owner task model and language."}}}})).await.unwrap();
+                        }
+                        let slow = std::fs::read_to_string("scenario.txt")
+                            .unwrap_or_default()
+                            .trim()
+                            == "slow-check";
+                        let mut tasks = json!([{"id":"work","role":"backend-dev","objective":"Change work.txt","dependencies":[],"scope":["work.txt"],"model":"auto"}]);
+                        if full_scenario == "separate-task-hold" {
+                            tasks[0]["scope"] = json!(["separate.txt"]);
+                        }
+                        if std::fs::read_to_string("scenario.txt")
+                            .unwrap_or_default()
+                            .trim()
+                            == "stop-siblings"
+                            || full_scenario == "reconcile-worker-replan"
+                        {
+                            tasks.as_array_mut().unwrap().push(json!({"id":"second","role":"backend-dev","objective":"Change other.txt","dependencies":[],"scope":["other.txt"],"model":"auto"}));
+                        }
+                        json!({"name":"plan_submit","arguments":{"request_key":"plan","plan":{
+                            "tasks":tasks,
+                            "verification":if slow {json!([["/usr/bin/cmp","/dev/zero","/dev/zero"]])} else if (full_scenario=="reconcile-repair" || full_scenario=="reconcile-repair-late") && context["revision"]==0 { json!([["/bin/false"]]) } else {json!([["/usr/bin/cmp","/dev/null","/dev/null"]])}}}})
+                    } else if mode == "desktop-worker"
+                        && full_scenario == "reconcile-worker-replan"
+                        && context["revision"] == 1
+                    {
+                        json!({"name":"replan_request","arguments":{"reason":"Replan before launching the already claimed sibling","request_key":"worker-replan"}})
+                    } else if mode == "desktop-worker"
+                        && scenario.starts_with("command-restart-")
+                        && *n == 1
+                    {
+                        json!({"name":"command_run","arguments":{"argv":["/bin/sh","-c",
+                            "printf 'launch\\n' >> command-launches; printf 'before\\n'; head -c 70000 /dev/zero; touch command-entered; while [ ! -f command-release ]; do sleep 0.1; done; printf 'after\\n'; exit 7"],
+                            "timeout_seconds":60,"request_key":"restart-command"}})
+                    } else if scenario.trim() == "outside-write" {
+                        json!({"name":"outside_write","arguments":{"path":std::fs::read_to_string("outside-target").unwrap(),
+                            "content":"client-approved","request_key":"client-write"}})
+                    } else if scenario.trim() == "guidance" && *n == 2
+                        || scenario.trim() == "guidance-preempt" && *n == 3
+                    {
+                        assert!(
+                            raw.contains("Owner guidance")
+                                && (raw.contains("Use the owner output") || raw.contains("Second guidance"))
+                        );
+                        wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Guidance observed in same worker session."}}}})).await.unwrap();
+                        json!({"name":"ask_question","arguments":{"question":"Guidance received; next?","options":["Continue","Wait"],"request_key":"guidance-question"}})
+                    } else if scenario.trim() == "batch" && *n == 1 {
+                        json!({"name":"ask_question","arguments":{"questions":[
+                            {"question":"Which output?","options":["Detailed","Brief"]},
+                            {"question":"Which language?","options":["English","Russian"]}],"request_key":"batch"}})
+                    } else if matches!(scenario.trim(), "question" | "question-exit") && *n == 1 {
+                        json!({"name":"ask_question","arguments":{"question":"Which output?","options":["Detailed","Brief"],"request_key":"question"}})
+                    } else {
+                        let consultant = context["current_nodes"].as_array().is_some_and(|a| {
+                            a.iter().any(|n| {
+                                n["assignment"] == context["recipient"]["assignment"]
+                                    && n["node"] == "_consultation"
+                            })
+                        });
+                        if consultant {
+                            assert!(raw.contains("CONSULTATION_REQUIRED"));
+                        }
+                        if mode == "desktop-worker" && !consultant {
+                            std::fs::write(
+                                if is_second { "other.txt" } else { "work.txt" },
+                                "after",
+                            )
+                            .unwrap();
+                        }
+                        let mut arguments = json!({"report":"# Fixture report\\n\\nObserved disposable fixture.","summary":"Fixture result.","checks":[],"request_key":"result"});
+                        if mode == "desktop-worker"
+                            && full_scenario.starts_with("reconcile-")
+                            && !consultant
+                        {
+                            arguments["checks"] = json!([{"name":"Live behavior","outcome":"not_run","blocker":"paid live check not requested by the owner"}]);
+                        }
+                        if mode == "desktop-reviewer" {
+                            arguments["verdict"] = json!("APPROVE");
+                            arguments["findings"] = json!([]);
+                        }
+                        json!({"name":"result_submit","arguments":arguments})
+                    };
+                    Some(format!("call:{params}"))
+                } else {
+                    None
+                };
+                let text = if let Some(text) = automatic.as_deref() {
+                    text
+                } else if mode == "native-host" {
+                    raw.rsplit_once("\n\n").map_or(raw, |(_, text)| text)
+                } else {
+                    raw
+                };
+                if (mode == "native-host" || mode.starts_with("desktop-"))
+                    && text.starts_with("call:")
+                {
+                    let mut params: Value = serde_json::from_str(&text[5..]).unwrap();
+                    let expected = params.as_object_mut().unwrap().remove("__fixture_expect");
+                    if mode.starts_with("desktop-") {
+                        for update in [
+                            json!({"sessionUpdate":"tool_call","toolCallId":"fixture-call","title":"Fixture step","status":"in_progress","rawInput":{"private":"not-public"}}),
+                            json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Native fixture progress."}}),
+                            json!({"sessionUpdate":"tool_call_update","toolCallId":"fixture-call","status":"completed"}),
+                        ] {
+                            wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})).await.unwrap();
+                        }
+                    }
+                    let entry = &servers[&sid];
+                    let mut relay =
+                        tokio::process::Command::new(entry["command"].as_str().unwrap())
+                            .args(
+                                entry["args"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .map(|v| v.as_str().unwrap()),
+                            )
+                            .stdin(std::process::Stdio::piped())
+                            .stdout(std::process::Stdio::piped())
+                            .kill_on_drop(true)
+                            .spawn()
+                            .unwrap();
+                    let mut stdin = relay.stdin.take().unwrap();
+                    let mut stdout = BufReader::new(relay.stdout.take().unwrap());
+                    wire::write_frame(
+                        &mut stdin,
+                        &json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+                    )
+                    .await
+                    .unwrap();
+                    let listing = wire::read_frame(&mut stdout).await.unwrap().unwrap();
+                    let tools = listing["result"]["tools"].as_array().unwrap();
+                    assert!(tools.iter().all(|v| [
+                        "read_skill",
+                        "answer_submit",
+                        "synthesis_submit",
+                        "verification_submit",
+                        "replan_request",
+                        "scope_request",
+                        "escalation_request",
+                        "ask_question",
+                        "user_question_request",
+                        "plan_submit",
+                        "list_route_options",
+                        "result_submit",
+                        "create_draft",
+                        "draft_write",
+                        "write_report",
+                        "list_reports",
+                        "read_report",
+                        "read_draft",
+                        "tools_discover",
+                        "outside_command",
+                        "outside_write",
+                        "list_sources",
+                        "read_source",
+                        "project_read",
+                        "project_write",
+                        "project_edit",
+                        "project_git",
+                        "command_run",
+                        "read_large_output",
+                        "access_request"
+                    ]
+                    .contains(&v["name"].as_str().unwrap())));
+                    if mode == "desktop-coordinator" && scenario.trim() == "routing-menu" {
+                        assert!(tools.iter().any(|t| t["name"] == "list_route_options"));
+                        wire::write_frame(
+                            &mut stdin,
+                            &json!({"jsonrpc":"2.0","id":11,"method":"tools/call",
+                            "params":{"name":"list_route_options","arguments":{}}}),
+                        )
+                        .await
+                        .unwrap();
+                        let menu = wire::read_frame(&mut stdout).await.unwrap().unwrap();
+                        assert!(menu.get("error").is_none(), "{menu}");
+                        assert!(
+                            menu["result"]["structuredContent"]["tiers"].is_object(),
+                            "{menu}"
+                        );
+                    }
+                    if mode == "desktop-worker" || mode == "desktop-reviewer" {
+                        assert!(!tools.iter().any(|t| t["name"] == "list_route_options"));
+                    }
+                    wire::write_frame(
+                        &mut stdin,
+                        &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":params}),
+                    )
+                    .await
+                    .unwrap();
+                    let reply = wire::read_frame(&mut stdout).await.unwrap().unwrap();
+                    if let Some(expected) = expected {
+                        for (pointer, value) in expected.as_object().unwrap() {
+                            assert_eq!(
+                                reply.pointer(pointer),
+                                Some(value),
+                                "fixture reply at {pointer}: {reply}"
+                            );
+                        }
+                    }
+                    if params["name"] == "user_question_request" && reply.get("error").is_none() {
+                        wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update",
+                            "params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk",
+                            "content":{"type":"text","text":"Forbidden post-question rewrite"}}}})).await.unwrap();
+                    }
+                    if scenario.trim() == "stop-siblings" {
+                        // Result commit precedes the ACP reply and owned process wait.
+                        // Let the parent observe this boundary without scheduler timing.
+                        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                            while !std::path::Path::new("release-sibling").exists() {
+                                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                            }
+                        })
+                        .await
+                        .expect("sibling release signal missing");
+                    }
+                    wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":if reply.get("error").is_some(){"refusal"}else{"end_turn"}}})).await.unwrap();
+                    relay.kill().await.unwrap();
+                    relay.wait().await.unwrap();
+                    // The worker process dies while its question is still open.
+                    if scenario.trim() == "question-exit"
+                        && params["name"] == "ask_question"
+                        && reply.get("error").is_none()
+                    {
+                        std::process::exit(1);
+                    }
+                    continue;
+                }
+                if mode == "native-host" && text == "native-activity" {
+                    assert!(raw.contains("## Skills already included"));
+                    assert!(raw.contains("# Cortex tool cheat sheet (code mode)"));
+                    for update in [
+                        json!({"sessionUpdate":"tool_call","toolCallId":"same-call","title":"Fixture step","status":"in_progress","rawInput":{"secret":"private-fixture-value"}}),
+                        json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"private-fixture-value"}}),
+                        json!({"sessionUpdate":"tool_call_update","toolCallId":"same-call","status":"completed","rawOutput":"private-fixture-value"}),
+                        json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Native public response."}}),
+                    ] {
+                        wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})).await.unwrap();
+                    }
+                    wire::write_frame(
+                        &mut output,
+                        &json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}),
+                    )
+                    .await
+                    .unwrap();
+                    continue;
+                }
+                if mode == "native-host" && text == "native-chunked-next" {
+                    // The next turn's text directly follows the previous turn's last chunk.
+                    let update = json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Next turn."}});
+                    wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})).await.unwrap();
+                    wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}})).await.unwrap();
+                    continue;
+                }
+                if mode == "native-host" && text == "native-chunked" {
+                    // A streamed message arrives as many small chunks; a tool row
+                    // between chunks ends the message the next chunk begins anew.
+                    for update in [
+                        json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Вы выб"}}),
+                        json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"рали `div"}}),
+                        json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ide`."}}),
+                        json!({"sessionUpdate":"tool_call","toolCallId":"chunk-call","title":"Fixture step","status":"in_progress"}),
+                        json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Review "}}),
+                        json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"text."}}),
+                    ] {
+                        wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})).await.unwrap();
+                    }
+                    wire::write_frame(
+                        &mut output,
+                        &json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}),
+                    )
+                    .await
+                    .unwrap();
+                    continue;
+                }
+                if text == "exit" {
+                    std::process::exit(17)
+                }
+                if text == "malformed" {
+                    output
+                        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"id\":2}\n")
+                        .await
+                        .unwrap();
+                    output.flush().await.unwrap();
+                    continue;
+                }
+                if text == "flood" {
+                    for _ in 0..300 {
+                        wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{}}})).await.unwrap();
+                    }
+                    continue;
+                }
+                if text == "hang" {
+                    held.insert(sid, id);
+                    continue;
+                }
+                if text == "permission" {
+                    let pid = json!(format!("permission-{sid}"));
+                    permissions.insert(pid.to_string(), (id, sid.clone()));
+                    wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","id":pid,"method":"session/request_permission","params":{"sessionId":sid,"toolCall":{"title":"Fixture"},"options":[{"optionId":"yes","name":"Allow","kind":"allow_once"}]}})).await.unwrap();
+                    continue;
+                }
+                // An exact engine-shaped request body (for example claude-agent-acp's).
+                if let Some(body) = text.strip_prefix("permission-request:") {
+                    let mut params: Value = serde_json::from_str(body).unwrap();
+                    params["sessionId"] = json!(sid);
+                    // Engines never reuse a request id; the client rejects replays.
+                    static NEXT: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
+                    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let pid = json!(format!("permission-{sid}-{n}"));
+                    permissions.insert(pid.to_string(), (id, sid.clone()));
+                    wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","id":pid,"method":"session/request_permission","params":params})).await.unwrap();
+                    continue;
+                }
+                wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}}}})).await.unwrap();
+                wire::write_frame(
+                    &mut output,
+                    &json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}),
+                )
+                .await
+                .unwrap();
+            }
+            "session/cancel" => {
+                if let Some(id) = held.remove(&sid) {
+                    wire::write_frame(
+                        &mut output,
+                        &json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"cancelled"}}),
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+            _ => {}
+        }
+    }
+}

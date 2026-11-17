@@ -14,25 +14,61 @@ fn refusal(code: &str) -> Option<&'static str> {
     Some(match code {
         "project_folder_not_directory" => "This path is a file, not a folder.",
         "project_folder_unreadable" => "Cortex has no permission to open this folder.",
-        "project_folder_not_writable" => "You cannot write to this folder, so it cannot hold a project.",
+        "project_folder_not_writable" => {
+            "You cannot write to this folder, so it cannot hold a project."
+        }
         "project_folder_exists" => "A folder with this name is already there.",
-        "project_path_refused" => "This folder is private to Cortex or outside what this machine allows.",
+        "project_path_refused" => {
+            "This folder is private to Cortex or outside what this machine allows."
+        }
         "absolute_path_required" => "Enter the full path of the folder, starting with / or ~/.",
-        "invalid_path" | "symlink_refused" => "This path cannot be used. Enter the folder's real path.",
+        "invalid_path" | "symlink_refused" => {
+            "This path cannot be used. Enter the folder's real path."
+        }
         "invalid_display_name" => "Enter a project name of up to 256 characters.",
         "project_activation_running" => "Cortex is already starting for this project.",
         "project_not_found" => "This project is no longer on this machine.",
-        "project_inactive" | "resync_required" | "child_unavailable" => "Cortex is restarting for this project. Try again in a moment.",
-        "machine_busy" | "machine_tool_timeout" => "The machine is busy and did not answer in time. Try again.",
+        "project_inactive" | "resync_required" | "child_unavailable" => {
+            "Cortex is restarting for this project. Try again in a moment."
+        }
+        "machine_busy" | "machine_tool_timeout" => {
+            "The machine is busy and did not answer in time. Try again."
+        }
         "machine_tool_failed" => "The machine could not finish this request.",
         "directory_search_timeout" => "The search took too long. Type more of the path.",
         "directory_search_failed" => "This machine could not search its folders.",
         "stale_version" => "This task changed on the machine. Refresh it before trying again.",
-        "stale_epoch" | "execution_session_unavailable" => "This session no longer owns the task. Reopen its current state.",
+        "stale_epoch" | "execution_session_unavailable" => {
+            "This session no longer owns the task. Reopen its current state."
+        }
         "task_paused" => "The task is paused. Resume it before sending or answering.",
         "pause_settling" => "The interrupted turn is still stopping. Wait before resuming.",
         "task_not_paused" => "This task is no longer paused. Refresh its current state.",
         "task_not_resumable" => "This task has ended and cannot be resumed.",
+        "native_route_authorization_unavailable" => "Native Start is unavailable: engine routing has not been qualified. Nothing was started.",
+        "portable_coordinator_unavailable" | "portable_coordinator_ambiguous" | "pinned_route_unavailable"
+        | "connection_unavailable" | "authorization_required" => "Native Start has no eligible configured engine route. Check Cortex connection and model settings. Nothing was started.",
+        "native_route_executable_unavailable" => "The configured engine command is missing or is not executable. Nothing was started.",
+        "native_automatic_routing_unavailable" | "native_route_policy_unsupported" | "native_default_effort_unavailable"
+        | "unsupported_dependent_setting" => "These routing or effort settings are not supported by native execution yet. Nothing was started.",
+        "model_policy_migration_required" | "model_policy_version_unsupported" | "invalid_routing_overrides"
+        | "native_route_settings_unreadable" | "native_route_settings_invalid" | "native_connection_registry_invalid"
+        | "invalid_catalog_snapshot" | "untrusted_project_override" | "native_route_catalog_too_large"
+        | "native_route_home_unavailable" | "native_route_engine_unsupported" | "native_route_auth_unsupported"
+        | "native_route_environment_invalid" | "connection_storage_under_project" | "relative_storage_root"
+        | "policy_missing" => "Native routing configuration could not be qualified. Check the configured connections, routing policy and observed model catalog. Nothing was started.",
+        "native_start_options_unavailable" => "Native Start does not support these saved task options. Nothing was started.",
+        "native_worktree_unavailable" => "A separate worktree per task is not available on this machine yet. Edit the task to work in the project folder, then start it. Nothing was started.",
+        "native_task_route_unavailable" => "The model saved with this task is not available on any enabled engine connection. Choose another model in the task settings. Nothing was started.",
+        "native_task_settings_invalid" => "The settings saved with this task are invalid. Choose the model, effort and access mode again. Nothing was started.",
+        "native_attachments_unavailable" => "Attachments are not supported by this native action. Nothing was sent.",
+        "native_operation_unavailable" => "This control is not available for native execution yet.",
+        "native_execution_binding_invalid" | "stale_owner" => "This execution no longer has the expected owner. Reopen its current state.",
+        "native_control_outcome_unknown" | "native_shutdown_unconfirmed" | "lost_worker_termination_unconfirmed" => "The action or process exit could not be confirmed. Inspect the current state; do not repeat the action.",
+        "retry_not_expected" => "This task is not waiting for a retry. Refresh its current state.",
+        "native_decision_history_limit" | "native_decision_page_unavailable" => "The question history could not be read completely. No answer was sent.",
+        "native_capacity_unavailable" => "Native execution capacity is full. Nothing was started.",
+        "legacy_runtime_tasks_active" => "This project still has legacy work. Native execution cannot adopt it.",
         "report_unavailable" => "No published worker report is available for this task.",
         "service_stopping" => "The machine service is stopping. Try again in a moment.",
         _ => return None,
@@ -43,13 +79,22 @@ const REFUSED: &str = "refused:";
 /// Starting a child includes engine and store setup, which can outlast an ordinary request.
 const ACTIVATION_DEADLINE: Duration = Duration::from_secs(120);
 const REQUEST_DEADLINE: Duration = Duration::from_secs(35);
-const RESYNC_DEADLINE: Duration = Duration::from_secs(5);
+const STARTUP_DEADLINE: Duration = Duration::from_secs(30);
+/// How long a subscription that held may be re-established silently before the window says the
+/// machine is offline. A resubscribe and resync inside it is not a lost service.
+const RECONNECT_GRACE: Duration = Duration::from_secs(5);
+/// Ordinary requests the window keeps in flight at once, each on its own connection. The service
+/// serves a bounded number of connections (`workspace_service::CONNECTION_LIMIT`); this leaves
+/// room for the status check and the subscription's own reads, which never wait for a permit, so
+/// the window's slow reads cannot crowd out the one request that says whether the machine is there.
+const ORDINARY_REQUESTS: usize = 48;
 
 pub struct Bridge {
     socket: PathBuf,
     sequence: AtomicU64,
     start_unit: bool,
     starting: tokio::sync::Mutex<()>,
+    ordinary: tokio::sync::Semaphore,
 }
 impl Bridge {
     /// The socket is resolved by trusted native startup, never a JavaScript argument.
@@ -72,6 +117,7 @@ impl Bridge {
             sequence: AtomicU64::new(1),
             start_unit: false,
             starting: tokio::sync::Mutex::new(()),
+            ordinary: tokio::sync::Semaphore::new(ORDINARY_REQUESTS),
         }
     }
     async fn connection(&self) -> Result<UnixStream, String> {
@@ -91,7 +137,10 @@ impl Bridge {
             &workspace_protocol::channel::current().unit,
         )
         .await?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+        self.wait_for_socket(STARTUP_DEADLINE).await
+    }
+    async fn wait_for_socket(&self, grace: Duration) -> Result<UnixStream, String> {
+        let deadline = tokio::time::Instant::now() + grace;
         while tokio::time::Instant::now() < deadline {
             if let Ok(stream) = connect(&self.socket).await {
                 return Ok(stream);
@@ -105,7 +154,7 @@ impl Bridge {
         // Reload also handles first launch in a manager that predates package install.
         for args in [
             vec!["--user", "daemon-reload"],
-            vec!["--user", "start", unit],
+            vec!["--user", "start", "--no-block", unit],
         ] {
             let mut child = tokio::process::Command::new(systemctl)
                 .args(args)
@@ -142,22 +191,42 @@ impl Bridge {
             .await
             .map_err(|_| "service_disconnected")?;
         if method.starts_with("voice.") && reply["jsonrpc"] == "2.0" && reply["id"] == id {
-            if let Some(code @ ("voice_busy" | "voice_unavailable" | "voice_session_unknown" | "voice_request_expired")) = reply["error"]["message"].as_str() {
+            if let Some(
+                code @ ("voice_busy"
+                | "voice_unavailable"
+                | "voice_session_unknown"
+                | "voice_request_expired"),
+            ) = reply["error"]["message"].as_str()
+            {
                 return Err(code.into());
             }
         }
         if method.starts_with("terminal.") && reply["jsonrpc"] == "2.0" && reply["id"] == id {
             let message = match reply["error"]["message"].as_str() {
-                Some("terminal_session_limit") => Some("Eight project shells are already open. Close a shell first."),
-                Some("terminal_session_unknown") => Some("This terminal session is gone. Reconnect to open a new shell."),
-                Some("terminal_shell_unavailable" | "terminal_unavailable") => Some("Your interactive shell could not be opened."),
-                Some("terminal_exited") => Some("The shell exited. Close it before opening a new shell."),
-                Some("terminal_input_refused") => Some("Terminal input was refused. Nothing was resent."),
+                Some("terminal_session_limit") => {
+                    Some("Eight project shells are already open. Close a shell first.")
+                }
+                Some("terminal_session_unknown") => {
+                    Some("This terminal session is gone. Reconnect to open a new shell.")
+                }
+                Some("terminal_shell_unavailable" | "terminal_unavailable") => {
+                    Some("Your interactive shell could not be opened.")
+                }
+                Some("terminal_exited") => {
+                    Some("The shell exited. Close it before opening a new shell.")
+                }
+                Some("terminal_input_refused") => {
+                    Some("Terminal input was refused. Nothing was resent.")
+                }
                 Some("terminal_resize_failed") => Some("The terminal could not be resized."),
-                Some("terminal_project_changed" | "project_not_found") => Some("This terminal's project is no longer available."),
+                Some("terminal_project_changed" | "project_not_found") => {
+                    Some("This terminal's project is no longer available.")
+                }
                 _ => None,
             };
-            if let Some(message) = message { return Err(message.into()); }
+            if let Some(message) = message {
+                return Err(message.into());
+            }
         }
         if reply["error"]["message"]
             .as_str()
@@ -168,8 +237,16 @@ impl Bridge {
         if reply["jsonrpc"] == "2.0" && reply["id"] == id {
             match reply["error"]["message"].as_str() {
                 // These two steer the caller, so they stay codes.
-                Some(code @ ("project_folder_missing" | "unknown_outcome")) => return Err(code.into()),
-                Some(code) => if let Some(text) = refusal(code) { return Err(format!("{REFUSED}{text}")); },
+                Some(
+                    code @ ("project_folder_missing"
+                    | "unknown_outcome"
+                    | "native_start_outcome_unknown"),
+                ) => return Err(code.into()),
+                Some(code) => {
+                    if let Some(text) = refusal(code) {
+                        return Err(format!("{REFUSED}{text}"));
+                    }
+                }
                 None => (),
             }
         }
@@ -185,67 +262,126 @@ impl Bridge {
     /// One attempt on a fresh authenticated connection. A timeout drops this connection;
     /// nothing retries a mutation or lets a late response satisfy another request.
     pub async fn rpc(&self, method: &str, params: Value) -> Result<Value, String> {
-        timeout(if method == "projects.activate" { ACTIVATION_DEADLINE } else { REQUEST_DEADLINE }, async {
-            let mut stream = self.connection().await?;
-            self.send(&mut stream, method, params).await
-        })
-        .await
-        .map_err(|_| "service_timeout")?
+        self.call(method, params, method != "service.status").await
+    }
+    async fn call(&self, method: &str, params: Value, ordinary: bool) -> Result<Value, String> {
+        let deadline = if method == "projects.activate" {
+            ACTIVATION_DEADLINE
+        } else {
+            REQUEST_DEADLINE
+        };
+        // Waiting for a permit sends nothing, so a request that never gets one is a refusal,
+        // never an unknown outcome.
+        let busy = || format!("{REFUSED}{}", refusal("machine_busy").unwrap_or_default());
+        let _permit = if ordinary {
+            Some(
+                timeout(deadline, self.ordinary.acquire())
+                    .await
+                    .map_err(|_| busy())?
+                    .map_err(|_| busy())?,
+            )
+        } else {
+            None
+        };
+        // Readiness has its own budget; it must not consume a request deadline.
+        // No request bytes are sent until the authenticated socket is available.
+        let mut stream = self.connection().await?;
+        timeout(deadline, self.send(&mut stream, method, params))
+            .await
+            .map_err(|_| "service_timeout")?
     }
     pub async fn request(&self, call: crate::policy::Call) -> Result<Value, String> {
         match call.operation.as_str() {
-            "service.status"
-            | "projects.register"
-            | "projects.remove"
-            | "projects.rename"
-            | "projects.list"
-            | "projects.status"
-            | "projects.activate"
-            | "projects.resynchronize"
-            | "executions.cancel"
-            | "executions.control"
-            | "executions.prompt"
-            | "machine.call"
-            | "directories.search"
-            | "directories.cancel"
-            | "voice.start"
-            | "voice.read"
-            | "voice.stop"
-            | "voice.cancel"
-            | "terminal.open"
-            | "terminal.read"
-            | "terminal.write"
-            | "terminal.resize"
-            | "terminal.close" => self.rpc(&call.operation, call.message).await,
+            "native.query" | "native.board" => {
+                let project = call.message["projectId"]
+                    .as_str()
+                    .ok_or("service_invalid_request")?
+                    .to_owned();
+                let value = self.rpc(&call.operation, call.message).await?;
+                let reply: workspace_protocol::read::ReadReply =
+                    serde_json::from_value(value.clone())
+                        .map_err(|_| "service_invalid_response")?;
+                reply.validate().map_err(|_| "service_invalid_response")?;
+                if reply.project_id != project {
+                    return Err("service_invalid_response".into());
+                }
+                Ok(value)
+            }
+            "service.status" | "projects.register" | "projects.remove" | "projects.rename"
+            | "projects.list" | "projects.status" | "projects.activate" | "executions.cancel"
+            | "executions.control" | "executions.prompt" | "machine.call"
+            | "directories.search" | "directories.cancel" | "voice.start" | "voice.read"
+            | "voice.stop" | "voice.cancel" | "terminal.open" | "terminal.read"
+            | "terminal.write" | "terminal.resize" | "terminal.close" => {
+                self.rpc(&call.operation, call.message).await
+            }
             "service.capabilities" => {
                 let mut value = self.rpc("service.capabilities", call.message).await?;
-                if let Some(methods) = value["methods"].as_array_mut() { methods.push(json!("native.clipboard_image")); methods.push(json!("native.take_dropped_files")); methods.push(json!("native.pick_folder")); methods.push(json!("native.save_attachment")); }
+                if let Some(methods) = value["methods"].as_array_mut() {
+                    methods.push(json!("native.clipboard_image"));
+                    methods.push(json!("native.take_dropped_files"));
+                    methods.push(json!("native.pick_folder"));
+                    methods.push(json!("native.save_attachment"));
+                }
                 let vs_code = opener::vs_code().is_some();
                 let system = opener::system_opener().is_some();
                 if let Some(methods) = value["methods"].as_array_mut() {
-                    if vs_code { methods.push(json!("native.open_editor.vscode")); }
-                    if vs_code || system { methods.push(json!("native.open_editor")); }
-                    if system { methods.push(json!("native.open_logs")); }
+                    if vs_code {
+                        methods.push(json!("native.open_editor.vscode"));
+                    }
+                    if vs_code || system {
+                        methods.push(json!("native.open_editor"));
+                    }
+                    if system {
+                        methods.push(json!("native.open_logs"));
+                    }
                 }
                 Ok(value)
             }
             "native.engine_login" => {
                 let reply = self.rpc("machine.call", json!({"op":"engine.connection","params":{"action":"login_command","engine":call.message["engine"]}})).await?;
-                if reply["ok"] != true { return Err(format!("{REFUSED}{}", reply["message"].as_str().unwrap_or("Native login is unavailable."))); }
-                let program = reply["result"]["program"].as_str().ok_or("Native login is unavailable.")?;
-                let args: Vec<std::ffi::OsString> = reply["result"]["args"].as_array().ok_or("Native login is unavailable.")?.iter().map(|v| v.as_str().unwrap_or("").into()).collect();
-                opener::engine_login(program, &args).await.map_err(|s| format!("{REFUSED}{s}"))?;
-                Ok(json!({"message":"Native login opened in a terminal. Finish there, then recheck here."}))
-            },
-            "native.open_editor" => self.open_editor(&call.message).await.map_err(|text| format!("{REFUSED}{text}")),
-            "native.open_logs" => self.open_logs().await.map_err(|text| format!("{REFUSED}{text}")),
+                if reply["ok"] != true {
+                    return Err(format!(
+                        "{REFUSED}{}",
+                        reply["message"]
+                            .as_str()
+                            .unwrap_or("Native login is unavailable.")
+                    ));
+                }
+                let program = reply["result"]["program"]
+                    .as_str()
+                    .ok_or("Native login is unavailable.")?;
+                let args: Vec<std::ffi::OsString> = reply["result"]["args"]
+                    .as_array()
+                    .ok_or("Native login is unavailable.")?
+                    .iter()
+                    .map(|v| v.as_str().unwrap_or("").into())
+                    .collect();
+                opener::engine_login(program, &args)
+                    .await
+                    .map_err(|s| format!("{REFUSED}{s}"))?;
+                Ok(
+                    json!({"message":"Native login opened in a terminal. Finish there, then recheck here."}),
+                )
+            }
+            "native.open_editor" => self
+                .open_editor(&call.message)
+                .await
+                .map_err(|text| format!("{REFUSED}{text}")),
+            "native.open_logs" => self
+                .open_logs()
+                .await
+                .map_err(|text| format!("{REFUSED}{text}")),
             "capabilities.get" => {
                 let mut value = self.capabilities().await?;
-                if call.message["protocol"]["minor"].as_u64().is_some_and(|minor| minor <= 6) {
+                if call.message["protocol"]["minor"]
+                    .as_u64()
+                    .is_some_and(|minor| minor <= 6)
+                {
                     value["limits"]["frameBytes"] = json!(1024 * 1024);
                 }
                 Ok(value)
-            },
+            }
             _ => self.rpc("workspace", call.message).await,
         }
     }
@@ -253,36 +389,77 @@ impl Bridge {
     async fn located(&self, message: &Value) -> Result<(String, Option<String>), String> {
         if message.get("checkoutId").is_none() && message.get("file").is_none() {
             let projects = self.rpc("projects.list", json!({})).await?;
-            let project = projects.as_array().and_then(|rows| rows.iter().find(|p| p["projectId"] == message["projectId"])).ok_or("This project is no longer on this machine.")?;
-            return Ok((project["canonicalRoot"].as_str().ok_or("This project has no folder.")?.to_owned(), None));
+            let project = projects
+                .as_array()
+                .and_then(|rows| rows.iter().find(|p| p["projectId"] == message["projectId"]))
+                .ok_or("This project is no longer on this machine.")?;
+            return Ok((
+                project["canonicalRoot"]
+                    .as_str()
+                    .ok_or("This project has no folder.")?
+                    .to_owned(),
+                None,
+            ));
         }
         let mut params = serde_json::Map::new();
         for key in ["checkoutId", "file"] {
-            if let Some(value) = message.get(key) { params.insert(key.to_owned(), value.clone()); }
+            if let Some(value) = message.get(key) {
+                params.insert(key.to_owned(), value.clone());
+            }
         }
-        let reply = self.rpc("machine.call", json!({"op":"repo.locate","projectId":message["projectId"],"params":params})).await?;
-        if reply["ok"] != true { return Err(reply["message"].as_str().unwrap_or("This file could not be found.").to_owned()); }
-        let root = reply["result"]["root"].as_str().ok_or("This file could not be found.")?.to_owned();
+        let reply = self
+            .rpc(
+                "machine.call",
+                json!({"op":"repo.locate","projectId":message["projectId"],"params":params}),
+            )
+            .await?;
+        if reply["ok"] != true {
+            return Err(reply["message"]
+                .as_str()
+                .unwrap_or("This file could not be found.")
+                .to_owned());
+        }
+        let root = reply["result"]["root"]
+            .as_str()
+            .ok_or("This file could not be found.")?
+            .to_owned();
         Ok((root, reply["result"]["path"].as_str().map(str::to_owned)))
     }
     async fn open_editor(&self, message: &Value) -> Result<Value, String> {
         let (root, file) = self.located(message).await?;
         if let Some(editor) = opener::vs_code() {
-            let args = opener::vs_code_args(&root, file.as_deref(), message["line"].as_u64().unwrap_or(1));
+            let args = opener::vs_code_args(
+                &root,
+                file.as_deref(),
+                message["line"].as_u64().unwrap_or(1),
+            );
             opener::launch(&editor, &args, "VS Code could not open this.").await?;
         } else {
-            let (program, args) = opener::system_opener().ok_or("No external editor or file opener is installed on this machine.")?;
+            let (program, args) = opener::system_opener()
+                .ok_or("No external editor or file opener is installed on this machine.")?;
             let mut args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
             args.push(file.unwrap_or(root).into());
-            opener::launch(&program, &args, "The default application could not open this.").await?;
+            opener::launch(
+                &program,
+                &args,
+                "The default application could not open this.",
+            )
+            .await?;
         }
         Ok(json!({"outcome":"opened"}))
     }
     async fn open_logs(&self) -> Result<Value, String> {
-        let reply = self.rpc("machine.call", json!({"op":"logs.folder"})).await?;
-        if reply["ok"] != true { return Err("Private service logs are unavailable.".into()); }
-        let folder = reply["result"]["folder"].as_str().ok_or("Private service logs are unavailable.")?;
-        let (program, args) = opener::system_opener().ok_or("No folder opener is installed on this machine.")?;
+        let reply = self
+            .rpc("machine.call", json!({"op":"logs.folder"}))
+            .await?;
+        if reply["ok"] != true {
+            return Err("Private service logs are unavailable.".into());
+        }
+        let folder = reply["result"]["folder"]
+            .as_str()
+            .ok_or("Private service logs are unavailable.")?;
+        let (program, args) =
+            opener::system_opener().ok_or("No folder opener is installed on this machine.")?;
         let mut args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
         args.push(folder.into());
         opener::launch(&program, &args, "The folder opener could not open logs.").await?;
@@ -373,46 +550,88 @@ impl Bridge {
         loop {
             let message = read_frame(&mut stream)
                 .await
-                .map_err(|_| "service_disconnected")?;
-            if message["jsonrpc"] != "2.0" || message["method"] != "service.event" {
-                return Err("service_invalid_event".into());
-            }
-            let event = &message["params"];
-            match event["type"].as_str() {
-                Some("resync_required") => self.resync(notify).await?,
-                Some("project_state") => notify(json!({"type":"refresh"})),
-                Some("invalidation" | "public_events") => {
-                    workspace_protocol::validate("Identity", &event["projectId"])
-                        .map_err(|_| "service_invalid_event")?;
-                    notify(json!({"type":"invalidated","projectId":event["projectId"]}));
+                .map_err(|error| format!("service_disconnected:{}", frame_failure(&error)))?;
+            match incoming(&message) {
+                Ok(Incoming::Forward(event)) => notify(event),
+                Ok(Incoming::Resync) => self.resync(notify).await?,
+                // One delta this window cannot apply says nothing about the connection. The
+                // project re-reads its authoritative state instead of trusting or dropping it.
+                Err(Refused {
+                    code,
+                    project: Some(project),
+                }) => {
+                    log_line("event_refused", code, None);
+                    notify(json!({"type":"native_resync","projectId":project}));
                 }
-                _ => return Err("service_invalid_event".into()),
+                Err(Refused {
+                    code,
+                    project: None,
+                }) => return Err(format!("service_invalid_event:{code}")),
             }
         }
     }
     async fn resync(&self, notify: &impl Fn(Value)) -> Result<(), String> {
-        let projects = self.rpc("projects.list", json!({})).await?;
+        // The subscription's own read never waits behind the window's ordinary requests.
+        let projects = self.call("projects.list", json!({}), false).await?;
         for project in projects
             .as_array()
             .ok_or("service_invalid_response")?
             .iter()
             .filter(|p| !p["activation"].is_null())
         {
-            // One project's child being away is that project's state, not a lost machine. The
-            // service brings it back and announces it. A stalled child does not hold this loop
-            // either: the service resnapshots by itself once the child answers.
-            let _ = timeout(
-                RESYNC_DEADLINE,
-                self.rpc("projects.resynchronize", json!({"projectId":project["projectId"]})),
-            )
-            .await;
+            // Reconnect invalidates presentation caches, not runtime state. The service
+            // publishes native deltas independently; asking it for anything here would stop
+            // draining this socket and turn a backlog into a false disconnect.
             notify(json!({"type":"invalidated","projectId":project["projectId"]}));
         }
+        notify(json!({"type":"refresh"}));
         Ok(())
     }
     pub async fn subscribe(&self, notify: impl Fn(Value)) {
+        self.subscribe_with(notify, RECONNECT_GRACE).await
+    }
+    async fn subscribe_with(&self, notify: impl Fn(Value), grace: Duration) {
+        let started = tokio::time::Instant::now();
+        let connects = AtomicU64::new(0);
+        let publish = |event: Value| {
+            if event["state"] == "connected" {
+                connects.fetch_add(1, Ordering::Relaxed);
+            }
+            notify(event);
+        };
+        notify(json!({"type":"connection","state":"connecting"}));
+        // When the window last lost a subscription that had held, while it has not said so.
+        let mut lost: Option<tokio::time::Instant> = None;
+        let mut logged = String::new();
         loop {
-            let _ = self.subscription(&notify).await;
+            let before = connects.load(Ordering::Relaxed);
+            let attempt = tokio::time::Instant::now();
+            let reason = match self.subscription(&publish).await {
+                Err(reason) => reason,
+                Ok(()) => "subscription_ended".into(),
+            };
+            let held = connects.load(Ordering::Relaxed) > before;
+            // Every end is recorded once per distinct reason, so a long outage is one line.
+            if held || reason != logged {
+                log_line("ended", &reason, Some(attempt.elapsed()));
+                logged = reason;
+            }
+            // A first-launch service is allowed to bind before an offline state is shown.
+            if connects.load(Ordering::Relaxed) == 0 && started.elapsed() < STARTUP_DEADLINE {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            // A subscription that held ended: resubscribe and resync silently first. Only one
+            // that cannot be re-established within the grace reaches the owner as offline. A
+            // subscription that keeps ending at once does not restart the grace.
+            if held && (lost.is_none() || attempt.elapsed() >= grace) {
+                lost = Some(tokio::time::Instant::now());
+            }
+            if lost.is_some_and(|since| since.elapsed() < grace) {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            }
+            lost = None;
             notify(
                 json!({"type":"connection","state":"disconnected","reason":"Machine service disconnected"}),
             );
@@ -421,11 +640,582 @@ impl Bridge {
     }
 }
 
+/// What one subscription frame asks of the window, after the desktop's own validation.
+#[derive(Debug)]
+pub enum Incoming {
+    /// Publish this event to the window as it is.
+    Forward(Value),
+    /// The service asks for a full resync of every active project.
+    Resync,
+}
+/// Why one subscription frame was refused. `code` is a fixed protocol code, never frame content.
+/// `project` is the frame's own valid project identity, when it named one, so the refusal can be
+/// recovered by re-reading that project alone.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Refused {
+    pub code: &'static str,
+    pub project: Option<String>,
+}
+/// Validates one subscription frame exactly as the window does before anything reaches it.
+pub fn incoming(message: &Value) -> Result<Incoming, Refused> {
+    let refused = |code| Refused {
+        code,
+        project: None,
+    };
+    if message["jsonrpc"] != "2.0" || message["method"] != "service.event" {
+        return Err(refused("not_service_event"));
+    }
+    let event = &message["params"];
+    match event["type"].as_str() {
+        Some("native_delta") => {
+            let project = event["projectId"]
+                .as_str()
+                .ok_or(refused("invalid_project"))?
+                .to_owned();
+            let named = project_named(event);
+            let refuse = |code| Refused {
+                code,
+                project: named.clone(),
+            };
+            let batch: workspace_protocol::events::DeltaBatch =
+                serde_json::from_value(event["batch"].clone())
+                    .map_err(|_| refuse("delta_unreadable"))?;
+            batch.validate().map_err(refuse)?;
+            if batch.stream_key
+                != (workspace_protocol::events::StreamKey::Project {
+                    project_id: project.clone(),
+                })
+            {
+                return Err(refuse("delta_stream_mismatch"));
+            }
+            Ok(Incoming::Forward(event.clone()))
+        }
+        Some("native_resync") => {
+            project_named(event).ok_or(refused("invalid_project"))?;
+            Ok(Incoming::Forward(event.clone()))
+        }
+        Some("resync_required") => Ok(Incoming::Resync),
+        Some("project_state") => Ok(Incoming::Forward(json!({"type":"refresh"}))),
+        Some(kind @ ("invalidation" | "public_events")) => {
+            let project = project_named(event).ok_or(refused("invalid_project"))?;
+            Ok(Incoming::Forward(if kind == "public_events" {
+                json!({"type":"invalidated","projectId":project,"source":"runtime"})
+            } else {
+                json!({"type":"invalidated","projectId":project})
+            }))
+        }
+        _ => Err(refused("unknown_event")),
+    }
+}
+fn project_named(event: &Value) -> Option<String> {
+    workspace_protocol::validate("Identity", &event["projectId"])
+        .ok()
+        .and_then(|()| event["projectId"].as_str().map(str::to_owned))
+}
+/// A bounded code for a failed frame read. Only the service's own short codes and I/O error
+/// kinds are kept; nothing read from the socket is.
+pub fn frame_failure(error: &std::io::Error) -> String {
+    let text = error.to_string();
+    if error.kind() == std::io::ErrorKind::Other
+        && !text.is_empty()
+        && text.len() <= 64
+        && text.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+    {
+        text
+    } else {
+        format!("{:?}", error.kind()).to_ascii_lowercase()
+    }
+}
+/// One bounded diagnostic line on the desktop's stderr. Codes are fixed protocol words; no
+/// project, task or message text is written.
+fn log_line(what: &str, reason: &str, after: Option<Duration>) {
+    let reason: String = reason
+        .chars()
+        .take(96)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "_:-".contains(c) {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    match after {
+        Some(after) => eprintln!(
+            "cortex-workspace-desktop: subscription {what} reason={reason} after_ms={}",
+            after.as_millis()
+        ),
+        None => eprintln!("cortex-workspace-desktop: subscription {what} reason={reason}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::Bridge;
     use std::os::unix::fs::PermissionsExt;
 
+    /// A fake service: every connection answers its first request; each subscription then
+    /// receives the frames the script returns for its ordinal (0 for the first) and stays open.
+    fn fake_service(
+        name: &str,
+        frames: impl Fn(usize) -> Vec<serde_json::Value> + Send + Sync + 'static,
+    ) -> (std::path::PathBuf, tokio::task::JoinHandle<()>) {
+        use serde_json::json;
+        let root = std::env::temp_dir().join(format!("cw-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("service.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let frames = std::sync::Arc::new(frames);
+        let subscriptions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let (frames, subscriptions) = (frames.clone(), subscriptions.clone());
+                tokio::spawn(async move {
+                    let request = workspace_service::read_frame(&mut stream).await.unwrap();
+                    let result = match request["method"].as_str().unwrap() {
+                        "projects.list" => json!([{"projectId":"p","activation":{}}]),
+                        "service.subscribe" => json!({"subscribed":true}),
+                        _ => panic!("unexpected method"),
+                    };
+                    let _ = workspace_service::write_frame(
+                        &mut stream,
+                        &json!({"jsonrpc":"2.0","id":request["id"],"result":result}),
+                    )
+                    .await;
+                    if request["method"] == "service.subscribe" {
+                        let ordinal =
+                            subscriptions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        // The subscriber resyncs before it reads events.
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        for frame in frames(ordinal) {
+                            let _ = workspace_service::write_frame(&mut stream, &frame).await;
+                        }
+                        std::future::pending::<()>().await;
+                    }
+                });
+            }
+        });
+        (path, server)
+    }
+    fn event(params: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"jsonrpc":"2.0","method":"service.event","params":params})
+    }
+
+    #[test]
+    fn a_refused_frame_names_a_fixed_code_and_only_its_own_valid_project() {
+        use super::{incoming, Incoming, Refused};
+        use serde_json::json;
+        let unreadable = incoming(&event(
+            json!({"type":"native_delta","projectId":"p","batch":{"unexpected":"private words"}}),
+        ))
+        .unwrap_err();
+        assert_eq!(
+            unreadable,
+            Refused {
+                code: "delta_unreadable",
+                project: Some("p".into())
+            }
+        );
+        let empty = incoming(&event(
+            json!({"type":"native_delta","projectId":"p","batch":{
+            "generation":"g","streamKey":{"scope":"project","project_id":"p"},
+            "fromSequence":"1","throughSequence":"1","changes":[]}}),
+        ))
+        .unwrap_err();
+        assert_eq!(empty.code, "invalid_delta");
+        assert_eq!(
+            incoming(&event(json!({"type":"brand_new_kind","projectId":"p"}))).unwrap_err(),
+            Refused {
+                code: "unknown_event",
+                project: None
+            }
+        );
+        assert_eq!(
+            incoming(&json!({"jsonrpc":"2.0","id":"1","result":{}}))
+                .unwrap_err()
+                .code,
+            "not_service_event"
+        );
+        assert!(matches!(
+            incoming(&event(
+                json!({"type":"resync_required","reason":"subscription_overflow"})
+            )),
+            Ok(Incoming::Resync)
+        ));
+        let Ok(Incoming::Forward(forwarded)) =
+            incoming(&event(json!({"type":"public_events","projectId":"p"})))
+        else {
+            panic!("a valid invalidation is forwarded");
+        };
+        assert_eq!(
+            forwarded,
+            json!({"type":"invalidated","projectId":"p","source":"runtime"})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delta_the_window_cannot_apply_resyncs_its_project_and_keeps_the_subscription() {
+        use serde_json::json;
+        let (path, server) = fake_service("refused-delta", |ordinal| {
+            assert_eq!(ordinal, 0, "the subscription was not ended");
+            vec![
+                event(json!({"type":"native_delta","projectId":"p","batch":{"unexpected":true}})),
+                event(json!({"type":"invalidation","projectId":"p"})),
+            ]
+        });
+        let bridge = Bridge::new(path.clone());
+        let events = std::sync::Mutex::new(Vec::new());
+        let subscription = bridge.subscribe(|e| events.lock().unwrap().push(e));
+        tokio::select! {
+            _ = subscription => panic!("subscription ended"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(400)) => {}
+        }
+        let seen = events.lock().unwrap();
+        let resync = seen
+            .iter()
+            .position(|e| *e == json!({"type":"native_resync","projectId":"p"}))
+            .expect("the refused delta becomes a resync of its project");
+        assert!(seen[resync + 1..]
+            .iter()
+            .any(|e| *e == json!({"type":"invalidated","projectId":"p"})));
+        assert_eq!(seen.iter().filter(|e| e["state"] == "connected").count(), 1);
+        assert!(!seen.iter().any(|e| e["state"] == "disconnected"));
+        server.abort();
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_subscription_that_ends_and_resubscribes_quickly_never_shows_offline() {
+        use serde_json::json;
+        // The first subscription receives a frame that is not a service event at all.
+        let (path, server) = fake_service("quick-resubscribe", |ordinal| {
+            if ordinal == 0 {
+                vec![json!({"jsonrpc":"2.0","method":"unexpected"})]
+            } else {
+                vec![]
+            }
+        });
+        let bridge = Bridge::new(path.clone());
+        let events = std::sync::Mutex::new(Vec::new());
+        let subscription = bridge.subscribe(|e| events.lock().unwrap().push(e));
+        tokio::select! {
+            _ = subscription => panic!("subscription ended"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(1500)) => {}
+        }
+        let seen = events.lock().unwrap();
+        assert_eq!(
+            seen.iter().filter(|e| e["state"] == "connected").count(),
+            2,
+            "resubscribed"
+        );
+        assert!(!seen.iter().any(|e| e["state"] == "disconnected"));
+        // The resubscribe re-reads what the lost connection may have missed.
+        let second = seen
+            .iter()
+            .rposition(|e| e["state"] == "connected")
+            .unwrap();
+        assert!(
+            seen[..second]
+                .iter()
+                .filter(|e| e["type"] == "refresh")
+                .count()
+                >= 2
+        );
+        server.abort();
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_service_that_stays_away_past_the_grace_is_shown_offline() {
+        let (path, server) = fake_service("stays-away", |_| {
+            vec![serde_json::json!({"not":"an event"})]
+        });
+        let bridge = Bridge::new(path.clone());
+        let events = std::sync::Mutex::new(Vec::new());
+        let first_offline = std::sync::Mutex::new(None);
+        let started = tokio::time::Instant::now();
+        let grace = std::time::Duration::from_millis(400);
+        let subscription = bridge.subscribe_with(
+            |e: serde_json::Value| {
+                if e["state"] == "connected" {
+                    // After the first subscription is up, the service goes away.
+                    let _ = std::fs::remove_file(&path);
+                }
+                if e["state"] == "disconnected" {
+                    first_offline
+                        .lock()
+                        .unwrap()
+                        .get_or_insert(started.elapsed());
+                }
+                events.lock().unwrap().push(e);
+            },
+            grace,
+        );
+        tokio::select! {
+            _ = subscription => panic!("subscription ended"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(1500)) => {}
+        }
+        let offline = first_offline
+            .lock()
+            .unwrap()
+            .expect("an outage longer than the grace is shown");
+        assert!(offline >= grace, "shown offline after {offline:?}");
+        server.abort();
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn slow_ordinary_requests_never_crowd_out_the_status_check() {
+        use serde_json::json;
+        let root = std::env::temp_dir().join(format!("cw-lanes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("service.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let slow = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = slow.clone();
+        // Ordinary requests are read and never answered; only the status check is.
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let slow = seen.clone();
+                tokio::spawn(async move {
+                    let request = workspace_service::read_frame(&mut stream).await.unwrap();
+                    if request["method"] != "service.status" {
+                        slow.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        return std::future::pending::<()>().await;
+                    }
+                    workspace_service::write_frame(
+                        &mut stream,
+                        &json!({"jsonrpc":"2.0","id":request["id"],"result":{"channel":"dev"}}),
+                    )
+                    .await
+                    .unwrap();
+                });
+            }
+        });
+        let bridge = std::sync::Arc::new(Bridge::new(path));
+        let mut waiting = Vec::new();
+        for _ in 0..super::ORDINARY_REQUESTS + 8 {
+            let bridge = bridge.clone();
+            waiting.push(tokio::spawn(async move {
+                bridge.rpc("projects.list", json!({})).await
+            }));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // The window never opens more ordinary connections than its bound.
+        assert_eq!(
+            slow.load(std::sync::atomic::Ordering::SeqCst),
+            super::ORDINARY_REQUESTS
+        );
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            bridge.rpc("service.status", json!({})),
+        )
+        .await
+        .expect("the status check does not wait behind ordinary requests")
+        .unwrap();
+        assert_eq!(status["channel"], "dev");
+        for task in waiting {
+            task.abort();
+        }
+        server.abort();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn first_subscription_waits_for_a_late_socket_without_reporting_offline() {
+        let root = std::env::temp_dir().join(format!("cw-late-ready-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("service.sock");
+        let bridge = Bridge::new(path.clone());
+        assert!(bridge
+            .wait_for_socket(std::time::Duration::from_millis(20))
+            .await
+            .is_err());
+        let events = std::sync::Mutex::new(Vec::new());
+        let publish = |event| events.lock().unwrap().push(event);
+        let subscription = bridge.subscribe(publish);
+        tokio::pin!(subscription);
+        let server = async {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let listener = tokio::net::UnixListener::bind(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            // Incoming fake subscription/status requests use the real authenticated framing.
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let request = workspace_service::read_frame(&mut stream).await.unwrap();
+                    let result = if request["method"] == "projects.list" {
+                        serde_json::json!([])
+                    } else {
+                        serde_json::json!({"subscribed":true})
+                    };
+                    workspace_service::write_frame(
+                        &mut stream,
+                        &serde_json::json!({"jsonrpc":"2.0","id":request["id"],"result":result}),
+                    )
+                    .await
+                    .unwrap();
+                    std::future::pending::<()>().await;
+                });
+            }
+        };
+        tokio::pin!(server);
+        tokio::select! {
+            _ = &mut server => unreachable!(),
+            _ = &mut subscription => panic!("subscription ended"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+        }
+        let seen = events.lock().unwrap();
+        assert!(seen.iter().any(|e| e["state"] == "connecting"));
+        assert!(seen.iter().any(|e| e["state"] == "connected"));
+        assert!(!seen.iter().any(|e| e["state"] == "disconnected"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn many_slow_projects_do_not_delay_subscription_or_reconnect() {
+        use serde_json::json;
+        use workspace_service::{read_frame, write_frame};
+        let root = std::env::temp_dir().join(format!("cw-sub-ready-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("service.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let request = read_frame(&mut stream).await.unwrap();
+                    let result = match request["method"].as_str().unwrap() {
+                        "service.subscribe" => json!({"subscribed":true}),
+                        "projects.list" => json!((0..50)
+                            .map(|i| json!({"projectId":format!("p{i}"),"activation":{}}))
+                            .collect::<Vec<_>>()),
+                        _ => panic!("unexpected method"),
+                    };
+                    let _ = write_frame(
+                        &mut stream,
+                        &json!({"jsonrpc":"2.0","id":request["id"],"result":result}),
+                    )
+                    .await;
+                    if request["method"] == "service.subscribe" {
+                        std::future::pending::<()>().await;
+                    }
+                });
+            }
+        });
+        let bridge = Bridge::new(path);
+        for _ in 0..2 {
+            let events = std::sync::Mutex::new(Vec::new());
+            let notify = |event| events.lock().unwrap().push(event);
+            let subscription = bridge.subscription(&notify);
+            tokio::pin!(subscription);
+            tokio::select! {
+                _ = &mut subscription => panic!("subscription ended"),
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+            }
+            assert!(events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e["state"] == "connected"));
+        }
+        server.abort();
+        let _ = server.await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn unqualified_native_start_is_a_visible_refusal_not_a_disconnect() {
+        use serde_json::json;
+        let root = std::env::temp_dir().join(format!("cw-native-refusal-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("service.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let codes = [
+            "native_route_authorization_unavailable",
+            "native_control_outcome_unknown",
+            "native_shutdown_unconfirmed",
+            "native_execution_binding_invalid",
+            "retry_not_expected",
+            "portable_coordinator_unavailable",
+            "native_route_executable_unavailable",
+            "native_automatic_routing_unavailable",
+            "native_route_settings_unreadable",
+            "native_route_policy_unsupported",
+            "native_task_route_unavailable",
+            "native_task_settings_invalid",
+            "native_worktree_unavailable",
+        ];
+        let serving = tokio::spawn(async move {
+            for code in codes {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = workspace_service::read_frame(&mut stream).await.unwrap();
+                workspace_service::write_frame(
+                    &mut stream,
+                    &json!({"jsonrpc":"2.0","id":request["id"],
+                    "error":{"code":-32000,"message":code}}),
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let bridge = Bridge::new(path);
+        for code in codes {
+            let error = bridge.rpc("workspace", json!({})).await.unwrap_err();
+            assert!(error.starts_with("refused:"), "{code} became a disconnect");
+            if code == "native_route_authorization_unavailable" {
+                assert!(error.starts_with("refused:Native Start is unavailable:"));
+                assert!(error.ends_with("Nothing was started."));
+            } else if code == "native_control_outcome_unknown"
+                || code == "native_shutdown_unconfirmed"
+            {
+                assert!(error.contains("do not repeat the action"));
+            } else if code == "native_worktree_unavailable" {
+                assert!(error.contains("Edit the task to work in the project folder"));
+                assert!(error.ends_with("Nothing was started."));
+            }
+        }
+        serving.await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_query_routes_directly_and_validates_its_reply() {
+        use serde_json::json;
+        let root = std::env::temp_dir().join(format!("cw-native-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.join("service.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let serving = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let request = workspace_service::read_frame(&mut stream).await.unwrap();
+            assert_eq!(request["method"], "native.query");
+            workspace_service::write_frame(&mut stream,&json!({"jsonrpc":"2.0","id":request["id"],
+                "result":{"protocol":{"major":2,"mapping":2},"projectId":"p","generation":"g","version":"1","highWatermark":"0",
+                "data":{"type":"tasks","value":{"items":[],"nextCursor":null,"highWatermark":"0"}}}})).await.unwrap();
+        });
+        let bridge = Bridge::new(path);
+        let call=crate::policy::authorize("main","tauri://localhost/",json!({"operation":"native.query","message":{
+            "protocol":{"major":2,"mapping":2},"projectId":"p","requestId":"read","operation":"tasks.page","payload":{"target":"p","cursor":null,"limit":50}}})).unwrap();
+        assert_eq!(bridge.request(call).await.unwrap()["generation"], "g");
+        serving.await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[tokio::test]
     async fn startup_reloads_and_starts_only_the_fixed_unit_and_retries_after_failure() {
         let root = std::env::temp_dir().join(format!("cw-start-{}", std::process::id()));
@@ -459,7 +1249,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             std::fs::read_to_string(&trace).unwrap(),
-            "--user daemon-reload\n--user daemon-reload\n--user start fixture.service\n"
+            "--user daemon-reload\n--user daemon-reload\n--user start --no-block fixture.service\n"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

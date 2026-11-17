@@ -1,5 +1,6 @@
 import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
+import { workspaceOutput } from "../../../packages/workspace-ui/build-chunks.ts";
 
 const at = (path: string) => new URL(path, import.meta.url).pathname;
 
@@ -11,11 +12,13 @@ export default defineConfig(({ mode }) => ({
     alias: [
       { find: /^@cortex\/workspace-contract$/, replacement: at("../../../packages/workspace-contract/index.js") },
       { find: /^@cortex\/workspace-domain$/, replacement: at("../../../packages/workspace-domain/src/index.ts") },
+      { find: /^@cortex\/workspace-domain\/(.*)$/, replacement: at("../../../packages/workspace-domain/src/") + "$1" },
       { find: /^@cortex\/workspace-ui$/, replacement: at("../../../packages/workspace-ui/src/index.ts") },
       { find: /^@cortex\/workspace-ui\/(.*)$/, replacement: at("../../../packages/workspace-ui/src/") + "$1" },
     ],
     dedupe: ["solid-js"],
   },
   server: { port: ({ a: 5181, b: 5182, c: 5183 } as Record<string, number>)[mode] ?? 5181, strictPort: true, fs: { allow: [at("../../..")] } },
+  build: { rolldownOptions: { output: workspaceOutput } },
   clearScreen: false,
 }));

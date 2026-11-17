@@ -1,0 +1,15 @@
+{
+  "taskId": "task",
+  "description": "Description",
+  "title": null,
+  "titleAvailability": "not_connected",
+  "version": "3",
+  "executionId": "execution",
+  "phase": "recovery",
+  "runtimeState": "RECOVERING",
+  "executionState": "recovering",
+  "waitReason": "turn_interrupted",
+  "lastConfirmedAt": "<timestamp>",
+  "coordinatorRoute": null,
+  "warnings": []
+}

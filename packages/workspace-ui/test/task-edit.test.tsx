@@ -24,7 +24,7 @@ function fixture() {
   const read = vi.fn(async () => [savedFile]);
   const close = vi.fn();
   let answer = {ok:false,message:"The task changed",requestId:"r",outcome:"stale_version"};
-  const ws = {store:{state:held,index:() => buildIndex(held(),1),mode:"real",readTaskAttachments:read,receipt:() => null,clock:() => 1,now:1},
+  const ws = {store:{machineLoaded:() => true,optionsKnown:() => true,overviewLoaded:() => true,overviewIssue:() => null,wantOverview:() => {},state:held,index:() => buildIndex(held(),1),mode:"real",readTaskAttachments:read,receipt:() => null,clock:() => 1,now:1},
     machine:() => machine,can:() => true,gate:() => undefined,needs:() => ({}),
     run:async (command: WorkspaceCommand) => { commands.push(command); return answer; },
     voiceAvailable:() => false,voice:undefined,t:() => "",router:{route:() => ({name:"archive",machine:machine.id})},
@@ -82,7 +82,8 @@ it.each([undefined,10])("offers destructive deletion even for archived sprints, 
   expect(confirmation.note).toContain("all 1 tasks");
   expect(confirmation.note).toContain("running work will be stopped");
   expect(await confirmation.go()).toBe(false);
-  expect(confirmation.note).toContain("The task changed");
+  // The refusal is shown once, on the run's own error line; the dialog body is not repeated.
+  expect(confirmation.note).not.toContain("The task changed");
   f.succeed();
   expect(await confirmation.go()).toBe(true);
   expect(f.commands[1]).toEqual({type:"delete_sprint",projectId:"p",sprintId:"s",confirmed:true});

@@ -15,7 +15,7 @@ CW-R06 (the machine service survives window closure, owns child sessions and rec
 - [architecture](../architecture.md): the service owns ACP child lifetime; it survives closing the UI, not machine shutdown.
 - [ADR 0002](../adr/0002-independent-machine-service.md): a UI-owned ACP process would couple execution to window lifetime.
 - [remote-access](../remote-access.md): the machine must be running and reachable; power loss is not survivable.
-- Current ACP entry points: `src/cortex_acp.py` and `src/cortex_runtime/acp/`. Confirm how EOF on stdio is handled today before designing the supervisor. The product docs describe EOF handling in [failures-and-cancellation](../../features/failures-and-cancellation/index.md).
+- Current ACP entry points: the former Python entry and the former `acp/` module. Confirm how EOF on stdio is handled today before designing the supervisor. The product docs describe EOF handling in [failures-and-cancellation](../../features/failures-and-cancellation/index.md).
 - [CW-F01](CW-F01.md) (toolchain) and [CW-F04](CW-F04.md) (verified lifecycle and paths).
 
 ## Deliverables

@@ -22,7 +22,6 @@ const server=createServer(async(req,res)=>{
 try {
  await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
  const url="http://127.0.0.1:"+server.address().port+"/";
- const child=spawn("timeout",["--kill-after=5","1200","docker","run","--rm","-i","--network","host","--user",process.getuid()+":"+process.getgid(),"-e","HOME=/tmp","-v",shots+":/evidence","cortex-workspace-rendered:ubuntu26.04","python3","-B","-",url,...process.argv.slice(2)],{stdio:["pipe","inherit","inherit"]});
- child.stdin.end(await readFile(new URL("./sprint-graph-render.py",import.meta.url)));
+ const child=spawn("timeout",["--kill-after=5","1200","docker","run","--rm","-i","--network","host","--user",process.getuid()+":"+process.getgid(),"-e","HOME=/tmp","-v",shots+":/evidence","-v",fileURLToPath(new URL(".",import.meta.url))+":/driver:ro",(process.env.CW_RENDERED_IMAGE??"cortex-workspace-rendered:ubuntu26.04"),"node","/driver/sprint-graph-render.driver.mjs",url,...process.argv.slice(2)],{stdio:"inherit"});
  process.exitCode=await new Promise((resolve,reject)=>{child.on("error",reject);child.on("exit",code=>resolve(code??1));});
 }finally{await new Promise(resolve=>server.close(resolve));}

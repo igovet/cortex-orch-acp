@@ -13,7 +13,7 @@ if (!target || !Array.isArray(target.argv) || !target.argv.length ||
     target.argv.some(x => typeof x !== "string" || !x) ||
     (target.env !== undefined && (!target.env || typeof target.env !== "object" ||
       Array.isArray(target.env) || Object.entries(target.env).some(([key, value]) =>
-        !/^(HOME|XDG_CONFIG_HOME|XDG_STATE_HOME)$/.test(key) ||
+        !/^(HOME|XDG_CONFIG_HOME|XDG_STATE_HOME|CORTEX_ACP_RUNTIME_ROOT)$/.test(key) ||
         typeof value !== "string" || !value.startsWith("/")))))
   throw new Error("CORTEX_ACP_TARGET is invalid");
 const child = spawn(target.argv[0], target.argv.slice(1), {

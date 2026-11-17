@@ -23,8 +23,8 @@ See [requirements](../requirements.md).
 - [CW-U02](CW-U02.md): the task detail host, the Dialog's compact worker rows and the plan strip.
 - [CW-C04](CW-C04.md) (typed read projections for status, wait reason and checks), [CW-C05](CW-C05.md) (result and evidence completeness) and [CW-H03](CW-H03.md) (history paging and activity push).
 - [Observability](../../features/observability/index.md): the worker activity rows and their cursor order, the check outcomes (passed, failed, not run, unverified, closed by rerun, retracted, superseded) and the disclosure that prose arrives in complete blocks. Confirm the exact row contract in source before implementation.
-- Node statuses `pending`, `running`, `completed`, `failed` and `cancelled`, with stage `execution` or `review`: `src/cortex_runtime/orchestration/state.py`.
-- The command-stop path in `src/cortex_runtime/orchestration/command_control.py` is the semantics to expose as a UI control. The text command is not part of the UI.
+- Node statuses `pending`, `running`, `completed`, `failed` and `cancelled`, with stage `execution` or `review`: the former `orchestration/state` module.
+- The command-stop path in the former `orchestration/command_control` module is the semantics to expose as a UI control. The text command is not part of the UI.
 
 ## Deliverables
 

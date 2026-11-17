@@ -1,38 +1,120 @@
-//! Folder search on this machine, for choosing a project. One bounded helper run per search, and a
-//! newer search from the same picker replaces the one it supersedes. The search runs in its own
-//! process so a read stuck on a dead mount is killed with it and can never hold the service.
+//! Native bounded folder search. Cancellation stops traversal cooperatively. A thread
+//! blocked by a dead mount retains one of two permits, never the async reactor.
 use crate::local::failure;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     io,
     path::{Path, PathBuf},
-    process::Stdio,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
-use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    process::Command,
-    sync::{oneshot, Mutex, Semaphore},
-};
+use tokio::sync::{oneshot, Mutex, Semaphore};
 use workspace_protocol::directories::{Request, Search};
 
-/// The helper stops itself at two seconds and sends what it has. This is for one that cannot.
+/// The native walk stops at two seconds; a stuck syscall cannot hold the reply indefinitely.
 const HARD_DEADLINE: Duration = Duration::from_secs(4);
-const REPLY_BYTES: u64 = workspace_protocol::FRAME_BYTES as u64 - 1024;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Config, LaunchSpec, Service};
+    use std::sync::Arc;
+    async fn fixture() -> (PathBuf, Arc<Service>) {
+        let root = std::env::temp_dir().join(format!(
+            "cw-search-queue-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let service = Service::bind(Config {
+            runtime_dir: root.join("runtime"),
+            state_dir: root.join("state"),
+            allowed_root: root.clone(),
+            launch: LaunchSpec::bare(),
+            request_timeout: Duration::from_secs(5),
+            shutdown_timeout: Duration::from_millis(100),
+            event_capacity: 2,
+        })
+        .await
+        .unwrap();
+        (root, service)
+    }
+    fn request(query: &str) -> Request {
+        Request::Search(serde_json::from_value(json!({"session":"picker","query":query})).unwrap())
+    }
+    async fn running(service: &Service) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if service.searches.running.lock().await.contains_key("picker") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    #[tokio::test]
+    async fn queued_search_can_be_cancelled_and_replaced_without_spawning() {
+        let (root, s) = fixture().await;
+        let slots = s.searches.slots.acquire_many(2).await.unwrap();
+        let first = {
+            let s = s.clone();
+            tokio::spawn(async move { s.directories(request("ce")).await.unwrap() })
+        };
+        running(&s).await;
+        let second = {
+            let s = s.clone();
+            tokio::spawn(async move { s.directories(request("ced")).await.unwrap() })
+        };
+        let replaced = first.await.unwrap();
+        assert_eq!(replaced["cancelled"], true);
+        assert_eq!(replaced["query"], "ce");
+        running(&s).await;
+        let cancel = Request::Cancel(serde_json::from_value(json!({"session":"picker"})).unwrap());
+        assert_eq!(s.directories(cancel).await.unwrap()["outcome"], "cancelled");
+        assert_eq!(second.await.unwrap()["cancelled"], true);
+        drop(slots);
+        s.stop().await.unwrap();
+        drop(s);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn dropping_a_waiting_search_does_not_hold_shutdown() {
+        let (root, s) = fixture().await;
+        let slots = s.searches.slots.acquire_many(2).await.unwrap();
+        let task = {
+            let s = s.clone();
+            tokio::spawn(async move { s.directories(request("cedar")).await })
+        };
+        running(&s).await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), s.stop())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(slots);
+        drop(s);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
 /// Where a machine keeps data outside the owner's home, searched as well when they exist.
 const MOUNT_ROOTS: &[&str] = &["/mnt", "/media", "/srv"];
 
 pub struct Searches {
-    slots: Semaphore,
+    slots: std::sync::Arc<Semaphore>,
     running: Mutex<BTreeMap<String, (u64, oneshot::Sender<()>)>>,
     next: AtomicU64,
 }
 impl Default for Searches {
     fn default() -> Self {
         Self {
-            slots: Semaphore::new(2),
+            slots: std::sync::Arc::new(Semaphore::new(2)),
             running: Mutex::new(BTreeMap::new()),
             next: AtomicU64::new(1),
         }
@@ -50,7 +132,13 @@ impl crate::Service {
         match request {
             Request::Search(search) => self.search_directories(search).await,
             Request::Cancel(cancel) => {
-                let stopped = self.searches.running.lock().await.remove(&cancel.session).is_some();
+                let stopped = self
+                    .searches
+                    .running
+                    .lock()
+                    .await
+                    .remove(&cancel.session)
+                    .is_some();
                 Ok(json!({"outcome":if stopped {"cancelled"} else {"not_running"}}))
             }
         }
@@ -59,7 +147,10 @@ impl crate::Service {
     async fn search_roots(&self, home: &Path) -> Vec<PathBuf> {
         let mut roots = vec![home.to_path_buf()];
         let state = self.state.lock().await;
-        let beside = state.projects.iter().filter_map(|p| p.canonical_root.parent().map(Path::to_path_buf));
+        let beside = state
+            .projects
+            .iter()
+            .filter_map(|p| p.canonical_root.parent().map(Path::to_path_buf));
         roots.extend(beside);
         drop(state);
         roots.extend(MOUNT_ROOTS.iter().map(PathBuf::from));
@@ -67,7 +158,10 @@ impl crate::Service {
         let allowed = &self.config.allowed_root;
         let mut kept: Vec<PathBuf> = Vec::new();
         for root in roots {
-            if root.starts_with(allowed) && root != Path::new("/") && !kept.iter().any(|k| root.starts_with(k)) {
+            if root.starts_with(allowed)
+                && root != Path::new("/")
+                && !kept.iter().any(|k| root.starts_with(k))
+            {
                 kept.retain(|k| !k.starts_with(&root));
                 kept.push(root);
             }
@@ -80,7 +174,11 @@ impl crate::Service {
         let (stop, mut stopped) = oneshot::channel();
         let turn = self.searches.next.fetch_add(1, Ordering::Relaxed);
         // Dropping the sender is what tells the search it was replaced.
-        self.searches.running.lock().await.insert(search.session.clone(), (turn, stop));
+        self.searches
+            .running
+            .lock()
+            .await
+            .insert(search.session.clone(), (turn, stop));
         if search.query.trim().is_empty() {
             self.finish_search(&search.session, turn).await;
             return Ok(empty(&search, &home, true));
@@ -99,51 +197,47 @@ impl crate::Service {
         }
     }
     async fn run_search(&self, search: &Search, home: &Path) -> io::Result<Value> {
-        let (python, tools) = self
-            .config
-            .launch
-            .tools()
-            .ok_or_else(|| failure("directory_search_failed"))?;
-        let request = serde_json::to_vec(&json!({
-            "query":search.query,"limit":search.limit,"home":home,
-            "allowedRoot":self.config.allowed_root,"roots":self.search_roots(home).await,
-            "excluded":[&self.config.state_dir,self.endpoint.path.parent().unwrap_or(Path::new("/"))],
-        }))
-        .map_err(|_| failure("invalid_json"))?;
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        struct Cancel(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for Cancel {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        let _cancel = Cancel(cancel.clone());
+        let native = crate::directory_search::Search::new(
+            search.query.clone(),
+            home.to_path_buf(),
+            self.config.allowed_root.clone(),
+            self.search_roots(home).await,
+            vec![
+                self.config.state_dir.clone(),
+                self.endpoint
+                    .path
+                    .parent()
+                    .unwrap_or(Path::new("/"))
+                    .to_path_buf(),
+            ],
+            search.limit.unwrap_or(30) as usize,
+            cancel,
+        );
         let deadline = tokio::time::Instant::now() + HARD_DEADLINE;
-        let _slot = tokio::time::timeout_at(deadline, self.searches.slots.acquire())
+        let slot = tokio::time::timeout_at(deadline, self.searches.slots.clone().acquire_owned())
             .await
             .map_err(|_| failure("directory_search_timeout"))?
             .map_err(|_| failure("service_stopping"))?;
-        let mut command = Command::new(python);
-        command
-            .args(["-I", "-B"])
-            .arg(tools.with_file_name("directory_search.py"))
-            .current_dir("/")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        crate::child::runtime_environment(&mut command, &self.config)?;
-        let mut process = command.spawn()?;
-        let mut input = process.stdin.take().ok_or_else(|| failure("directory_search_failed"))?;
-        let output = process.stdout.take().ok_or_else(|| failure("directory_search_failed"))?;
-        // One line is the whole answer. A process held in the kernel may never reach end of file.
-        let read = async move {
-            input.write_all(&request).await?;
-            input.shutdown().await?;
-            drop(input);
-            let mut line = String::new();
-            BufReader::new(output.take(REPLY_BYTES)).read_line(&mut line).await?;
-            io::Result::Ok(line)
+        let (send, receive) = oneshot::channel();
+        std::thread::Builder::new()
+            .name("directory-search".into())
+            .spawn(move || {
+                let _slot = slot;
+                let _ = send.send(native.run());
+            })?;
+        let mut reply = match tokio::time::timeout_at(deadline, receive).await {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(_)) => return Err(failure("directory_search_failed")),
+            Err(_) => json!({"entries":[],"complete":false,"stopped":"deadline"}),
         };
-        let line = tokio::time::timeout_at(deadline, read)
-            .await
-            .map_err(|_| failure("directory_search_timeout"))??;
-        let mut reply: Value = serde_json::from_str(&line).map_err(|_| failure("directory_search_failed"))?;
-        if reply.get("error").is_some() || !reply["entries"].is_array() {
-            return Err(failure("directory_search_failed"));
-        }
         reply["query"] = json!(search.query);
         reply["home"] = json!(home);
         Ok(reply)

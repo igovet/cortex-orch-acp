@@ -88,7 +88,7 @@ it.skipIf(!socket)("Accept binds the real source version, rejects stale review, 
     expect(button("Rerun check")).toBeDefined();
     expect(button("Ask to fix")).toBeDefined();
     button("Accept v1")!.click();
-    expect(document.querySelector('dialog[aria-label="Accept with open checks"]')?.hasAttribute("open")).not.toBe(true);
+    expect(document.querySelector('dialog[data-dialog="Accept with open checks"]')?.hasAttribute("open")).not.toBe(true);
     const refusal = await command(p, { type: "accept_result", taskId: fixture.taskId, digest: result.digest, now: Date.now() });
     expect(refusal.ok).toBe(false);
     const current = await rpc("fixture.result");
@@ -112,7 +112,7 @@ it.skipIf(!socket)("Accept binds the real source version, rejects stale review, 
   button("Accept v1")!.click();
   if (fixture.technical) {
     await until(() => text().includes("knowing these checks did not pass"));
-    const dialog = document.querySelector('dialog[aria-label="Accept with open checks"]')!;
+    const dialog = document.querySelector('dialog[data-dialog="Accept with open checks"]')!;
     const confirm = dialog.querySelector<HTMLButtonElement>("[data-bar=\"dialog\"] .btn-primary")!;
     expect(confirm.getAttribute("aria-disabled")).toBe("true");
     confirm.click();

@@ -46,19 +46,22 @@ it.skipIf(!socket || !project)("owner screens survive window detach through the 
       if (operation === "capabilities.get") {
         const projects = await rpc("projects.list", {});
         const active = projects.filter((p: any) => p.activation !== null);
-        let operations: string[] = [];
+        let operations: string[] = [], ready = false;
         for (const p of active) {
           const status = await rpc("projects.status", {projectId:p.projectId});
-          expect(status.ready).toBe(true); operations=status.capabilities.operations;
+          // Match Bridge::capabilities: recorded activation is not child readiness.
+          // An in-flight project must not fail machine-wide capability discovery.
+          if (status.ready !== true) continue;
+          ready = true; operations=status.capabilities.operations;
         }
-        return {...capabilities("journey-test", "0", operations), attachments: active.length > 0};
+        return {...capabilities("journey-test", "0", operations), attachments: ready};
       }
-      return rpc(["service.capabilities","projects.list","projects.register","projects.activate","projects.status","machine.call","executions.cancel","executions.prompt","executions.control"].includes(operation) ? operation : "workspace", message);
+      return rpc(["service.capabilities","projects.list","projects.register","projects.activate","projects.status","native.query","native.board","machine.call","executions.cancel","executions.prompt","executions.control"].includes(operation) ? operation : "workspace", message);
     },
     subscribe(listener) { listeners.add(listener); return () => {listeners.delete(listener);}; },
   };
   const all = (s: string) => [...document.querySelectorAll<HTMLElement>(s)];
-  const button = (text: string) => all("button").find(b => b.textContent?.trim().startsWith(text) || b.textContent?.trim().endsWith(text))!;
+  const button = (text: string) => all("button").find(b => b.getAttribute("aria-label") === text || b.textContent?.trim().startsWith(text) || b.textContent?.trim().endsWith(text))!;
   function input(label: string, value: string) {
     const el=document.querySelector<HTMLInputElement>(`[aria-label="${label}"]`)!;
     expect(el.disabled).toBe(false);
@@ -107,30 +110,37 @@ it.skipIf(!socket || !project)("owner screens survive window detach through the 
     await until(()=>!button("Activate"));
     button("New task").click();
     input("Describe the task","Explain this disposable project.");
-    button("Save as draft").click();
+    button("Save draft").click();
     await until(()=>!!document.querySelector(".card-link"));
     expect(existsSync(project!+"/turns")).toBe(false);
     (document.querySelector(".card-link") as HTMLElement).click();
+    // Owner edits apply to drafts, before execution makes the task immutable.
+    document.querySelector<HTMLButtonElement>("button.ws-title")!.click();
+    await until(()=>!!document.querySelector('[aria-label="Task title"]'));
+    const title = document.querySelector<HTMLInputElement>('[aria-label="Task title"]')!;
+    title.value = "Renamed by the owner"; title.dispatchEvent(new Event("input",{bubbles:true}));
+    title.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));
+    await until(()=>document.querySelector(".ws-title")?.textContent === "Renamed by the owner");
     button("Start").click();
     await until(()=>document.body.textContent!.includes("Which direction"));
     const path=location.pathname;
     detach(); await mount(path);
+    await until(()=>document.body.textContent!.includes("Which direction"));
     expect(document.body.textContent).toContain("Which direction");
     all("a").find(e=>e.getAttribute("href")==="/m/local/inbox")!.click();
-    await until(()=>document.body.textContent!.includes("Decisions from this machine"));
+    await until(()=>document.querySelector(".page-h h1")?.textContent === "Inbox");
     expect(document.body.textContent).not.toContain("Nothing needs you right now");
     all("a").find(e=>e.getAttribute("href")===path)!.click();
-    await until(()=>!!button("Other answer"));
+    await until(()=>document.querySelector<HTMLTextAreaElement>('[aria-label="Your answer"]')?.disabled === false);
     writeFileSync(project!+"/expect-attachments","");
-    button("Other answer").click();
     input("Your answer","first line\nsecond line");
     const choose = (selector: string, name: string, body: string) => {
       const el = document.querySelector<HTMLInputElement>(selector)!;
       Object.defineProperty(el, "files", {configurable:true,value:[new File([body], name, {type:"text/plain"})]});
       el.dispatchEvent(new Event("change",{bubbles:true}));
     };
-    choose('.ws-dc-other input[type="file"]', "notes.txt", "answer fixture");
-    await until(()=>document.querySelector(".ws-dc-other .ws-att")?.textContent?.includes("notes.txt") === true);
+    choose('.dc-answer input[type="file"]', "notes.txt", "answer fixture");
+    await until(()=>document.querySelector(".dc-answer .ws-att")?.textContent?.includes("notes.txt") === true);
     button("Send answer").click();
     // A late runtime event can invalidate the question CAS. Refresh is read-only;
     // the owner reviews and explicitly presses Send again, never automatic replay.
@@ -151,7 +161,11 @@ it.skipIf(!socket || !project)("owner screens survive window detach through the 
     input("Message", "Held across relaunch");
     choose('.dock input[type="file"]', "queued.txt", "queue fixture");
     await until(()=>document.querySelector(".dock .composer .ws-att")?.textContent?.includes("queued.txt") === true);
+    // Delivery selects how to send; only the plane commits the message.
     button("Queue").click();
+    expect(button("Queue").getAttribute("aria-pressed")).toBe("true");
+    expect(document.querySelector(".queue")).toBeNull();
+    button("Queue message").click();
     await until(()=>!!document.querySelector(".queue"));
     detach(); await mount(path);
     await until(()=>document.querySelector(".queue")?.textContent?.includes("Held across relaunch") === true);
@@ -162,10 +176,13 @@ it.skipIf(!socket || !project)("owner screens survive window detach through the 
     expect((document.querySelector('[aria-label="Message"]') as HTMLTextAreaElement).value).toBe("Held across relaunch");
     expect(document.querySelector(".dock .composer")?.textContent).toContain("queued.txt");
     input("Message", "Focus on durable conversation");
-    button("Steer").click();
+    button("Send now").click();
+    button("Send message now").click();
     await until(()=>document.querySelector(".timeline")?.textContent?.includes("Focus on durable conversation") === true);
     expect(document.querySelector(".queue")).toBeNull();
     detach(); await mount(path);
+    // Connection and the cached board precede separately loaded conversation details.
+    await until(()=>document.querySelector(".timeline")?.textContent?.includes("Focus on durable conversation") === true);
     expect(document.querySelector(".timeline")?.textContent).toContain("Focus on durable conversation");
     expect(document.querySelector(".timeline")?.textContent).toContain("first line");
     writeFileSync(project!+"/release-stream","");
@@ -179,7 +196,7 @@ it.skipIf(!socket || !project)("owner screens survive window detach through the 
     button("Request changes…").click();
     const feedback = document.querySelector("dialog textarea") as HTMLTextAreaElement;
     feedback.value="Owner review feedback"; feedback.dispatchEvent(new Event("input",{bubbles:true}));
-    button("Send and reopen").click();
+    document.querySelector<HTMLButtonElement>('dialog[open] button[aria-label="Send and reopen"]')!.click();
     await until(()=>existsSync(project!+"/review-returned"));
     await until(()=>document.querySelector(".rcard-h")?.textContent?.includes("Result v2") === true);
     expect(document.body.textContent).toContain("Review feedback returned to Cortex.");
@@ -198,16 +215,12 @@ it.skipIf(!socket || !project)("owner screens survive window detach through the 
     await until(()=>text().includes("Coordinator"));
     go(taskPath);
     await until(()=>!!document.querySelector(".ws-title"));
-    (document.querySelector(".ws-title") as HTMLElement).click();
-    await until(()=>!!document.querySelector('[aria-label="Task title"]'));
-    const title = document.querySelector<HTMLInputElement>('[aria-label="Task title"]')!;
-    title.value = "Renamed by the owner"; title.dispatchEvent(new Event("input",{bubbles:true}));
-    title.dispatchEvent(new KeyboardEvent("keydown",{key:"Enter",bubbles:true}));
-    await until(()=>text().includes("Renamed by the owner"));
+    expect(document.querySelector(".ws-title")?.textContent).toBe("Renamed by the owner");
+    expect(document.querySelector("button.ws-title")).toBeNull();
     button("New task").click();
     writeFileSync(project!+"/start-worker-scenario", "");
     input("Describe the task", "Exercise worker controls");
-    button("Save as draft").click();
+    button("Save draft").click();
     await until(()=>all(".card-link").some(e => e.textContent?.includes("Exercise worker controls")));
     all(".card-link").find(e => e.textContent?.includes("Exercise worker controls"))!.click();
     button("Start").click();

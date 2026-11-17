@@ -1,0 +1,757 @@
+{
+  "acp_host_sessions": [
+    "session_id",
+    "project_root",
+    "task_id",
+    "client_info",
+    "client_capabilities",
+    "mcp_servers",
+    "created_at",
+    "closed_at"
+  ],
+  "acp_session_access_defaults": [
+    "session_id",
+    "mode",
+    "selected_mode",
+    "selection_origin"
+  ],
+  "acp_session_workspaces": [
+    "session_id",
+    "workspace_root"
+  ],
+  "attempt_effective_context": [
+    "attempt_id",
+    "task_id",
+    "role",
+    "selected_config_revision_id",
+    "effective_config_revision_id",
+    "route_engine",
+    "route_connection_id",
+    "resource_policy_json",
+    "recorded_at"
+  ],
+  "attempt_process_registry": [
+    "attempt_id",
+    "task_id",
+    "role",
+    "engine_session_ref",
+    "connection_id",
+    "pid",
+    "pgid",
+    "start_ticks",
+    "boot_id",
+    "launch_command_digest",
+    "recorded_at",
+    "terminated_at",
+    "termination_reason"
+  ],
+  "attempt_revisions": [
+    "attempt_id",
+    "captured_at",
+    "phase",
+    "kind",
+    "head",
+    "dirty_digest",
+    "detail",
+    "manifest_json"
+  ],
+  "attempt_route_audit": [
+    "id",
+    "attempt_id",
+    "task_id",
+    "role",
+    "engine",
+    "connection_id",
+    "model",
+    "params_fingerprint",
+    "config_revision_id",
+    "decision",
+    "decision_detail_json",
+    "predecessor_attempt_id",
+    "recorded_at"
+  ],
+  "binding_receipts": [
+    "thread_id",
+    "receipt",
+    "state",
+    "updated_at"
+  ],
+  "capacity_reservations": [
+    "reservation_id",
+    "connection_id",
+    "task_id",
+    "assignment_ref",
+    "attempt_id",
+    "kind",
+    "state",
+    "reserved_at",
+    "updated_at",
+    "release_observation"
+  ],
+  "capsule_deliveries": [
+    "id",
+    "recipient",
+    "context_generation_id",
+    "capsule_revision",
+    "task_id",
+    "assignment_ref",
+    "engine_session_ref",
+    "state",
+    "evidence_source",
+    "uncertainty",
+    "reason",
+    "retry_count",
+    "created_at",
+    "updated_at"
+  ],
+  "compaction_events_seen": [
+    "engine_session_ref",
+    "evidence_id",
+    "task_id",
+    "phase",
+    "observed_at",
+    "generation_id"
+  ],
+  "compaction_owners": [
+    "engine_session_ref",
+    "task_id",
+    "owner",
+    "tier",
+    "engine",
+    "engine_version",
+    "limitation",
+    "set_at"
+  ],
+  "compaction_recovery_events": [
+    "id",
+    "task_id",
+    "engine_session_ref",
+    "generation_id",
+    "before_tokens",
+    "before_basis",
+    "after_tokens",
+    "after_basis",
+    "recovered_tokens",
+    "recovered_ratio",
+    "status",
+    "reason",
+    "created_at"
+  ],
+  "configuration_revisions": [
+    "id",
+    "task_id",
+    "revision",
+    "route_id",
+    "route_engine",
+    "route_connection_id",
+    "parameters",
+    "ceiling_snapshot",
+    "state",
+    "confirmation_evidence_ref",
+    "error_code",
+    "created_at",
+    "updated_at"
+  ],
+  "configuration_route_extras": [
+    "revision_id",
+    "task_id",
+    "route_model",
+    "route_profile_json",
+    "route_details_json",
+    "created_at"
+  ],
+  "context_generations": [
+    "id",
+    "engine_session_ref",
+    "task_id",
+    "assignment_ref",
+    "recipient",
+    "sequence",
+    "cause",
+    "evidence_source",
+    "evidence_id",
+    "created_at"
+  ],
+  "delegation_effects": [
+    "id",
+    "idempotency_key",
+    "step",
+    "phase",
+    "detail_json",
+    "at"
+  ],
+  "delegation_provisioning": [
+    "idempotency_key",
+    "task_id",
+    "assignment_id",
+    "attempt_id",
+    "role_id",
+    "step",
+    "status",
+    "workspace_binding_id",
+    "channel_id",
+    "config_revision",
+    "context_snapshot_ref",
+    "engine_session_ref",
+    "instruction_delivery",
+    "error_code",
+    "owner_epoch",
+    "created_at",
+    "updated_at"
+  ],
+  "deliveries": [
+    "scope",
+    "operation",
+    "delivery_key",
+    "digest",
+    "content_digest",
+    "response"
+  ],
+  "draft_revisions": [
+    "draft_id",
+    "source_revision"
+  ],
+  "drafts": [
+    "id",
+    "task_id",
+    "owner_thread_id",
+    "kind",
+    "template",
+    "path",
+    "created_at",
+    "device",
+    "inode",
+    "published_report_id",
+    "published_digest"
+  ],
+  "editions": [
+    "sequence",
+    "report_id",
+    "title",
+    "summary",
+    "author",
+    "updated_at",
+    "digest",
+    "size_bytes"
+  ],
+  "fallback_consent_records": [
+    "id",
+    "task_id",
+    "target_connection_id",
+    "target_provider",
+    "data_scope",
+    "granted_by",
+    "granted_at",
+    "revoked_at"
+  ],
+  "format_history": [
+    "sequence",
+    "action",
+    "from_version",
+    "to_version",
+    "backup_path",
+    "backup_digest",
+    "at"
+  ],
+  "governance": [
+    "id",
+    "task_id",
+    "mode",
+    "report_id"
+  ],
+  "host_transcript": [
+    "id",
+    "session_id",
+    "seq",
+    "kind",
+    "text",
+    "attachments_json",
+    "message_id",
+    "created_at"
+  ],
+  "host_updates": [
+    "session_id",
+    "seq",
+    "update_json",
+    "created_at"
+  ],
+  "large_outputs": [
+    "id",
+    "task_id",
+    "owner_scope",
+    "source_kind",
+    "source_ref",
+    "filename",
+    "byte_count",
+    "truncated",
+    "exit_code",
+    "signal",
+    "failure",
+    "created_at"
+  ],
+  "observability_events": [
+    "id",
+    "task_id",
+    "category",
+    "outcome",
+    "basis",
+    "assignment_ref",
+    "attempt_id",
+    "engine_session_ref",
+    "context_generation_id",
+    "config_revision_id",
+    "connection_id",
+    "route_engine",
+    "source_event_ref",
+    "detail_json",
+    "created_at"
+  ],
+  "pending_deletions": [
+    "task_id"
+  ],
+  "pending_question_late_answers": [
+    "id",
+    "question_id",
+    "task_id",
+    "answer_text",
+    "answer_source",
+    "received_at"
+  ],
+  "pending_questions": [
+    "id",
+    "task_id",
+    "assignment_ref",
+    "dedup_key",
+    "text",
+    "options_json",
+    "status",
+    "answer_text",
+    "answer_source",
+    "created_at",
+    "answered_at"
+  ],
+  "pending_source_deletions": [
+    "task_id",
+    "draft_id",
+    "path",
+    "digest"
+  ],
+  "permission_receipts": [
+    "task_id",
+    "attempt_id",
+    "tool_call_ref",
+    "command_sha256",
+    "command_text",
+    "host_outcome",
+    "created_at"
+  ],
+  "project_configuration_defaults": [
+    "project_root",
+    "defaults",
+    "ceiling",
+    "updated_at"
+  ],
+  "report_provenance": [
+    "edition_sequence",
+    "source_revision",
+    "artifacts"
+  ],
+  "report_read_observations": [
+    "task_id",
+    "attempt_id",
+    "report_id",
+    "request_id",
+    "outcome",
+    "created_at"
+  ],
+  "reports": [
+    "id",
+    "task_id",
+    "kind",
+    "filename",
+    "created_at"
+  ],
+  "runtime_events": [
+    "id",
+    "task_id",
+    "type",
+    "actor",
+    "payload_json",
+    "created_at"
+  ],
+  "runtime_nodes": [
+    "task_id",
+    "revision",
+    "node_id",
+    "role",
+    "objective",
+    "dependencies_json",
+    "scope_json",
+    "stage",
+    "status",
+    "assignment_ref",
+    "result_json"
+  ],
+  "runtime_requests": [
+    "task_id",
+    "request_key",
+    "actor",
+    "operation",
+    "digest",
+    "result_json"
+  ],
+  "runtime_tasks": [
+    "task_id",
+    "state",
+    "revision",
+    "goal",
+    "plan_json",
+    "synthesis",
+    "review_cycle",
+    "blocker",
+    "created_at",
+    "updated_at"
+  ],
+  "source_block_reads": [
+    "id",
+    "report_id",
+    "block_index",
+    "observed_at",
+    "availability",
+    "reason"
+  ],
+  "source_blocks": [
+    "task_id",
+    "report_id",
+    "block_index",
+    "kind",
+    "mime",
+    "name",
+    "uri",
+    "sha256",
+    "size_bytes",
+    "availability",
+    "reason",
+    "trust_label",
+    "body_ref",
+    "fetched_at",
+    "created_at"
+  ],
+  "source_cursors": [
+    "thread_id",
+    "task_id",
+    "cursor"
+  ],
+  "source_events": [
+    "origin",
+    "event_id",
+    "task_id",
+    "captured_at",
+    "meta_json",
+    "ledger_state"
+  ],
+  "source_messages": [
+    "thread_id",
+    "message_id",
+    "task_id",
+    "report_id",
+    "digest"
+  ],
+  "source_resets": [
+    "thread_id",
+    "task_id",
+    "pause_turn"
+  ],
+  "source_revisions": [
+    "task_id",
+    "revision",
+    "thread_id",
+    "message_id",
+    "report_id",
+    "attachments"
+  ],
+  "source_turns": [
+    "task_id",
+    "thread_id",
+    "turn_id",
+    "report_id",
+    "digest"
+  ],
+  "task_changes": [
+    "sequence",
+    "task_id",
+    "kind",
+    "reference",
+    "created_at"
+  ],
+  "task_events": [
+    "id",
+    "task_id",
+    "event_type",
+    "assignment_ref",
+    "dedup_key",
+    "payload_json",
+    "origin",
+    "created_at",
+    "consumed_by",
+    "superseded",
+    "delivered_at"
+  ],
+  "task_language": [
+    "task_id",
+    "language"
+  ],
+  "task_orchestration": [
+    "task_id",
+    "state",
+    "coordinator_attempt_ref",
+    "updated_at",
+    "wait_reason",
+    "wait_detail_json",
+    "no_progress_count",
+    "requirement_revision",
+    "stopped_at",
+    "language"
+  ],
+  "task_owners": [
+    "task_id",
+    "owner_ref",
+    "epoch",
+    "acquired_at"
+  ],
+  "task_route_selections": [
+    "task_id",
+    "sequence",
+    "route_id",
+    "label_at_selection",
+    "supported_parameters",
+    "catalog_snapshot_id",
+    "evidence",
+    "selected_at"
+  ],
+  "task_stopped": [
+    "task_id",
+    "stopped_at"
+  ],
+  "task_workspaces": [
+    "task_id",
+    "workspace_root",
+    "recorded_at"
+  ],
+  "tasks": [
+    "id",
+    "project_root",
+    "created_at"
+  ],
+  "thread_bindings": [
+    "thread_id",
+    "parent_thread_id",
+    "task_id"
+  ],
+  "tool_result_observations": [
+    "id",
+    "task_id",
+    "attempt_id",
+    "tool_call_ref",
+    "kind",
+    "title",
+    "status",
+    "created_at"
+  ],
+  "trusted_channels": [
+    "channel_id",
+    "secret_hash",
+    "task_id",
+    "principal_thread_id",
+    "parent_principal_thread_id",
+    "role",
+    "assignment_id",
+    "attempt_id",
+    "workspace_binding_id",
+    "context_generation_id",
+    "owner_epoch",
+    "issued_at",
+    "expires_at",
+    "revoked_at"
+  ],
+  "usage_records": [
+    "id",
+    "task_id",
+    "attempt_id",
+    "engine_session_ref",
+    "call_sequence",
+    "basis",
+    "tokens_json",
+    "stop_reason",
+    "failed",
+    "created_at"
+  ],
+  "work_assignment_attempts": [
+    "attempt_id",
+    "task_id",
+    "assignment_id",
+    "attempt_no",
+    "predecessor_attempt_id",
+    "input_candidate_ref",
+    "requirement_bindings_json",
+    "status",
+    "failure_reason",
+    "idempotency_key",
+    "created_at"
+  ],
+  "work_assignment_predecessors": [
+    "task_id",
+    "assignment_id",
+    "predecessor_assignment_id",
+    "predecessor_candidate_ref"
+  ],
+  "work_assignments": [
+    "assignment_id",
+    "task_id",
+    "node_key",
+    "requirement_bindings_json",
+    "candidate_ref",
+    "status",
+    "requirement_state",
+    "idempotency_key",
+    "created_at"
+  ],
+  "work_graph_operations": [
+    "task_id",
+    "idempotency_key",
+    "operation",
+    "request_json",
+    "response_json",
+    "created_at"
+  ],
+  "work_requirement_revisions": [
+    "requirement_id",
+    "revision",
+    "statement",
+    "criteria_json",
+    "digest",
+    "requirement_type",
+    "created_at"
+  ],
+  "work_requirements": [
+    "requirement_id",
+    "task_id",
+    "current_revision",
+    "created_at"
+  ],
+  "workspace_candidate_seeds": [
+    "assignment_ref",
+    "task_id",
+    "candidate_id",
+    "created_at"
+  ],
+  "workspace_executions": [
+    "execution_id",
+    "task_id",
+    "runtime_task_id",
+    "acp_session_id",
+    "owner_epoch",
+    "version",
+    "bound_at"
+  ],
+  "workspace_integration_journal": [
+    "journal_key",
+    "relpath",
+    "before_json",
+    "before_bytes",
+    "desired_json",
+    "state",
+    "created_at"
+  ],
+  "workspace_integrations": [
+    "id",
+    "task_id",
+    "assignment_ref",
+    "request_key",
+    "attempt_id",
+    "workspace_binding_id",
+    "status",
+    "applied_paths_json",
+    "conflict_paths_json",
+    "integrated_head",
+    "integrated_dirty_digest",
+    "host_buffer_state",
+    "created_at"
+  ],
+  "workspace_outbox": [
+    "project_id",
+    "sequence",
+    "event_id",
+    "entity_id",
+    "kind",
+    "entity_version",
+    "recorded_at",
+    "payload_digest"
+  ],
+  "workspace_outbox_state": [
+    "project_id",
+    "high_watermark",
+    "retained_floor"
+  ],
+  "workspace_projects": [
+    "project_id",
+    "project_root",
+    "activated_by",
+    "activated_at",
+    "version"
+  ],
+  "workspace_requests": [
+    "project_id",
+    "actor_id",
+    "request_id",
+    "operation",
+    "digest",
+    "receipt_json"
+  ],
+  "workspace_snapshot_lineage": [
+    "workspace_binding_id",
+    "candidate_id",
+    "created_at"
+  ],
+  "workspace_snapshots": [
+    "workspace_binding_id",
+    "task_id",
+    "attempt_id",
+    "project_root",
+    "root_path",
+    "base_path",
+    "mode",
+    "manifest_json",
+    "base_kind",
+    "base_head",
+    "base_dirty_digest",
+    "created_at",
+    "cleaned_up_at",
+    "cleanup_reason"
+  ],
+  "workspace_starts": [
+    "execution_id",
+    "task_id",
+    "project_id",
+    "actor_id",
+    "request_id",
+    "source_origin",
+    "source_event_id",
+    "state",
+    "version",
+    "created_at"
+  ],
+  "workspace_task_options": [
+    "task_id",
+    "options_json"
+  ],
+  "workspace_tasks": [
+    "sequence",
+    "task_id",
+    "project_id",
+    "description",
+    "version",
+    "execution_id",
+    "created_at"
+  ]
+}

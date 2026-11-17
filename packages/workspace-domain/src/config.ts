@@ -22,7 +22,7 @@ export function diffPaths(a: unknown, b: unknown, at = ""): string[] {
   return [at || "value"];
 }
 
-const mcpPolicy = (s: McpServer): McpPolicy => { const { command: _c, args: _a, env: _e, handTools: _h, unsupportedKeys: _u, problem: _p, ...rest } = s; return structuredClone(rest); };
+const mcpPolicy = (s: McpServer): McpPolicy => { const { command: _c, args: _a, env: _e, handTools: _h, unsupportedKeys: _u, problem: _p, containment: _n, ...rest } = s; return structuredClone(rest); };
 export function capture(surfaces: MachineConfig["surfaces"], sessions: Record<string, number>): ProfileSections {
   return { routing: structuredClone(surfaces.routing), defaults: structuredClone(surfaces.user_defaults), mcp: surfaces.mcp_servers.map(mcpPolicy), sessions: { ...sessions } };
 }

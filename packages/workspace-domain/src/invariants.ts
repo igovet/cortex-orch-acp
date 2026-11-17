@@ -7,6 +7,8 @@ import { DomainError, entity, machineFor, nonempty, projectFor, requireFact } fr
  */
 /** Editing the saved request is distinct from messaging or changing a live session. */
 export const taskEditable = (task: Task) => task.executionId === null && task.status === "draft" && task.process === "stopped" && !task.archive && !task.closedAs;
+/** The title is presentation, not lifecycle: any task still kept can be renamed, started, finished or closed. Only a cleared task cannot. */
+export const taskRenamable = (task: Task) => !task.archive;
 export const repoOf = (state: WorkspaceState, projectId: string) => state.repos.find(r => r.projectId === projectId) ?? null;
 export function checkoutOf(state: WorkspaceState, id: string): { repo: ProjectRepo; checkout: RepoCheckout } {
   for (const repo of state.repos) {

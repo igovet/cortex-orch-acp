@@ -26,18 +26,29 @@ export function acceptBlocked(task: Task): string | null {
   if (task.acceptance) return `You accepted v${task.acceptance.version}`;
   if (task.status === "done") return "This task is closed";
   if (task.reviewActions?.accept === false) return task.reviewActions.reason ?? "Refresh this result before accepting";
+  // A task that has not finished has no acceptable result yet; that, not missing evidence, is why Accept is off.
+  if (task.result.acceptanceAvailable === false && task.status !== "review" && task.status !== "ready_to_merge") return "Available once this task finishes";
   if (task.result.acceptanceAvailable === false) return "Result evidence is unavailable. Request a new result";
   const answer = task.result.kind === "answer" && task.result.acceptanceAvailable === true && task.result.checks.length === 0;
   const checksBlocker = answer ? null : checkAcceptanceBlocker(task.result.checks);
   if (checksBlocker) return checksBlocker;
   return task.status === "review" || task.status === "ready_to_merge" ? null : "Available once this task finishes";
 }
+/** A reason as one sentence: it gets its full stop only when it has none of its own, so a strip never ends in "..". */
+export const sentence = (text: string) => { const t = text.trim(); return !t || /[.!?…]$/.test(t) ? t : `${t}.`; };
+/** Whether a result offers Request changes. A closed task has nothing left to change, and one being integrated is past review. */
+export const changesOffered = (task: Task) => (task.status === "review" || task.status === "ready_to_merge") && !task.integration;
+/** Whether a result card offers Accept at all. A closed task, or one working again after Request changes, has nothing to accept. */
+export const acceptOffered = (task: Task) => task.status !== "done" && task.status !== "working" && task.status !== "stopping";
 export function mergeBlocked(task: Task): string | null {
   if (task.status === "done") return task.work === "merged" ? "This task is already merged" : "This task is closed";
   if (task.conflict !== "none") return "Resolve the conflict first";
   if (!task.acceptance) return task.result ? `Accept v${task.result.version} first. Accepting is your decision, merging is a Git action.` : "Available once this task has an accepted result";
   return task.status === "ready_to_merge" ? null : "Available in Ready to merge";
 }
+/** Why a task on its target branch cannot be committed from here, when the machine gave no reason of its own. It says where the
+ *  task works and what is missing, never that the task has no files. */
+export const noCommitReason = (task: Task) => `Which files this task changed in ${task.checkout.kind === "main" ? "the project folder" : "its checkout"} could not be confirmed, so they cannot be committed from here. Close as is, or commit in Git and use Done outside the app.`;
 /**
  * Why Review and merge cannot open for a task in Ready to merge, or null. Without an acceptance yet, the merge dialog
  * records it for exactly this version first, so the only blockers are the ones that would refuse that acceptance.
@@ -45,7 +56,7 @@ export function mergeBlocked(task: Task): string | null {
 export function finishBlocked(task: Task): string | null {
   if (task.integrationFacts?.alreadyInTarget) return `Already in ${task.integrationFacts.targetBranch}. Close the task instead.`;
   if (task.integrationFacts?.sameBranch) {
-    if (!task.integrationFacts.commitAvailable) return task.integrationFacts.reason ?? "Task-owned files are not available for a commit. Close as is or finish outside the app.";
+    if (!task.integrationFacts.commitAvailable) return task.integrationFacts.reason ?? noCommitReason(task);
     if (task.conflict !== "none") return "Resolve the conflict first";
     return task.acceptance ? task.status === "ready_to_merge" ? null : "Available after review" : acceptBlocked(task);
   }

@@ -6,12 +6,12 @@ import { useWs, type WindowChrome } from "./ctx";
 import { Confirmed } from "./freshness";
 import { CodePanel } from "./code";
 import { GitPanel } from "./git";
-import { A, FactLine, I, Keyed, MenuItem, Pop } from "./kit";
+import { A, FactLine, I, Keyed, MenuItem, OverviewShown, Pop, useWantOverview } from "./kit";
 import { revealCutIn, Strip, Whole } from "./layout";
 import { SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN } from "./prefs";
 import { APP_SECTIONS, MACHINE_SECTIONS, ORCHESTRATION_PAGES, type OrchestrationPage, type Route, type SettingsSection } from "./router";
 import { defaultCheckout, repoOf } from "./review-model";
-import { awaitsOwner, checkCounts, clock, dayClock, engineLimits, homeView, inboxItems, projectsOn, rowIcon, sameBranch, sideRows, sprintRoute, sprintView, type EngineLimit, type ProjectSummary, type SideRow, type TaskView } from "./selectors";
+import { asOf, awaitsOwner, checkCounts, clock, dayClock, engineLimits, limitsText, newestObserved, homeView, inboxItems, projectsOn, rowIcon, sameBranch, sideRows, sideWord, sprintRoute, sprintView, type EngineLimit, type LimitWindow, type ProjectSummary, type SideRow, type TaskView } from "./selectors";
 import { workerFace } from "./session-model";
 import { SprintActions, SprintCrumb } from "./sprint";
 import { BranchChip, TaskActions, TaskInspector, TaskTitle } from "./task-chrome";
@@ -177,7 +177,7 @@ function ProjectRow(props: { summary: ProjectSummary; n: number; openByDefault: 
           const sprint = () => r() as Extract<SideRow, { kind: "sprint" }>;
           return r().kind === "task" ? <TaskRow view={(r() as Extract<SideRow, { kind: "task" }>).view} />
             : <A class="task-row" to={sprintRoute(props.summary.machine.id, sprint().sprint)}>
-              <I n="layers" s={14} class="faint" /><span class="trunc">Sprint: {sprintView(ws.store.index(), sprint().sprint).title}</span><span class={`sig tnum${sprint().sprint.planning === "question" ? " st-warn" : ""}`}>{sprint().sprint.planning === "created" ? `${sprint().started}/${sprint().total}` : sprint().sprint.planning === "question" ? "Needs you" : "Planning"}</span>
+              <I n="layers" s={14} class="faint" /><span class="trunc">Sprint: {sprintView(ws.store.index(), sprint().sprint).title}</span><span class={`sig tnum${sprint().sprint.deletion || sprint().sprint.planning === "question" ? " st-warn" : ""}`}>{sprint().sprint.deletion ? "Deleting" : sprint().sprint.planning === "created" ? sprint().sprint.queueState === "complete" ? "Done" : `${sprint().started}/${sprint().total}` : sprint().sprint.planning === "question" ? "Needs you" : "Planning"}</span>
             </A>;
         }}</Keyed>
         <Show when={props.summary.views.length > 0}><A class="task-row all" to={project(props.summary.machine.id, id())}>All {props.summary.views.length}</A></Show>
@@ -189,25 +189,29 @@ function ProjectRow(props: { summary: ProjectSummary; n: number; openByDefault: 
 function TaskRow(props: { view: TaskView }) {
   const ws = useWs();
   const route = () => ws.router.route();
-  const word = () => props.view.column === "needs" ? "Needs you" : props.view.column === "work" ? "Working" : props.view.column === "review" ? "Review" : props.view.project.hasGit === false || sameBranch(props.view.task, props.view.target) ? "Finish" : "Merge";
+  const word = () => sideWord(props.view);
   return <A class="task-row" to={{ name: "task", machine: props.view.machine.id, task: props.view.id }} aria-current={(() => { const r = route(); return r.name === "task" && r.task === props.view.id ? "page" : undefined; })()}>
     <I n={rowIcon(props.view)} s={14} class={awaitsOwner(props.view) ? "st-warn" : props.view.fact.tone} /><span class="trunc">{props.view.task.title}</span><span class={`sig${awaitsOwner(props.view) ? " st-warn" : ""}`}>{word()}</span>
   </A>;
 }
 
-function UsageBar(props: { row: EngineLimit }) {
-  return <span class="um"><span>{props.row.label}</span>
-    <span class="bar"><i style={{ width: `${props.row.usedPercent ?? 0}%` }}></i></span>
-    <span class="tnum">{props.row.usedPercent}%</span>
+/** One line per weekly window: Claude's general window under its engine name, its Fable window as "Fable".
+ *  The lines share three columns (name, bar, value); the button's label and the popover say each window in full. */
+function UsageBar(props: { row: EngineLimit; window: LimitWindow; first: boolean }) {
+  const ws = useWs();
+  const stale = () => asOf(props.window.observedAt, ws.store.clock())?.stale ?? false;
+  return <span class={`um${stale() ? " stale" : ""}`}><span>{props.first ? props.row.label : props.window.label}</span>
+    <Show when={props.window.usedPercent !== null} fallback={<span class="na muted">Not reported</span>}><span class="bar"><i style={{ width: `${props.window.usedPercent}%` }}></i></span><span class="tnum">{props.window.usedPercent}%</span></Show>
   </span>;
 }
-/** Only what the provider reported. An unknown limit stays off the sidebar and reads Unavailable in the popover. */
+/** Every connected engine stays visible; unknown is never drawn as zero. */
 function SidebarUsage() {
   const ws = useWs();
-  const known = createMemo(() => engineLimits(ws.store.state(), ws.machine()).rows.filter(r => r.usedPercent !== null));
-  const label = () => `Engine limits: ${known().map(r => `${r.label} ${r.usedPercent}%`).join(", ")} used this week`;
+  const known = createMemo(() => engineLimits(ws.store.state(), ws.machine()).rows);
+  const stale = () => known().some(r => r.windows.some(w => asOf(w.observedAt, ws.store.clock())?.stale));
+  const label = () => `Engine limits: ${limitsText(known())} used this week${stale() ? ", some values are stale" : ""}`;
   return <Show when={known().length > 0}>
-    <button class="sb-usage" popovertarget="m-usage" aria-label={label()}><For each={known()}>{r => <UsageBar row={r} />}</For></button>
+    <button class="sb-usage" popovertarget="m-usage" aria-label={label()}><For each={known()}>{r => <For each={r.windows}>{(w, i) => <UsageBar row={r} window={w} first={i() === 0} />}</For>}</For></button>
   </Show>;
 }
 function SidebarFoot() {
@@ -227,15 +231,18 @@ function SidebarFoot() {
 }
 
 export function Limit(props: { row: EngineLimit }) {
+  const ws = useWs();
+  const seen = () => asOf(newestObserved(props.row), ws.store.clock());
+  const reported = () => props.row.windows.some(w => w.usedPercent !== null);
   return <div class="u-eng">
     <div class="u-h"><span class="w500">{props.row.label}</span><span class="st st-ok"><I n="check-circle" s={12} />Connected</span></div>
-    <div class="u-win"><span>This week</span>
-      <Show when={props.row.usedPercent !== null} fallback={<span class="na">Unavailable</span>}>
-        <span class="bar"><i style={{ width: `${props.row.usedPercent}%` }}></i></span><span class="v">{props.row.usedPercent}% used</span>
-        <span class="rs">{props.row.resetAt ? `Resets ${dayClock(props.row.resetAt)}` : ""}</span>
+    <For each={props.row.windows}>{w => <div class="u-win"><span>{w.label}</span>
+      <Show when={w.usedPercent !== null} fallback={<span class="na">Not reported</span>}>
+        <span class="bar"><i style={{ width: `${w.usedPercent}%` }}></i></span><span class="v">{w.usedPercent}% used</span>
+        <span class="rs">{w.resetAt ? `Resets ${dayClock(w.resetAt)}` : ""}</span>
       </Show>
-    </div>
-    <div class="u-src">{props.row.observedAt ? `Observed ${clock(props.row.observedAt)}, reported by the provider` : "Not reported by the provider"}</div>
+    </div>}</For>
+    <div class={`u-src${seen()?.stale ? " st-warn" : ""}`}>{!reported() ? "Not reported by the provider" : seen() ? `${seen()!.text}, reported by the provider` : "Reported by the provider, time not reported"}</div>
   </div>;
 }
 
@@ -446,14 +453,16 @@ function ProjectPanel(props: { summary: ProjectSummary }) {
 function MachinePanel() {
   const ws = useWs();
   const m = () => ws.machine();
+  // The inspector is always mounted; only a shown one asks for the machine's details.
+  useWantOverview(() => ws.inspectable() && ws.panels.inspectorVisible());
   return <div class="ins-sec">
     <div class="ins-h"><span>Machine</span></div>
     <dl class="kv">
-      <dt>Name</dt><dd>{m().name}</dd>
+      <dt>Name</dt><dd><OverviewShown inline><>{m().name}</></OverviewShown></dd>
       <dt>Kind</dt><dd>{m().kind === "local" ? "Local" : "Remote"}</dd>
       <dt>Connection</dt><dd>{m().connection === "connected" ? "Connected" : `Offline, last confirmed ${clock(m().lastConfirmedAt)}`}</dd>
       <dt>Projects</dt><dd>{projectsOn(ws.store.index(), m().id).length}</dd>
-      <dt>Archive kept</dt><dd>{m().retentionDays} days</dd>
+      <dt>Archive kept</dt><dd><OverviewShown inline><>{m().retentionDays} days</></OverviewShown></dd>
     </dl>
   </div>;
 }

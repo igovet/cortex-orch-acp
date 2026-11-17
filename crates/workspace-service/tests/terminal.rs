@@ -1,3 +1,5 @@
+#[path = "support/hermetic.rs"]
+mod hermetic;
 use serde_json::{json, Value};
 use std::{
     os::unix::fs::{symlink, PermissionsExt},
@@ -24,7 +26,7 @@ impl Fixture {
             runtime_dir: self.0.join("runtime"),
             state_dir: self.0.join("state"),
             allowed_root: self.0.clone(),
-            launch: LaunchSpec::new("/usr/bin/python3".into(), vec!["-B".into()]).unwrap(),
+            launch: LaunchSpec::bare(),
             request_timeout: Duration::from_secs(2),
             shutdown_timeout: Duration::from_millis(150),
             event_capacity: 2,
@@ -71,7 +73,9 @@ fn running(pid: i32) -> bool {
 }
 
 fn isolated_terminal_test(name: &str) -> bool {
-    if std::env::var("CW_PTY_ISOLATED_TEST").as_deref() == Ok(name) { return true; }
+    if std::env::var("CW_PTY_ISOLATED_TEST").as_deref() == Ok(name) {
+        return true;
+    }
     let fixture = Fixture::new();
     let home = fixture.0.join("shell-home");
     std::fs::create_dir(&home).unwrap();
@@ -80,18 +84,25 @@ fn isolated_terminal_test(name: &str) -> bool {
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name])
         .env("CW_PTY_ISOLATED_TEST", name)
-        .env("HOME", &home).env("SHELL", "/bin/sh")
-        .env("XDG_CONFIG_HOME", &home).env("XDG_STATE_HOME", &home)
+        .env("HOME", &home)
+        .env("SHELL", "/bin/sh")
+        .env("XDG_CONFIG_HOME", &home)
+        .env("XDG_STATE_HOME", &home)
         .env("XDG_CACHE_HOME", &home)
-        .env_remove("ENV").env_remove("BASH_ENV")
-        .output().unwrap().status;
+        .env_remove("ENV")
+        .env_remove("BASH_ENV")
+        .output()
+        .unwrap()
+        .status;
     assert!(status.success(), "isolated terminal test failed");
     false
 }
 
 #[tokio::test]
 async fn terminal_real_service_round_trip_detach_resize_close_and_stop() {
-    if !isolated_terminal_test("terminal_real_service_round_trip_detach_resize_close_and_stop") { return; }
+    if !isolated_terminal_test("terminal_real_service_round_trip_detach_resize_close_and_stop") {
+        return;
+    }
     let f = Fixture::new();
     let s = Service::bind(f.config()).await.unwrap();
     let p = s.register(&f.0.join("project"), "PTY").await.unwrap()["projectId"]
@@ -278,38 +289,84 @@ async fn terminal_real_service_round_trip_detach_resize_close_and_stop() {
 }
 #[tokio::test]
 async fn terminal_exit_is_retained_and_removal_reaps_the_shell() {
-    if !isolated_terminal_test("terminal_exit_is_retained_and_removal_reaps_the_shell") { return; }
+    if !isolated_terminal_test("terminal_exit_is_retained_and_removal_reaps_the_shell") {
+        return;
+    }
     let f = Fixture::new();
     let s = Service::bind(f.config()).await.unwrap();
-    let p = s.register(&f.0.join("project"), "PTY").await.unwrap()["projectId"].as_str().unwrap().to_owned();
+    let p = s.register(&f.0.join("project"), "PTY").await.unwrap()["projectId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let serve = tokio::spawn(s.clone().serve());
-    let opened = ok(&s, "terminal.open", json!({"projectId":p,"cols":80,"rows":24})).await;
+    let opened = ok(
+        &s,
+        "terminal.open",
+        json!({"projectId":p,"cols":80,"rows":24}),
+    )
+    .await;
     let id = opened["sessionId"].clone();
-    ok(&s, "terminal.write", json!({"projectId":p,"sessionId":id,"data":"exit\n"})).await;
+    ok(
+        &s,
+        "terminal.write",
+        json!({"projectId":p,"sessionId":id,"data":"exit\n"}),
+    )
+    .await;
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let page = ok(&s, "terminal.read", json!({"projectId":p,"sessionId":id,"after":0})).await;
-            if page["exited"] == true { break; }
+            let page = ok(
+                &s,
+                "terminal.read",
+                json!({"projectId":p,"sessionId":id,"after":0}),
+            )
+            .await;
+            if page["exited"] == true {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }).await.unwrap();
-    let retained = ok(&s, "terminal.open", json!({"projectId":p,"cols":80,"rows":24})).await;
+    })
+    .await
+    .unwrap();
+    let retained = ok(
+        &s,
+        "terminal.open",
+        json!({"projectId":p,"cols":80,"rows":24}),
+    )
+    .await;
     assert_eq!(retained["sessionId"], id);
     assert_eq!(retained["exited"], true);
     ok(&s, "terminal.close", json!({"projectId":p,"sessionId":id})).await;
-    let opened = ok(&s, "terminal.open", json!({"projectId":p,"cols":80,"rows":24})).await;
+    let opened = ok(
+        &s,
+        "terminal.open",
+        json!({"projectId":p,"cols":80,"rows":24}),
+    )
+    .await;
     let id = opened["sessionId"].clone();
-    ok(&s, "terminal.write", json!({"projectId":p,"sessionId":id,"data":"echo $$ > remove-pid\n"})).await;
+    ok(
+        &s,
+        "terminal.write",
+        json!({"projectId":p,"sessionId":id,"data":"echo $$ > remove-pid\n"}),
+    )
+    .await;
     wait_file(&f.0.join("project/remove-pid")).await;
-    let pid = std::fs::read_to_string(f.0.join("project/remove-pid")).unwrap().trim().parse::<i32>().unwrap();
+    let pid = std::fs::read_to_string(f.0.join("project/remove-pid"))
+        .unwrap()
+        .trim()
+        .parse::<i32>()
+        .unwrap();
     s.remove(&p).await.unwrap();
     assert!(!running(pid));
-    s.stop().await.unwrap(); serve.await.unwrap().unwrap();
+    s.stop().await.unwrap();
+    serve.await.unwrap().unwrap();
 }
 
 #[tokio::test]
 async fn terminal_limits_removed_project_and_changed_root_are_refused() {
-    if !isolated_terminal_test("terminal_limits_removed_project_and_changed_root_are_refused") { return; }
+    if !isolated_terminal_test("terminal_limits_removed_project_and_changed_root_are_refused") {
+        return;
+    }
     let f = Fixture::new();
     let s = Service::bind(f.config()).await.unwrap();
     let serve = tokio::spawn(s.clone().serve());

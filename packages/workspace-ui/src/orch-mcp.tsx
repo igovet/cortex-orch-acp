@@ -9,7 +9,11 @@ import { clock } from "./selectors";
 import { Adv, Chk, Err, Hint, Lines, Lock, Pick, Seg, SetH, Srow, Sw, Tabs, Tags } from "./settings-kit";
 
 const allServer = (s: McpServer) => s.engines ? s.engines.map(engineLabel).join(", ") : "All";
-const counts = (s: McpServer) => `${s.allowedTools.length} writing · ${s.readOnlyTools.length} read-only · ${(s.coordinatorTools ?? s.readOnlyTools).length} coordinator`;
+/** Who gets how many of the server's tools. The three lists overlap (a read-only grant is also a writing one), so each number
+ *  names its audience and they never read as parts of one total. */
+export const toolCounts = (s: McpServer) => s.allowedTools.length === 0 ? "No tools granted"
+  : `${s.allowedTools.length} ${s.allowedTools.length === 1 ? "tool" : "tools"} for writing workers, ${s.readOnlyTools.length} for read-only roles, ${(s.coordinatorTools ?? s.readOnlyTools).length} for the coordinator`;
+const counts = toolCounts;
 const basename = (path: string) => path.split("/").at(-1) ?? path;
 const patchServer = (list: McpServer[], name: string, fn: (s: McpServer) => McpServer) => list.map(s => s.name === name ? fn(s) : s);
 
@@ -123,7 +127,9 @@ function EnvRows(props: { items: McpEnv[]; off?: string; set: (items: McpEnv[]) 
 
 function SandboxFields(props: { s: McpServer; set: (s: McpServer) => void; off?: string; problems: Problem[]; prefix: string }) {
   const missing = (p: string) => pathMissing(p) ? "The server is dropped from sessions until this exists." : null;
+  const open = () => props.s.containment === "none";
   return <>
+    <Srow t="Run without the sandbox" d={open() ? "Runs with your full user rights: no file, network or process limits. The paths, Network and runtime directory variables below are not applied." : "Off by default. Only for a server that cannot start contained."}><Sw label="Run without the sandbox" checked={open()} disabled={props.off} onChange={on => props.set({ ...props.s, containment: on ? "none" : "contained" })} /></Srow>
     <Srow t="Network" d="Off by default."><Sw label="Network" checked={props.s.network} disabled={props.off} onChange={network => props.set({ ...props.s, network })} /></Srow>
     <div class="ws-pad ws-fld"><span class="lab">Read paths</span><Lines label="Read path" add="Add read path" items={props.s.readPaths} disabled={props.off} note={missing} problems={props.problems} path={`${props.prefix}.read_paths`} onChange={readPaths => props.set({ ...props.s, readPaths })} /></div>
     <div class="ws-pad ws-fld"><span class="lab">Write paths</span><span class="cap muted">Only writable state beyond the task scope.</span><Lines label="Write path" add="Add write path" items={props.s.writePaths} disabled={props.off} note={missing} problems={props.problems} path={`${props.prefix}.write_paths`} onChange={writePaths => props.set({ ...props.s, writePaths })} /></div>
@@ -231,7 +237,7 @@ function AddServer(props: { tab?: string }) {
           <Srow t="Start from" d="Fills the fields with a known server."><Pick id="m-add-template" label="Start from" width="200px" value={template()} options={[{ id: "blank", label: "Blank" }, ...templates().map(t => ({ id: t.name, label: t.name }))]} onPick={pick} /></Srow>
           <ConnectionFields s={s()} set={set} off={off()} problems={problems()} prefix="new" isNew />
         </div>
-        <Adv id="add-sandbox" label="Sandbox" force={s().readPaths.length > 0 || s().writePaths.length > 0 || s().network}><div class="surface"><SandboxFields s={s()} set={set} off={off()} problems={problems()} prefix="new" /></div></Adv>
+        <Adv id="add-sandbox" label="Sandbox" force={s().readPaths.length > 0 || s().writePaths.length > 0 || s().network || s().containment === "none"}><div class="surface"><SandboxFields s={s()} set={set} off={off()} problems={problems()} prefix="new" /></div></Adv>
         <ActionBar class="ws-form-f"><button class="btn btn-primary" aria-disabled={defined() ? undefined : "true"} data-why={defined() ? undefined : "Name the server and its command first"} onClick={() => { if (defined()) go("connect"); }}>Next: Connect</button></ActionBar>
       </Match>
       <Match when={tab() === "connect"}>
@@ -345,7 +351,7 @@ function ServerList() {
               <Show when={status().tone !== "st-ok" && status().tone !== "st-idle"}><span class={`sub trunc ${status().tone}`}>{status().text}</span></Show></span>
             <span class="cap muted tnum ws-wrap">{counts(s)}</span>
             <span class="cap muted trunc">{allServer(s)}</span>
-            <span class="cap muted">{s.network ? "On" : "Off"}</span>
+            <span class="cap muted">{s.containment === "none" ? "No sandbox" : s.network ? "On" : "Off"}</span>
             <span class="cap muted tnum">{seen() ? clock(seen()!.at) : ""}</span>
             <span onClick={e => e.stopPropagation()}><Sw label={`${s.name} enabled`} checked={s.enabled} disabled={off()} onChange={enabled => d.set(patchServer(d.value(), s.name, x => ({ ...x, enabled })))} /></span>
             <span onClick={e => e.stopPropagation()}><button class="ib ws-ib" popovertarget={off() ? undefined : `m-srv-${slug(s.name)}`} aria-label={`More for ${s.name}`} aria-disabled={off() ? "true" : undefined} data-why={off()}><I n="more" s={14} /></button>

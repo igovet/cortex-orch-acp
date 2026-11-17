@@ -45,7 +45,7 @@ Negative:
 ## Validation
 
 - Targeted new adapter tests with fake engines only. No paid call.
-- Regression: `tests/test_acp_elicitation.py` and `tests/test_acp_host_permission_requester.py`.
+- Regression: the former Python test `test_acp_elicitation` and the former Python test `test_acp_host_permission_requester`.
 
 ## Documentation impact
 

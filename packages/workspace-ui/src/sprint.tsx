@@ -3,6 +3,7 @@ import { dependencyProblem, runBlocker, type AttachmentInput, type PlanItem, typ
 import { reportHeight } from "./autogrow";
 import { AttachChips, createAttachments, createDictation, MessageComposer, RouteBar } from "./composer";
 import { useWs } from "./ctx";
+import { FieldEdit } from "./field-edit";
 import { createFollow } from "./follow";
 import { createUnsent, ScreenActive } from "./freshness";
 import { A, I, Keyed, MenuItem, placeFocus, Pop } from "./kit";
@@ -74,10 +75,13 @@ export function QueueButton(props: { sprint: Sprint; line?: boolean; small?: boo
   const run = () => { if (!blocker()) ws.run({ type: "run_sprint", sprintId: props.sprint.id, now: ws.store.clock() }); };
   const complete = () => props.sprint.queueState === "complete";
   const cls = () => `btn ${props.line ? "btn-line" : "btn-primary"}${size()}`;
+  // A run that cannot go takes the shared disabled look of a main action (layout.css): an outlined secondary only greys its
+  // label, and beside the other outlined controls of the board bar a disabled Continue queue read as usable.
+  const runCls = () => blocker() || ws.gate("run_sprint") ? `btn btn-primary${size()}` : cls();
   return <Show when={!props.sprint.archivedAt && props.sprint.planning === "created"}>
     <Show when={props.sprint.runMode === "automatic"} fallback={<Show when={next()}>{v => <button class={cls()} aria-describedby={described("start_task")} {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: v().id, now: ws.store.clock() })}>Start task {number()}</button>}</Show>}>
       <Show when={props.sprint.queueState === "running"} fallback={<Show when={!complete()}>
-        <button class={cls()} aria-disabled={blocker() ? "true" : undefined} data-why={blocker()} aria-describedby={described("run_sprint", blocker())} {...ws.needs("run_sprint")} onClick={run}>{props.sprint.queueState === "paused" ? "Continue queue" : "Run sprint"}</button>
+        <button class={runCls()} aria-disabled={blocker() ? "true" : undefined} data-why={blocker()} aria-describedby={described("run_sprint", blocker())} {...ws.needs("run_sprint")} onClick={run}>{props.sprint.queueState === "paused" ? "Continue queue" : "Run sprint"}</button>
       </Show>}>
         <button class={`btn btn-line${size()}`} aria-describedby={described("pause_sprint")} {...ws.needs("pause_sprint")} onClick={() => ws.run({ type: "pause_sprint", sprintId: props.sprint.id })}>Pause queue</button>
       </Show>
@@ -89,13 +93,18 @@ type QueueWords = { tone: StripTone; icon: string; iconClass: string; text: stri
 const stop = (text: string) => text.replace(/\.+$/, "");
 /** What the queue is doing or waiting for, when that needs saying. One answer, so the same words appear on every screen and only once on each. */
 function queueWords(ws: ReturnType<typeof useWs>, sprint: Sprint): QueueWords | null {
-  const index = ws.store.index(), stall = queueStall(index, sprint);
+  const index = ws.store.index();
+  // Queue state belongs to the service, not completeness of a window read.
+  if (sprint.taskIds.some(id => !index.byId.has(id))) return null;
+  const stall = queueStall(index, sprint);
   const waiting = sprint.runMode === "automatic" && sprint.planning === "created" && sprint.queueState !== "running" && sprint.queueState !== "complete";
   const blocker = waiting ? queueBlocker(index.state, sprint) : null;
   if (sprint.queueState === "paused" && sprint.pauseReason) return { tone: "warn", icon: "pause", iconClass: "st-warn", taskId: stall?.taskId ?? null,
     text: `Queue paused: ${stop(stall?.reason ?? blocker ?? sprint.pauseReason)}.${stall || blocker ? "" : " Continue queue when you are ready."}` };
   if (stall || blocker) return { tone: "warn", icon: "alert", iconClass: "st-warn", taskId: stall?.taskId ?? null, role: "status", text: `${stop(stall?.reason ?? blocker!)}.` };
-  if (sprint.queueState === "complete") return { tone: "ok", icon: "check-circle", iconClass: "st-ok", taskId: null, text: "All queued tasks have run. Finished results wait for your confirmation; nothing closes by itself." };
+  // Once every task of the sprint is closed nothing waits for confirmation any more, so the queue has nothing to say.
+  if (sprint.queueState === "complete") return sprint.taskIds.every(id => index.byId.get(id)!.task.status === "done") ? null
+    : { tone: "ok", icon: "check-circle", iconClass: "st-ok", taskId: null, text: "All queued tasks have run. Finished results wait for your confirmation; nothing closes by itself." };
   // A control the machine does not offer is greyed out: its reason still has to be somewhere the owner can read.
   const refused = ws.gate("set_run_mode") ?? ws.gate(sprint.runMode !== "automatic" ? "start_task" : sprint.queueState === "running" ? "pause_sprint" : "run_sprint");
   return refused ? { tone: "info", icon: "help", iconClass: "faint", taskId: null, role: "status", text: refused } : null;
@@ -130,12 +139,8 @@ function createGapStrip(sprint: Accessor<Sprint>): Accessor<StripItem | null> {
 
 export function SprintCrumb(props: { sprint: Sprint }) {
   const ws = useWs();
-  const [text, setText] = createSignal<string | null>(null);
-  const save = () => { const t = text(); if (t?.trim()) ws.ok({ type: "rename_sprint", sprintId: props.sprint.id, title: t }, () => { setText(null); }); };
-  return <Show when={text() !== null} fallback={<button class="cur trunc ws-title" onClick={() => setText(sprintTitle(props.sprint))}>Sprint: {sprintTitle(props.sprint)}</button>}>
-    <input class="inp ws-title-in" aria-label="Sprint title" value={text()!} onInput={e => setText(e.currentTarget.value)} ref={el => queueMicrotask(() => { el.focus(); el.select(); })} onBlur={() => setText(null)}
-      onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); save(); } else if (e.key === "Escape") { e.stopPropagation(); setText(null); } }} />
-  </Show>;
+  return <FieldEdit band label="Sprint title" value={sprintTitle(props.sprint)} off={ws.gate("rename_sprint")} inputClass="ws-title-in" save={title => ws.run({ type: "rename_sprint", sprintId: props.sprint.id, title })}
+    closed={{ class: "cur trunc ws-title", text: saved => <>Sprint: {saved}</> }} />;
 }
 
 export function SprintActions(props: { sprint: Sprint; tab: SprintRoute["tab"] }) {
@@ -147,19 +152,21 @@ export function SprintActions(props: { sprint: Sprint; tab: SprintRoute["tab"] }
   const remove = () => {
     const id = props.sprint.id, projectId = props.sprint.projectId;
     const count = new Set([...props.sprint.taskIds,...ws.store.state().tasks.filter(t => t.sprintId === id).map(t => t.id)]).size;
-    const [failure, setFailure] = createSignal("");
     const note = `Permanently delete this sprint and all ${count} tasks? The queue and running work will be stopped. Only clean app-created worktrees are removed; other worktrees are kept and their paths shown. The project folder and Git branches are never deleted. This cannot be undone.`;
-    ws.open({kind:"confirm",title:"Delete this sprint and its tasks?",action:"Delete sprint",danger:true,
-      get note() { return note + (failure() ? "\n\n" + failure() : ""); },
+    // A refusal is shown once, on the run's own error line (with any kept worktree paths), not repeated in the body.
+    // A deletion that started but still waits for a task's stop has happened in part: the dialog closes, the receipt
+    // says what is left, and the sprint's own Deleting strip and Retry delete… carry it on.
+    ws.open({kind:"confirm",title:"Delete this sprint and its tasks?",action:"Delete sprint",danger:true,note,
       go:async () => {
         const r = await ws.run({type:"delete_sprint",projectId,sprintId:id,confirmed:true});
         if (r.ok) ws.go({name:"home",machine:ws.machine().id});
-        else setFailure(r.message + (r.keptPaths?.length ? " Kept worktrees: " + r.keptPaths.join(", ") : ""));
-        return r.ok;
+        return r.ok || r.outcome === "partial_effect";
       }});
   };
   const deleteButton = () => <button class="btn btn-line" {...ws.needs("delete_sprint")} onClick={remove}>Delete sprint…</button>;
-  return <Show when={!props.sprint.archivedAt} fallback={<><span class="st st-idle">Closed sprint</span>{deleteButton()}</>}><>
+  return <Show when={!props.sprint.archivedAt} fallback={<Show when={props.sprint.deletion} fallback={<><span class="st st-idle">Closed sprint</span>{deleteButton()}</>}>
+    <span class="st st-warn">Deleting</span><button class="btn btn-line" {...ws.needs("delete_sprint")} onClick={remove}>Retry delete…</button>
+  </Show>}><>
     <Show when={props.tab === "summary"}><QueueButton sprint={props.sprint} line /></Show>
     <Show when={props.sprint.planning === "created"}><button class="btn btn-line tb-fold" onClick={() => ws.newItem("task", props.sprint.projectId, props.sprint.id)}><I n="plus" s={14} />New task</button></Show>
     <button class="btn btn-line tb-fold" {...ws.needs("close_sprint")} onClick={close}>Close sprint…</button>
@@ -562,12 +569,15 @@ function SummaryTab(props: { route: SprintRoute; sprint: Sprint }) {
   const planning = (): Route => ({ ...props.route, tab: "planning" });
   const gapStrip = createGapStrip(() => props.sprint);
   const queueStrip = createQueueStrip(() => props.sprint);
-  const status = createMemo<StripItem[]>(() => [...(data().rows.length > 0 && gapStrip() ? [gapStrip()!] : []), ...(queueStrip() ? [queueStrip()!] : [])]);
+  // An unfinished deletion says what is left and what it waits for; its retry is the header's Retry delete.
+  const deletion = (): StripItem[] => props.sprint.deletion ? [{ id: "deletion", tone: "warn", role: "status", icon: <I n="hourglass" s={14} class="st-warn" />, text: sprintView(ws.store.index(), props.sprint).state }] : [];
+  const status = createMemo<StripItem[]>(() => [...deletion(), ...(data().rows.length > 0 && gapStrip() ? [gapStrip()!] : []), ...(queueStrip() && !props.sprint.deletion ? [queueStrip()!] : [])]);
   return <Page class="l-work sp-page" scroll="none" head={<Tabs route={props.route} sprint={props.sprint} />} status={<StatusLane items={status()} />}>
     <div class="page"><div class="page-in">
       <div class="sum-grid">
         <div><div class="v">{data().ready}</div><div class="l">Ready to finish</div></div>
         <div><div class="v">{data().working}</div><div class="l">Working</div></div>
+        <div><div class="v">{data().needs}</div><div class="l">Needs you</div></div>
         <div><div class="v">{data().next}</div><div class="l">Next</div></div>
         <div><div class="v">{data().blocked}</div><div class="l">Blocked or queued</div></div>
         <div><div class="v">{data().merged}</div><div class="l">Merged</div></div>

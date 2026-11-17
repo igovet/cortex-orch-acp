@@ -9,6 +9,7 @@ import { Count } from "./kit";
 const cx = (...names: (string | false | undefined)[]) => names.filter(Boolean).join(" ");
 const DISABLED = '[aria-disabled="true"][data-why]';
 const reasonOf = (el: Element) => el.getAttribute("data-why") ?? "";
+const PRIMARY = ".btn-primary, .btn-danger, .mc-send";
 const isCut = (el: Element) => el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1;
 /** Enter and Space press a cut box as a click does, as Row's do, so the keyboard opens what a press opens. */
 const pressByKey = (e: KeyboardEvent) => {
@@ -99,7 +100,7 @@ export function ReasonSlot(props: { bar: Accessor<HTMLElement | undefined>; hint
     // A control that a strip beside the bar already explains, with its way out, is left to that strip.
     const controls = [...bar.querySelectorAll(DISABLED)].filter(c => { const by = c.getAttribute("aria-describedby"); return !by || by === id; });
     // The primary's reason first; in a composer the paper plane is its primary.
-    const shown = (picked && controls.includes(picked) ? picked : controls.find(c => c.matches(".btn-primary, .btn-danger, .mc-send")) ?? controls[0]) ?? null;
+    const shown = (picked && controls.includes(picked) ? picked : controls.find(c => c.matches(PRIMARY)) ?? controls[0]) ?? null;
     setReason(shown ? reasonOf(shown) : null);
     for (const c of controls) if (!c.getAttribute("aria-describedby")) { c.setAttribute("aria-describedby", id); described.add(c); }
     for (const c of described) if (!controls.includes(c)) { if (c.getAttribute("aria-describedby") === id) c.removeAttribute("aria-describedby"); described.delete(c); }

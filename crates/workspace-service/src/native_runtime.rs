@@ -1,0 +1,1382 @@
+//! Service-owned native Start composition. No model or socket supplied launch authority.
+use crate::{
+    actor, failure,
+    native_sessions::{NativeHost, SessionRole, SessionRoute},
+    Service,
+};
+use cortex_core::{
+    ownership::OwnerEpoch, CoreError, CoreResult, OpenMode, ProjectKey, Store, StoreChannel,
+};
+use serde_json::{json, Value};
+use std::{
+    collections::HashMap,
+    io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tokio::sync::{watch, Mutex};
+
+static RETRY_WINDOW: std::sync::Mutex<Option<cortex_core::scheduler::retry::RetryWindow>> =
+    std::sync::Mutex::new(None);
+/// Python reads its lost-worker retry window at call time
+/// (`engine/retry_policy.py::default_window`, `runtime._engine_retry_window`)
+/// so its tests can shorten it. This is the same seam; production never sets it.
+#[doc(hidden)]
+pub fn set_retry_window(window: Option<cortex_core::scheduler::retry::RetryWindow>) {
+    *RETRY_WINDOW.lock().unwrap_or_else(|e| e.into_inner()) = window;
+}
+pub(crate) fn retry_window() -> cortex_core::scheduler::retry::RetryWindow {
+    RETRY_WINDOW
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_default()
+}
+
+/// Trusted embedding authorization, not a route candidate or desktop JSON.
+/// Implementations must qualify every returned engine/account/model and role.
+/// Generate the absent first-run profile from routing/defaults/MCP/connections
+/// bytes. The caller owns the configuration lock and no-replacement publication;
+/// this function has no filesystem or engine effects. Custom settings return None.
+pub fn seed_default_profile(
+    bytes: &[Option<Vec<u8>>; 4],
+    now: &str,
+) -> io::Result<Option<Vec<u8>>> {
+    crate::machine::seed_default_profile(bytes, now)
+}
+
+pub trait NativeRoutes: Send + Sync {
+    fn default_language(&self) -> Option<String> {
+        None
+    }
+    /// Persist a pre-task language choice as the user-wide default. Returns
+    /// false when this provider owns no user defaults (the choice stays
+    /// session-local); an error means nothing was persisted.
+    fn persist_default_language(&self, _language: Option<&str>) -> CoreResult<bool> {
+        Ok(false)
+    }
+    /// Persist a pre-task coordinator `model`/`thought_level` choice (`option`)
+    /// as the user-default route, from the session's `previous` and new
+    /// `settings`. Same contract as `persist_default_language`.
+    fn persist_default_route(
+        &self,
+        _root: &Path,
+        _previous: &Value,
+        _settings: &Value,
+        _option: &str,
+    ) -> CoreResult<bool> {
+        Ok(false)
+    }
+    fn route(&self, root: &Path, role: &str) -> CoreResult<SessionRoute>;
+    /// The exact coordinator route a task starting with `settings` resolves to, as
+    /// a durable pin `{route_id, parameters}`. Persisted at start so a later change
+    /// of the owner default never re-routes a running task. None: not pinnable.
+    fn coordinator_pin(&self, _root: &Path, _settings: &Value) -> CoreResult<Option<Value>> {
+        Ok(None)
+    }
+    /// The session route of a pin from `coordinator_pin`. `effort` is the task's
+    /// explicit thought-level choice, if any.
+    fn pinned_route(
+        &self,
+        root: &Path,
+        _pin: &Value,
+        _effort: Option<&str>,
+    ) -> CoreResult<SessionRoute> {
+        self.route(root, "orchestrator")
+    }
+    fn worker_route(
+        &self,
+        root: &Path,
+        role: &str,
+        _node: &Value,
+        _evidence: &cortex_core::routing::Evidence,
+        _escalated: bool,
+        _previous: Option<&str>,
+    ) -> CoreResult<SessionRoute> {
+        self.route(root, role)
+    }
+    fn worker_selection(
+        &self,
+        root: &Path,
+        role: &str,
+        node: &Value,
+        evidence: &cortex_core::routing::Evidence,
+        escalated: bool,
+        previous: Option<&str>,
+    ) -> CoreResult<(SessionRoute, Value)> {
+        Ok((
+            self.worker_route(root, role, node, evidence, escalated, previous)?,
+            json!({}),
+        ))
+    }
+    fn menu(&self, _root: &Path, _evidence: &cortex_core::routing::Evidence) -> CoreResult<Value> {
+        Err(CoreError::Refused("native_route_menu_unavailable"))
+    }
+    fn previews(
+        &self,
+        _root: &Path,
+        _plan: &Value,
+        _evidence: &cortex_core::routing::Evidence,
+    ) -> CoreResult<Value> {
+        Ok(json!([]))
+    }
+    fn mcp_registry(&self) -> CoreResult<crate::native_mcp::Registry> {
+        Ok(crate::native_mcp::Registry::default())
+    }
+    /// Only host-qualified identities may be exposed to an incoming client.
+    fn options(&self, root: &Path, settings: &Value) -> Value {
+        match self.task_route(root, settings) {
+            Ok(route) => json!([{"id":"model","name":"Model","category":"model","type":"select",
+                "currentValue":route.model,"options":[{"value":route.model,"name":route.model}]}]),
+            Err(_) => json!([]),
+        }
+    }
+    /// Selectable routes `{route, model, label, disambiguated_label}` for
+    /// `/cortex-model` resolution.
+    fn listing(&self, _root: &Path) -> Vec<Value> {
+        Vec::new()
+    }
+    /// Every registered connection's persisted state, in registry order.
+    fn connection_states(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Registered connection ids, in registry order.
+    fn connection_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// One prompt-free catalogue refresh of a registered connection (Python's
+    /// per-session `_refresh_catalog_for_session`); true only when a new
+    /// observation was published. Never a model prompt.
+    fn refresh_catalog(&self, _connection: &str) -> bool {
+        false
+    }
+    /// The route a `provider`/`model`/`thought_level` choice selects (Python
+    /// `_apply_config_selection`): `{route, model, connection, echo}`, where
+    /// `echo` marks a pre-task re-selection of the saved or pending route.
+    fn select(&self, _root: &Path, settings: &Value, id: &str, value: &str) -> CoreResult<Value> {
+        let route = if id == "thought_level" {
+            settings["model"].clone()
+        } else {
+            json!(value)
+        };
+        Ok(json!({"route":route,"model":route,"connection":null,"echo":false}))
+    }
+    fn task_route(&self, root: &Path, settings: &Value) -> CoreResult<SessionRoute> {
+        let route = self.route(root, "orchestrator")?;
+        if settings["model"]
+            .as_str()
+            .is_some_and(|m| !m.is_empty() && m != route.model)
+            || settings["effort"].as_str().is_some_and(|e| {
+                !e.is_empty()
+                    && route.parameters.get("thought_level").map(String::as_str) != Some(e)
+            })
+        {
+            return Err(CoreError::Refused("native_task_route_unavailable"));
+        }
+        Ok(route)
+    }
+}
+/// `history.page` is served from the core projection (see `Service::workspace`
+/// and `native.query`); without it a client never reads the task conversation.
+pub(crate) fn capabilities() -> io::Result<Value> {
+    let mut value = workspace_protocol::capabilities(
+        "workspace-service-native-1.0.6",
+        "1",
+        &[
+            "capabilities.get",
+            "tasks.create",
+            "tasks.start",
+            "decisions.list",
+            "decisions.get",
+            "decisions.answer",
+            "history.page",
+            "reports.read",
+        ],
+    )
+    .map_err(|_| failure("invalid_capabilities"))?;
+    // Retained, delivered files: Start, owner messages (also Request changes) and answers
+    // keep the bodies privately and the engine prompt carries them (`native_attachments`).
+    // Worker guidance does not carry files; its composer says so itself.
+    value["attachments"] = json!(true);
+    workspace_protocol::validate("Capabilities", &value).map_err(|_| failure("invalid_capabilities"))?;
+    Ok(value)
+}
+pub struct UnqualifiedRoutes;
+impl NativeRoutes for UnqualifiedRoutes {
+    fn route(&self, _: &Path, _: &str) -> CoreResult<SessionRoute> {
+        Err(CoreError::Refused("native_route_authorization_unavailable"))
+    }
+}
+pub(crate) struct Runtime {
+    pub(super) host: Arc<NativeHost>,
+    pub(super) maintenance_state: Option<PathBuf>,
+    pub(super) routes: Arc<dyn NativeRoutes>,
+    pub(super) controls: Mutex<()>,
+    pub(super) command_controls: Mutex<()>,
+    pumps: Mutex<HashMap<String, Pump>>,
+    pub(super) guidance: Mutex<HashMap<String, tokio::sync::mpsc::Sender<Value>>>,
+    pub(super) worker_stops: Mutex<HashMap<String, (watch::Sender<bool>, watch::Receiver<bool>)>>,
+    pub(super) wake: tokio::sync::Notify,
+    jobs: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    pub(super) stop: watch::Sender<bool>,
+}
+struct Pump {
+    cancel: watch::Sender<bool>,
+    done: watch::Receiver<bool>,
+}
+fn err(e: CoreError) -> io::Error {
+    failure(e.code())
+}
+pub(crate) fn key(root: &Path) -> CoreResult<ProjectKey> {
+    ProjectKey::new(
+        root,
+        if workspace_protocol::channel::current().is_dev() {
+            StoreChannel::Dev
+        } else {
+            StoreChannel::Release
+        },
+    )
+}
+/// Incoming history-only ingress still refuses unadopted legacy projects.
+pub(crate) fn legacy(root: &Path) -> CoreResult<bool> {
+    let key = key(root)?;
+    if !key.database().try_exists()? {
+        return Ok(false);
+    }
+    Store::open(key, OpenMode::LiveReadOnly)?.read(|db| Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_tasks t WHERE NOT EXISTS(SELECT 1 FROM runtime_events e
+         WHERE e.task_id=t.task_id AND e.type IN ('TASK_CREATED','NATIVE_TASK_ADOPTED') AND json_extract(e.payload_json,'$.execution_host')='rust'))",
+        [], |r| r.get(0))?))
+}
+impl Runtime {
+    pub(crate) fn open(
+        root: &Path,
+        project: &str,
+        routes: Arc<dyn NativeRoutes>,
+    ) -> CoreResult<Self> {
+        Self::open_with(root, project, routes, false)
+    }
+    /// Incoming ACP agents may share a project: see `StoreExecutor::open_shared`.
+    pub(crate) fn open_shared(
+        root: &Path,
+        project: &str,
+        routes: Arc<dyn NativeRoutes>,
+    ) -> CoreResult<Self> {
+        Self::open_with(root, project, routes, true)
+    }
+    fn open_with(
+        root: &Path,
+        project: &str,
+        routes: Arc<dyn NativeRoutes>,
+        shared: bool,
+    ) -> CoreResult<Self> {
+        let host = if shared {
+            NativeHost::open_shared_for_recovery(key(root)?, routes.mcp_registry()?)?
+        } else {
+            NativeHost::open_for_recovery(key(root)?, routes.mcp_registry()?)?
+        };
+        *host.routes.write().unwrap() = Some(routes.clone());
+        let project = project.to_owned();
+        let root = root.to_string_lossy().into_owned();
+        host.executor.write(move |db| {
+            let actor = actor();
+            db.execute("INSERT OR IGNORE INTO workspace_projects VALUES (?,?,?, ?,1)",
+                (&project,&root,&actor,cortex_core::now()))?;
+            let valid: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM workspace_projects WHERE project_id=? AND project_root=? AND activated_by=?)",
+                (&project,&root,&actor), |r| r.get(0))?;
+            if !valid { return Err(CoreError::Refused("project_context_conflict")); }
+            Ok(())
+        })?.blocking_recv().map_err(|_| CoreError::Refused("native_host_closed"))??;
+        let (stop, _) = watch::channel(false);
+        Ok(Self {
+            host: Arc::new(host),
+            maintenance_state: None,
+            routes,
+            controls: Mutex::new(()),
+            command_controls: Mutex::new(()),
+            pumps: Mutex::new(HashMap::new()),
+            guidance: Mutex::new(HashMap::new()),
+            worker_stops: Mutex::new(HashMap::new()),
+            wake: tokio::sync::Notify::new(),
+            jobs: Mutex::new(Vec::new()),
+            stop,
+        })
+    }
+    pub(crate) fn with_maintenance_state(mut self, state: PathBuf) -> Self {
+        self.maintenance_state = Some(state);
+        self
+    }
+    pub(crate) async fn draft_attachments(
+        &self,
+        project: String,
+        task: String,
+    ) -> CoreResult<Value> {
+        self.host
+            .executor
+            .publication(move |store| {
+                cortex_core::workspace::draft_attachments(store, &project, &actor(), &task)
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))?
+    }
+    pub(crate) async fn command(
+        self: &Arc<Self>,
+        project: String,
+        request: Value,
+    ) -> io::Result<Value> {
+        self.client_command(project, request, None).await
+    }
+    pub(super) async fn client_command(
+        self: &Arc<Self>,
+        project: String,
+        request: Value,
+        client: Option<(String, Value, Option<cortex_core::input::Capture>)>,
+    ) -> io::Result<Value> {
+        if *self.stop.borrow() {
+            return Err(failure("service_stopping"));
+        }
+        let host = self.host.clone();
+        let operation = request["operation"].as_str().unwrap_or("");
+        if operation == "capabilities.get" {
+            return capabilities();
+        }
+        if operation == "tasks.create" {
+            return host
+                .executor
+                .publication(move |store| {
+                    Ok(
+                        cortex_core::workspace::create_draft(store, &project, &actor(), &request)?
+                            .receipt,
+                    )
+                })
+                .map_err(err)?
+                .await
+                .map_err(|_| failure("native_host_closed"))?
+                .map_err(err);
+        }
+        if matches!(operation, "decisions.list" | "decisions.get") {
+            return self.decisions(project, request).await;
+        }
+        if operation == "decisions.answer" {
+            return self.answer_command(project, request).await;
+        }
+        if operation == "reports.read" {
+            let report = request["target"].as_str().unwrap_or("").to_owned();
+            let cursor = request["cursor"].as_str().map(str::to_owned);
+            let limit = request["limit"].as_u64().unwrap_or(4000).clamp(1, 4000) as usize;
+            let value = host
+                .executor
+                .publication(move |store| {
+                    cortex_core::workspace::read_report_page(
+                        store,
+                        &project,
+                        &report,
+                        cursor.as_deref(),
+                        limit,
+                    )
+                })
+                .map_err(err)?
+                .await
+                .map_err(|_| failure("native_host_closed"))?
+                .map_err(err)?;
+            return workspace_protocol::validate("ReportPage", &value)
+                .map(|_| value)
+                .map_err(|_| failure("invalid_report_page"));
+        }
+        if operation != "tasks.start" {
+            return Err(failure("native_operation_unavailable"));
+        }
+        let _control = self.controls.lock().await;
+        let replay_project = project.clone();
+        let replay_request = request.clone();
+        if let Some(receipt) = host
+            .executor
+            .publication({
+                let incoming = client.is_some();
+                move |store| {
+                    if incoming {
+                        return Ok(None);
+                    }
+                    cortex_core::workspace::replay_native_start(
+                        store,
+                        &replay_project,
+                        &actor(),
+                        &replay_request,
+                    )
+                }
+            })
+            .map_err(err)?
+            .await
+            .map_err(|_| failure("native_host_closed"))?
+            .map_err(err)?
+        {
+            return Ok(receipt);
+        }
+        // Candidate parsing is deliberately not authorization. Refuse before admission/effects.
+        // A desktop draft's saved model/effort is qualified exactly as its coordinator
+        // turns will route it (`task_route`), never against the owner default alone.
+        let saved = if client.is_none() {
+            let (p, t) = (
+                project.clone(),
+                request["target"].as_str().unwrap_or("").to_owned(),
+            );
+            host.executor
+                .publication(move |store| {
+                    cortex_core::workspace::draft_settings(store, &p, &actor(), &t)
+                })
+                .map_err(err)?
+                .await
+                .map_err(|_| failure("native_host_closed"))?
+                .map_err(err)?
+        } else {
+            None
+        };
+        // A task's own route never needs a resolvable owner default (incoming
+        // clients carry their settings; a desktop draft its saved ones).
+        let pin_settings = saved
+            .clone()
+            .or_else(|| client.as_ref().map(|(_, settings, _)| settings.clone()));
+        let coordinator = match &pin_settings {
+            Some(settings) => self.routes.task_route(&host.root, settings),
+            None => self.routes.route(&host.root, "orchestrator"),
+        }
+        .map_err(err)?;
+        let pin = match &pin_settings {
+            Some(settings) => self.routes.coordinator_pin(&host.root, settings),
+            None => self.routes.coordinator_pin(&host.root, &json!({})),
+        }
+        .map_err(err)?;
+        let mut jobs = self.jobs.lock().await;
+        if *self.stop.borrow() {
+            return Err(failure("service_stopping"));
+        }
+        jobs.retain(|j| !j.is_finished());
+        if jobs.len() >= 32 {
+            return Err(failure("native_capacity_unavailable"));
+        }
+        // Own admission before awaiting SQLite. Losing a window/request must not
+        // strand a committed Start or cause a retry to launch a second process.
+        let (send, reply) = tokio::sync::oneshot::channel();
+        let runtime = self.clone();
+        jobs.push(tokio::spawn(async move {
+            let maintenance = runtime.maintenance_state.clone();
+            let admitted = async {
+                host.executor
+                    .publication(move |store| {
+                        let _guard = maintenance
+                            .as_deref()
+                            .map(crate::machine::maintenance::admission)
+                            .transpose()
+                            .map_err(|e| CoreError::Refused(e.code))?;
+                        cortex_core::workspace::start_native_input(
+                            store,
+                            &project,
+                            &actor(),
+                            &request,
+                            client
+                                .as_ref()
+                                .map(|(session, settings, _)| (session.as_str(), settings)),
+                            client.as_ref().and_then(|(_, _, capture)| capture.as_ref()),
+                        )
+                    })
+                    .map_err(err)?
+                    .await
+                    .map_err(|_| failure("native_host_closed"))?
+                    .map_err(err)
+            }
+            .await;
+            match admitted {
+                Err(error) => {
+                    let _ = send.send(Err(error));
+                }
+                Ok(admitted) => {
+                    if admitted["fresh"] != true {
+                        let _ = send.send(Ok(admitted["receipt"].clone()));
+                        return;
+                    }
+                    let task = admitted["task"].as_str().unwrap().to_owned();
+                    let owner = OwnerEpoch {
+                        owner: admitted["owner"]["owner"].as_str().unwrap().into(),
+                        epoch: admitted["owner"]["epoch"].as_i64().unwrap(),
+                    };
+                    let goal = admitted["goal"].as_str().unwrap().to_owned();
+                    // Pin the resolved coordinator route with the task's start.
+                    if let Some(pin) = pin {
+                        let t = task.clone();
+                        if let Ok(reply) = runtime.host.executor.write(move |db| {
+                            cortex_core::lifecycle::event_tx(db, &t, "NATIVE_COORDINATOR_ROUTE", pin)?;
+                            Ok(())
+                        }) {
+                            let _ = reply.await;
+                        }
+                    }
+                    let (cancel, cancelled) = watch::channel(false);
+                    let (done, finished) = watch::channel(false);
+                    runtime
+                        .install_pump(task.clone(), cancel, finished)
+                        .await;
+                    let _ = send.send(Ok(admitted["receipt"].clone()));
+                    if let Err(error) = runtime
+                        .drive(&task, &owner, &goal, coordinator, cancelled.clone())
+                        .await
+                    {
+                        if *cancelled.borrow() || *runtime.stop.borrow() {
+                            done.send_replace(true);
+                            return;
+                        }
+                        runtime
+                            .stop_after_error(&task, &owner, error, cancelled.clone())
+                            .await;
+                    }
+                    done.send_replace(true);
+                }
+            }
+        }));
+        drop(jobs);
+        reply
+            .await
+            .map_err(|_| failure("native_start_outcome_unknown"))?
+    }
+    async fn turn(
+        &self,
+        task: &str,
+        owner: &OwnerEpoch,
+        role: SessionRole,
+        mut route: SessionRoute,
+        prompt: &str,
+        mut cancelled: watch::Receiver<bool>,
+    ) -> CoreResult<()> {
+        let settings = self.task_settings(task).await?;
+        if matches!(role, SessionRole::Coordinator) {
+            route = self.coordinator_route(task, Some(route)).await?;
+        }
+        if let Some(language @ ("en" | "ru")) = settings["language"].as_str() {
+            route
+                .instructions
+                .push_str(&format!("\nOwner-selected response language: {language}."));
+        }
+        let mut prompt = prompt.to_owned();
+        if matches!(role, SessionRole::Coordinator) {
+            let t = task.to_owned();
+            let instruction = self
+                .host
+                .executor
+                .read(move |db| {
+                    cortex_core::lifecycle::skill_proposals::planning_instruction(db, &t)
+                })?
+                .await
+                .map_err(|_| CoreError::Refused("native_host_closed"))??;
+            if !instruction.is_empty() {
+                prompt.push_str(&format!("\n\n{instruction}"));
+            }
+        }
+        let assignment = match &role {
+            SessionRole::Worker { assignment } => Some(assignment.clone()),
+            _ => None,
+        };
+        let is_worker = assignment.is_some();
+        // Register owner guidance/stop before dispatch: dispatch already reports the
+        // worker ready, and a message sent at that moment must reach it.
+        let (sender, mut guidance) = tokio::sync::mpsc::channel(8);
+        let (worker_stop, mut worker_cancelled) = watch::channel(false);
+        let (worker_done, worker_finished) = watch::channel(false);
+        if let Some(a) = &assignment {
+            self.guidance.lock().await.insert(a.clone(), sender);
+            self.worker_stops
+                .lock()
+                .await
+                .insert(a.clone(), (worker_stop, worker_finished));
+        }
+        let driver = match self
+            .host
+            .dispatch(task.into(), owner.clone(), role, route)
+            .await
+        {
+            Ok(driver) => driver,
+            Err(error) => {
+                if let Some(a) = &assignment {
+                    self.guidance.lock().await.remove(a);
+                    self.worker_stops.lock().await.remove(a);
+                }
+                return Err(error);
+            }
+        };
+        let mut stop = self.stop.subscribe();
+        let turn = if *stop.borrow_and_update() || *cancelled.borrow() {
+            Err(CoreError::Refused("native_service_stopped"))
+        } else {
+            tokio::select! {
+                result = async {
+                    self.guided_prompt(&driver, &prompt, &mut guidance).await?;
+                    loop {
+                        let wake = self.wake.notified();
+                        tokio::pin!(wake);
+                        wake.as_mut().enable();
+                        match driver.wait_state().await?.as_deref() {
+                            Some("ready") => { driver.continue_answer().await?; },
+                            Some("open") => tokio::select! {
+                                _ = &mut wake => {},
+                                // A worker process that dies while its question is open is
+                                // noticed now, not when the answer arrives. The turn ends
+                                // and the exited process is settled; the lost-worker path
+                                // then replaces the assignment and retires its wait.
+                                _ = driver.process_exited(), if is_worker => break,
+                                Some(message) = guidance.recv() => {
+                                    let result = driver.prompt(&crate::native_owner_controls::guidance_prompt(&message)).await;
+                                    driver.guidance_delivery(message, result.is_ok(), false).await?;
+                                    result?;
+                                }
+                            },
+                            _ => break,
+                        }
+                    }
+                    Ok(())
+                } => result,
+                _ = stop.changed() => Err(CoreError::Refused("native_service_stopped")),
+                _ = cancelled.changed() => Err(CoreError::Refused("native_task_interrupted")),
+                _ = worker_cancelled.changed() => Ok(()),
+            }
+        };
+        // Always observe the owned wait, including prompt failure or service shutdown.
+        if let Some(a) = &assignment {
+            self.guidance.lock().await.remove(a);
+        }
+        let settled = driver.shutdown().await;
+        if settled.is_ok() {
+            worker_done.send_replace(true);
+        }
+        if let Some(a) = assignment {
+            self.worker_stops.lock().await.remove(&a);
+        }
+        settled?;
+        // result_submit can revoke its channel before ACP returns. Only a persisted
+        // result/plan checked by advance permits progress, never transport loss alone.
+        if let Err(e) = turn {
+            if e.code() != "native_turn_outcome_unknown" {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+    /// Stop a driver that failed. A first completion gap returns the task to its
+    /// coordinator (`ASK_USER_REQUIRED` → RECOVERING) so that it asks the owner: drive
+    /// that coordinator turn here, or nothing ever asks and the task hangs. A second
+    /// stop asks the owner directly (WAITING_USER); every round ends in a stop.
+    pub(super) async fn stop_after_error(
+        self: &Arc<Self>,
+        task: &str,
+        owner: &OwnerEpoch,
+        mut error: CoreError,
+        cancelled: watch::Receiver<bool>,
+    ) {
+        for round in 0..3 {
+            if *cancelled.borrow() || *self.stop.borrow() {
+                return;
+            }
+            let code = error.code().to_owned();
+            // Only a completion gap returns to the coordinator. Other work blockers (a
+            // lost worker whose retries gave up, a failed check) have no coordinator turn
+            // that would ask: the owner gets the runtime's own stop question at once, with
+            // its concrete answers, never a silent RECOVERING hold with nothing to press.
+            let gap = code.starts_with("completion_");
+            let t = task.to_owned();
+            let state = match self.host.executor.write(move |db| {
+                cortex_core::lifecycle::event_tx(
+                    db,
+                    &t,
+                    "NATIVE_DRIVER_STOPPED",
+                    json!({"reason":code}),
+                )?;
+                let state = cortex_core::lifecycle::domain::stop_tx(db, &t, &code)?;
+                if !gap && state == cortex_core::TaskState::Recovering {
+                    return cortex_core::lifecycle::domain::stop_tx(db, &t, &code);
+                }
+                Ok(state)
+            }) {
+                Ok(reply) => reply.await.ok().and_then(|r| r.ok()),
+                Err(_) => None,
+            };
+            if round == 2 || !gap || state != Some(cortex_core::TaskState::Recovering) {
+                return;
+            }
+            match self.progress(task, owner, cancelled.clone()).await {
+                Ok(()) => return,
+                Err(next) => error = next,
+            }
+        }
+    }
+    async fn drive(
+        &self,
+        task: &str,
+        owner: &OwnerEpoch,
+        goal: &str,
+        route: SessionRoute,
+        cancelled: watch::Receiver<bool>,
+    ) -> CoreResult<()> {
+        if *self.stop.borrow() {
+            return Err(CoreError::Refused("native_service_stopped"));
+        }
+        self.turn(
+            task,
+            owner,
+            SessionRole::Coordinator,
+            route,
+            goal,
+            cancelled.clone(),
+        )
+        .await?;
+        self.progress(task, owner, cancelled).await
+    }
+    pub(super) async fn recover_planning(
+        &self,
+        task: &str,
+        owner: &OwnerEpoch,
+        cancelled: watch::Receiver<bool>,
+    ) -> CoreResult<()> {
+        // SessionDriver rebuilds the capsule on its serial writer lane immediately
+        // before delivery; never reuse a snapshot captured before replacement.
+        let goal="Coordinator recovery on a new engine session. The prior process has a confirmed terminal observation. Do not replay commands, permissions or claimed deliveries. Continue from the fresh retained-state capsule; missing outcomes remain unresolved.";
+        let route = self.routes.route(&self.host.root, "orchestrator")?;
+        self.drive(task, owner, goal, route, cancelled).await
+    }
+    pub(super) async fn install_pump(
+        &self,
+        task: String,
+        cancel: watch::Sender<bool>,
+        done: watch::Receiver<bool>,
+    ) {
+        // The map lock is held across the wait so two installers cannot interleave:
+        // a task never has two drivers. A dropped sender means the prior driver is gone.
+        let mut pumps = self.pumps.lock().await;
+        if let Some(prior) = pumps.remove(&task) {
+            prior.cancel.send_replace(true);
+            let mut done = prior.done;
+            while !*done.borrow_and_update() {
+                if done.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+        pumps.insert(task, Pump { cancel, done });
+    }
+    pub(super) async fn spawn_recovery(
+        &self,
+        job: impl std::future::Future<Output = ()> + Send + 'static,
+    ) {
+        let mut jobs = self.jobs.lock().await;
+        jobs.retain(|j| !j.is_finished());
+        jobs.push(tokio::spawn(job));
+    }
+    pub(super) async fn progress(
+        &self,
+        task: &str,
+        owner: &OwnerEpoch,
+        cancelled: watch::Receiver<bool>,
+    ) -> CoreResult<()> {
+        loop {
+            if *self.stop.borrow() || *cancelled.borrow() {
+                return Err(CoreError::Refused("native_service_stopped"));
+            }
+            self.spend_progress(task).await?;
+            loop {
+                if *self.stop.borrow() || *cancelled.borrow() {
+                    return Err(CoreError::Refused("native_service_stopped"));
+                }
+                let t = task.to_owned();
+                let waiting = self
+                    .host
+                    .executor
+                    .write(move |db| {
+                        Ok(cortex_core::lifecycle::domain::task_tx(db, &t)?.0
+                            == cortex_core::TaskState::WaitingUser
+                            || cortex_core::lifecycle::waits::projection_tx(db, &t)?
+                                .iter()
+                                .any(|w| {
+                                    w["status"] == "open" && w["continuation_required"] == true
+                                }))
+                    })?
+                    .await
+                    .map_err(|_| CoreError::Refused("native_host_closed"))??;
+                if !waiting {
+                    break;
+                }
+                tokio::select! {
+                    _ = self.wake.notified() => {},
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+                }
+            }
+            let step = loop {
+                if *self.stop.borrow() || *cancelled.borrow() {
+                    return Err(CoreError::Refused("native_service_stopped"));
+                }
+                let step = self.host.advance(task.into(), owner.clone()).await?;
+                if !step["assignments"].as_array().is_some_and(|a| a.is_empty()) {
+                    break step;
+                }
+                // A settled replacement waits out its retained retry backoff.
+                // Waiting does not consume the bounded progress/dispatch budget.
+                let t = task.to_owned();
+                let delayed = self.host.executor.read(move |db| {
+                    let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                        .map_err(|_|CoreError::Refused("clock_unavailable"))?.as_secs_f64();
+                    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_nodes n
+                        JOIN runtime_tasks t USING(task_id) WHERE n.task_id=? AND n.revision=t.revision
+                        AND n.status='pending' AND EXISTS(SELECT 1 FROM runtime_events e
+                            WHERE e.id=(SELECT max(x.id) FROM runtime_events x WHERE x.task_id=n.task_id
+                                AND x.type='ASSIGNMENT_RETRIED' AND json_extract(x.payload_json,'$.node')=n.node_id
+                                AND json_extract(x.payload_json,'$.revision')=n.revision)
+                            AND json_extract(e.payload_json,'$.retry_not_before')>?))",
+                        (&t,now),|r|r.get::<_,bool>(0))?)
+                })?.await.map_err(|_|CoreError::Refused("native_host_closed"))??;
+                if !delayed {
+                    // A ready step whose files another task's worker still holds is
+                    // queued behind that holding, never stopped as a dead end. The wait is
+                    // recorded once per holder; it ends when the holding is released.
+                    if !self.wait_for_write_holding(task, owner, &cancelled).await? {
+                        break step;
+                    }
+                    continue;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            };
+            if matches!(
+                step["state"].as_str(),
+                Some("COMPLETED" | "FAILED" | "CANCELLED")
+            ) {
+                return Ok(());
+            }
+            if matches!(
+                step["state"].as_str(),
+                Some("RECOVERING" | "PLANNING" | "RECONCILING")
+            ) {
+                let t = task.to_owned();
+                let o = owner.clone();
+                self.host.executor.write(move|db|{
+                    cortex_core::ownership::check_tx(db,&t,&o)?;
+                    if cortex_core::lifecycle::domain::task_tx(db,&t)?.0==cortex_core::TaskState::Recovering {
+                        cortex_core::lifecycle::domain::settle_recovery_tx(db,&t,cortex_core::TaskState::Planning)?;
+                    }
+                    let count:i64=db.query_row("SELECT count(*) FROM runtime_events WHERE task_id=? AND type='NATIVE_COORDINATOR_CONTINUED'
+                        AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=? AND type IN
+                        ('PLAN_ACCEPTED','VERIFICATION_PASSED','VERIFICATION_FAILED','REPLAN_REQUEST_ACCEPTED','USER_ANSWER_RECEIVED','USER_STEERING')),0)",(&t,&t),|r|r.get(0))?;
+                    if count>=3 { return Err(CoreError::Refused("coordinator_no_progress_limit")); }
+                    cortex_core::lifecycle::event_tx(db,&t,"NATIVE_COORDINATOR_CONTINUED",json!({"state":cortex_core::lifecycle::domain::task_tx(db,&t)?.0}))?;
+                    Ok(())
+                })?.await.map_err(|_|CoreError::Refused("native_host_closed"))??;
+                let route = self.routes.route(&self.host.root, "orchestrator")?;
+                self.turn(task,owner,SessionRole::Coordinator,route,
+                    "Continue from the retained-state capsule. Reconcile verified work with synthesis_submit, ask a structured user question if a decision remains, repair failed verification with verification_submit, or propose necessary new work. Never certify missing evidence.",
+                    cancelled.clone()).await?;
+                continue;
+            }
+            let assignments = step["assignments"]
+                .as_array()
+                .filter(|a| !a.is_empty())
+                .ok_or(CoreError::Refused("native_continuation_unavailable"))?;
+            // Claimed workers of one batch run their turns concurrently, each with its own
+            // session, channel, write reservation and result. One failing turn, a stale plan
+            // or a cancellation stops the others through `batch`; nothing is dropped mid-turn.
+            let (batch, batch_cancelled) = watch::channel(false);
+            let stale = std::sync::atomic::AtomicBool::new(false);
+            let batch_cancelled = &batch_cancelled;
+            let turns = assignments.iter().map(|assignment| {
+                let mut stop = batch_cancelled.clone();
+                let batch = &batch;
+                let stale = &stale;
+                Box::pin(async move {
+                    // A turn that was never started when the batch is already cancelled
+                    // is skipped; its claimed node is settled by the usual lost-worker path.
+                    if *stop.borrow_and_update() {
+                        return Ok(());
+                    }
+                    let result = self
+                        .run_assignment(task, owner, assignment, batch_cancelled.clone())
+                        .await;
+                    self.settle_batch_turn(task, result, batch, stale).await
+                })
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = CoreResult<()>> + Send + '_>,
+                    >
+            });
+            let mut turns: Vec<_> = turns.map(Some).collect();
+            let mut results: Vec<Option<CoreResult<()>>> = (0..turns.len()).map(|_| None).collect();
+            let mut parent = cancelled.clone();
+            let joined = std::future::poll_fn(|cx| {
+                let mut pending = false;
+                for (turn, result) in turns.iter_mut().zip(results.iter_mut()) {
+                    if let Some(future) = turn {
+                        match future.as_mut().poll(cx) {
+                            std::task::Poll::Ready(r) => {
+                                *result = Some(r);
+                                *turn = None;
+                            }
+                            std::task::Poll::Pending => pending = true,
+                        }
+                    }
+                }
+                if pending {
+                    std::task::Poll::Pending
+                } else {
+                    std::task::Poll::Ready(())
+                }
+            });
+            tokio::pin!(joined);
+            tokio::select! {
+                _ = &mut joined => {}
+                _ = async {
+                    loop {
+                        if *parent.borrow_and_update() {
+                            break;
+                        }
+                        if parent.changed().await.is_err() {
+                            std::future::pending::<()>().await;
+                        }
+                    }
+                } => {
+                    // Cancellation reaches every turn through the batch; each settles its own session.
+                    batch.send_replace(true);
+                    (&mut joined).await;
+                }
+            }
+            let stale = stale.load(std::sync::atomic::Ordering::SeqCst);
+            // The causal failure wins over siblings that were only interrupted because of it.
+            let mut first: Option<CoreError> = None;
+            for result in results.into_iter().flatten() {
+                if let Err(error) = result {
+                    if error.code() == "native_task_interrupted" && (stale || first.is_some()) {
+                        continue;
+                    }
+                    if first
+                        .as_ref()
+                        .is_none_or(|f| f.code() == "native_task_interrupted")
+                    {
+                        first = Some(error);
+                    }
+                }
+            }
+            if let Some(error) = first {
+                return Err(error);
+            }
+        }
+    }
+    /// Close one worker turn of a batch. Every exit path, including a failed state read,
+    /// signals the batch, so siblings never keep running after this turn is lost.
+    ///
+    /// A worker question normally leaves the task Executing/Reviewing (only the asking
+    /// worker waits). The task moves to WAITING_USER only when the worker has no engine
+    /// session reference; then the whole task waits and sibling channels are no longer
+    /// authorised (workers act only while EXECUTING/REVIEWING), so they are stopped.
+    async fn settle_batch_turn(
+        &self,
+        task: &str,
+        result: CoreResult<()>,
+        batch: &watch::Sender<bool>,
+        stale: &std::sync::atomic::AtomicBool,
+    ) -> CoreResult<()> {
+        if result.is_err() {
+            batch.send_replace(true);
+            return result;
+        }
+        let t = task.to_owned();
+        let state = async {
+            Ok::<_, CoreError>(
+                self.host
+                    .executor
+                    .write(move |db| cortex_core::lifecycle::domain::task_tx(db, &t))?
+                    .await
+                    .map_err(|_| CoreError::Refused("native_host_closed"))??
+                    .0,
+            )
+        }
+        .await;
+        match state {
+            Ok(state) => {
+                // A worker proposal can cancel siblings already claimed in this batch.
+                if !matches!(
+                    state,
+                    cortex_core::TaskState::Executing | cortex_core::TaskState::Reviewing
+                ) {
+                    stale.store(true, std::sync::atomic::Ordering::SeqCst);
+                    batch.send_replace(true);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                batch.send_replace(true);
+                Err(error)
+            }
+        }
+    }
+    /// The progress budget is persisted (`cortex_core::lifecycle::progress`), so a
+    /// restarted driver continues the count instead of resetting it.
+    async fn spend_progress(&self, task: &str) -> CoreResult<()> {
+        let t = task.to_owned();
+        self.host
+            .executor
+            .write(move |db| {
+                cortex_core::lifecycle::progress::spend_tx(
+                    db,
+                    &t,
+                    cortex_core::lifecycle::progress::PROGRESS_BUDGET,
+                )
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))?
+    }
+    /// Whether a ready step of the task waited for another task's write holding
+    /// (`cortex_core::scheduler::policy::write_conflict_tx`). Returns `false` at once
+    /// when nothing is held; otherwise records `NATIVE_WRITE_CONFLICT_WAITING` once for
+    /// the holder, waits until the holding is gone (or the driver is stopped) and
+    /// returns `true` so the caller claims again. Waiting spends no progress budget.
+    async fn wait_for_write_holding(
+        &self,
+        task: &str,
+        owner: &OwnerEpoch,
+        cancelled: &watch::Receiver<bool>,
+    ) -> CoreResult<bool> {
+        let mut waited = false;
+        loop {
+            if *self.stop.borrow() || *cancelled.borrow() {
+                return Err(CoreError::Refused("native_service_stopped"));
+            }
+            let (t, o) = (task.to_owned(), owner.clone());
+            let conflict = self
+                .host
+                .executor
+                .write(move |db| {
+                    cortex_core::ownership::check_tx(db, &t, &o)?;
+                    let Some(conflict) = cortex_core::scheduler::policy::write_conflict_tx(db, &t)? else {
+                        return Ok(false);
+                    };
+                    // One record per holder since the latest plan or owner message.
+                    let recorded: bool = db.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?1 AND type='NATIVE_WRITE_CONFLICT_WAITING'
+                         AND json_extract(payload_json,'$.holder_task')=?2
+                         AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type IN
+                            ('PLAN_ACCEPTED','USER_STEERING','USER_ANSWER_RECEIVED','ASSIGNMENT_CREATED')),0))",
+                        (&t, conflict["holder_task"].as_str().unwrap_or_default()),
+                        |r| r.get(0),
+                    )?;
+                    if !recorded {
+                        cortex_core::lifecycle::event_tx(db, &t, "NATIVE_WRITE_CONFLICT_WAITING", conflict)?;
+                    }
+                    Ok(true)
+                })?
+                .await
+                .map_err(|_| CoreError::Refused("native_host_closed"))??;
+            if !conflict {
+                return Ok(waited);
+            }
+            waited = true;
+            tokio::select! {
+                _ = self.wake.notified() => {},
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
+            }
+        }
+    }
+    /// Select a route for one claimed assignment, record it and run the worker's turn.
+    async fn run_assignment(
+        &self,
+        task: &str,
+        owner: &OwnerEpoch,
+        assignment: &Value,
+        cancelled: watch::Receiver<bool>,
+    ) -> CoreResult<()> {
+        let role = assignment["role"]
+            .as_str()
+            .ok_or(CoreError::Refused("native_role_missing"))?;
+        let t = task.to_owned();
+        let a = assignment["assignment_ref"].as_str().unwrap().to_owned();
+        let root = self.host.root.clone();
+        let (node,evidence,escalated,previous,revision)=self.host.executor.read(move |db| {
+            let (plan,node_id,stage,revision):(Option<String>,String,String,i64)=db.query_row(
+                "SELECT t.plan_json,n.node_id,n.stage,t.revision FROM runtime_nodes n JOIN runtime_tasks t USING(task_id) WHERE n.task_id=? AND n.assignment_ref=?",
+                (&t,&a),|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+            let plan:Value=serde_json::from_str(plan.as_deref().unwrap_or("{}"))?;
+            // Planned nodes route by their own fields; fix and review nodes by the
+            // routing recorded when the runtime created them.
+            let mut node=cortex_core::lifecycle::plan::node_routing(&plan,&node_id);
+            if !node.is_object(){node=json!({});}
+            node["id"]=json!(node_id);
+            // Escalation means a previous dispatch of this node in this plan revision
+            // (review cycles carry the cycle in the node id); a replan reusing the id
+            // starts fresh.
+            let previous=cortex_core::routing::previous_dispatch_engine(db,&t,&node_id,revision)?;
+            let escalated=previous.is_some();
+            if stage=="review"{
+                // Independence: the reviewer should run on a model other than the
+                // reviewed execution nodes' models (and preferably another engine).
+                let mut stmt=db.prepare("SELECT json_extract(e.payload_json,'$.route_engine'),json_extract(e.payload_json,'$.model')
+                    FROM runtime_events e WHERE e.task_id=? AND e.type='NATIVE_ROUTE_SELECTED' AND json_extract(e.payload_json,'$.revision')=?
+                    AND json_extract(e.payload_json,'$.node') IN (SELECT node_id FROM runtime_nodes WHERE task_id=e.task_id AND revision=? AND stage='execution') ORDER BY e.id")?;
+                let reviewed=stmt.query_map((&t,revision,revision),|r|Ok(json!({"engine":r.get::<_,Option<String>>(0)?,"model":r.get::<_,Option<String>>(1)?})))?
+                    .collect::<Result<Vec<_>,_>>()?;
+                node["avoid_routes"]=json!(reviewed);
+            }
+            Ok((node,cortex_core::routing::evidence(db,&t,&root)?,escalated,previous,revision))
+        })?.await.map_err(|_|CoreError::Refused("native_host_closed"))??;
+        let (route, mut decision) = self.routes.worker_selection(
+            &self.host.root,
+            role,
+            &node,
+            &evidence,
+            escalated,
+            previous.as_deref(),
+        )?;
+        // Review independence facts come from the route actually chosen, whoever
+        // produced it: the same model as the reviewed work is a visible warning.
+        if let Some(avoid) = node["avoid_routes"].as_array().filter(|a| !a.is_empty()) {
+            let same_model = avoid.iter().any(|a| a["model"] == json!(route.model));
+            let same_engine = !decision["route_engine"].is_null()
+                && avoid.iter().any(|a| a["engine"] == decision["route_engine"]);
+            decision["independence"] = if same_model {
+                json!({"status":"warning","model":route.model,"same_model_as_reviewed":true,
+                    "same_engine_as_reviewed":same_engine,
+                    "warning":"The reviewer runs on the same model as the work it reviews: no other model was available or selected for this review."})
+            } else {
+                json!({"status":"independent","model":route.model,"same_engine_as_reviewed":same_engine})
+            };
+        }
+        let t = task.to_owned();
+        let a = assignment.clone();
+        let selected = json!({"assignment_ref":a["assignment_ref"],"node":a["node"],"revision":revision,"route_engine":decision["route_engine"],"engine":match route.launch.engine {
+            cortex_engine::environment::EngineKind::Codex=>"codex-acp",
+            cortex_engine::environment::EngineKind::Claude=>"claude-agent-acp",
+            cortex_engine::environment::EngineKind::OpenCode=>"opencode"},
+            "model":route.model,"connection_id":route.connection,"parameters":route.parameters,"decision":decision});
+        self.host
+            .executor
+            .write(move |db| {
+                cortex_core::lifecycle::event_tx(db, &t, "NATIVE_ROUTE_SELECTED", selected)?;
+                Ok(())
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        self.turn(
+            task,
+            owner,
+            SessionRole::Worker {
+                assignment: assignment["assignment_ref"].as_str().unwrap().into(),
+            },
+            route,
+            &assignment.to_string(),
+            cancelled,
+        )
+        .await
+    }
+    pub(super) async fn settle_task(&self, task: &str) -> CoreResult<()> {
+        let done = {
+            let pumps = self.pumps.lock().await;
+            pumps.get(task).map(|pump| {
+                pump.cancel.send_replace(true);
+                pump.done.clone()
+            })
+        };
+        // A dropped sender means the driver job is gone (it ended without signalling,
+        // e.g. it panicked): no driver of this task runs any more. This only fences
+        // drivers; whether their engine processes exited is decided separately by the
+        // durable provisioning/reservation rows that `control::finish` checks.
+        if let Some(mut done) = done {
+            while !*done.borrow_and_update() {
+                if done.changed().await.is_err() {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+    pub(super) async fn continue_task(
+        self: &Arc<Self>,
+        task: String,
+        owner: OwnerEpoch,
+        prompt: String,
+        route: SessionRoute,
+    ) -> CoreResult<()> {
+        let (cancel, cancelled) = watch::channel(false);
+        let (done, finished) = watch::channel(false);
+        self.install_pump(task.clone(), cancel, finished).await;
+        let runtime = self.clone();
+        let mut jobs = self.jobs.lock().await;
+        jobs.retain(|j| !j.is_finished());
+        jobs.push(tokio::spawn(async move {
+            if let Err(error) = runtime
+                .drive(&task, &owner, &prompt, route, cancelled.clone())
+                .await
+            {
+                runtime
+                    .stop_after_error(&task, &owner, error, cancelled.clone())
+                    .await;
+            }
+            done.send_replace(true);
+        }));
+        Ok(())
+    }
+    pub(crate) async fn shutdown(&self) {
+        self.stop.send_replace(true);
+        let _serial = self.controls.lock().await;
+        for job in self.jobs.lock().await.drain(..) {
+            let _ = job.await;
+        }
+    }
+}
+impl Service {
+    /// Native embedding/test entry. It accepts host authority, never wire launch fields.
+    pub async fn bind_native(
+        mut config: crate::Config,
+        routes: Arc<dyn NativeRoutes>,
+    ) -> io::Result<Arc<Self>> {
+        config.launch.native_routes = Some(routes);
+        Self::bind(config).await
+    }
+}
+#[cfg(test)]
+mod pump_tests {
+    use super::*;
+    use std::time::Duration;
+    // A turn whose state read fails still signals the batch (siblings must not keep running).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_state_read_after_a_turn_still_signals_the_batch() {
+        let root = std::env::temp_dir().join(format!("batch-{}", crate::identity().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.clone();
+        let runtime = Arc::new(
+            tokio::task::spawn_blocking(move || {
+                Runtime::open(&path, "project", Arc::new(UnqualifiedRoutes))
+            })
+            .await
+            .unwrap()
+            .unwrap(),
+        );
+        let (batch, sibling) = watch::channel(false);
+        let stale = std::sync::atomic::AtomicBool::new(false);
+        let outcome = runtime
+            .settle_batch_turn("no-such-task", Ok(()), &batch, &stale)
+            .await;
+        assert!(outcome.is_err());
+        assert!(*sibling.borrow(), "siblings must be signalled on every exit path");
+        // A failed turn signals the batch too.
+        let (batch, sibling) = watch::channel(false);
+        let _ = runtime
+            .settle_batch_turn("no-such-task", Err(CoreError::Refused("x")), &batch, &stale)
+            .await;
+        assert!(*sibling.borrow());
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    // Installing a pump for a task that already has one cancels it and waits for it to
+    // finish; the new driver is never visible while the old one may still be running.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn installing_a_pump_cancels_and_awaits_the_prior_driver() {
+        let root = std::env::temp_dir().join(format!("pump-{}", crate::identity().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.clone();
+        let runtime = Arc::new(
+            tokio::task::spawn_blocking(move || {
+                Runtime::open(&path, "project", Arc::new(UnqualifiedRoutes))
+            })
+            .await
+            .unwrap()
+            .unwrap(),
+        );
+        let (cancel1, mut cancelled1) = watch::channel(false);
+        let (done1, finished1) = watch::channel(false);
+        runtime.install_pump("t".into(), cancel1, finished1).await;
+        let (cancel2, _cancelled2) = watch::channel(false);
+        let (_done2, finished2) = watch::channel(false);
+        let r = runtime.clone();
+        let second = tokio::spawn(async move { r.install_pump("t".into(), cancel2, finished2).await });
+        cancelled1.changed().await.unwrap();
+        assert!(*cancelled1.borrow());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!second.is_finished(), "replacement must wait for the prior driver");
+        done1.send_replace(true);
+        second.await.unwrap();
+        assert_eq!(runtime.pumps.lock().await.len(), 1);
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    // A driver job that ended without signalling (its sender dropped, e.g. a panic)
+    // no longer runs: settling the task must not fail every later owner control.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_driver_gone_without_signalling_is_settled() {
+        let root = std::env::temp_dir().join(format!("pump-gone-{}", crate::identity().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.clone();
+        let runtime = Arc::new(
+            tokio::task::spawn_blocking(move || {
+                Runtime::open(&path, "project", Arc::new(UnqualifiedRoutes))
+            })
+            .await
+            .unwrap()
+            .unwrap(),
+        );
+        let (cancel, mut cancelled) = watch::channel(false);
+        let (done, finished) = watch::channel(false);
+        runtime.install_pump("t".into(), cancel, finished).await;
+        let job = tokio::spawn(async move {
+            let _ = cancelled.changed().await;
+            drop(done);
+        });
+        runtime.settle_task("t").await.unwrap();
+        job.await.unwrap();
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    // A ready step whose file another unfinished task's worker holds waits for it (one
+    // recorded wait), instead of stopping the task as `native_continuation_unavailable`;
+    // it claims again once the holder's task is cancelled.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_step_held_by_another_tasks_writer_waits_until_the_holding_ends() {
+        let root = std::env::temp_dir().join(format!("held-{}", crate::identity().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.clone();
+        let runtime = Arc::new(
+            tokio::task::spawn_blocking(move || {
+                Runtime::open(&path, "project", Arc::new(UnqualifiedRoutes))
+            })
+            .await
+            .unwrap()
+            .unwrap(),
+        );
+        let owners = runtime.host.executor.publication(|store| {
+            let machine = cortex_core::lifecycle::TaskMachine::new(store);
+            let waiting = machine.create("waiting", "Reset test", "owner")?;
+            machine.create("holder", "formatAll", "owner")?;
+            store.write(|db| {
+                db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1", [])?;
+                db.execute("INSERT INTO runtime_nodes VALUES ('holder',1,'formatAll','worker-backend-dev','o','[]','[\"test/counter.test.js\"]','execution','running','ha',NULL)", [])?;
+                db.execute("INSERT INTO delegation_provisioning VALUES ('ha','holder',NULL,'hx','worker-backend-dev','ready','ambiguous',NULL,'hc',NULL,NULL,NULL,NULL,NULL,1,'0','0')", [])?;
+                db.execute("INSERT INTO runtime_nodes VALUES ('waiting',1,'reset','worker-backend-dev','o','[]','[\"test\"]','execution','pending',NULL,NULL)", [])?;
+                Ok(())
+            })?;
+            Ok(waiting)
+        }).unwrap().await.unwrap().unwrap();
+        let (_cancel, cancelled) = watch::channel(false);
+        let r = runtime.clone();
+        let wait = tokio::spawn(async move { r.wait_for_write_holding("waiting", &owners, &cancelled).await });
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(!wait.is_finished(), "the held step did not wait");
+        let count = |runtime: Arc<Runtime>| async move {
+            runtime.host.executor.read(|db| Ok(db.query_row(
+                "SELECT count(*)||':'||coalesce(max(json_extract(payload_json,'$.holder_task')),'') FROM runtime_events WHERE type='NATIVE_WRITE_CONFLICT_WAITING' AND task_id='waiting'",
+                [], |r| r.get::<_, String>(0))?)).unwrap().await.unwrap().unwrap()
+        };
+        assert_eq!(count(runtime.clone()).await, "1:holder");
+        runtime.host.executor.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='CANCELLED' WHERE task_id='holder'", [])?;
+            Ok(())
+        }).unwrap().await.unwrap().unwrap();
+        assert!(tokio::time::timeout(Duration::from_secs(5), wait).await.unwrap().unwrap().unwrap());
+        assert_eq!(count(runtime.clone()).await, "1:holder");
+        // Nothing held: no wait at all.
+        let (_cancel, cancelled) = watch::channel(false);
+        let owner = runtime.host.executor.read(|db| Ok(db.query_row("SELECT owner_ref,epoch FROM task_owners WHERE task_id='waiting'", [],
+            |r| Ok(OwnerEpoch { owner: r.get(0)?, epoch: r.get(1)? }))?)).unwrap().await.unwrap().unwrap();
+        assert!(!runtime.wait_for_write_holding("waiting", &owner, &cancelled).await.unwrap());
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

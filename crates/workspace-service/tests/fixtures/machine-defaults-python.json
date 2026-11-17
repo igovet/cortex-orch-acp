@@ -1,0 +1,2703 @@
+{
+  "sources": {
+    "crates/workspace-service/machine_tools.py": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+    "src/cortex_runtime/configuration/management.py": "f035019940568b7b2881c7548e29f53a8e1ce0433eb5b7b1d2fc12e70f6ae8a2",
+    "src/cortex_runtime/configuration/store.py": "10c94bb9060e9adc1bbb7b4358e40db1a654df19b79ee9e737abd8864c91dc8a",
+    "src/cortex_runtime/configuration/resolution.py": "4f0c77f501b7702206b3609208d130e8b062bbd8ac5bd46e8363be5590d065f9",
+    "src/cortex_runtime/configuration/policy.py": "e18f298a05712ce3810ae7c11f4c19318cb13611d0ce9fdb5c1b9d084fcba525",
+    "src/cortex_runtime/connections/registry.py": "6c96df2025a2b3e73d81dbcfabb57f2d9fcd233c167b19b5684163c4986a1ce5",
+    "crates/workspace-service/tests/fixtures/config-action-python.json": "dac7e3c7bbacaf1345469bc23f21e925835010396773d508b01cf0b3fa1058c7",
+    "crates/workspace-service/tests/generate_machine_defaults_fixture.py": "82502275e5a1dcf775c6e85f8d573d70e81a16062f839fee09c21bf8898be3e5"
+  },
+  "processNetworkKeyringAttempts": 0,
+  "cases": [
+    {
+      "name": "empty-and-noop",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:0fe09ca1134317139466a2bab476fb16ee7d47442f2f0761f1f59e1ac76ae530",
+              "exists": true,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        },
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:0fe09ca1134317139466a2bab476fb16ee7d47442f2f0761f1f59e1ac76ae530"
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:0fe09ca1134317139466a2bab476fb16ee7d47442f2f0761f1f59e1ac76ae530",
+              "exists": true,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": false
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "language-and-clear",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "language": "ru"
+            }
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:b7b3a870aa30a5a3bb3aaf87fdecc10a03051bd21210468947e93141ae0a94f7",
+              "exists": true,
+              "defaults": {
+                "language": "ru"
+              },
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{\"language\":\"ru\"}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        },
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:b7b3a870aa30a5a3bb3aaf87fdecc10a03051bd21210468947e93141ae0a94f7"
+            },
+            "value": {
+              "language": "en"
+            }
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:f22b122e77409ccf80acd496dddbbecc07d2584ed4519f9c94fcc0634e60ba94",
+              "exists": true,
+              "defaults": {
+                "language": "en"
+              },
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{\"language\":\"en\"}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        },
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:f22b122e77409ccf80acd496dddbbecc07d2584ed4519f9c94fcc0634e60ba94"
+            },
+            "value": {
+              "language": "auto"
+            }
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:0fe09ca1134317139466a2bab476fb16ee7d47442f2f0761f1f59e1ac76ae530",
+              "exists": true,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "workspace-fields",
+      "workspace": "{\"extra\":{\"z\":[1,2]},\"mode\":\"old\"}",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "checkout": "worktree",
+              "mode": "development"
+            }
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:0fe09ca1134317139466a2bab476fb16ee7d47442f2f0761f1f59e1ac76ae530",
+              "exists": true,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"worktree\", \"extra\": {\"z\": [1, 2]}, \"mode\": \"development\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        },
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:0fe09ca1134317139466a2bab476fb16ee7d47442f2f0761f1f59e1ac76ae530"
+            },
+            "value": {
+              "checkout": null,
+              "mode": null
+            }
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:0fe09ca1134317139466a2bab476fb16ee7d47442f2f0761f1f59e1ac76ae530",
+              "exists": true,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": false
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": null, \"extra\": {\"z\": [1, 2]}, \"mode\": null}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        },
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:0fe09ca1134317139466a2bab476fb16ee7d47442f2f0761f1f59e1ac76ae530"
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:0fe09ca1134317139466a2bab476fb16ee7d47442f2f0761f1f59e1ac76ae530",
+              "exists": true,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": false
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"extra\": {\"z\": [1, 2]}, \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "unknown-metadata",
+      "initial": "{\"metadata\":{\"z\":1,\"a\":\"Привет\"},\"defaults\":{\"opaque\":[1,2],\"parameters\":{\"kept\":\"yes\"}}}",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:aca112bff0e17eb9021574146191006cdb0de5951f2227a9aadce5cdf914f0c3"
+            },
+            "value": {
+              "language": "en"
+            }
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:373092e9ac16da683952da8ab9427b971356839f7217b8c3f1bfc9463061ddbf",
+              "exists": true,
+              "defaults": {
+                "language": "en",
+                "opaque": [
+                  1,
+                  2
+                ],
+                "parameters": {
+                  "kept": "yes"
+                }
+              },
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [
+                "opaque"
+              ],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{\"language\":\"en\",\"opaque\":[1,2],\"parameters\":{\"kept\":\"yes\"}},\"metadata\":{\"a\":\"Привет\",\"z\":1}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        },
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:373092e9ac16da683952da8ab9427b971356839f7217b8c3f1bfc9463061ddbf"
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:31ff3ca5da867676acf3a14aab1680bc9338c690ea460c00725b7d6ac97dcbed",
+              "exists": true,
+              "defaults": {
+                "opaque": [
+                  1,
+                  2
+                ],
+                "parameters": {
+                  "kept": "yes"
+                }
+              },
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [
+                "opaque"
+              ],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{\"opaque\":[1,2],\"parameters\":{\"kept\":\"yes\"}},\"metadata\":{\"a\":\"Привет\",\"z\":1}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "float-metadata",
+      "initial": "{\"metadata\":[1.0,-0.0,1e-7,1e20,1.5],\"defaults\":{}}",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:b6e8966abdb7ed4b4501fa1dbe8d39a55de553c4dc5009306ed94bf19acc3a46"
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:3e2d764ee9cdd5174e8b1e4ddfb03d9588d1653f2faa587894458fc21f07b5cc",
+              "exists": true,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{},\"metadata\":[1.0,-0.0,1e-07,1e+20,1.5]}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "duplicate-keys",
+      "initial": "{\"defaults\":{\"opaque\":1,\"opaque\":2},\"metadata\":1,\"metadata\":2}",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:0c75821f587f6e2e58952f7ab845a0d9feb259c77b28907ea3a664ebb1dc43b4"
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:8f73490e034e7c6ebbd00d2161ce591dd971b76a939dd69d9faddc8515a992d1",
+              "exists": true,
+              "defaults": {
+                "opaque": 2
+              },
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [
+                "opaque"
+              ],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{\"opaque\":2},\"metadata\":2}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "coordinator",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "coordinator": {
+                "effort": "high",
+                "engine": "codex-acp",
+                "model": "fixture",
+                "parameters": {
+                  "mode": "agent"
+                }
+              }
+            }
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:79741395337f45e258e03e46609e15ffdd60e37c058ed656638cbe01a69d10c2",
+              "exists": true,
+              "defaults": {
+                "coordinator": {
+                  "engine": "codex-acp",
+                  "model": "fixture",
+                  "parameters": {
+                    "mode": "agent",
+                    "thought_level": "high"
+                  }
+                }
+              },
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{\"coordinator\":{\"engine\":\"codex-acp\",\"model\":\"fixture\",\"parameters\":{\"mode\":\"agent\",\"thought_level\":\"high\"}}}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        },
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:79741395337f45e258e03e46609e15ffdd60e37c058ed656638cbe01a69d10c2"
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:0fe09ca1134317139466a2bab476fb16ee7d47442f2f0761f1f59e1ac76ae530",
+              "exists": true,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "coordinator-pair-parameters",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "coordinator": {
+                "engine": "codex-acp",
+                "model": "fixture",
+                "parameters": [
+                  [
+                    "mode",
+                    "old"
+                  ],
+                  [
+                    "mode",
+                    "agent"
+                  ]
+                ]
+              }
+            }
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:f558c514a6454cec38b3a98ae6beb54cc585461a2faddede142c4d1042945a07",
+              "exists": true,
+              "defaults": {
+                "coordinator": {
+                  "engine": "codex-acp",
+                  "model": "fixture",
+                  "parameters": {
+                    "mode": "agent"
+                  }
+                }
+              },
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{\"coordinator\":{\"engine\":\"codex-acp\",\"model\":\"fixture\",\"parameters\":{\"mode\":\"agent\"}}}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "old-valid-ceiling-cleared",
+      "initial": "{\"defaults\": {\"language\": \"ru\"}, \"ceiling\": {\"allowed_routes\": [\"a\"], \"allowed_connections\": null, \"allowed_data_recipients\": null, \"permission_level\": null, \"limits\": {\"attempts\": 1}, \"spend_limit\": null, \"spend_limit_enforceable\": false, \"fallback_policy\": {\"allowed_target_routes\": null, \"allowed_failure_classes\": null, \"budget\": null, \"data_recipient_consent\": false}}}",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:f2036be28485fc49b2f5038cd50403235bee62565aee2788792ebb53eb99b3db"
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:0fe09ca1134317139466a2bab476fb16ee7d47442f2f0761f1f59e1ac76ae530",
+              "exists": true,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "bad-ceiling-before-token",
+      "token": "bad",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "bad"
+            },
+            "value": {
+              "ceiling": "bad"
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "machine_tool_failed",
+            "message": "AttributeError"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "coordinator-wins-over-route",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "coordinator": {
+                "engine": "opencode",
+                "model": "provider/fixture"
+              },
+              "routeDefault": {
+                "connectionId": "cn_0123456789ab",
+                "model": "fixture",
+                "routeId": "xr_111111111111111111111111"
+              }
+            }
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:b7000f01cb140e402736504d92ea2d4cc40cc1d74fe0e7fe0ebffd2b5d09ec6b",
+              "exists": true,
+              "defaults": {
+                "coordinator": {
+                  "engine": "opencode",
+                  "model": "provider/fixture",
+                  "parameters": {}
+                }
+              },
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{\"coordinator\":{\"engine\":\"opencode\",\"model\":\"provider/fixture\",\"parameters\":{}}}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "bound-route-and-clear",
+      "registry": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "routeDefault": {
+                "connectionId": "cn_0123456789ab",
+                "model": "fixture",
+                "routeId": "xr_111111111111111111111111"
+              }
+            }
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:9b0ee871226a6a52648079daca18d9571a8a382793dbfd8f0683bbf73397db92",
+              "exists": true,
+              "defaults": {
+                "route_connection_id": "cn_0123456789ab",
+                "route_id": "xr_111111111111111111111111",
+                "route_model": "fixture"
+              },
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{\"route_connection_id\":\"cn_0123456789ab\",\"route_id\":\"xr_111111111111111111111111\",\"route_model\":\"fixture\"}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        },
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:9b0ee871226a6a52648079daca18d9571a8a382793dbfd8f0683bbf73397db92"
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:0fe09ca1134317139466a2bab476fb16ee7d47442f2f0761f1f59e1ac76ae530",
+              "exists": true,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "switch-route-to-portable",
+      "registry": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "routeDefault": {
+                "connectionId": "cn_0123456789ab",
+                "model": "fixture",
+                "routeId": "xr_111111111111111111111111"
+              }
+            }
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:9b0ee871226a6a52648079daca18d9571a8a382793dbfd8f0683bbf73397db92",
+              "exists": true,
+              "defaults": {
+                "route_connection_id": "cn_0123456789ab",
+                "route_id": "xr_111111111111111111111111",
+                "route_model": "fixture"
+              },
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{\"route_connection_id\":\"cn_0123456789ab\",\"route_id\":\"xr_111111111111111111111111\",\"route_model\":\"fixture\"}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        },
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:9b0ee871226a6a52648079daca18d9571a8a382793dbfd8f0683bbf73397db92"
+            },
+            "value": {
+              "coordinator": {
+                "engine": "claude-agent-acp",
+                "model": "fixture"
+              }
+            }
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:152aebfa4486fe4b488646b3ad526fd1fa59ec961f49b1dacc245be815f96b2e",
+              "exists": true,
+              "defaults": {
+                "coordinator": {
+                  "engine": "claude-agent-acp",
+                  "model": "fixture",
+                  "parameters": {}
+                }
+              },
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{\"coordinator\":{\"engine\":\"claude-agent-acp\",\"model\":\"fixture\",\"parameters\":{}}}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "unknown-connection",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "routeDefault": {
+                "connectionId": "cn_0123456789ab",
+                "model": "fixture",
+                "routeId": "xr_111111111111111111111111"
+              }
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_configuration",
+            "message": "Correct the invalid setting(s); nothing was written. defaults.route_connection_id: names no registered connection"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "ceiling-sorted",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "ceiling": {
+                "allowedConnections": [],
+                "allowedRecipients": [
+                  "recipient"
+                ],
+                "allowedRoutes": [
+                  "z",
+                  "a"
+                ],
+                "attempts": 0,
+                "budget": 2,
+                "consent": true,
+                "failureClasses": [
+                  "transient"
+                ],
+                "stored": {
+                  "calls": 3,
+                  "concurrency": 1,
+                  "permissionLevel": "STANDARD",
+                  "spendEnforceable": true,
+                  "spendLimit": 5,
+                  "tokens": 4
+                },
+                "targetRoutes": [
+                  "z",
+                  "a"
+                ]
+              }
+            }
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:9a24b270deb63dea8d932ae10100da649cee9949461da37c8f8142404c89e876",
+              "exists": true,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": [],
+                "allowed_data_recipients": [
+                  "recipient"
+                ],
+                "allowed_routes": [
+                  "a",
+                  "z"
+                ],
+                "fallback_policy": {
+                  "allowed_failure_classes": [
+                    "transient"
+                  ],
+                  "allowed_target_routes": [
+                    "a",
+                    "z"
+                  ],
+                  "budget": 2,
+                  "data_recipient_consent": true
+                },
+                "limits": {
+                  "attempts": 0,
+                  "calls": 3,
+                  "concurrency": 1,
+                  "tokens": 4
+                },
+                "permission_level": "STANDARD",
+                "spend_limit": 5,
+                "spend_limit_enforceable": true
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":[],\"allowed_data_recipients\":[\"recipient\"],\"allowed_routes\":[\"a\",\"z\"],\"fallback_policy\":{\"allowed_failure_classes\":[\"transient\"],\"allowed_target_routes\":[\"a\",\"z\"],\"budget\":2,\"data_recipient_consent\":true},\"limits\":{\"attempts\":0,\"calls\":3,\"concurrency\":1,\"tokens\":4},\"permission_level\":\"STANDARD\",\"spend_limit\":5,\"spend_limit_enforceable\":true},\"defaults\":{}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "old-ceiling-cleared",
+      "initial": "{\"defaults\":{},\"ceiling\":null}",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:79ff6838cb6425090bd2a64c60ebfbc5a29f2cef23faab34ed6e6936028c9fce"
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_ceiling_snapshot",
+            "message": "a stored ceiling snapshot has an unexpected shape."
+          },
+          "files": {
+            "owner": {
+              "body": "{\"defaults\":{},\"ceiling\":null}",
+              "mode": 384
+            },
+            "workspace": null,
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "malformed-json",
+      "initial": "{",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:021fb596db81e6d02bf3d2586ee3981fe519f275c0ac9ca76bbcf2ebb4097d96"
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_user_defaults",
+            "message": "defaults.json is not valid UTF-8 JSON; repair it by hand. Nothing was changed."
+          },
+          "files": {
+            "owner": {
+              "body": "{",
+              "mode": 384
+            },
+            "workspace": null,
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "array-document",
+      "initial": "[]",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_user_defaults",
+            "message": "defaults.json must contain a JSON object; repair it by hand. Nothing was changed."
+          },
+          "files": {
+            "owner": {
+              "body": "[]",
+              "mode": 384
+            },
+            "workspace": null,
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "bad-defaults",
+      "initial": "{\"defaults\":[]}",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:c308a137774c548e5f87143929435fd94bdb14253715b711551b8614bcf77c21"
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_user_defaults",
+            "message": "defaults.json 'defaults' must be an object; repair it by hand."
+          },
+          "files": {
+            "owner": {
+              "body": "{\"defaults\":[]}",
+              "mode": 384
+            },
+            "workspace": null,
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "stale",
+      "token": "stale",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": false,
+            "code": "revision_conflict",
+            "message": "The user_defaults configuration changed after it was read (expected revision sha256:0000000000000000000000000000000000000000000000000000000000000000, current absent); nothing was written. Re-read it and apply the change again."
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "missing-token-conflict",
+      "initial": "{\"defaults\":{}}",
+      "omitTokens": true,
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "value": {}
+          },
+          "reply": {
+            "ok": false,
+            "code": "revision_conflict",
+            "message": "The user_defaults configuration changed after it was read (expected revision absent, current sha256:5ff6c8bb3a1ef80a09cf2fe6ca6821fa6c98efe77fa17ce1f22af753dd45a4aa); nothing was written. Re-read it and apply the change again."
+          },
+          "files": {
+            "owner": {
+              "body": "{\"defaults\":{}}",
+              "mode": 384
+            },
+            "workspace": null,
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "missing-token-absent",
+      "omitTokens": true,
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "value": {}
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:0fe09ca1134317139466a2bab476fb16ee7d47442f2f0761f1f59e1ac76ae530",
+              "exists": true,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid-token",
+      "token": "bad",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "bad"
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_expected_revision",
+            "message": "expected_revision must be the exact revision a read returned ('absent' or 'sha256:<64 hex>')."
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "bool-token",
+      "token": true,
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": true
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_expected_revision",
+            "message": "expected_revision must be the exact revision a read returned ('absent' or 'sha256:<64 hex>')."
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "false-token",
+      "token": false,
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": false
+            },
+            "value": {}
+          },
+          "reply": {
+            "ok": true,
+            "result": {
+              "surface": "user_defaults",
+              "path": "$CONFIG/cortex/defaults.json",
+              "revision": "sha256:0fe09ca1134317139466a2bab476fb16ee7d47442f2f0761f1f59e1ac76ae530",
+              "exists": true,
+              "defaults": {},
+              "editable_keys": [
+                "coordinator",
+                "route_id",
+                "route_connection_id",
+                "route_model",
+                "parameters",
+                "language"
+              ],
+              "preserved_keys": [],
+              "languages": [
+                "en",
+                "ru"
+              ],
+              "ceiling": {
+                "allowed_connections": null,
+                "allowed_data_recipients": null,
+                "allowed_routes": null,
+                "fallback_policy": {
+                  "allowed_failure_classes": null,
+                  "allowed_target_routes": null,
+                  "budget": null,
+                  "data_recipient_consent": false
+                },
+                "limits": {},
+                "permission_level": null,
+                "spend_limit": null,
+                "spend_limit_enforceable": false
+              },
+              "ceiling_set": true,
+              "changed": true
+            }
+          },
+          "files": {
+            "owner": {
+              "body": "{\"ceiling\":{\"allowed_connections\":null,\"allowed_data_recipients\":null,\"allowed_routes\":null,\"fallback_policy\":{\"allowed_failure_classes\":null,\"allowed_target_routes\":null,\"budget\":null,\"data_recipient_consent\":false},\"limits\":{},\"permission_level\":null,\"spend_limit\":null,\"spend_limit_enforceable\":false},\"defaults\":{}}",
+              "mode": 384
+            },
+            "workspace": {
+              "body": "{\"checkout\": \"main\", \"mode\": \"guarded\"}",
+              "mode": 384
+            },
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "bad-tokens-container",
+      "tokens": true,
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": true,
+            "value": {}
+          },
+          "reply": {
+            "ok": false,
+            "code": "machine_tool_failed",
+            "message": "AttributeError"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "bad-value-null",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": null
+          },
+          "reply": {
+            "ok": false,
+            "code": "machine_tool_failed",
+            "message": "AttributeError"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "bad-value-array",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": []
+          },
+          "reply": {
+            "ok": false,
+            "code": "machine_tool_failed",
+            "message": "AttributeError"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "bad-choice",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "coordinator": "invalid"
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "machine_tool_failed",
+            "message": "AttributeError"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "choice-key-missing",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "coordinator": {
+                "engine": "codex-acp"
+              }
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "machine_tool_failed",
+            "message": "KeyError"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "choice-bad-parameters",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "coordinator": {
+                "engine": "codex-acp",
+                "model": "fixture",
+                "parameters": "invalid"
+              }
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "machine_tool_failed",
+            "message": "ValueError"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "bad-route",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "routeDefault": "invalid"
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "machine_tool_failed",
+            "message": "TypeError"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "route-key-missing",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "routeDefault": {
+                "routeId": "xr_111111111111111111111111"
+              }
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "machine_tool_failed",
+            "message": "KeyError"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid-route-fields",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "ceiling": {
+                "attempts": -1
+              },
+              "language": "fr",
+              "routeDefault": {
+                "connectionId": "bad",
+                "model": "\n",
+                "routeId": "bad"
+              }
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_configuration",
+            "message": "Correct the invalid setting(s); nothing was written. defaults.route_id: must be an observed route id (xr_<hex>); defaults.route_connection_id: must be a connection id (cn_<12 hex>); defaults.route_model: must be the route's exact model id; defaults.language: must be null (auto) or one of en, ru; ceiling.limits.attempts: must be a non-negative integer"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid-language-34",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "language": "fr"
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_configuration",
+            "message": "Correct the invalid setting(s); nothing was written. defaults.language: must be null (auto) or one of en, ru"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid-language-35",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "language": true
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_configuration",
+            "message": "Correct the invalid setting(s); nothing was written. defaults.language: must be null (auto) or one of en, ru"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid-language-36",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "language": []
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_configuration",
+            "message": "Correct the invalid setting(s); nothing was written. defaults.language: must be null (auto) or one of en, ru"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid-coordinator-37",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "coordinator": {
+                "engine": "missing",
+                "model": "fixture"
+              }
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_configuration",
+            "message": "Correct the invalid setting(s); nothing was written. defaults.coordinator: Use exact engine/model and a parameter string mapping."
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid-coordinator-38",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "coordinator": {
+                "engine": "codex-acp",
+                "model": " "
+              }
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_configuration",
+            "message": "Correct the invalid setting(s); nothing was written. defaults.coordinator: Use exact engine/model and a parameter string mapping."
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid-coordinator-39",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "coordinator": {
+                "engine": "codex-acp",
+                "model": "fixture",
+                "parameters": {
+                  "mode": 1
+                }
+              }
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_configuration",
+            "message": "Correct the invalid setting(s); nothing was written. defaults.coordinator: Use exact engine/model and a parameter string mapping."
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid-routeDefault-40",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "routeDefault": {
+                "connectionId": "cn_0123456789ab",
+                "model": "fixture",
+                "parameters": [],
+                "routeId": "xr_111111111111111111111111"
+              }
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_configuration",
+            "message": "Correct the invalid setting(s); nothing was written. defaults.route_connection_id: names no registered connection"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": {
+              "body": "*\n",
+              "mode": 384
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid-routeDefault-41",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "routeDefault": {
+                "connectionId": "cn_0123456789ab",
+                "model": "fixture",
+                "parameters": {
+                  "Bad": "",
+                  "mode": true
+                },
+                "routeId": "xr_111111111111111111111111"
+              }
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_configuration",
+            "message": "Correct the invalid setting(s); nothing was written. defaults.parameters.Bad: parameter names are lowercase identifiers and values non-empty strings; defaults.parameters.mode: parameter names are lowercase identifiers and values non-empty strings"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid-ceiling-42",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "ceiling": {
+                "attempts": true
+              }
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_configuration",
+            "message": "Correct the invalid setting(s); nothing was written. ceiling.limits.attempts: must be a non-negative integer"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid-ceiling-43",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "ceiling": {
+                "allowedRoutes": [
+                  "a",
+                  "a"
+                ]
+              }
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_configuration",
+            "message": "Correct the invalid setting(s); nothing was written. ceiling.allowed_routes: must be null (unrestricted) or an array of unique non-empty strings"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid-ceiling-44",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "ceiling": {
+                "failureClasses": [
+                  "refusal",
+                  "cancellation"
+                ]
+              }
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_configuration",
+            "message": "Correct the invalid setting(s); nothing was written. ceiling.fallback_policy.allowed_failure_classes: may never name cancellation, refusal"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid-ceiling-45",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "ceiling": {
+                "stored": {
+                  "spendLimit": 1
+                }
+              }
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_configuration",
+            "message": "Correct the invalid setting(s); nothing was written. ceiling.spend_limit: may only be set with spend_limit_enforceable: true (unknown cost is never treated as zero)"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid-ceiling-46",
+      "observations": [
+        {
+          "params": {
+            "surface": "user_defaults",
+            "tokens": {
+              "user_defaults": "absent"
+            },
+            "value": {
+              "ceiling": {
+                "stored": {
+                  "permissionLevel": "bad"
+                }
+              }
+            }
+          },
+          "reply": {
+            "ok": false,
+            "code": "invalid_configuration",
+            "message": "Correct the invalid setting(s); nothing was written. ceiling.permission_level: must be null or one of READ_ONLY, STANDARD, ELEVATED"
+          },
+          "files": {
+            "owner": null,
+            "workspace": null,
+            "ignore": null
+          }
+        }
+      ]
+    }
+  ]
+}

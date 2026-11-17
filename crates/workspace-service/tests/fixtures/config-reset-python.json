@@ -1,0 +1,592 @@
+{
+  "format": 1,
+  "sources": {
+    "crates/workspace-service/machine_tools.py": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+    "src/cortex_runtime/configuration/management.py": "f035019940568b7b2881c7548e29f53a8e1ce0433eb5b7b1d2fc12e70f6ae8a2",
+    "src/cortex_runtime/connections/registry.py": "6c96df2025a2b3e73d81dbcfabb57f2d9fcd233c167b19b5684163c4986a1ce5",
+    "src/cortex_runtime/routing/defaults.py": "8cf60e6ad064d155ab26c52094680ea0ef5be89a18f505e8c50b0bf9da1562e0",
+    "policy/model-settings-default.json": "5e409de81b2a63d95dfb9ca02c14943dbf42fa88d8764a6f7248f21ecb811fd4",
+    "crates/workspace-service/tests/generate_config_reset_fixture.py": "33aeb4a3b7c357483c41c986eeb60a9bb2e6ce0b060583de7382093c33a125e2"
+  },
+  "stamp": "1800000000123456789",
+  "processNetworkAttempts": 0,
+  "cases": [
+    {
+      "name": "absent",
+      "initial": {},
+      "params": {
+        "action": "reset_default_preset",
+        "confirm": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "default_preset",
+          "revision": "sha256:3dd3663b33664a40a7fa3168c613f73c91c78066580b4ddf9e554babc57483db",
+          "files": {
+            "routing": {
+              "revision": "sha256:829383a3662da8a5b73f3edd601098f800b6dbc316bebde16bad8573a42cc29c",
+              "status": "existing"
+            },
+            "defaults": {
+              "revision": "sha256:6d6a7b3421a501795013b59e3865cd4e51383e442e101bdc62d399bb02e50bcd",
+              "status": "existing"
+            },
+            "mcp_servers": {
+              "revision": "absent",
+              "status": "absent"
+            },
+            "routing_profiles": {
+              "revision": "absent",
+              "status": "absent"
+            }
+          },
+          "changed": true,
+          "backups": {}
+        }
+      },
+      "files": {
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"coordinator\": {\n      \"engine\": \"claude-agent-acp\",\n      \"model\": \"fable\",\n      \"parameters\": {\n        \"thought_level\": \"medium\"\n      }\n    },\n    \"language\": \"ru\"\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"gpt-5.5\",\n    \"claude-agent-acp/claude-haiku-4-5-20251001\",\n    \"claude-agent-acp/claude-sonnet-4-6\",\n    \"claude-agent-acp/claude-opus-4-6\",\n    \"claude-agent-acp/claude-opus-4-7\",\n    \"claude-agent-acp/claude-opus-4-8\",\n    \"claude-agent-acp/claude-opus-5\",\n    \"claude-agent-acp/claude-fable-5\",\n    \"codex-acp/gpt-5.6-luna\",\n    \"codex-acp/gpt-5.6-sol\",\n    \"codex-acp/gpt-5.6-terra\",\n    \"codex-acp/gpt-6-sol\",\n    \"opencode/*\"\n  ],\n  \"enabled\": {\n    \"claude-agent-acp\": [\n      \"default\",\n      \"opus\",\n      \"fable\",\n      \"claude-sonnet-5\",\n      \"haiku\"\n    ],\n    \"codex-acp\": [\n      \"gpt-6.1-sol\",\n      \"gpt-6-astra\",\n      \"gpt-6-luna\",\n      \"gpt-6.1-terra\"\n    ],\n    \"opencode\": []\n  },\n  \"auto_allow\": [],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ],\n  \"models\": {\n    \"claude-agent-acp\": {\n      \"auto\": [\n        \"default\",\n        \"opus\",\n        \"fable\",\n        \"claude-sonnet-5\",\n        \"haiku\"\n      ],\n      \"tiers\": {\n        \"fable\": [\n          \"flagship\"\n        ],\n        \"claude-sonnet-5\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"default\": [\n          \"deep\"\n        ],\n        \"haiku\": [\n          \"light\"\n        ],\n        \"opus\": [\n          \"flagship\",\n          \"deep\"\n        ]\n      },\n      \"policy\": {\n        \"fable\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"fable\",\n            \"фейбл\",\n            \"фэйбл\"\n          ]\n        },\n        \"claude-sonnet-5\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"investigation\",\n            \"review\",\n            \"analysis\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"default\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": null,\n          \"request_names\": null\n        },\n        \"haiku\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"opus\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"design\",\n            \"planning\",\n            \"implementation_frontend_design\",\n            \"debugging\",\n            \"analysis\",\n            \"implementation_backend\",\n            \"implementation_frontend\"\n          ],\n          \"preferred_when\": \"Use for the listed kinds. Always use for implementation_frontend_design and UI/UX design: layout, styling, markup, responsive layout, UI components, visual polish, UX flows, mockups, wireframes and design systems. Never mark such nodes low complexity: that leaves Opus ineligible. For implementation_backend, use only for very complex, narrowly scoped tasks.\",\n          \"request_names\": [\n            \"opus\",\n            \"опус\"\n          ]\n        }\n      }\n    },\n    \"codex-acp\": {\n      \"auto\": [\n        \"gpt-6.1-sol\",\n        \"gpt-6-astra\",\n        \"gpt-6-luna\",\n        \"gpt-6.1-terra\"\n      ],\n      \"tiers\": {\n        \"gpt-6-astra\": [\n          \"flagship\"\n        ],\n        \"gpt-6-luna\": [\n          \"light\"\n        ],\n        \"gpt-6.1-sol\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"gpt-6.1-terra\": [\n          \"standard\"\n        ]\n      },\n      \"policy\": {\n        \"gpt-6-astra\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"astra\",\n            \"астр\"\n          ]\n        },\n        \"gpt-6-luna\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"gpt-6.1-sol\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"planning\",\n            \"design\",\n            \"review\",\n            \"operations\",\n            \"analysis\",\n            \"investigation\"\n          ],\n          \"preferred_when\": null,\n          \"request_names\": null\n        },\n        \"gpt-6.1-terra\": {\n          \"effort_floor\": \"medium\",\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"writing\",\n            \"testing\",\n            \"debugging\"\n          ]\n        }\n      }\n    },\n    \"opencode\": {\n      \"auto\": [],\n      \"tiers\": {},\n      \"policy\": {}\n    }\n  },\n  \"quota_windows\": {\n    \"claude-agent-acp\": [\n      {\n        \"window\": \"seven_day_opus\",\n        \"models\": [\n          \"opus\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_sonnet\",\n        \"models\": [\n          \"claude-sonnet-5\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_fable\",\n        \"models\": [\n          \"fable\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_haiku\",\n        \"models\": [\n          \"haiku\"\n        ]\n      }\n    ]\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      }
+    },
+    {
+      "name": "routing-only",
+      "initial": {
+        "routing.json": "{malformed Ω\n"
+      },
+      "params": {
+        "action": "reset_default_preset",
+        "confirm": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "default_preset",
+          "revision": "sha256:3dd3663b33664a40a7fa3168c613f73c91c78066580b4ddf9e554babc57483db",
+          "files": {
+            "routing": {
+              "revision": "sha256:829383a3662da8a5b73f3edd601098f800b6dbc316bebde16bad8573a42cc29c",
+              "status": "existing"
+            },
+            "defaults": {
+              "revision": "sha256:6d6a7b3421a501795013b59e3865cd4e51383e442e101bdc62d399bb02e50bcd",
+              "status": "existing"
+            },
+            "mcp_servers": {
+              "revision": "absent",
+              "status": "absent"
+            },
+            "routing_profiles": {
+              "revision": "absent",
+              "status": "absent"
+            }
+          },
+          "changed": true,
+          "backups": {
+            "routing": "$CONFIG/routing.json.cortex-backup-1800000000123456789"
+          }
+        }
+      },
+      "files": {
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"coordinator\": {\n      \"engine\": \"claude-agent-acp\",\n      \"model\": \"fable\",\n      \"parameters\": {\n        \"thought_level\": \"medium\"\n      }\n    },\n    \"language\": \"ru\"\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"gpt-5.5\",\n    \"claude-agent-acp/claude-haiku-4-5-20251001\",\n    \"claude-agent-acp/claude-sonnet-4-6\",\n    \"claude-agent-acp/claude-opus-4-6\",\n    \"claude-agent-acp/claude-opus-4-7\",\n    \"claude-agent-acp/claude-opus-4-8\",\n    \"claude-agent-acp/claude-opus-5\",\n    \"claude-agent-acp/claude-fable-5\",\n    \"codex-acp/gpt-5.6-luna\",\n    \"codex-acp/gpt-5.6-sol\",\n    \"codex-acp/gpt-5.6-terra\",\n    \"codex-acp/gpt-6-sol\",\n    \"opencode/*\"\n  ],\n  \"enabled\": {\n    \"claude-agent-acp\": [\n      \"default\",\n      \"opus\",\n      \"fable\",\n      \"claude-sonnet-5\",\n      \"haiku\"\n    ],\n    \"codex-acp\": [\n      \"gpt-6.1-sol\",\n      \"gpt-6-astra\",\n      \"gpt-6-luna\",\n      \"gpt-6.1-terra\"\n    ],\n    \"opencode\": []\n  },\n  \"auto_allow\": [],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ],\n  \"models\": {\n    \"claude-agent-acp\": {\n      \"auto\": [\n        \"default\",\n        \"opus\",\n        \"fable\",\n        \"claude-sonnet-5\",\n        \"haiku\"\n      ],\n      \"tiers\": {\n        \"fable\": [\n          \"flagship\"\n        ],\n        \"claude-sonnet-5\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"default\": [\n          \"deep\"\n        ],\n        \"haiku\": [\n          \"light\"\n        ],\n        \"opus\": [\n          \"flagship\",\n          \"deep\"\n        ]\n      },\n      \"policy\": {\n        \"fable\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"fable\",\n            \"фейбл\",\n            \"фэйбл\"\n          ]\n        },\n        \"claude-sonnet-5\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"investigation\",\n            \"review\",\n            \"analysis\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"default\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": null,\n          \"request_names\": null\n        },\n        \"haiku\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"opus\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"design\",\n            \"planning\",\n            \"implementation_frontend_design\",\n            \"debugging\",\n            \"analysis\",\n            \"implementation_backend\",\n            \"implementation_frontend\"\n          ],\n          \"preferred_when\": \"Use for the listed kinds. Always use for implementation_frontend_design and UI/UX design: layout, styling, markup, responsive layout, UI components, visual polish, UX flows, mockups, wireframes and design systems. Never mark such nodes low complexity: that leaves Opus ineligible. For implementation_backend, use only for very complex, narrowly scoped tasks.\",\n          \"request_names\": [\n            \"opus\",\n            \"опус\"\n          ]\n        }\n      }\n    },\n    \"codex-acp\": {\n      \"auto\": [\n        \"gpt-6.1-sol\",\n        \"gpt-6-astra\",\n        \"gpt-6-luna\",\n        \"gpt-6.1-terra\"\n      ],\n      \"tiers\": {\n        \"gpt-6-astra\": [\n          \"flagship\"\n        ],\n        \"gpt-6-luna\": [\n          \"light\"\n        ],\n        \"gpt-6.1-sol\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"gpt-6.1-terra\": [\n          \"standard\"\n        ]\n      },\n      \"policy\": {\n        \"gpt-6-astra\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"astra\",\n            \"астр\"\n          ]\n        },\n        \"gpt-6-luna\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"gpt-6.1-sol\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"planning\",\n            \"design\",\n            \"review\",\n            \"operations\",\n            \"analysis\",\n            \"investigation\"\n          ],\n          \"preferred_when\": null,\n          \"request_names\": null\n        },\n        \"gpt-6.1-terra\": {\n          \"effort_floor\": \"medium\",\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"writing\",\n            \"testing\",\n            \"debugging\"\n          ]\n        }\n      }\n    },\n    \"opencode\": {\n      \"auto\": [],\n      \"tiers\": {},\n      \"policy\": {}\n    }\n  },\n  \"quota_windows\": {\n    \"claude-agent-acp\": [\n      {\n        \"window\": \"seven_day_opus\",\n        \"models\": [\n          \"opus\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_sonnet\",\n        \"models\": [\n          \"claude-sonnet-5\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_fable\",\n        \"models\": [\n          \"fable\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_haiku\",\n        \"models\": [\n          \"haiku\"\n        ]\n      }\n    ]\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json.cortex-backup-1800000000123456789": {
+          "content": "{malformed Ω\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      }
+    },
+    {
+      "name": "defaults-only",
+      "initial": {
+        "defaults.json": "[not-json\n"
+      },
+      "params": {
+        "action": "reset_default_preset",
+        "confirm": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "default_preset",
+          "revision": "sha256:3dd3663b33664a40a7fa3168c613f73c91c78066580b4ddf9e554babc57483db",
+          "files": {
+            "routing": {
+              "revision": "sha256:829383a3662da8a5b73f3edd601098f800b6dbc316bebde16bad8573a42cc29c",
+              "status": "existing"
+            },
+            "defaults": {
+              "revision": "sha256:6d6a7b3421a501795013b59e3865cd4e51383e442e101bdc62d399bb02e50bcd",
+              "status": "existing"
+            },
+            "mcp_servers": {
+              "revision": "absent",
+              "status": "absent"
+            },
+            "routing_profiles": {
+              "revision": "absent",
+              "status": "absent"
+            }
+          },
+          "changed": true,
+          "backups": {
+            "defaults": "$CONFIG/defaults.json.cortex-backup-1800000000123456789"
+          }
+        }
+      },
+      "files": {
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"coordinator\": {\n      \"engine\": \"claude-agent-acp\",\n      \"model\": \"fable\",\n      \"parameters\": {\n        \"thought_level\": \"medium\"\n      }\n    },\n    \"language\": \"ru\"\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"gpt-5.5\",\n    \"claude-agent-acp/claude-haiku-4-5-20251001\",\n    \"claude-agent-acp/claude-sonnet-4-6\",\n    \"claude-agent-acp/claude-opus-4-6\",\n    \"claude-agent-acp/claude-opus-4-7\",\n    \"claude-agent-acp/claude-opus-4-8\",\n    \"claude-agent-acp/claude-opus-5\",\n    \"claude-agent-acp/claude-fable-5\",\n    \"codex-acp/gpt-5.6-luna\",\n    \"codex-acp/gpt-5.6-sol\",\n    \"codex-acp/gpt-5.6-terra\",\n    \"codex-acp/gpt-6-sol\",\n    \"opencode/*\"\n  ],\n  \"enabled\": {\n    \"claude-agent-acp\": [\n      \"default\",\n      \"opus\",\n      \"fable\",\n      \"claude-sonnet-5\",\n      \"haiku\"\n    ],\n    \"codex-acp\": [\n      \"gpt-6.1-sol\",\n      \"gpt-6-astra\",\n      \"gpt-6-luna\",\n      \"gpt-6.1-terra\"\n    ],\n    \"opencode\": []\n  },\n  \"auto_allow\": [],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ],\n  \"models\": {\n    \"claude-agent-acp\": {\n      \"auto\": [\n        \"default\",\n        \"opus\",\n        \"fable\",\n        \"claude-sonnet-5\",\n        \"haiku\"\n      ],\n      \"tiers\": {\n        \"fable\": [\n          \"flagship\"\n        ],\n        \"claude-sonnet-5\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"default\": [\n          \"deep\"\n        ],\n        \"haiku\": [\n          \"light\"\n        ],\n        \"opus\": [\n          \"flagship\",\n          \"deep\"\n        ]\n      },\n      \"policy\": {\n        \"fable\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"fable\",\n            \"фейбл\",\n            \"фэйбл\"\n          ]\n        },\n        \"claude-sonnet-5\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"investigation\",\n            \"review\",\n            \"analysis\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"default\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": null,\n          \"request_names\": null\n        },\n        \"haiku\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"opus\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"design\",\n            \"planning\",\n            \"implementation_frontend_design\",\n            \"debugging\",\n            \"analysis\",\n            \"implementation_backend\",\n            \"implementation_frontend\"\n          ],\n          \"preferred_when\": \"Use for the listed kinds. Always use for implementation_frontend_design and UI/UX design: layout, styling, markup, responsive layout, UI components, visual polish, UX flows, mockups, wireframes and design systems. Never mark such nodes low complexity: that leaves Opus ineligible. For implementation_backend, use only for very complex, narrowly scoped tasks.\",\n          \"request_names\": [\n            \"opus\",\n            \"опус\"\n          ]\n        }\n      }\n    },\n    \"codex-acp\": {\n      \"auto\": [\n        \"gpt-6.1-sol\",\n        \"gpt-6-astra\",\n        \"gpt-6-luna\",\n        \"gpt-6.1-terra\"\n      ],\n      \"tiers\": {\n        \"gpt-6-astra\": [\n          \"flagship\"\n        ],\n        \"gpt-6-luna\": [\n          \"light\"\n        ],\n        \"gpt-6.1-sol\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"gpt-6.1-terra\": [\n          \"standard\"\n        ]\n      },\n      \"policy\": {\n        \"gpt-6-astra\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"astra\",\n            \"астр\"\n          ]\n        },\n        \"gpt-6-luna\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"gpt-6.1-sol\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"planning\",\n            \"design\",\n            \"review\",\n            \"operations\",\n            \"analysis\",\n            \"investigation\"\n          ],\n          \"preferred_when\": null,\n          \"request_names\": null\n        },\n        \"gpt-6.1-terra\": {\n          \"effort_floor\": \"medium\",\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"writing\",\n            \"testing\",\n            \"debugging\"\n          ]\n        }\n      }\n    },\n    \"opencode\": {\n      \"auto\": [],\n      \"tiers\": {},\n      \"policy\": {}\n    }\n  },\n  \"quota_windows\": {\n    \"claude-agent-acp\": [\n      {\n        \"window\": \"seven_day_opus\",\n        \"models\": [\n          \"opus\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_sonnet\",\n        \"models\": [\n          \"claude-sonnet-5\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_fable\",\n        \"models\": [\n          \"fable\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_haiku\",\n        \"models\": [\n          \"haiku\"\n        ]\n      }\n    ]\n  }\n}\n",
+          "mode": 384
+        },
+        "defaults.json.cortex-backup-1800000000123456789": {
+          "content": "[not-json\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      }
+    },
+    {
+      "name": "existing",
+      "initial": {
+        "routing.json": "{}\n",
+        "defaults.json": "{}\n"
+      },
+      "params": {
+        "action": "reset_default_preset",
+        "confirm": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "default_preset",
+          "revision": "sha256:3dd3663b33664a40a7fa3168c613f73c91c78066580b4ddf9e554babc57483db",
+          "files": {
+            "routing": {
+              "revision": "sha256:829383a3662da8a5b73f3edd601098f800b6dbc316bebde16bad8573a42cc29c",
+              "status": "existing"
+            },
+            "defaults": {
+              "revision": "sha256:6d6a7b3421a501795013b59e3865cd4e51383e442e101bdc62d399bb02e50bcd",
+              "status": "existing"
+            },
+            "mcp_servers": {
+              "revision": "absent",
+              "status": "absent"
+            },
+            "routing_profiles": {
+              "revision": "absent",
+              "status": "absent"
+            }
+          },
+          "changed": true,
+          "backups": {
+            "routing": "$CONFIG/routing.json.cortex-backup-1800000000123456789",
+            "defaults": "$CONFIG/defaults.json.cortex-backup-1800000000123456789"
+          }
+        }
+      },
+      "files": {
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"coordinator\": {\n      \"engine\": \"claude-agent-acp\",\n      \"model\": \"fable\",\n      \"parameters\": {\n        \"thought_level\": \"medium\"\n      }\n    },\n    \"language\": \"ru\"\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"gpt-5.5\",\n    \"claude-agent-acp/claude-haiku-4-5-20251001\",\n    \"claude-agent-acp/claude-sonnet-4-6\",\n    \"claude-agent-acp/claude-opus-4-6\",\n    \"claude-agent-acp/claude-opus-4-7\",\n    \"claude-agent-acp/claude-opus-4-8\",\n    \"claude-agent-acp/claude-opus-5\",\n    \"claude-agent-acp/claude-fable-5\",\n    \"codex-acp/gpt-5.6-luna\",\n    \"codex-acp/gpt-5.6-sol\",\n    \"codex-acp/gpt-5.6-terra\",\n    \"codex-acp/gpt-6-sol\",\n    \"opencode/*\"\n  ],\n  \"enabled\": {\n    \"claude-agent-acp\": [\n      \"default\",\n      \"opus\",\n      \"fable\",\n      \"claude-sonnet-5\",\n      \"haiku\"\n    ],\n    \"codex-acp\": [\n      \"gpt-6.1-sol\",\n      \"gpt-6-astra\",\n      \"gpt-6-luna\",\n      \"gpt-6.1-terra\"\n    ],\n    \"opencode\": []\n  },\n  \"auto_allow\": [],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ],\n  \"models\": {\n    \"claude-agent-acp\": {\n      \"auto\": [\n        \"default\",\n        \"opus\",\n        \"fable\",\n        \"claude-sonnet-5\",\n        \"haiku\"\n      ],\n      \"tiers\": {\n        \"fable\": [\n          \"flagship\"\n        ],\n        \"claude-sonnet-5\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"default\": [\n          \"deep\"\n        ],\n        \"haiku\": [\n          \"light\"\n        ],\n        \"opus\": [\n          \"flagship\",\n          \"deep\"\n        ]\n      },\n      \"policy\": {\n        \"fable\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"fable\",\n            \"фейбл\",\n            \"фэйбл\"\n          ]\n        },\n        \"claude-sonnet-5\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"investigation\",\n            \"review\",\n            \"analysis\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"default\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": null,\n          \"request_names\": null\n        },\n        \"haiku\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"opus\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"design\",\n            \"planning\",\n            \"implementation_frontend_design\",\n            \"debugging\",\n            \"analysis\",\n            \"implementation_backend\",\n            \"implementation_frontend\"\n          ],\n          \"preferred_when\": \"Use for the listed kinds. Always use for implementation_frontend_design and UI/UX design: layout, styling, markup, responsive layout, UI components, visual polish, UX flows, mockups, wireframes and design systems. Never mark such nodes low complexity: that leaves Opus ineligible. For implementation_backend, use only for very complex, narrowly scoped tasks.\",\n          \"request_names\": [\n            \"opus\",\n            \"опус\"\n          ]\n        }\n      }\n    },\n    \"codex-acp\": {\n      \"auto\": [\n        \"gpt-6.1-sol\",\n        \"gpt-6-astra\",\n        \"gpt-6-luna\",\n        \"gpt-6.1-terra\"\n      ],\n      \"tiers\": {\n        \"gpt-6-astra\": [\n          \"flagship\"\n        ],\n        \"gpt-6-luna\": [\n          \"light\"\n        ],\n        \"gpt-6.1-sol\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"gpt-6.1-terra\": [\n          \"standard\"\n        ]\n      },\n      \"policy\": {\n        \"gpt-6-astra\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"astra\",\n            \"астр\"\n          ]\n        },\n        \"gpt-6-luna\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"gpt-6.1-sol\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"planning\",\n            \"design\",\n            \"review\",\n            \"operations\",\n            \"analysis\",\n            \"investigation\"\n          ],\n          \"preferred_when\": null,\n          \"request_names\": null\n        },\n        \"gpt-6.1-terra\": {\n          \"effort_floor\": \"medium\",\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"writing\",\n            \"testing\",\n            \"debugging\"\n          ]\n        }\n      }\n    },\n    \"opencode\": {\n      \"auto\": [],\n      \"tiers\": {},\n      \"policy\": {}\n    }\n  },\n  \"quota_windows\": {\n    \"claude-agent-acp\": [\n      {\n        \"window\": \"seven_day_opus\",\n        \"models\": [\n          \"opus\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_sonnet\",\n        \"models\": [\n          \"claude-sonnet-5\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_fable\",\n        \"models\": [\n          \"fable\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_haiku\",\n        \"models\": [\n          \"haiku\"\n        ]\n      }\n    ]\n  }\n}\n",
+          "mode": 384
+        },
+        "defaults.json.cortex-backup-1800000000123456789": {
+          "content": "{}\n",
+          "mode": 384
+        },
+        "routing.json.cortex-backup-1800000000123456789": {
+          "content": "{}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      }
+    },
+    {
+      "name": "no-change-still-backs-up",
+      "initial": {
+        "routing.json": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"gpt-5.5\",\n    \"claude-agent-acp/claude-haiku-4-5-20251001\",\n    \"claude-agent-acp/claude-sonnet-4-6\",\n    \"claude-agent-acp/claude-opus-4-6\",\n    \"claude-agent-acp/claude-opus-4-7\",\n    \"claude-agent-acp/claude-opus-4-8\",\n    \"claude-agent-acp/claude-opus-5\",\n    \"claude-agent-acp/claude-fable-5\",\n    \"codex-acp/gpt-5.6-luna\",\n    \"codex-acp/gpt-5.6-sol\",\n    \"codex-acp/gpt-5.6-terra\",\n    \"codex-acp/gpt-6-sol\",\n    \"opencode/*\"\n  ],\n  \"enabled\": {\n    \"claude-agent-acp\": [\n      \"default\",\n      \"opus\",\n      \"fable\",\n      \"claude-sonnet-5\",\n      \"haiku\"\n    ],\n    \"codex-acp\": [\n      \"gpt-6.1-sol\",\n      \"gpt-6-astra\",\n      \"gpt-6-luna\",\n      \"gpt-6.1-terra\"\n    ],\n    \"opencode\": []\n  },\n  \"auto_allow\": [],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ],\n  \"models\": {\n    \"claude-agent-acp\": {\n      \"auto\": [\n        \"default\",\n        \"opus\",\n        \"fable\",\n        \"claude-sonnet-5\",\n        \"haiku\"\n      ],\n      \"tiers\": {\n        \"fable\": [\n          \"flagship\"\n        ],\n        \"claude-sonnet-5\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"default\": [\n          \"deep\"\n        ],\n        \"haiku\": [\n          \"light\"\n        ],\n        \"opus\": [\n          \"flagship\",\n          \"deep\"\n        ]\n      },\n      \"policy\": {\n        \"fable\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"fable\",\n            \"фейбл\",\n            \"фэйбл\"\n          ]\n        },\n        \"claude-sonnet-5\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"investigation\",\n            \"review\",\n            \"analysis\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"default\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": null,\n          \"request_names\": null\n        },\n        \"haiku\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"opus\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"design\",\n            \"planning\",\n            \"implementation_frontend_design\",\n            \"debugging\",\n            \"analysis\",\n            \"implementation_backend\",\n            \"implementation_frontend\"\n          ],\n          \"preferred_when\": \"Use for the listed kinds. Always use for implementation_frontend_design and UI/UX design: layout, styling, markup, responsive layout, UI components, visual polish, UX flows, mockups, wireframes and design systems. Never mark such nodes low complexity: that leaves Opus ineligible. For implementation_backend, use only for very complex, narrowly scoped tasks.\",\n          \"request_names\": [\n            \"opus\",\n            \"опус\"\n          ]\n        }\n      }\n    },\n    \"codex-acp\": {\n      \"auto\": [\n        \"gpt-6.1-sol\",\n        \"gpt-6-astra\",\n        \"gpt-6-luna\",\n        \"gpt-6.1-terra\"\n      ],\n      \"tiers\": {\n        \"gpt-6-astra\": [\n          \"flagship\"\n        ],\n        \"gpt-6-luna\": [\n          \"light\"\n        ],\n        \"gpt-6.1-sol\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"gpt-6.1-terra\": [\n          \"standard\"\n        ]\n      },\n      \"policy\": {\n        \"gpt-6-astra\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"astra\",\n            \"астр\"\n          ]\n        },\n        \"gpt-6-luna\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"gpt-6.1-sol\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"planning\",\n            \"design\",\n            \"review\",\n            \"operations\",\n            \"analysis\",\n            \"investigation\"\n          ],\n          \"preferred_when\": null,\n          \"request_names\": null\n        },\n        \"gpt-6.1-terra\": {\n          \"effort_floor\": \"medium\",\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"writing\",\n            \"testing\",\n            \"debugging\"\n          ]\n        }\n      }\n    },\n    \"opencode\": {\n      \"auto\": [],\n      \"tiers\": {},\n      \"policy\": {}\n    }\n  },\n  \"quota_windows\": {\n    \"claude-agent-acp\": [\n      {\n        \"window\": \"seven_day_opus\",\n        \"models\": [\n          \"opus\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_sonnet\",\n        \"models\": [\n          \"claude-sonnet-5\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_fable\",\n        \"models\": [\n          \"fable\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_haiku\",\n        \"models\": [\n          \"haiku\"\n        ]\n      }\n    ]\n  }\n}\n",
+        "defaults.json": "{\n  \"defaults\": {\n    \"coordinator\": {\n      \"engine\": \"claude-agent-acp\",\n      \"model\": \"fable\",\n      \"parameters\": {\n        \"thought_level\": \"medium\"\n      }\n    },\n    \"language\": \"ru\"\n  }\n}\n"
+      },
+      "params": {
+        "action": "reset_default_preset",
+        "confirm": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "default_preset",
+          "revision": "sha256:3dd3663b33664a40a7fa3168c613f73c91c78066580b4ddf9e554babc57483db",
+          "files": {
+            "routing": {
+              "revision": "sha256:829383a3662da8a5b73f3edd601098f800b6dbc316bebde16bad8573a42cc29c",
+              "status": "existing"
+            },
+            "defaults": {
+              "revision": "sha256:6d6a7b3421a501795013b59e3865cd4e51383e442e101bdc62d399bb02e50bcd",
+              "status": "existing"
+            },
+            "mcp_servers": {
+              "revision": "absent",
+              "status": "absent"
+            },
+            "routing_profiles": {
+              "revision": "absent",
+              "status": "absent"
+            }
+          },
+          "changed": false,
+          "backups": {
+            "routing": "$CONFIG/routing.json.cortex-backup-1800000000123456789",
+            "defaults": "$CONFIG/defaults.json.cortex-backup-1800000000123456789"
+          }
+        }
+      },
+      "files": {
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"coordinator\": {\n      \"engine\": \"claude-agent-acp\",\n      \"model\": \"fable\",\n      \"parameters\": {\n        \"thought_level\": \"medium\"\n      }\n    },\n    \"language\": \"ru\"\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"gpt-5.5\",\n    \"claude-agent-acp/claude-haiku-4-5-20251001\",\n    \"claude-agent-acp/claude-sonnet-4-6\",\n    \"claude-agent-acp/claude-opus-4-6\",\n    \"claude-agent-acp/claude-opus-4-7\",\n    \"claude-agent-acp/claude-opus-4-8\",\n    \"claude-agent-acp/claude-opus-5\",\n    \"claude-agent-acp/claude-fable-5\",\n    \"codex-acp/gpt-5.6-luna\",\n    \"codex-acp/gpt-5.6-sol\",\n    \"codex-acp/gpt-5.6-terra\",\n    \"codex-acp/gpt-6-sol\",\n    \"opencode/*\"\n  ],\n  \"enabled\": {\n    \"claude-agent-acp\": [\n      \"default\",\n      \"opus\",\n      \"fable\",\n      \"claude-sonnet-5\",\n      \"haiku\"\n    ],\n    \"codex-acp\": [\n      \"gpt-6.1-sol\",\n      \"gpt-6-astra\",\n      \"gpt-6-luna\",\n      \"gpt-6.1-terra\"\n    ],\n    \"opencode\": []\n  },\n  \"auto_allow\": [],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ],\n  \"models\": {\n    \"claude-agent-acp\": {\n      \"auto\": [\n        \"default\",\n        \"opus\",\n        \"fable\",\n        \"claude-sonnet-5\",\n        \"haiku\"\n      ],\n      \"tiers\": {\n        \"fable\": [\n          \"flagship\"\n        ],\n        \"claude-sonnet-5\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"default\": [\n          \"deep\"\n        ],\n        \"haiku\": [\n          \"light\"\n        ],\n        \"opus\": [\n          \"flagship\",\n          \"deep\"\n        ]\n      },\n      \"policy\": {\n        \"fable\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"fable\",\n            \"фейбл\",\n            \"фэйбл\"\n          ]\n        },\n        \"claude-sonnet-5\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"investigation\",\n            \"review\",\n            \"analysis\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"default\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": null,\n          \"request_names\": null\n        },\n        \"haiku\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"opus\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"design\",\n            \"planning\",\n            \"implementation_frontend_design\",\n            \"debugging\",\n            \"analysis\",\n            \"implementation_backend\",\n            \"implementation_frontend\"\n          ],\n          \"preferred_when\": \"Use for the listed kinds. Always use for implementation_frontend_design and UI/UX design: layout, styling, markup, responsive layout, UI components, visual polish, UX flows, mockups, wireframes and design systems. Never mark such nodes low complexity: that leaves Opus ineligible. For implementation_backend, use only for very complex, narrowly scoped tasks.\",\n          \"request_names\": [\n            \"opus\",\n            \"опус\"\n          ]\n        }\n      }\n    },\n    \"codex-acp\": {\n      \"auto\": [\n        \"gpt-6.1-sol\",\n        \"gpt-6-astra\",\n        \"gpt-6-luna\",\n        \"gpt-6.1-terra\"\n      ],\n      \"tiers\": {\n        \"gpt-6-astra\": [\n          \"flagship\"\n        ],\n        \"gpt-6-luna\": [\n          \"light\"\n        ],\n        \"gpt-6.1-sol\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"gpt-6.1-terra\": [\n          \"standard\"\n        ]\n      },\n      \"policy\": {\n        \"gpt-6-astra\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"astra\",\n            \"астр\"\n          ]\n        },\n        \"gpt-6-luna\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"gpt-6.1-sol\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"planning\",\n            \"design\",\n            \"review\",\n            \"operations\",\n            \"analysis\",\n            \"investigation\"\n          ],\n          \"preferred_when\": null,\n          \"request_names\": null\n        },\n        \"gpt-6.1-terra\": {\n          \"effort_floor\": \"medium\",\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"writing\",\n            \"testing\",\n            \"debugging\"\n          ]\n        }\n      }\n    },\n    \"opencode\": {\n      \"auto\": [],\n      \"tiers\": {},\n      \"policy\": {}\n    }\n  },\n  \"quota_windows\": {\n    \"claude-agent-acp\": [\n      {\n        \"window\": \"seven_day_opus\",\n        \"models\": [\n          \"opus\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_sonnet\",\n        \"models\": [\n          \"claude-sonnet-5\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_fable\",\n        \"models\": [\n          \"fable\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_haiku\",\n        \"models\": [\n          \"haiku\"\n        ]\n      }\n    ]\n  }\n}\n",
+          "mode": 384
+        },
+        "defaults.json.cortex-backup-1800000000123456789": {
+          "content": "{\n  \"defaults\": {\n    \"coordinator\": {\n      \"engine\": \"claude-agent-acp\",\n      \"model\": \"fable\",\n      \"parameters\": {\n        \"thought_level\": \"medium\"\n      }\n    },\n    \"language\": \"ru\"\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json.cortex-backup-1800000000123456789": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"gpt-5.5\",\n    \"claude-agent-acp/claude-haiku-4-5-20251001\",\n    \"claude-agent-acp/claude-sonnet-4-6\",\n    \"claude-agent-acp/claude-opus-4-6\",\n    \"claude-agent-acp/claude-opus-4-7\",\n    \"claude-agent-acp/claude-opus-4-8\",\n    \"claude-agent-acp/claude-opus-5\",\n    \"claude-agent-acp/claude-fable-5\",\n    \"codex-acp/gpt-5.6-luna\",\n    \"codex-acp/gpt-5.6-sol\",\n    \"codex-acp/gpt-5.6-terra\",\n    \"codex-acp/gpt-6-sol\",\n    \"opencode/*\"\n  ],\n  \"enabled\": {\n    \"claude-agent-acp\": [\n      \"default\",\n      \"opus\",\n      \"fable\",\n      \"claude-sonnet-5\",\n      \"haiku\"\n    ],\n    \"codex-acp\": [\n      \"gpt-6.1-sol\",\n      \"gpt-6-astra\",\n      \"gpt-6-luna\",\n      \"gpt-6.1-terra\"\n    ],\n    \"opencode\": []\n  },\n  \"auto_allow\": [],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ],\n  \"models\": {\n    \"claude-agent-acp\": {\n      \"auto\": [\n        \"default\",\n        \"opus\",\n        \"fable\",\n        \"claude-sonnet-5\",\n        \"haiku\"\n      ],\n      \"tiers\": {\n        \"fable\": [\n          \"flagship\"\n        ],\n        \"claude-sonnet-5\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"default\": [\n          \"deep\"\n        ],\n        \"haiku\": [\n          \"light\"\n        ],\n        \"opus\": [\n          \"flagship\",\n          \"deep\"\n        ]\n      },\n      \"policy\": {\n        \"fable\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"fable\",\n            \"фейбл\",\n            \"фэйбл\"\n          ]\n        },\n        \"claude-sonnet-5\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"investigation\",\n            \"review\",\n            \"analysis\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"default\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": null,\n          \"request_names\": null\n        },\n        \"haiku\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"opus\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"design\",\n            \"planning\",\n            \"implementation_frontend_design\",\n            \"debugging\",\n            \"analysis\",\n            \"implementation_backend\",\n            \"implementation_frontend\"\n          ],\n          \"preferred_when\": \"Use for the listed kinds. Always use for implementation_frontend_design and UI/UX design: layout, styling, markup, responsive layout, UI components, visual polish, UX flows, mockups, wireframes and design systems. Never mark such nodes low complexity: that leaves Opus ineligible. For implementation_backend, use only for very complex, narrowly scoped tasks.\",\n          \"request_names\": [\n            \"opus\",\n            \"опус\"\n          ]\n        }\n      }\n    },\n    \"codex-acp\": {\n      \"auto\": [\n        \"gpt-6.1-sol\",\n        \"gpt-6-astra\",\n        \"gpt-6-luna\",\n        \"gpt-6.1-terra\"\n      ],\n      \"tiers\": {\n        \"gpt-6-astra\": [\n          \"flagship\"\n        ],\n        \"gpt-6-luna\": [\n          \"light\"\n        ],\n        \"gpt-6.1-sol\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"gpt-6.1-terra\": [\n          \"standard\"\n        ]\n      },\n      \"policy\": {\n        \"gpt-6-astra\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"astra\",\n            \"астр\"\n          ]\n        },\n        \"gpt-6-luna\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"gpt-6.1-sol\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"planning\",\n            \"design\",\n            \"review\",\n            \"operations\",\n            \"analysis\",\n            \"investigation\"\n          ],\n          \"preferred_when\": null,\n          \"request_names\": null\n        },\n        \"gpt-6.1-terra\": {\n          \"effort_floor\": \"medium\",\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"writing\",\n            \"testing\",\n            \"debugging\"\n          ]\n        }\n      }\n    },\n    \"opencode\": {\n      \"auto\": [],\n      \"tiers\": {},\n      \"policy\": {}\n    }\n  },\n  \"quota_windows\": {\n    \"claude-agent-acp\": [\n      {\n        \"window\": \"seven_day_opus\",\n        \"models\": [\n          \"opus\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_sonnet\",\n        \"models\": [\n          \"claude-sonnet-5\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_fable\",\n        \"models\": [\n          \"fable\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_haiku\",\n        \"models\": [\n          \"haiku\"\n        ]\n      }\n    ]\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      }
+    },
+    {
+      "name": "other-sections-untouched",
+      "initial": {
+        "mcp-servers.json": "[broken",
+        "routing-profiles.json": "null",
+        "connections.json": "{not-read"
+      },
+      "params": {
+        "action": "reset_default_preset",
+        "confirm": true
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "default_preset",
+          "revision": "sha256:3dd3663b33664a40a7fa3168c613f73c91c78066580b4ddf9e554babc57483db",
+          "files": {
+            "routing": {
+              "revision": "sha256:829383a3662da8a5b73f3edd601098f800b6dbc316bebde16bad8573a42cc29c",
+              "status": "existing"
+            },
+            "defaults": {
+              "revision": "sha256:6d6a7b3421a501795013b59e3865cd4e51383e442e101bdc62d399bb02e50bcd",
+              "status": "existing"
+            },
+            "mcp_servers": {
+              "revision": "sha256:af035063bb96e3848cd647faef081c579c0648bae24a80f9ae2a633935da83c2",
+              "status": "existing"
+            },
+            "routing_profiles": {
+              "revision": "sha256:74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b",
+              "status": "existing"
+            }
+          },
+          "changed": true,
+          "backups": {}
+        }
+      },
+      "files": {
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"coordinator\": {\n      \"engine\": \"claude-agent-acp\",\n      \"model\": \"fable\",\n      \"parameters\": {\n        \"thought_level\": \"medium\"\n      }\n    },\n    \"language\": \"ru\"\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"gpt-5.5\",\n    \"claude-agent-acp/claude-haiku-4-5-20251001\",\n    \"claude-agent-acp/claude-sonnet-4-6\",\n    \"claude-agent-acp/claude-opus-4-6\",\n    \"claude-agent-acp/claude-opus-4-7\",\n    \"claude-agent-acp/claude-opus-4-8\",\n    \"claude-agent-acp/claude-opus-5\",\n    \"claude-agent-acp/claude-fable-5\",\n    \"codex-acp/gpt-5.6-luna\",\n    \"codex-acp/gpt-5.6-sol\",\n    \"codex-acp/gpt-5.6-terra\",\n    \"codex-acp/gpt-6-sol\",\n    \"opencode/*\"\n  ],\n  \"enabled\": {\n    \"claude-agent-acp\": [\n      \"default\",\n      \"opus\",\n      \"fable\",\n      \"claude-sonnet-5\",\n      \"haiku\"\n    ],\n    \"codex-acp\": [\n      \"gpt-6.1-sol\",\n      \"gpt-6-astra\",\n      \"gpt-6-luna\",\n      \"gpt-6.1-terra\"\n    ],\n    \"opencode\": []\n  },\n  \"auto_allow\": [],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ],\n  \"models\": {\n    \"claude-agent-acp\": {\n      \"auto\": [\n        \"default\",\n        \"opus\",\n        \"fable\",\n        \"claude-sonnet-5\",\n        \"haiku\"\n      ],\n      \"tiers\": {\n        \"fable\": [\n          \"flagship\"\n        ],\n        \"claude-sonnet-5\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"default\": [\n          \"deep\"\n        ],\n        \"haiku\": [\n          \"light\"\n        ],\n        \"opus\": [\n          \"flagship\",\n          \"deep\"\n        ]\n      },\n      \"policy\": {\n        \"fable\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"fable\",\n            \"фейбл\",\n            \"фэйбл\"\n          ]\n        },\n        \"claude-sonnet-5\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"investigation\",\n            \"review\",\n            \"analysis\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"default\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": null,\n          \"request_names\": null\n        },\n        \"haiku\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"opus\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"design\",\n            \"planning\",\n            \"implementation_frontend_design\",\n            \"debugging\",\n            \"analysis\",\n            \"implementation_backend\",\n            \"implementation_frontend\"\n          ],\n          \"preferred_when\": \"Use for the listed kinds. Always use for implementation_frontend_design and UI/UX design: layout, styling, markup, responsive layout, UI components, visual polish, UX flows, mockups, wireframes and design systems. Never mark such nodes low complexity: that leaves Opus ineligible. For implementation_backend, use only for very complex, narrowly scoped tasks.\",\n          \"request_names\": [\n            \"opus\",\n            \"опус\"\n          ]\n        }\n      }\n    },\n    \"codex-acp\": {\n      \"auto\": [\n        \"gpt-6.1-sol\",\n        \"gpt-6-astra\",\n        \"gpt-6-luna\",\n        \"gpt-6.1-terra\"\n      ],\n      \"tiers\": {\n        \"gpt-6-astra\": [\n          \"flagship\"\n        ],\n        \"gpt-6-luna\": [\n          \"light\"\n        ],\n        \"gpt-6.1-sol\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"gpt-6.1-terra\": [\n          \"standard\"\n        ]\n      },\n      \"policy\": {\n        \"gpt-6-astra\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"astra\",\n            \"астр\"\n          ]\n        },\n        \"gpt-6-luna\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"gpt-6.1-sol\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"planning\",\n            \"design\",\n            \"review\",\n            \"operations\",\n            \"analysis\",\n            \"investigation\"\n          ],\n          \"preferred_when\": null,\n          \"request_names\": null\n        },\n        \"gpt-6.1-terra\": {\n          \"effort_floor\": \"medium\",\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"writing\",\n            \"testing\",\n            \"debugging\"\n          ]\n        }\n      }\n    },\n    \"opencode\": {\n      \"auto\": [],\n      \"tiers\": {},\n      \"policy\": {}\n    }\n  },\n  \"quota_windows\": {\n    \"claude-agent-acp\": [\n      {\n        \"window\": \"seven_day_opus\",\n        \"models\": [\n          \"opus\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_sonnet\",\n        \"models\": [\n          \"claude-sonnet-5\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_fable\",\n        \"models\": [\n          \"fable\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_haiku\",\n        \"models\": [\n          \"haiku\"\n        ]\n      }\n    ]\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "connections.json": {
+          "content": "{not-read",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "null",
+          "mode": 384
+        },
+        "mcp-servers.json": {
+          "content": "[broken",
+          "mode": 384
+        }
+      }
+    },
+    {
+      "name": "caller-revision-ignored",
+      "initial": {},
+      "params": {
+        "action": "reset_default_preset",
+        "confirm": true,
+        "expected_revision": false
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "default_preset",
+          "revision": "sha256:3dd3663b33664a40a7fa3168c613f73c91c78066580b4ddf9e554babc57483db",
+          "files": {
+            "routing": {
+              "revision": "sha256:829383a3662da8a5b73f3edd601098f800b6dbc316bebde16bad8573a42cc29c",
+              "status": "existing"
+            },
+            "defaults": {
+              "revision": "sha256:6d6a7b3421a501795013b59e3865cd4e51383e442e101bdc62d399bb02e50bcd",
+              "status": "existing"
+            },
+            "mcp_servers": {
+              "revision": "absent",
+              "status": "absent"
+            },
+            "routing_profiles": {
+              "revision": "absent",
+              "status": "absent"
+            }
+          },
+          "changed": true,
+          "backups": {}
+        }
+      },
+      "files": {
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"coordinator\": {\n      \"engine\": \"claude-agent-acp\",\n      \"model\": \"fable\",\n      \"parameters\": {\n        \"thought_level\": \"medium\"\n      }\n    },\n    \"language\": \"ru\"\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"gpt-5.5\",\n    \"claude-agent-acp/claude-haiku-4-5-20251001\",\n    \"claude-agent-acp/claude-sonnet-4-6\",\n    \"claude-agent-acp/claude-opus-4-6\",\n    \"claude-agent-acp/claude-opus-4-7\",\n    \"claude-agent-acp/claude-opus-4-8\",\n    \"claude-agent-acp/claude-opus-5\",\n    \"claude-agent-acp/claude-fable-5\",\n    \"codex-acp/gpt-5.6-luna\",\n    \"codex-acp/gpt-5.6-sol\",\n    \"codex-acp/gpt-5.6-terra\",\n    \"codex-acp/gpt-6-sol\",\n    \"opencode/*\"\n  ],\n  \"enabled\": {\n    \"claude-agent-acp\": [\n      \"default\",\n      \"opus\",\n      \"fable\",\n      \"claude-sonnet-5\",\n      \"haiku\"\n    ],\n    \"codex-acp\": [\n      \"gpt-6.1-sol\",\n      \"gpt-6-astra\",\n      \"gpt-6-luna\",\n      \"gpt-6.1-terra\"\n    ],\n    \"opencode\": []\n  },\n  \"auto_allow\": [],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ],\n  \"models\": {\n    \"claude-agent-acp\": {\n      \"auto\": [\n        \"default\",\n        \"opus\",\n        \"fable\",\n        \"claude-sonnet-5\",\n        \"haiku\"\n      ],\n      \"tiers\": {\n        \"fable\": [\n          \"flagship\"\n        ],\n        \"claude-sonnet-5\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"default\": [\n          \"deep\"\n        ],\n        \"haiku\": [\n          \"light\"\n        ],\n        \"opus\": [\n          \"flagship\",\n          \"deep\"\n        ]\n      },\n      \"policy\": {\n        \"fable\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"fable\",\n            \"фейбл\",\n            \"фэйбл\"\n          ]\n        },\n        \"claude-sonnet-5\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"investigation\",\n            \"review\",\n            \"analysis\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"default\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": null,\n          \"request_names\": null\n        },\n        \"haiku\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"opus\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"design\",\n            \"planning\",\n            \"implementation_frontend_design\",\n            \"debugging\",\n            \"analysis\",\n            \"implementation_backend\",\n            \"implementation_frontend\"\n          ],\n          \"preferred_when\": \"Use for the listed kinds. Always use for implementation_frontend_design and UI/UX design: layout, styling, markup, responsive layout, UI components, visual polish, UX flows, mockups, wireframes and design systems. Never mark such nodes low complexity: that leaves Opus ineligible. For implementation_backend, use only for very complex, narrowly scoped tasks.\",\n          \"request_names\": [\n            \"opus\",\n            \"опус\"\n          ]\n        }\n      }\n    },\n    \"codex-acp\": {\n      \"auto\": [\n        \"gpt-6.1-sol\",\n        \"gpt-6-astra\",\n        \"gpt-6-luna\",\n        \"gpt-6.1-terra\"\n      ],\n      \"tiers\": {\n        \"gpt-6-astra\": [\n          \"flagship\"\n        ],\n        \"gpt-6-luna\": [\n          \"light\"\n        ],\n        \"gpt-6.1-sol\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"gpt-6.1-terra\": [\n          \"standard\"\n        ]\n      },\n      \"policy\": {\n        \"gpt-6-astra\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"astra\",\n            \"астр\"\n          ]\n        },\n        \"gpt-6-luna\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"gpt-6.1-sol\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"planning\",\n            \"design\",\n            \"review\",\n            \"operations\",\n            \"analysis\",\n            \"investigation\"\n          ],\n          \"preferred_when\": null,\n          \"request_names\": null\n        },\n        \"gpt-6.1-terra\": {\n          \"effort_floor\": \"medium\",\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"writing\",\n            \"testing\",\n            \"debugging\"\n          ]\n        }\n      }\n    },\n    \"opencode\": {\n      \"auto\": [],\n      \"tiers\": {},\n      \"policy\": {}\n    }\n  },\n  \"quota_windows\": {\n    \"claude-agent-acp\": [\n      {\n        \"window\": \"seven_day_opus\",\n        \"models\": [\n          \"opus\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_sonnet\",\n        \"models\": [\n          \"claude-sonnet-5\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_fable\",\n        \"models\": [\n          \"fable\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_haiku\",\n        \"models\": [\n          \"haiku\"\n        ]\n      }\n    ]\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      }
+    },
+    {
+      "name": "caller-paths-ignored",
+      "initial": {},
+      "params": {
+        "action": "reset_default_preset",
+        "confirm": true,
+        "configRoot": "/not-authorized",
+        "project": "/not-authorized"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "default_preset",
+          "revision": "sha256:3dd3663b33664a40a7fa3168c613f73c91c78066580b4ddf9e554babc57483db",
+          "files": {
+            "routing": {
+              "revision": "sha256:829383a3662da8a5b73f3edd601098f800b6dbc316bebde16bad8573a42cc29c",
+              "status": "existing"
+            },
+            "defaults": {
+              "revision": "sha256:6d6a7b3421a501795013b59e3865cd4e51383e442e101bdc62d399bb02e50bcd",
+              "status": "existing"
+            },
+            "mcp_servers": {
+              "revision": "absent",
+              "status": "absent"
+            },
+            "routing_profiles": {
+              "revision": "absent",
+              "status": "absent"
+            }
+          },
+          "changed": true,
+          "backups": {}
+        }
+      },
+      "files": {
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"coordinator\": {\n      \"engine\": \"claude-agent-acp\",\n      \"model\": \"fable\",\n      \"parameters\": {\n        \"thought_level\": \"medium\"\n      }\n    },\n    \"language\": \"ru\"\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"model_policy_version\": 2,\n  \"deny\": [\n    \"gpt-5.5\",\n    \"claude-agent-acp/claude-haiku-4-5-20251001\",\n    \"claude-agent-acp/claude-sonnet-4-6\",\n    \"claude-agent-acp/claude-opus-4-6\",\n    \"claude-agent-acp/claude-opus-4-7\",\n    \"claude-agent-acp/claude-opus-4-8\",\n    \"claude-agent-acp/claude-opus-5\",\n    \"claude-agent-acp/claude-fable-5\",\n    \"codex-acp/gpt-5.6-luna\",\n    \"codex-acp/gpt-5.6-sol\",\n    \"codex-acp/gpt-5.6-terra\",\n    \"codex-acp/gpt-6-sol\",\n    \"opencode/*\"\n  ],\n  \"enabled\": {\n    \"claude-agent-acp\": [\n      \"default\",\n      \"opus\",\n      \"fable\",\n      \"claude-sonnet-5\",\n      \"haiku\"\n    ],\n    \"codex-acp\": [\n      \"gpt-6.1-sol\",\n      \"gpt-6-astra\",\n      \"gpt-6-luna\",\n      \"gpt-6.1-terra\"\n    ],\n    \"opencode\": []\n  },\n  \"auto_allow\": [],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ],\n  \"models\": {\n    \"claude-agent-acp\": {\n      \"auto\": [\n        \"default\",\n        \"opus\",\n        \"fable\",\n        \"claude-sonnet-5\",\n        \"haiku\"\n      ],\n      \"tiers\": {\n        \"fable\": [\n          \"flagship\"\n        ],\n        \"claude-sonnet-5\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"default\": [\n          \"deep\"\n        ],\n        \"haiku\": [\n          \"light\"\n        ],\n        \"opus\": [\n          \"flagship\",\n          \"deep\"\n        ]\n      },\n      \"policy\": {\n        \"fable\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"fable\",\n            \"фейбл\",\n            \"фэйбл\"\n          ]\n        },\n        \"claude-sonnet-5\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"investigation\",\n            \"review\",\n            \"analysis\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"default\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": null,\n          \"request_names\": null\n        },\n        \"haiku\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"opus\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"design\",\n            \"planning\",\n            \"implementation_frontend_design\",\n            \"debugging\",\n            \"analysis\",\n            \"implementation_backend\",\n            \"implementation_frontend\"\n          ],\n          \"preferred_when\": \"Use for the listed kinds. Always use for implementation_frontend_design and UI/UX design: layout, styling, markup, responsive layout, UI components, visual polish, UX flows, mockups, wireframes and design systems. Never mark such nodes low complexity: that leaves Opus ineligible. For implementation_backend, use only for very complex, narrowly scoped tasks.\",\n          \"request_names\": [\n            \"opus\",\n            \"опус\"\n          ]\n        }\n      }\n    },\n    \"codex-acp\": {\n      \"auto\": [\n        \"gpt-6.1-sol\",\n        \"gpt-6-astra\",\n        \"gpt-6-luna\",\n        \"gpt-6.1-terra\"\n      ],\n      \"tiers\": {\n        \"gpt-6-astra\": [\n          \"flagship\"\n        ],\n        \"gpt-6-luna\": [\n          \"light\"\n        ],\n        \"gpt-6.1-sol\": [\n          \"standard\",\n          \"deep\"\n        ],\n        \"gpt-6.1-terra\": [\n          \"standard\"\n        ]\n      },\n      \"policy\": {\n        \"gpt-6-astra\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"low\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"design\"\n          ],\n          \"request_names\": [\n            \"astra\",\n            \"астр\"\n          ]\n        },\n        \"gpt-6-luna\": {\n          \"also_standard_for\": [\n            \"testing\"\n          ],\n          \"effort_floor\": \"high\",\n          \"effort_ladder\": [\n            \"high\",\n            \"xhigh\",\n            \"max\"\n          ],\n          \"max_effort\": \"max\",\n          \"preferred_for\": [\n            \"analysis\",\n            \"writing\",\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"debugging\",\n            \"investigation\",\n            \"operations\"\n          ],\n          \"request_names\": null\n        },\n        \"gpt-6.1-sol\": {\n          \"also_standard_for\": null,\n          \"effort_floor\": \"medium\",\n          \"effort_ladder\": null,\n          \"max_effort\": \"xhigh\",\n          \"preferred_for\": [\n            \"implementation_backend\",\n            \"implementation_frontend\",\n            \"planning\",\n            \"design\",\n            \"review\",\n            \"operations\",\n            \"analysis\",\n            \"investigation\"\n          ],\n          \"preferred_when\": null,\n          \"request_names\": null\n        },\n        \"gpt-6.1-terra\": {\n          \"effort_floor\": \"medium\",\n          \"max_effort\": \"high\",\n          \"preferred_for\": [\n            \"writing\",\n            \"testing\",\n            \"debugging\"\n          ]\n        }\n      }\n    },\n    \"opencode\": {\n      \"auto\": [],\n      \"tiers\": {},\n      \"policy\": {}\n    }\n  },\n  \"quota_windows\": {\n    \"claude-agent-acp\": [\n      {\n        \"window\": \"seven_day_opus\",\n        \"models\": [\n          \"opus\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_sonnet\",\n        \"models\": [\n          \"claude-sonnet-5\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_fable\",\n        \"models\": [\n          \"fable\"\n        ]\n      },\n      {\n        \"window\": \"seven_day_haiku\",\n        \"models\": [\n          \"haiku\"\n        ]\n      }\n    ]\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      }
+    },
+    {
+      "name": "conflicting-ignore",
+      "initial": {
+        ".gitignore": "keep\n"
+      },
+      "params": {
+        "action": "reset_default_preset",
+        "confirm": true
+      },
+      "reply": {
+        "ok": false,
+        "code": "unsafe_storage",
+        "message": "$CONFIG/.gitignore already exists with unexpected content; refusing to overwrite it (it must contain exactly '*')."
+      },
+      "files": {
+        ".gitignore": {
+          "content": "keep\n",
+          "mode": 384
+        }
+      }
+    },
+    {
+      "name": "confirmation-False",
+      "initial": {},
+      "params": {
+        "action": "reset_default_preset",
+        "confirm": false
+      },
+      "reply": {
+        "ok": false,
+        "code": "confirmation_required",
+        "message": "Send confirm: true to replace both user preset files."
+      },
+      "files": {}
+    },
+    {
+      "name": "confirmation-None",
+      "initial": {},
+      "params": {
+        "action": "reset_default_preset",
+        "confirm": null
+      },
+      "reply": {
+        "ok": false,
+        "code": "confirmation_required",
+        "message": "Send confirm: true to replace both user preset files."
+      },
+      "files": {}
+    },
+    {
+      "name": "confirmation-1",
+      "initial": {},
+      "params": {
+        "action": "reset_default_preset",
+        "confirm": 1
+      },
+      "reply": {
+        "ok": false,
+        "code": "confirmation_required",
+        "message": "Send confirm: true to replace both user preset files."
+      },
+      "files": {}
+    },
+    {
+      "name": "confirmation-'true'",
+      "initial": {},
+      "params": {
+        "action": "reset_default_preset",
+        "confirm": "true"
+      },
+      "reply": {
+        "ok": false,
+        "code": "confirmation_required",
+        "message": "Send confirm: true to replace both user preset files."
+      },
+      "files": {}
+    },
+    {
+      "name": "missing-confirm",
+      "initial": {},
+      "params": {
+        "action": "reset_default_preset"
+      },
+      "reply": {
+        "ok": false,
+        "code": "confirmation_required",
+        "message": "Send confirm: true to replace both user preset files."
+      },
+      "files": {}
+    }
+  ]
+}

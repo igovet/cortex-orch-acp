@@ -6,10 +6,6 @@
 .cortex-workspace-dev.json
 .claude/
 
-# Local Python bytecode from the bundled plugin.
-__pycache__/
-*.py[cod]
-
 docs/implementation
 *.log
 
@@ -30,9 +26,6 @@ integrations/paseo/node_modules/
 # Cargo workspace build output (including future nested crates).
 target/
 
-# Checkout-local Python test environment (pytest); never a payload input.
-/.venv/
-/.verification-venv/
 /.cortex/
 
 # Vitest cache written at the repository root when the prototype tests run from here.

@@ -10,6 +10,25 @@ const storeOn = (port: Parameters<typeof createWorkspaceStore>[0], options: Para
 const titles = (state: WorkspaceState) => state.tasks.map(t => t.title);
 
 describe("workspace store", () => {
+  it("retains a native patch arriving during a coherent read, then installs only the newer version", async () => {
+    const s = scriptedPort();
+    const store = storeOn(s.port);
+    await flush();
+    const before = withTask(emptyWorkspace(), "Before");
+    s.emit(projection("1", before));
+    let release!: (updates: ReturnType<typeof projection>[]) => void;
+    const original = s.port.query.bind(s.port);
+    s.port.query = ((operation: string, parameters: unknown) => operation === "project.snapshot"
+      ? new Promise<ReturnType<typeof projection>[]>(resolve => {release = resolve;}) : original(operation as never, parameters as never)) as unknown as typeof s.port.query;
+    const reading = store.reload();
+    await flush();
+    s.emit({kind:"delta",update:projection("3", withTask(emptyWorkspace(), "Native update"))});
+    expect(titles(store.state())).toEqual(["Before"]);
+    release([projection("2", withTask(emptyWorkspace(), "Older snapshot"))]);
+    await reading; await flush();
+    expect(titles(store.state())).toEqual(["Native update"]);
+    expect(store.version("workspace")).toBe("3");
+  });
   it("installs a confirmed projection and starts empty", async () => {
     const s = scriptedPort();
     const store = storeOn(s.port);
@@ -182,7 +201,7 @@ describe("a real backend failure", () => {
     s.port.query = ((operation: Parameters<typeof query>[0], parameters: never) => { asked.push(operation); return query(operation, parameters); }) as typeof s.port.query;
     s.emit({ kind: "connection", connection: { state: "connected", reason: null, at: 6 } });
     await flush();
-    expect(asked).toEqual(["capabilities.get", "project.snapshot", "project.facts", "machine.facts"]);
+    expect(asked).toEqual(["capabilities.get", "machine.facts", "project.snapshot", "project.facts"]);
     expect(store.connection().state).toBe("connected");
   });
 

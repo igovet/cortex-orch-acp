@@ -1,6 +1,6 @@
 # Commands and project skill management
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 Cortex advertises `/skill-management <request>` as an ACP session command. It accepts one text block beginning with the exact command name. A request such as `/skill-management create a release-notes skill`, `/skill-management revise .agents/skills/release-notes`, or `/skill-management import https://example.com/skills/review` enters the skill-management workflow. Ordinary prose, a command with a longer prefix, or a multi-block prompt does not activate it. Clients that display ACP commands can expose it in their command picker; typing the exact command is also recognized by Cortex.
@@ -52,7 +52,7 @@ The operation requires a writing assignment, but no particular declared scope: w
 
 The coordinator may propose one reusable project skill when retained reports show the same procedure more than once. It explains the cases and the benefit in its message, then asks through the durable question protocol: `user_question_request` with a `skill_proposal` (name, action `create` or `update`, purpose, and 2 to 5 distinct report ids, each with a one-line case) and exactly two explicit, action-matched options. For creation, use `Create the skill` / `Not now` or `Создать навык` / `Не сейчас`; for update, use `Update the skill` / `Not now` or `Обновить навык` / `Не сейчас`. The runtime also accepts the corresponding explicit `Approve creating/updating the skill` / `Decline creating/updating the skill` pairs in English and Russian. Reversed, mixed, or ambiguous labels are rejected before the question is stored. The question is persisted before the user sees it, and the task waits in `WAITING_USER` as for any coordinator question. A proposal is possible only while planning or reconciling, so it never interrupts running workers.
 
-Before the question exists, the runtime (`orchestration/skill_proposals.py`) checks:
+Before the question exists, the runtime checks:
 
 - each report id names an ordinary published report of this project store (not a pipeline or source); it keeps a bounded snapshot (id, task, title, case) with the question;
 - the action matches the project: `create` needs no entry at `.agents/skills/<name>`, `update` needs a real skill directory with a regular `SKILL.md`;
@@ -64,6 +64,11 @@ The user sees the runtime's own evidence list with the report ids and titles, fo
 - **Declined or unclear.** The runtime writes nothing to the project. The coordinator is told not to create, update or link that skill and not to propose it again. It can close the task with a short answer. The user can still run `/skill-management <request>` explicitly.
 
 Existing files never start a proposal. The runtime cannot inspect a model's intent, so it does not block a plan that ignores the decision; the instruction, the recorded decision, the plan, and the mandatory independent review are the controls for that.
+
+The additive Rust incoming adapter implements the same proposal consent path
+through `cortex_core::lifecycle::skill_proposals`, including durable decisions
+and the skill-management planning handoff. This is not yet full native authoring
+tool or installed-client parity; see [native incoming ACP](../../project/native-incoming-acp.md#coordinator-questions-and-skill-proposals).
 
 ## Bundled core skills and project extras
 

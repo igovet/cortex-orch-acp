@@ -1,0 +1,3460 @@
+{
+  "format": 1,
+  "now": "2027-01-15T08:00:00.123456+00:00",
+  "processNetworkAttempts": 0,
+  "sources": {
+    "crates/workspace-service/machine_tools.py": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+    "src/cortex_runtime/configuration/management.py": "f035019940568b7b2881c7548e29f53a8e1ce0433eb5b7b1d2fc12e70f6ae8a2",
+    "src/cortex_runtime/configuration/routing_profiles.py": "2365f75d1fd1fdb0269b44932e3b666031d56e7e777191965d33ad7f78103971",
+    "src/cortex_runtime/connections/registry.py": "6c96df2025a2b3e73d81dbcfabb57f2d9fcd233c167b19b5684163c4986a1ce5",
+    "crates/workspace-service/tests/generate_config_profiles_fixture.py": "6f5ba985cb854721862bebd9f9d1ec8ce3eab779cb1208ef8884d9653e058802",
+    "crates/workspace-service/tests/generate_config_profiles_edges_fixture.py": "28d6d3a59ea7d13110b2fc9b8f778f70ece9f2892b239044148417f20d2a696e"
+  },
+  "cases": [
+    {
+      "name": "read-absent",
+      "initial": {},
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "absent",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {},
+      "dirs": {}
+    },
+    {
+      "name": "deactivate-absent",
+      "initial": {},
+      "params": {
+        "action": "profile",
+        "verb": "deactivate",
+        "expected_revision": "absent"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:a1c9b02a604f177af2a80ad24b3cefad2a677116e7dab6d747d66a0e1bb4b24a",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {}\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-rich",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+        "routing.json": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ]\n}\n",
+        "defaults.json": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {\n      \"mode\": \"agent\",\n      \"thought_level\": \"high\"\n    }\n  }\n}\n",
+        "mcp-servers.json": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/not-executed\",\n      \"args\": [],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"read_only_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    },\n    \"a\": {\n      \"command\": \"/not-executed\",\n      \"allowed_tools\": [\n        \"get\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:5e88b1aaee17bc7cc7e9ac8c2ad2a88679738398d5f5a8212661ca083ebc8fbc",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "modified",
+          "modified_sections": [
+            "routing"
+          ],
+          "differences": [
+            {
+              "section": "routing",
+              "key": "deny"
+            },
+            {
+              "section": "routing",
+              "key": "providers"
+            }
+          ],
+          "pending": null,
+          "problems": [],
+          "applied": null,
+          "current_revisions": {
+            "routing": "sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5",
+            "user_defaults": "sha256:fdac995e1ee93a61de4f744393cee61c350f0ea1e28b1ec275e85cce7eab2e7a",
+            "mcp_servers": "sha256:746d9a77404fb39116a3e4aa43a017f1c37895d0145d8a3dda7cdc17d8e64869",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Ω",
+              "revision": "sha256:d4a41ab9f952d20c90dd3dd88973e82a00d23a33ec63740a0e1970a01a9c9a49",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": null,
+              "updated_at": null,
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {
+        "mcp-servers.json": {
+          "content": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/not-executed\",\n      \"args\": [],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"read_only_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    },\n    \"a\": {\n      \"command\": \"/not-executed\",\n      \"allowed_tools\": [\n        \"get\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {\n      \"mode\": \"agent\",\n      \"thought_level\": \"high\"\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ]\n}\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "deactivate-rich",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+        "routing.json": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ]\n}\n",
+        "defaults.json": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {\n      \"mode\": \"agent\",\n      \"thought_level\": \"high\"\n    }\n  }\n}\n",
+        "mcp-servers.json": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/not-executed\",\n      \"args\": [],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"read_only_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    },\n    \"a\": {\n      \"command\": \"/not-executed\",\n      \"allowed_tools\": [\n        \"get\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "deactivate",
+        "expected_revision": "sha256:5e88b1aaee17bc7cc7e9ac8c2ad2a88679738398d5f5a8212661ca083ebc8fbc"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:1aeca96b255b82aa7dacc1e4a3987fccd995011377cc74cfbe8212c0ab697291",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": null,
+          "current_revisions": {
+            "routing": "sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5",
+            "user_defaults": "sha256:fdac995e1ee93a61de4f744393cee61c350f0ea1e28b1ec275e85cce7eab2e7a",
+            "mcp_servers": "sha256:746d9a77404fb39116a3e4aa43a017f1c37895d0145d8a3dda7cdc17d8e64869",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Ω",
+              "revision": "sha256:d4a41ab9f952d20c90dd3dd88973e82a00d23a33ec63740a0e1970a01a9c9a49",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": null,
+              "updated_at": null,
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"pending\": null,\n  \"applied\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "mcp-servers.json": {
+          "content": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/not-executed\",\n      \"args\": [],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"read_only_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    },\n    \"a\": {\n      \"command\": \"/not-executed\",\n      \"allowed_tools\": [\n        \"get\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {\n      \"mode\": \"agent\",\n      \"thought_level\": \"high\"\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ]\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-existing",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:5e88b1aaee17bc7cc7e9ac8c2ad2a88679738398d5f5a8212661ca083ebc8fbc",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Ω",
+              "revision": "sha256:d4a41ab9f952d20c90dd3dd88973e82a00d23a33ec63740a0e1970a01a9c9a49",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": null,
+              "updated_at": null,
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": []
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "deactivate-existing",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "deactivate",
+        "expected_revision": "sha256:5e88b1aaee17bc7cc7e9ac8c2ad2a88679738398d5f5a8212661ca083ebc8fbc"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:1aeca96b255b82aa7dacc1e4a3987fccd995011377cc74cfbe8212c0ab697291",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Ω",
+              "revision": "sha256:d4a41ab9f952d20c90dd3dd88973e82a00d23a33ec63740a0e1970a01a9c9a49",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": null,
+              "updated_at": null,
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"pending\": null,\n  \"applied\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "capture-rich",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+        "routing.json": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ]\n}\n",
+        "defaults.json": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {\n      \"mode\": \"agent\",\n      \"thought_level\": \"high\"\n    }\n  }\n}\n",
+        "mcp-servers.json": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/not-executed\",\n      \"args\": [],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"read_only_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    },\n    \"a\": {\n      \"command\": \"/not-executed\",\n      \"allowed_tools\": [\n        \"get\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "sha256:5e88b1aaee17bc7cc7e9ac8c2ad2a88679738398d5f5a8212661ca083ebc8fbc",
+        "expected_revisions": {
+          "routing": "sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5",
+          "user_defaults": "sha256:fdac995e1ee93a61de4f744393cee61c350f0ea1e28b1ec275e85cce7eab2e7a",
+          "mcp_servers": "sha256:746d9a77404fb39116a3e4aa43a017f1c37895d0145d8a3dda7cdc17d8e64869",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:ff49a517c35e72deffc547dc14250332468d0536536d0fd461a6f88dd71a69c2",
+          "format": 2,
+          "migrated_from": null,
+          "active": "new",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "new",
+            "at": "2027-01-15T08:00:00.123456+00:00",
+            "revisions": {
+              "routing": "sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5",
+              "user_defaults": "sha256:fdac995e1ee93a61de4f744393cee61c350f0ea1e28b1ec275e85cce7eab2e7a",
+              "mcp_servers": "sha256:746d9a77404fb39116a3e4aa43a017f1c37895d0145d8a3dda7cdc17d8e64869",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5",
+            "user_defaults": "sha256:fdac995e1ee93a61de4f744393cee61c350f0ea1e28b1ec275e85cce7eab2e7a",
+            "mcp_servers": "sha256:746d9a77404fb39116a3e4aa43a017f1c37895d0145d8a3dda7cdc17d8e64869",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Ω",
+              "revision": "sha256:d4a41ab9f952d20c90dd3dd88973e82a00d23a33ec63740a0e1970a01a9c9a49",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": null,
+              "updated_at": null,
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            },
+            {
+              "name": "new",
+              "description": "",
+              "revision": "sha256:33bd593b6d814df85a64d24db1e6e5c7eab205af118e104a0e336ba55e220960",
+              "sections": [
+                "routing",
+                "user_defaults",
+                "mcp_servers",
+                "connections"
+              ],
+              "settings": {
+                "routing": {
+                  "deny": [
+                    "codex-acp/*"
+                  ],
+                  "providers": [
+                    "claude-agent-acp",
+                    "codex-acp"
+                  ]
+                },
+                "user_defaults": {
+                  "defaults": {
+                    "language": "ru",
+                    "parameters": {
+                      "mode": "agent",
+                      "thought_level": "high"
+                    }
+                  },
+                  "ceiling": {
+                    "allowed_connections": null,
+                    "allowed_data_recipients": null,
+                    "allowed_routes": null,
+                    "fallback_policy": {
+                      "allowed_failure_classes": null,
+                      "allowed_target_routes": null,
+                      "budget": null,
+                      "data_recipient_consent": false
+                    },
+                    "limits": {},
+                    "permission_level": null,
+                    "spend_limit": null,
+                    "spend_limit_enforceable": false
+                  }
+                },
+                "mcp_servers": {
+                  "z": {
+                    "read_only_tools": [
+                      "read"
+                    ],
+                    "enabled": false
+                  },
+                  "a": {
+                    "allowed_tools": [
+                      "get"
+                    ],
+                    "enabled": true
+                  }
+                },
+                "connections": {}
+              },
+              "created_at": "2027-01-15T08:00:00.123456+00:00",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": [
+                  "claude-agent-acp",
+                  "codex-acp"
+                ],
+                "denied_engines": [
+                  "codex-acp"
+                ],
+                "selected_models": {},
+                "default_model": null,
+                "language": "ru",
+                "enabled_mcp_servers": 1,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5",
+          "shadowed_by": null,
+          "matches_profile": [
+            "new"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"new\",\n  \"pending\": null,\n  \"applied\": {\n    \"profile\": \"new\",\n    \"at\": \"2027-01-15T08:00:00.123456+00:00\",\n    \"revisions\": {\n      \"routing\": \"sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5\",\n      \"user_defaults\": \"sha256:fdac995e1ee93a61de4f744393cee61c350f0ea1e28b1ec275e85cce7eab2e7a\",\n      \"mcp_servers\": \"sha256:746d9a77404fb39116a3e4aa43a017f1c37895d0145d8a3dda7cdc17d8e64869\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"new\": {\n      \"description\": \"\",\n      \"created_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\",\n        \"user_defaults\",\n        \"mcp_servers\",\n        \"connections\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"deny\": [\n            \"codex-acp/*\"\n          ],\n          \"providers\": [\n            \"claude-agent-acp\",\n            \"codex-acp\"\n          ]\n        },\n        \"user_defaults\": {\n          \"defaults\": {\n            \"language\": \"ru\",\n            \"parameters\": {\n              \"mode\": \"agent\",\n              \"thought_level\": \"high\"\n            }\n          },\n          \"ceiling\": {\n            \"allowed_connections\": null,\n            \"allowed_data_recipients\": null,\n            \"allowed_routes\": null,\n            \"fallback_policy\": {\n              \"allowed_failure_classes\": null,\n              \"allowed_target_routes\": null,\n              \"budget\": null,\n              \"data_recipient_consent\": false\n            },\n            \"limits\": {},\n            \"permission_level\": null,\n            \"spend_limit\": null,\n            \"spend_limit_enforceable\": false\n          }\n        },\n        \"mcp_servers\": {\n          \"z\": {\n            \"read_only_tools\": [\n              \"read\"\n            ],\n            \"enabled\": false\n          },\n          \"a\": {\n            \"allowed_tools\": [\n              \"get\"\n            ],\n            \"enabled\": true\n          }\n        },\n        \"connections\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "mcp-servers.json": {
+          "content": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/not-executed\",\n      \"args\": [],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"read_only_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    },\n    \"a\": {\n      \"command\": \"/not-executed\",\n      \"allowed_tools\": [\n        \"get\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {\n      \"mode\": \"agent\",\n      \"thought_level\": \"high\"\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ]\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "save-rich",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+        "routing.json": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ]\n}\n",
+        "defaults.json": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {\n      \"mode\": \"agent\",\n      \"thought_level\": \"high\"\n    }\n  }\n}\n",
+        "mcp-servers.json": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/not-executed\",\n      \"args\": [],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"read_only_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    },\n    \"a\": {\n      \"command\": \"/not-executed\",\n      \"allowed_tools\": [\n        \"get\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "save",
+        "name": "a",
+        "expected_revision": "sha256:5e88b1aaee17bc7cc7e9ac8c2ad2a88679738398d5f5a8212661ca083ebc8fbc",
+        "expected_revisions": {
+          "routing": "sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5",
+          "user_defaults": "sha256:fdac995e1ee93a61de4f744393cee61c350f0ea1e28b1ec275e85cce7eab2e7a",
+          "mcp_servers": "sha256:746d9a77404fb39116a3e4aa43a017f1c37895d0145d8a3dda7cdc17d8e64869",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:2e6c75509165c3f27002a83761ccd9b7be8354efde7621f8e1a490fbf2730f21",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "a",
+            "at": "2027-01-15T08:00:00.123456+00:00",
+            "revisions": {
+              "routing": "sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5",
+              "user_defaults": "sha256:fdac995e1ee93a61de4f744393cee61c350f0ea1e28b1ec275e85cce7eab2e7a",
+              "mcp_servers": "sha256:746d9a77404fb39116a3e4aa43a017f1c37895d0145d8a3dda7cdc17d8e64869",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5",
+            "user_defaults": "sha256:fdac995e1ee93a61de4f744393cee61c350f0ea1e28b1ec275e85cce7eab2e7a",
+            "mcp_servers": "sha256:746d9a77404fb39116a3e4aa43a017f1c37895d0145d8a3dda7cdc17d8e64869",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Ω",
+              "revision": "sha256:a7481a0d05c104d7f8dea3d416691cc84ef96da3277c023ce76dad3fff72168a",
+              "sections": [
+                "routing",
+                "user_defaults",
+                "mcp_servers",
+                "connections"
+              ],
+              "settings": {
+                "routing": {
+                  "deny": [
+                    "codex-acp/*"
+                  ],
+                  "providers": [
+                    "claude-agent-acp",
+                    "codex-acp"
+                  ]
+                },
+                "user_defaults": {
+                  "defaults": {
+                    "language": "ru",
+                    "parameters": {
+                      "mode": "agent",
+                      "thought_level": "high"
+                    }
+                  },
+                  "ceiling": {
+                    "allowed_connections": null,
+                    "allowed_data_recipients": null,
+                    "allowed_routes": null,
+                    "fallback_policy": {
+                      "allowed_failure_classes": null,
+                      "allowed_target_routes": null,
+                      "budget": null,
+                      "data_recipient_consent": false
+                    },
+                    "limits": {},
+                    "permission_level": null,
+                    "spend_limit": null,
+                    "spend_limit_enforceable": false
+                  }
+                },
+                "mcp_servers": {
+                  "z": {
+                    "read_only_tools": [
+                      "read"
+                    ],
+                    "enabled": false
+                  },
+                  "a": {
+                    "allowed_tools": [
+                      "get"
+                    ],
+                    "enabled": true
+                  }
+                },
+                "connections": {}
+              },
+              "created_at": null,
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": [
+                  "claude-agent-acp",
+                  "codex-acp"
+                ],
+                "denied_engines": [
+                  "codex-acp"
+                ],
+                "selected_models": {},
+                "default_model": null,
+                "language": "ru",
+                "enabled_mcp_servers": 1,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": {\n    \"profile\": \"a\",\n    \"at\": \"2027-01-15T08:00:00.123456+00:00\",\n    \"revisions\": {\n      \"routing\": \"sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5\",\n      \"user_defaults\": \"sha256:fdac995e1ee93a61de4f744393cee61c350f0ea1e28b1ec275e85cce7eab2e7a\",\n      \"mcp_servers\": \"sha256:746d9a77404fb39116a3e4aa43a017f1c37895d0145d8a3dda7cdc17d8e64869\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\",\n        \"user_defaults\",\n        \"mcp_servers\",\n        \"connections\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"deny\": [\n            \"codex-acp/*\"\n          ],\n          \"providers\": [\n            \"claude-agent-acp\",\n            \"codex-acp\"\n          ]\n        },\n        \"user_defaults\": {\n          \"defaults\": {\n            \"language\": \"ru\",\n            \"parameters\": {\n              \"mode\": \"agent\",\n              \"thought_level\": \"high\"\n            }\n          },\n          \"ceiling\": {\n            \"allowed_connections\": null,\n            \"allowed_data_recipients\": null,\n            \"allowed_routes\": null,\n            \"fallback_policy\": {\n              \"allowed_failure_classes\": null,\n              \"allowed_target_routes\": null,\n              \"budget\": null,\n              \"data_recipient_consent\": false\n            },\n            \"limits\": {},\n            \"permission_level\": null,\n            \"spend_limit\": null,\n            \"spend_limit_enforceable\": false\n          }\n        },\n        \"mcp_servers\": {\n          \"z\": {\n            \"read_only_tools\": [\n              \"read\"\n            ],\n            \"enabled\": false\n          },\n          \"a\": {\n            \"allowed_tools\": [\n              \"get\"\n            ],\n            \"enabled\": true\n          }\n        },\n        \"connections\": {}\n      },\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\"\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "mcp-servers.json": {
+          "content": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/not-executed\",\n      \"args\": [],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"read_only_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    },\n    \"a\": {\n      \"command\": \"/not-executed\",\n      \"allowed_tools\": [\n        \"get\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {\n      \"mode\": \"agent\",\n      \"thought_level\": \"high\"\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ]\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "rename-same",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+        "routing.json": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ]\n}\n",
+        "defaults.json": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {\n      \"mode\": \"agent\",\n      \"thought_level\": \"high\"\n    }\n  }\n}\n",
+        "mcp-servers.json": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/not-executed\",\n      \"args\": [],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"read_only_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    },\n    \"a\": {\n      \"command\": \"/not-executed\",\n      \"allowed_tools\": [\n        \"get\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "update",
+        "name": "a",
+        "rename_to": "a",
+        "description": "",
+        "expected_revision": "sha256:5e88b1aaee17bc7cc7e9ac8c2ad2a88679738398d5f5a8212661ca083ebc8fbc"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:15ac1eb7cfb75267482242a3c4ff028b0350a7d2c06bdf981f51962f992f8363",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "modified",
+          "modified_sections": [
+            "routing"
+          ],
+          "differences": [
+            {
+              "section": "routing",
+              "key": "deny"
+            },
+            {
+              "section": "routing",
+              "key": "providers"
+            }
+          ],
+          "pending": null,
+          "problems": [],
+          "applied": null,
+          "current_revisions": {
+            "routing": "sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5",
+            "user_defaults": "sha256:fdac995e1ee93a61de4f744393cee61c350f0ea1e28b1ec275e85cce7eab2e7a",
+            "mcp_servers": "sha256:746d9a77404fb39116a3e4aa43a017f1c37895d0145d8a3dda7cdc17d8e64869",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "",
+              "revision": "sha256:0ebba61868cffbbd3556609a688be24f10da527be37b6c04956aef452051bba4",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": null,
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      },\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\"\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "mcp-servers.json": {
+          "content": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/not-executed\",\n      \"args\": [],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"read_only_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    },\n    \"a\": {\n      \"command\": \"/not-executed\",\n      \"allowed_tools\": [\n        \"get\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {\n      \"mode\": \"agent\",\n      \"thought_level\": \"high\"\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ]\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "pending-read",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": {\n    \"operation\": \"activate\",\n    \"profile\": \"a\",\n    \"at\": \"old\"\n  },\n  \"applied\": null\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:9e1e6d12264bda8af0e0fe570009bce5c75dd704616f7b3bdb514d21b30e186b",
+          "format": 2,
+          "migrated_from": null,
+          "active": "a",
+          "state": "interrupted",
+          "modified_sections": [],
+          "differences": [],
+          "pending": {
+            "operation": "activate",
+            "profile": "a",
+            "at": "old"
+          },
+          "problems": [],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Ω",
+              "revision": "sha256:d4a41ab9f952d20c90dd3dd88973e82a00d23a33ec63740a0e1970a01a9c9a49",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": null,
+              "updated_at": null,
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": []
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": {\n    \"operation\": \"activate\",\n    \"profile\": \"a\",\n    \"at\": \"old\"\n  },\n  \"applied\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "format1-read",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 1,\n  \"active\": \"a\",\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"rules\": {},\n      \"created_at\": \"old\"\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:9a4f2912af8161112c3bc3d60ebdd7a0f4b9694c5c293afd632b84ae61f05613",
+          "format": 2,
+          "migrated_from": 1,
+          "active": "a",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "legacy",
+              "revision": "sha256:3ff6c12d46db7338d259d8c21e5be0ac6fc249aca6d0d5d471ddd779d27b3158",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": "old",
+              "updated_at": null,
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": []
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 1,\n  \"active\": \"a\",\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"rules\": {},\n      \"created_at\": \"old\"\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "pending-deactivate",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": {\n    \"operation\": \"activate\",\n    \"profile\": \"a\",\n    \"at\": \"old\"\n  },\n  \"applied\": null\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "deactivate",
+        "expected_revision": "sha256:9e1e6d12264bda8af0e0fe570009bce5c75dd704616f7b3bdb514d21b30e186b"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:1aeca96b255b82aa7dacc1e4a3987fccd995011377cc74cfbe8212c0ab697291",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "Ω",
+              "revision": "sha256:d4a41ab9f952d20c90dd3dd88973e82a00d23a33ec63740a0e1970a01a9c9a49",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": null,
+              "updated_at": null,
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"pending\": null,\n  \"applied\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "format1-deactivate",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 1,\n  \"active\": \"a\",\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"rules\": {},\n      \"created_at\": \"old\"\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "deactivate",
+        "expected_revision": "sha256:9a4f2912af8161112c3bc3d60ebdd7a0f4b9694c5c293afd632b84ae61f05613"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:8d2bff5fe549ea37aadb65d9b18b2a994fdeffc0955483a4f9832ea5a1a22cbb",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "a",
+              "description": "legacy",
+              "revision": "sha256:3ff6c12d46db7338d259d8c21e5be0ac6fc249aca6d0d5d471ddd779d27b3158",
+              "sections": [
+                "routing"
+              ],
+              "settings": {
+                "routing": {}
+              },
+              "created_at": "old",
+              "updated_at": null,
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "a"
+          ],
+          "notes": [
+            "migrated_from_format_1"
+          ],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": null,\n  \"applied\": null,\n  \"pending\": null,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"created_at\": \"old\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        ".migration-backups/routing-profiles.format-1.20270115T080000123456Z.json": {
+          "content": "{\n  \"format\": 1,\n  \"active\": \"a\",\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"legacy\",\n      \"rules\": {},\n      \"created_at\": \"old\"\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {
+        ".migration-backups": 448
+      }
+    },
+    {
+      "name": "deactivate-stale",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+        "routing.json": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ]\n}\n",
+        "defaults.json": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {\n      \"mode\": \"agent\",\n      \"thought_level\": \"high\"\n    }\n  }\n}\n",
+        "mcp-servers.json": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/not-executed\",\n      \"args\": [],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"read_only_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    },\n    \"a\": {\n      \"command\": \"/not-executed\",\n      \"allowed_tools\": [\n        \"get\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "deactivate",
+        "expected_revision": "absent"
+      },
+      "reply": {
+        "ok": false,
+        "code": "revision_conflict",
+        "message": "The routing_profiles configuration changed after it was read (expected revision absent, current sha256:5e88b1aaee17bc7cc7e9ac8c2ad2a88679738398d5f5a8212661ca083ebc8fbc); nothing was written. Re-read it and apply the change again."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "mcp-servers.json": {
+          "content": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/not-executed\",\n      \"args\": [],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"read_only_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    },\n    \"a\": {\n      \"command\": \"/not-executed\",\n      \"allowed_tools\": [\n        \"get\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {\n      \"mode\": \"agent\",\n      \"thought_level\": \"high\"\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ]\n}\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "deactivate-invalid-revision",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+        "routing.json": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ]\n}\n",
+        "defaults.json": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {\n      \"mode\": \"agent\",\n      \"thought_level\": \"high\"\n    }\n  }\n}\n",
+        "mcp-servers.json": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/not-executed\",\n      \"args\": [],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"read_only_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    },\n    \"a\": {\n      \"command\": \"/not-executed\",\n      \"allowed_tools\": [\n        \"get\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "deactivate",
+        "expected_revision": 1
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_expected_revision",
+        "message": "expected_revision must be the exact revision a read returned ('absent' or 'sha256:<64 hex>')."
+      },
+      "files": {
+        "mcp-servers.json": {
+          "content": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/not-executed\",\n      \"args\": [],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"read_only_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    },\n    \"a\": {\n      \"command\": \"/not-executed\",\n      \"allowed_tools\": [\n        \"get\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {\n      \"mode\": \"agent\",\n      \"thought_level\": \"high\"\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ]\n}\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "section-stale",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+        "routing.json": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ]\n}\n",
+        "defaults.json": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {\n      \"mode\": \"agent\",\n      \"thought_level\": \"high\"\n    }\n  }\n}\n",
+        "mcp-servers.json": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/not-executed\",\n      \"args\": [],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"read_only_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    },\n    \"a\": {\n      \"command\": \"/not-executed\",\n      \"allowed_tools\": [\n        \"get\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        },
+        "expected_revision": "sha256:5e88b1aaee17bc7cc7e9ac8c2ad2a88679738398d5f5a8212661ca083ebc8fbc"
+      },
+      "reply": {
+        "ok": false,
+        "code": "revision_conflict",
+        "message": "The routing (user) configuration changed after it was read (expected revision absent, current sha256:916fc32fcb756fa43ec4fb291b1f27fa302d65f30afa63f9acba074d5f6bf4a5); nothing was written. Re-read it and apply the change again."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "mcp-servers.json": {
+          "content": "{\n  \"version\": 1,\n  \"servers\": {\n    \"z\": {\n      \"command\": \"/not-executed\",\n      \"args\": [],\n      \"env\": {\n        \"FAKE\": \"synthetic-only\"\n      },\n      \"read_only_tools\": [\n        \"read\"\n      ],\n      \"enabled\": false\n    },\n    \"a\": {\n      \"command\": \"/not-executed\",\n      \"allowed_tools\": [\n        \"get\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"language\": \"ru\",\n    \"parameters\": {\n      \"mode\": \"agent\",\n      \"thought_level\": \"high\"\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "routing.json": {
+          "content": "{\n  \"deny\": [\n    \"codex-acp/*\"\n  ],\n  \"providers\": [\n    \"claude-agent-acp\",\n    \"codex-acp\"\n  ]\n}\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "maximum-profiles",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p1\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p2\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p3\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p4\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p5\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p6\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p7\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p8\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p9\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p10\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p11\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p12\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p13\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p14\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p15\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p16\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p17\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p18\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p19\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p20\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p21\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p22\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p23\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p24\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p25\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p26\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p27\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p28\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p29\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p30\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p31\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "sha256:30b6cd56a74b08290a2b79498a9ba3d2a401019342dda741973e31f0d8b2bbc9",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "too_many_profiles",
+        "message": "At most 32 profiles are supported."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p1\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p2\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p3\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p4\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p5\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p6\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p7\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p8\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p9\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p10\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p11\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p12\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p13\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p14\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p15\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p16\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p17\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p18\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p19\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p20\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p21\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p22\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p23\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p24\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p25\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p26\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p27\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p28\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p29\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p30\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    },\n    \"p31\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "drop-unknown-defaults",
+      "initial": {
+        "defaults.json": "{\n  \"defaults\": {\n    \"ignored\": \"kept-in-file\",\n    \"language\": \"en\"\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "sha256:04b84a09d4813b4d2385ae1d1d4a357eb21cc0bfcbe0f0044bdbf9b25fee90df",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:57f9679b370e404d2d43d478e7410a6acc0f0dbb55162cf7fe2954020db6a3d6",
+          "format": 2,
+          "migrated_from": null,
+          "active": "new",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "new",
+            "at": "2027-01-15T08:00:00.123456+00:00",
+            "revisions": {
+              "routing": "absent",
+              "user_defaults": "sha256:04b84a09d4813b4d2385ae1d1d4a357eb21cc0bfcbe0f0044bdbf9b25fee90df",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "sha256:04b84a09d4813b4d2385ae1d1d4a357eb21cc0bfcbe0f0044bdbf9b25fee90df",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "new",
+              "description": "",
+              "revision": "sha256:d46c3e80f4c1c2ecb7a43592cf24e2e8467ad62ef1c3bb2a043da39499bb2a1e",
+              "sections": [
+                "routing",
+                "user_defaults",
+                "mcp_servers",
+                "connections"
+              ],
+              "settings": {
+                "routing": {},
+                "user_defaults": {
+                  "defaults": {
+                    "language": "en"
+                  },
+                  "ceiling": {
+                    "allowed_connections": null,
+                    "allowed_data_recipients": null,
+                    "allowed_routes": null,
+                    "fallback_policy": {
+                      "allowed_failure_classes": null,
+                      "allowed_target_routes": null,
+                      "budget": null,
+                      "data_recipient_consent": false
+                    },
+                    "limits": {},
+                    "permission_level": null,
+                    "spend_limit": null,
+                    "spend_limit_enforceable": false
+                  }
+                },
+                "mcp_servers": {},
+                "connections": {}
+              },
+              "created_at": "2027-01-15T08:00:00.123456+00:00",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": "en",
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "new"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"new\",\n  \"applied\": {\n    \"profile\": \"new\",\n    \"at\": \"2027-01-15T08:00:00.123456+00:00\",\n    \"revisions\": {\n      \"routing\": \"absent\",\n      \"user_defaults\": \"sha256:04b84a09d4813b4d2385ae1d1d4a357eb21cc0bfcbe0f0044bdbf9b25fee90df\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"new\": {\n      \"description\": \"\",\n      \"created_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\",\n        \"user_defaults\",\n        \"mcp_servers\",\n        \"connections\"\n      ],\n      \"settings\": {\n        \"routing\": {},\n        \"user_defaults\": {\n          \"defaults\": {\n            \"language\": \"en\"\n          },\n          \"ceiling\": {\n            \"allowed_connections\": null,\n            \"allowed_data_recipients\": null,\n            \"allowed_routes\": null,\n            \"fallback_policy\": {\n              \"allowed_failure_classes\": null,\n              \"allowed_target_routes\": null,\n              \"budget\": null,\n              \"data_recipient_consent\": false\n            },\n            \"limits\": {},\n            \"permission_level\": null,\n            \"spend_limit\": null,\n            \"spend_limit_enforceable\": false\n          }\n        },\n        \"mcp_servers\": {},\n        \"connections\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"ignored\": \"kept-in-file\",\n    \"language\": \"en\"\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "capture-empty-parameters",
+      "initial": {
+        "defaults.json": "{\n  \"defaults\": {\n    \"parameters\": {}\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "sha256:565f06fdcc9b4c85febdf589d6c01b99a5c9ea57e1cba55f5e6697a7bbad849b",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:fe226814181a99e387e107564c8af8a6788f099fa52c4abe5682ab4a0ada684e",
+          "format": 2,
+          "migrated_from": null,
+          "active": "new",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "new",
+            "at": "2027-01-15T08:00:00.123456+00:00",
+            "revisions": {
+              "routing": "absent",
+              "user_defaults": "sha256:565f06fdcc9b4c85febdf589d6c01b99a5c9ea57e1cba55f5e6697a7bbad849b",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "sha256:565f06fdcc9b4c85febdf589d6c01b99a5c9ea57e1cba55f5e6697a7bbad849b",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "new",
+              "description": "",
+              "revision": "sha256:6f28771c31d99dfc8b45805aa97df466744ec8bfa91851e892877c5499e18099",
+              "sections": [
+                "routing",
+                "user_defaults",
+                "mcp_servers",
+                "connections"
+              ],
+              "settings": {
+                "routing": {},
+                "user_defaults": {
+                  "defaults": {},
+                  "ceiling": {
+                    "allowed_connections": null,
+                    "allowed_data_recipients": null,
+                    "allowed_routes": null,
+                    "fallback_policy": {
+                      "allowed_failure_classes": null,
+                      "allowed_target_routes": null,
+                      "budget": null,
+                      "data_recipient_consent": false
+                    },
+                    "limits": {},
+                    "permission_level": null,
+                    "spend_limit": null,
+                    "spend_limit_enforceable": false
+                  }
+                },
+                "mcp_servers": {},
+                "connections": {}
+              },
+              "created_at": "2027-01-15T08:00:00.123456+00:00",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "new"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"new\",\n  \"applied\": {\n    \"profile\": \"new\",\n    \"at\": \"2027-01-15T08:00:00.123456+00:00\",\n    \"revisions\": {\n      \"routing\": \"absent\",\n      \"user_defaults\": \"sha256:565f06fdcc9b4c85febdf589d6c01b99a5c9ea57e1cba55f5e6697a7bbad849b\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"new\": {\n      \"description\": \"\",\n      \"created_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\",\n        \"user_defaults\",\n        \"mcp_servers\",\n        \"connections\"\n      ],\n      \"settings\": {\n        \"routing\": {},\n        \"user_defaults\": {\n          \"defaults\": {},\n          \"ceiling\": {\n            \"allowed_connections\": null,\n            \"allowed_data_recipients\": null,\n            \"allowed_routes\": null,\n            \"fallback_policy\": {\n              \"allowed_failure_classes\": null,\n              \"allowed_target_routes\": null,\n              \"budget\": null,\n              \"data_recipient_consent\": false\n            },\n            \"limits\": {},\n            \"permission_level\": null,\n            \"spend_limit\": null,\n            \"spend_limit_enforceable\": false\n          }\n        },\n        \"mcp_servers\": {},\n        \"connections\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"parameters\": {}\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "legacy-mcp-spelling",
+      "initial": {
+        "mcp-servers.json": "{\n  \"mcpServers\": {\n    \"local\": {\n      \"command\": \"not-run\",\n      \"roles\": [\n        \"worker-backend-dev\"\n      ]\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "sha256:25a7708401f6e7f5037548c3ae7d72b8cdb4b6811b33098bea42028948ce2b77",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:8688121ce89bcf555ff22b65c92eb82db4bf9f719ac83096eeebd06f97ebdcd6",
+          "format": 2,
+          "migrated_from": null,
+          "active": "new",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "new",
+            "at": "2027-01-15T08:00:00.123456+00:00",
+            "revisions": {
+              "routing": "absent",
+              "user_defaults": "absent",
+              "mcp_servers": "sha256:25a7708401f6e7f5037548c3ae7d72b8cdb4b6811b33098bea42028948ce2b77",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "sha256:25a7708401f6e7f5037548c3ae7d72b8cdb4b6811b33098bea42028948ce2b77",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "new",
+              "description": "",
+              "revision": "sha256:2a9d51f8a8c509902aa115d3852abeeddaa29c152ba2bac7f84b0f250f0bb6fb",
+              "sections": [
+                "routing",
+                "user_defaults",
+                "mcp_servers",
+                "connections"
+              ],
+              "settings": {
+                "routing": {},
+                "user_defaults": {
+                  "defaults": {},
+                  "ceiling": {
+                    "allowed_connections": null,
+                    "allowed_data_recipients": null,
+                    "allowed_routes": null,
+                    "fallback_policy": {
+                      "allowed_failure_classes": null,
+                      "allowed_target_routes": null,
+                      "budget": null,
+                      "data_recipient_consent": false
+                    },
+                    "limits": {},
+                    "permission_level": null,
+                    "spend_limit": null,
+                    "spend_limit_enforceable": false
+                  }
+                },
+                "mcp_servers": {
+                  "local": {
+                    "roles": [
+                      "worker-backend-dev"
+                    ],
+                    "enabled": true
+                  }
+                },
+                "connections": {}
+              },
+              "created_at": "2027-01-15T08:00:00.123456+00:00",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 1,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "new"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"new\",\n  \"applied\": {\n    \"profile\": \"new\",\n    \"at\": \"2027-01-15T08:00:00.123456+00:00\",\n    \"revisions\": {\n      \"routing\": \"absent\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"sha256:25a7708401f6e7f5037548c3ae7d72b8cdb4b6811b33098bea42028948ce2b77\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"new\": {\n      \"description\": \"\",\n      \"created_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\",\n        \"user_defaults\",\n        \"mcp_servers\",\n        \"connections\"\n      ],\n      \"settings\": {\n        \"routing\": {},\n        \"user_defaults\": {\n          \"defaults\": {},\n          \"ceiling\": {\n            \"allowed_connections\": null,\n            \"allowed_data_recipients\": null,\n            \"allowed_routes\": null,\n            \"fallback_policy\": {\n              \"allowed_failure_classes\": null,\n              \"allowed_target_routes\": null,\n              \"budget\": null,\n              \"data_recipient_consent\": false\n            },\n            \"limits\": {},\n            \"permission_level\": null,\n            \"spend_limit\": null,\n            \"spend_limit_enforceable\": false\n          }\n        },\n        \"mcp_servers\": {\n          \"local\": {\n            \"roles\": [\n              \"worker-backend-dev\"\n            ],\n            \"enabled\": true\n          }\n        },\n        \"connections\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "mcp-servers.json": {
+          "content": "{\n  \"mcpServers\": {\n    \"local\": {\n      \"command\": \"not-run\",\n      \"roles\": [\n        \"worker-backend-dev\"\n      ]\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "mcp-{}",
+      "initial": {
+        "mcp-servers.json": "{}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "sha256:ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_section_unavailable",
+        "message": "The current mcp_servers settings cannot be stored in a profile (invalid_mcp_registry); repair them first. Nothing was written."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "mcp-servers.json": {
+          "content": "{}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-mcp-{}",
+      "initial": {
+        "mcp-servers.json": "{}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "absent",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "mcp_servers",
+              "code": "invalid_mcp_registry",
+              "message": "mcp-servers.json must hold a 'servers' object; repair it by hand."
+            }
+          ],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "sha256:ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+            "connections": "absent"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {
+        "mcp-servers.json": {
+          "content": "{}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "mcp-[]",
+      "initial": {
+        "mcp-servers.json": "[]\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "sha256:37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_section_unavailable",
+        "message": "The current mcp_servers settings cannot be stored in a profile (invalid_mcp_registry); repair them first. Nothing was written."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "mcp-servers.json": {
+          "content": "[]\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-mcp-[]",
+      "initial": {
+        "mcp-servers.json": "[]\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "absent",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "mcp_servers",
+              "code": "invalid_mcp_registry",
+              "message": "mcp-servers.json must contain a JSON object; repair it by hand. Nothing was changed."
+            }
+          ],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "sha256:37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+            "connections": "absent"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {
+        "mcp-servers.json": {
+          "content": "[]\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "mcp-{'version': 2, 'servers': {}}",
+      "initial": {
+        "mcp-servers.json": "{\n  \"version\": 2,\n  \"servers\": {}\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "sha256:284835cc5106a97b31a5dce883217f9df0ecd75b3284cd67746806161304b897",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:20be71d0d82259a33415a48cca67f027dde5654ba9b114a2f6780b228ca75c62",
+          "format": 2,
+          "migrated_from": null,
+          "active": "new",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "new",
+            "at": "2027-01-15T08:00:00.123456+00:00",
+            "revisions": {
+              "routing": "absent",
+              "user_defaults": "absent",
+              "mcp_servers": "sha256:284835cc5106a97b31a5dce883217f9df0ecd75b3284cd67746806161304b897",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "sha256:284835cc5106a97b31a5dce883217f9df0ecd75b3284cd67746806161304b897",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "new",
+              "description": "",
+              "revision": "sha256:6f28771c31d99dfc8b45805aa97df466744ec8bfa91851e892877c5499e18099",
+              "sections": [
+                "routing",
+                "user_defaults",
+                "mcp_servers",
+                "connections"
+              ],
+              "settings": {
+                "routing": {},
+                "user_defaults": {
+                  "defaults": {},
+                  "ceiling": {
+                    "allowed_connections": null,
+                    "allowed_data_recipients": null,
+                    "allowed_routes": null,
+                    "fallback_policy": {
+                      "allowed_failure_classes": null,
+                      "allowed_target_routes": null,
+                      "budget": null,
+                      "data_recipient_consent": false
+                    },
+                    "limits": {},
+                    "permission_level": null,
+                    "spend_limit": null,
+                    "spend_limit_enforceable": false
+                  }
+                },
+                "mcp_servers": {},
+                "connections": {}
+              },
+              "created_at": "2027-01-15T08:00:00.123456+00:00",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "new"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"new\",\n  \"applied\": {\n    \"profile\": \"new\",\n    \"at\": \"2027-01-15T08:00:00.123456+00:00\",\n    \"revisions\": {\n      \"routing\": \"absent\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"sha256:284835cc5106a97b31a5dce883217f9df0ecd75b3284cd67746806161304b897\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"new\": {\n      \"description\": \"\",\n      \"created_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\",\n        \"user_defaults\",\n        \"mcp_servers\",\n        \"connections\"\n      ],\n      \"settings\": {\n        \"routing\": {},\n        \"user_defaults\": {\n          \"defaults\": {},\n          \"ceiling\": {\n            \"allowed_connections\": null,\n            \"allowed_data_recipients\": null,\n            \"allowed_routes\": null,\n            \"fallback_policy\": {\n              \"allowed_failure_classes\": null,\n              \"allowed_target_routes\": null,\n              \"budget\": null,\n              \"data_recipient_consent\": false\n            },\n            \"limits\": {},\n            \"permission_level\": null,\n            \"spend_limit\": null,\n            \"spend_limit_enforceable\": false\n          }\n        },\n        \"mcp_servers\": {},\n        \"connections\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "mcp-servers.json": {
+          "content": "{\n  \"version\": 2,\n  \"servers\": {}\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-mcp-{'version': 2, 'servers': {}}",
+      "initial": {
+        "mcp-servers.json": "{\n  \"version\": 2,\n  \"servers\": {}\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "absent",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "sha256:284835cc5106a97b31a5dce883217f9df0ecd75b3284cd67746806161304b897",
+            "connections": "absent"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {
+        "mcp-servers.json": {
+          "content": "{\n  \"version\": 2,\n  \"servers\": {}\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "mcp-{'servers': {'cortex': {'command': 'x'}}}",
+      "initial": {
+        "mcp-servers.json": "{\n  \"servers\": {\n    \"cortex\": {\n      \"command\": \"x\"\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "sha256:d8ed056714b8f369f2371c8a5a7af281c7fe0a3c40242276d312f81371a6bbf4",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_section_unavailable",
+        "message": "The current mcp_servers settings cannot be stored in a profile (invalid_configuration); repair them first. Nothing was written."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "mcp-servers.json": {
+          "content": "{\n  \"servers\": {\n    \"cortex\": {\n      \"command\": \"x\"\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-mcp-{'servers': {'cortex': {'command': 'x'}}}",
+      "initial": {
+        "mcp-servers.json": "{\n  \"servers\": {\n    \"cortex\": {\n      \"command\": \"x\"\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "absent",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "mcp_servers",
+              "code": "invalid_configuration",
+              "message": "Correct the invalid setting(s); nothing was written. settings.mcp_servers.cortex: must be a configured server name other than 'cortex'"
+            }
+          ],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "sha256:d8ed056714b8f369f2371c8a5a7af281c7fe0a3c40242276d312f81371a6bbf4",
+            "connections": "absent"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {
+        "mcp-servers.json": {
+          "content": "{\n  \"servers\": {\n    \"cortex\": {\n      \"command\": \"x\"\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "mcp-{'servers': {'x': 3}}",
+      "initial": {
+        "mcp-servers.json": "{\n  \"servers\": {\n    \"x\": 3\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "sha256:1388e0ebc10ef2a0ee38f72615b8c43268f3d6c860a32530da3a51c8734e021f",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_section_unavailable",
+        "message": "The current mcp_servers settings cannot be stored in a profile (invalid_mcp_registry); repair them first. Nothing was written."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "mcp-servers.json": {
+          "content": "{\n  \"servers\": {\n    \"x\": 3\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-mcp-{'servers': {'x': 3}}",
+      "initial": {
+        "mcp-servers.json": "{\n  \"servers\": {\n    \"x\": 3\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "absent",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "mcp_servers",
+              "code": "invalid_mcp_registry",
+              "message": "mcp-servers.json has a server entry that is not an object."
+            }
+          ],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "sha256:1388e0ebc10ef2a0ee38f72615b8c43268f3d6c860a32530da3a51c8734e021f",
+            "connections": "absent"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {
+        "mcp-servers.json": {
+          "content": "{\n  \"servers\": {\n    \"x\": 3\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "defaults-{'defaults': []}",
+      "initial": {
+        "defaults.json": "{\n  \"defaults\": []\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "sha256:add9b10959d80bb651e3619e0028c72e233442645face01b38a9af5b5f7e7ede",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_section_unavailable",
+        "message": "The current user_defaults settings cannot be stored in a profile (invalid_user_defaults); repair them first. Nothing was written."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"defaults\": []\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-defaults-{'defaults': []}",
+      "initial": {
+        "defaults.json": "{\n  \"defaults\": []\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "absent",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "user_defaults",
+              "code": "invalid_user_defaults",
+              "message": "defaults.json 'defaults' must be an object; repair it by hand."
+            }
+          ],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "sha256:add9b10959d80bb651e3619e0028c72e233442645face01b38a9af5b5f7e7ede",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {
+        "defaults.json": {
+          "content": "{\n  \"defaults\": []\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "defaults-{'defaults': {'language': 'invalid'}}",
+      "initial": {
+        "defaults.json": "{\n  \"defaults\": {\n    \"language\": \"invalid\"\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "sha256:1d090d21de71b05931446518616f86968a08190e25216e6b653eda826a74eb4c",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_section_unavailable",
+        "message": "The current user_defaults settings cannot be stored in a profile (invalid_configuration); repair them first. Nothing was written."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"language\": \"invalid\"\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-defaults-{'defaults': {'language': 'invalid'}}",
+      "initial": {
+        "defaults.json": "{\n  \"defaults\": {\n    \"language\": \"invalid\"\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "absent",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "user_defaults",
+              "code": "invalid_configuration",
+              "message": "Correct the invalid setting(s); nothing was written. settings.user_defaults.defaults.language: must be null (auto) or one of en, ru"
+            }
+          ],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "sha256:1d090d21de71b05931446518616f86968a08190e25216e6b653eda826a74eb4c",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"language\": \"invalid\"\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "defaults-{'defaults': {'parameters': {'bad': 1}}}",
+      "initial": {
+        "defaults.json": "{\n  \"defaults\": {\n    \"parameters\": {\n      \"bad\": 1\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "sha256:9d97e6c7a8595ea8568688dd7f7b317acee70ba0c81e2ed2fe9c44f9ef46bc04",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_section_unavailable",
+        "message": "The current user_defaults settings cannot be stored in a profile (invalid_configuration); repair them first. Nothing was written."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"parameters\": {\n      \"bad\": 1\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-defaults-{'defaults': {'parameters': {'bad': 1}}}",
+      "initial": {
+        "defaults.json": "{\n  \"defaults\": {\n    \"parameters\": {\n      \"bad\": 1\n    }\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "absent",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "user_defaults",
+              "code": "invalid_configuration",
+              "message": "Correct the invalid setting(s); nothing was written. settings.user_defaults.defaults.parameters.bad: parameter names are lowercase identifiers and values non-empty strings"
+            }
+          ],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "sha256:9d97e6c7a8595ea8568688dd7f7b317acee70ba0c81e2ed2fe9c44f9ef46bc04",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"parameters\": {\n      \"bad\": 1\n    }\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "defaults-{'defaults': {'language': None}}",
+      "initial": {
+        "defaults.json": "{\n  \"defaults\": {\n    \"language\": null\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "sha256:3dd55935b90e52bc58bc38ddc537a9772ebd6934524d54d9324dc7e87ed3c4bd",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:5ffbb742b2d778e7ed942a9a2b6626c0e34d003bbc84370b788738ba9add9671",
+          "format": 2,
+          "migrated_from": null,
+          "active": "new",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "new",
+            "at": "2027-01-15T08:00:00.123456+00:00",
+            "revisions": {
+              "routing": "absent",
+              "user_defaults": "sha256:3dd55935b90e52bc58bc38ddc537a9772ebd6934524d54d9324dc7e87ed3c4bd",
+              "mcp_servers": "absent",
+              "connections": "absent"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "sha256:3dd55935b90e52bc58bc38ddc537a9772ebd6934524d54d9324dc7e87ed3c4bd",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [
+            {
+              "name": "new",
+              "description": "",
+              "revision": "sha256:6f28771c31d99dfc8b45805aa97df466744ec8bfa91851e892877c5499e18099",
+              "sections": [
+                "routing",
+                "user_defaults",
+                "mcp_servers",
+                "connections"
+              ],
+              "settings": {
+                "routing": {},
+                "user_defaults": {
+                  "defaults": {},
+                  "ceiling": {
+                    "allowed_connections": null,
+                    "allowed_data_recipients": null,
+                    "allowed_routes": null,
+                    "fallback_policy": {
+                      "allowed_failure_classes": null,
+                      "allowed_target_routes": null,
+                      "budget": null,
+                      "data_recipient_consent": false
+                    },
+                    "limits": {},
+                    "permission_level": null,
+                    "spend_limit": null,
+                    "spend_limit_enforceable": false
+                  }
+                },
+                "mcp_servers": {},
+                "connections": {}
+              },
+              "created_at": "2027-01-15T08:00:00.123456+00:00",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "new"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"new\",\n  \"applied\": {\n    \"profile\": \"new\",\n    \"at\": \"2027-01-15T08:00:00.123456+00:00\",\n    \"revisions\": {\n      \"routing\": \"absent\",\n      \"user_defaults\": \"sha256:3dd55935b90e52bc58bc38ddc537a9772ebd6934524d54d9324dc7e87ed3c4bd\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"absent\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"new\": {\n      \"description\": \"\",\n      \"created_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\",\n        \"user_defaults\",\n        \"mcp_servers\",\n        \"connections\"\n      ],\n      \"settings\": {\n        \"routing\": {},\n        \"user_defaults\": {\n          \"defaults\": {},\n          \"ceiling\": {\n            \"allowed_connections\": null,\n            \"allowed_data_recipients\": null,\n            \"allowed_routes\": null,\n            \"fallback_policy\": {\n              \"allowed_failure_classes\": null,\n              \"allowed_target_routes\": null,\n              \"budget\": null,\n              \"data_recipient_consent\": false\n            },\n            \"limits\": {},\n            \"permission_level\": null,\n            \"spend_limit\": null,\n            \"spend_limit_enforceable\": false\n          }\n        },\n        \"mcp_servers\": {},\n        \"connections\": {}\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"language\": null\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-defaults-{'defaults': {'language': None}}",
+      "initial": {
+        "defaults.json": "{\n  \"defaults\": {\n    \"language\": null\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "absent",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "sha256:3dd55935b90e52bc58bc38ddc537a9772ebd6934524d54d9324dc7e87ed3c4bd",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {
+        "defaults.json": {
+          "content": "{\n  \"defaults\": {\n    \"language\": null\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "defaults-{'ceiling': {}}",
+      "initial": {
+        "defaults.json": "{\n  \"ceiling\": {}\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "sha256:4ae8d7773b94f0c9721ba9f22029fc375c9768dff6b4da9804f69d26162e60cb",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_section_unavailable",
+        "message": "The current user_defaults settings cannot be stored in a profile (invalid_ceiling_snapshot); repair them first. Nothing was written."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"ceiling\": {}\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-defaults-{'ceiling': {}}",
+      "initial": {
+        "defaults.json": "{\n  \"ceiling\": {}\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "absent",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "user_defaults",
+              "code": "invalid_ceiling_snapshot",
+              "message": "a stored ceiling snapshot has an unexpected shape."
+            }
+          ],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "sha256:4ae8d7773b94f0c9721ba9f22029fc375c9768dff6b4da9804f69d26162e60cb",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {
+        "defaults.json": {
+          "content": "{\n  \"ceiling\": {}\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "defaults-{'ceiling': None}",
+      "initial": {
+        "defaults.json": "{\n  \"ceiling\": null\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "sha256:f9c55994bdbc8f102208d508158c68bf5324ca8750dc293b08f0ede5812d13cf",
+          "mcp_servers": "absent",
+          "connections": "absent"
+        }
+      },
+      "reply": {
+        "ok": false,
+        "code": "profile_section_unavailable",
+        "message": "The current user_defaults settings cannot be stored in a profile (invalid_ceiling_snapshot); repair them first. Nothing was written."
+      },
+      "files": {
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "defaults.json": {
+          "content": "{\n  \"ceiling\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-defaults-{'ceiling': None}",
+      "initial": {
+        "defaults.json": "{\n  \"ceiling\": null\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "absent",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "user_defaults",
+              "code": "invalid_ceiling_snapshot",
+              "message": "a stored ceiling snapshot has an unexpected shape."
+            }
+          ],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "sha256:f9c55994bdbc8f102208d508158c68bf5324ca8750dc293b08f0ede5812d13cf",
+            "mcp_servers": "absent",
+            "connections": "absent"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {
+        "defaults.json": {
+          "content": "{\n  \"ceiling\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-registry-{}",
+      "initial": {
+        "connections.json": "{}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "absent",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "connections",
+              "code": "invalid_registry",
+              "message": "connections.json schema_version must be 1."
+            }
+          ],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {
+        "connections.json": {
+          "content": "{}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-registry-[]",
+      "initial": {
+        "connections.json": "[]\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "absent",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "connections",
+              "code": "invalid_registry",
+              "message": "connections.json must only contain keys from ['auto_connect_disabled', 'connections', 'override_history', 'schema_version']."
+            }
+          ],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {
+        "connections.json": {
+          "content": "[]\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-registry-{'schema_version': 99}",
+      "initial": {
+        "connections.json": "{\n  \"schema_version\": 99\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "absent",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "connections",
+              "code": "invalid_registry",
+              "message": "connections.json schema_version must be 1."
+            }
+          ],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:fb2c96977165ef61fbcbcb7350b6d38cd8a2a29c7351bc94f6295c58d80ae5cd"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {
+        "connections.json": {
+          "content": "{\n  \"schema_version\": 99\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "read-registry-{'schema_version': 1, 'connections': {'bad': {}}}",
+      "initial": {
+        "connections.json": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"bad\": {}\n  }\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "absent",
+          "format": 2,
+          "migrated_from": null,
+          "active": null,
+          "state": "none",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [
+            {
+              "section": "connections",
+              "code": "invalid_connection_record",
+              "message": "A connection record has an unexpected or missing field set."
+            }
+          ],
+          "applied": null,
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:303c0ecbf15a2f4b23a2b6b4d6f873f7754e457fe1024ea67be26cd6bf332d76"
+          },
+          "profiles": [],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [],
+          "notes": []
+        }
+      },
+      "files": {
+        "connections.json": {
+          "content": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"bad\": {}\n  }\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-entry-descriptionNone",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": null,\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profiles",
+        "message": "A profile has an invalid description, sections or settings."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": null,\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-entry-sections[]",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profiles",
+        "message": "A profile has an invalid description, sections or settings."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-entry-sections['routing', 'routing']",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\",\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profiles",
+        "message": "A profile has an invalid description, sections or settings."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\",\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-entry-settings{}",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {}\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profiles",
+        "message": "A profile has an invalid description, sections or settings."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {}\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-entry-settings{'routing': {'providers': ['bogus']}}",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"providers\": [\n            \"bogus\"\n          ]\n        }\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profiles",
+        "message": "A profile holds an invalid setting; repair or delete that profile."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {\n          \"providers\": [\n            \"bogus\"\n          ]\n        }\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-entry-unexpected1",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      },\n      \"unexpected\": 1\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profiles",
+        "message": "A profile has an invalid description, sections or settings."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      },\n      \"unexpected\": 1\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-document-pending",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": {},\n  \"applied\": null\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profiles",
+        "message": "routing-profiles.json has an invalid pending activation."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": {},\n  \"applied\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-document-active",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"missing\",\n  \"pending\": null,\n  \"applied\": null\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profiles",
+        "message": "routing-profiles.json has invalid profile metadata."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"missing\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-document-applied",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": []\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": false,
+        "code": "invalid_profiles",
+        "message": "routing-profiles.json has invalid profile metadata."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": []\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "invalid-document-format",
+      "initial": {
+        "routing-profiles.json": "{\n  \"format\": 2.0,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "read"
+      },
+      "reply": {
+        "ok": false,
+        "code": "unsupported_profiles_format",
+        "message": "routing-profiles.json format must be 2 (or 1, which is migrated on the first change)."
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2.0,\n  \"profiles\": {\n    \"a\": {\n      \"description\": \"Ω\",\n      \"sections\": [\n        \"routing\"\n      ],\n      \"settings\": {\n        \"routing\": {}\n      }\n    }\n  },\n  \"active\": \"a\",\n  \"pending\": null,\n  \"applied\": null\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    },
+    {
+      "name": "capture-connections",
+      "initial": {
+        "connections.json": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n"
+      },
+      "params": {
+        "action": "profile",
+        "verb": "create",
+        "name": "new",
+        "expected_revision": "absent",
+        "expected_revisions": {
+          "routing": "absent",
+          "user_defaults": "absent",
+          "mcp_servers": "absent",
+          "connections": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0"
+        }
+      },
+      "reply": {
+        "ok": true,
+        "result": {
+          "surface": "routing_profiles",
+          "path": "$CONFIG/routing-profiles.json",
+          "revision": "sha256:d266bf4368c7f9ca8cf6173f74e928ff57e44fe6dd140899efc192d50b5954ef",
+          "format": 2,
+          "migrated_from": null,
+          "active": "new",
+          "state": "in_sync",
+          "modified_sections": [],
+          "differences": [],
+          "pending": null,
+          "problems": [],
+          "applied": {
+            "profile": "new",
+            "at": "2027-01-15T08:00:00.123456+00:00",
+            "revisions": {
+              "routing": "absent",
+              "user_defaults": "absent",
+              "mcp_servers": "absent",
+              "connections": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0"
+            }
+          },
+          "current_revisions": {
+            "routing": "absent",
+            "user_defaults": "absent",
+            "mcp_servers": "absent",
+            "connections": "sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0"
+          },
+          "profiles": [
+            {
+              "name": "new",
+              "description": "",
+              "revision": "sha256:719c8431c338a01228476f59097debb972b0bc88b7d486fa217e0f1aba601890",
+              "sections": [
+                "routing",
+                "user_defaults",
+                "mcp_servers",
+                "connections"
+              ],
+              "settings": {
+                "routing": {},
+                "user_defaults": {
+                  "defaults": {},
+                  "ceiling": {
+                    "allowed_connections": null,
+                    "allowed_data_recipients": null,
+                    "allowed_routes": null,
+                    "fallback_policy": {
+                      "allowed_failure_classes": null,
+                      "allowed_target_routes": null,
+                      "budget": null,
+                      "data_recipient_consent": false
+                    },
+                    "limits": {},
+                    "permission_level": null,
+                    "spend_limit": null,
+                    "spend_limit_enforceable": false
+                  }
+                },
+                "mcp_servers": {},
+                "connections": {
+                  "cn_0123456789ab": {
+                    "max_concurrent_sessions": 4
+                  },
+                  "cn_abcdef012345": {
+                    "max_concurrent_sessions": 4
+                  }
+                }
+              },
+              "created_at": "2027-01-15T08:00:00.123456+00:00",
+              "updated_at": "2027-01-15T08:00:00.123456+00:00",
+              "summary": {
+                "providers": null,
+                "denied_engines": [],
+                "selected_models": {},
+                "default_model": null,
+                "language": null,
+                "enabled_mcp_servers": 0,
+                "ceiling_set": false
+              }
+            }
+          ],
+          "user_routing_revision": "absent",
+          "shadowed_by": null,
+          "matches_profile": [
+            "new"
+          ],
+          "notes": [],
+          "changed": true
+        }
+      },
+      "files": {
+        "routing-profiles.json": {
+          "content": "{\n  \"format\": 2,\n  \"active\": \"new\",\n  \"applied\": {\n    \"profile\": \"new\",\n    \"at\": \"2027-01-15T08:00:00.123456+00:00\",\n    \"revisions\": {\n      \"routing\": \"absent\",\n      \"user_defaults\": \"absent\",\n      \"mcp_servers\": \"absent\",\n      \"connections\": \"sha256:b47e4e2dbaa88de7f2e51309d0b55f5ada708a17371f464e6b6d98af317136d0\"\n    }\n  },\n  \"pending\": null,\n  \"profiles\": {\n    \"new\": {\n      \"description\": \"\",\n      \"created_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"updated_at\": \"2027-01-15T08:00:00.123456+00:00\",\n      \"sections\": [\n        \"routing\",\n        \"user_defaults\",\n        \"mcp_servers\",\n        \"connections\"\n      ],\n      \"settings\": {\n        \"routing\": {},\n        \"user_defaults\": {\n          \"defaults\": {},\n          \"ceiling\": {\n            \"allowed_connections\": null,\n            \"allowed_data_recipients\": null,\n            \"allowed_routes\": null,\n            \"fallback_policy\": {\n              \"allowed_failure_classes\": null,\n              \"allowed_target_routes\": null,\n              \"budget\": null,\n              \"data_recipient_consent\": false\n            },\n            \"limits\": {},\n            \"permission_level\": null,\n            \"spend_limit\": null,\n            \"spend_limit_enforceable\": false\n          }\n        },\n        \"mcp_servers\": {},\n        \"connections\": {\n          \"cn_0123456789ab\": {\n            \"max_concurrent_sessions\": 4\n          },\n          \"cn_abcdef012345\": {\n            \"max_concurrent_sessions\": 4\n          }\n        }\n      }\n    }\n  }\n}\n",
+          "mode": 384
+        },
+        "connections.lock": {
+          "content": "",
+          "mode": 384
+        },
+        ".gitignore": {
+          "content": "*\n",
+          "mode": 384
+        },
+        "connections.json": {
+          "content": "{\n  \"schema_version\": 1,\n  \"connections\": {\n    \"cn_0123456789ab\": {\n      \"id\": \"cn_0123456789ab\",\n      \"name\": \"Fixture\",\n      \"engine\": \"codex-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"os_keyring\",\n        \"service\": \"fake\",\n        \"account\": \"fixture\"\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    },\n    \"cn_abcdef012345\": {\n      \"id\": \"cn_abcdef012345\",\n      \"name\": \"Other\",\n      \"engine\": \"claude-agent-acp\",\n      \"provider\": \"openai\",\n      \"auth_mode\": \"native_account\",\n      \"key_kind\": null,\n      \"endpoint\": null,\n      \"launch_command\": [\n        \"/fake/node\",\n        \"/fake/adapter.js\"\n      ],\n      \"credential_ref\": {\n        \"kind\": \"engine_native_dir\",\n        \"path\": \"/fake/native\",\n        \"owned\": false\n      },\n      \"approved_fingerprint\": \"unchanged\",\n      \"state\": \"configured\",\n      \"qualified\": true,\n      \"created_at\": \"2026-01-01T00:00:00+00:00\",\n      \"updated_at\": \"old\"\n    }\n  },\n  \"override_history\": {\n    \"cn_0123456789ab\": [\n      {\n        \"fingerprint\": \"fake\",\n        \"previous_fingerprint\": \"older\",\n        \"engine\": \"codex-acp\",\n        \"provider\": \"openai\",\n        \"endpoint\": null,\n        \"launch_command\": [\n          \"/fake/node\"\n        ],\n        \"approved_at\": \"2026-01-01\",\n        \"approved_by_user\": true\n      }\n    ]\n  },\n  \"auto_connect_disabled\": [\n    \"opencode\",\n    \"codex-acp\"\n  ]\n}\n",
+          "mode": 384
+        }
+      },
+      "dirs": {}
+    }
+  ]
+}

@@ -79,6 +79,17 @@ const ACTIONS: Record<string, { kind: ToolPresentationKind; icon: ToolPresentati
   read_large_output: { kind: "read", icon: "FileText", action: "Read output" },
   read_diagnostics: { kind: "read", icon: "FileText", action: "Read diagnostics" },
   ask_question: { kind: "governance", icon: "Scale", action: "Ask question" },
+  // Every other advertised tool (crates/cortex-engine/schema/tools.json) has its own words too. Without them Codex's
+  // `execute` kind, which it gives every MCP call, turned a call such as list_route_options into an empty Shell row.
+  list_route_options: { kind: "read", icon: "FileText", action: "List model routes" },
+  read_batch: { kind: "read", icon: "FileText", action: "Read batch" },
+  tools_discover: { kind: "read", icon: "FileText", action: "Discover tools" },
+  check_preflight: { kind: "generic", icon: "Wrench", action: "Check tool availability" },
+  verification_submit: { kind: "edit", icon: "FilePenLine", action: "Submit verification" },
+  access_request: { kind: "governance", icon: "Scale", action: "Request paths" },
+  project_skill_link: { kind: "edit", icon: "FilePenLine", action: "Link skill" },
+  outside_write: { kind: "edit", icon: "FilePenLine", action: "Write outside project" },
+  outside_command: { kind: "shell", icon: "Terminal", action: "Shell outside sandbox" },
 };
 
 const NATIVE_READ = { kind: "read" as const, icon: "FileText" as const, action: "Read" };
@@ -155,6 +166,8 @@ function operationName(input: ToolPresentationInput): string {
   return raw
     .replace(/^mcp__[^_]+__/i, "")
     .replace(/^mcp\.[^.]+\./i, "")
+    // A bare server-qualified name (`cortex.list_route_options`) is the same call.
+    .replace(/^cortex\./i, "")
     .split(/[\s(]/, 1)[0]
     .replace(/[^A-Za-z0-9_-]/g, "")
     .toLowerCase();
@@ -240,7 +253,7 @@ export function presentToolSemantics(input: ToolPresentationInput): ToolPresenta
     return { kind: "generic", icon: "Wrench", action, target: commandLine, label: commandLine ?? action, expandable: true, systemOperation: false, visible: true };
   }
   let target = targetFor(name, input, mapped.action);
-  if (!target && native && !/^mcp(?:__|\.)/i.test(title)) {
+  if (!target && native && !/^(?:mcp(?:__|\.)|cortex\.)/i.test(title)) {
     const suffix = title.replace(/^(read|view|cat|edit|patch|write|replace|modify|shell|bash|terminal|execute|run(?:\s+command)?|skill|governance|decide)\b\s*(?:[—:-]\s*)?/i, "").trim();
     if (suffix && suffix.toLowerCase() !== mapped.action.toLowerCase() && !isPlaceholderTarget(suffix)) target = compactTarget(suffix);
   }

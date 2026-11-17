@@ -1,8 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { applyFacts, applyProjection, compareVersions, emptyWorkspace, LOCAL_MACHINE_ID, overlayTask, projectionKey, type Project, type ProjectFacts, type ProjectionUpdate, type Sprint, type Task } from "../src";
+import { applyFacts, applyMachineFacts, applyProjection, compareVersions, emptyWorkspace, LOCAL_MACHINE_ID, overlayTask, projectionKey, type Project, type ProjectFacts, type ProjectionUpdate, type Sprint, type Task } from "../src";
 import { canRun, capabilityOf, noCapabilities, WIRE_OPERATIONS } from "../src/capabilities";
 
 const project: Project = { id: "p", machineId: LOCAL_MACHINE_ID, name: "P", repository: "/p", openBranch: "", defaultBranch: "" };
+
+describe("machine facts", () => {
+  it("lets an overview-only update leave engine usage and the composer's options as they were", () => {
+    const usage = [{ engine: "codex" as const, connected: true, usedPercent: 40, resetAt: null, observedAt: null, window: "weekly" as const }];
+    const options = { models: [{ id: "m", label: "M", engine: "Codex", efforts: [] }], efforts: [], modes: [], languages: [] };
+    const settled = applyMachineFacts(emptyWorkspace(), { machineId: LOCAL_MACHINE_ID, engineUsage: usage, options, patch: { config: emptyWorkspace().machines[0].config } });
+    const next = applyMachineFacts(settled, { machineId: LOCAL_MACHINE_ID, patch: { retentionDays: 12, ghAvailable: false } });
+    expect(next.engineUsage).toBe(usage);
+    expect(next.options).toBe(options);
+    expect(next.machines[0]).toMatchObject({ retentionDays: 12, ghAvailable: false });
+    // A settings read that does carry usage still replaces it.
+    expect(applyMachineFacts(next, { machineId: LOCAL_MACHINE_ID, engineUsage: [], patch: {} }).engineUsage).toEqual([]);
+  });
+});
 
 describe("versions", () => {
   it("orders decimal strings beyond the safe integer range", () => {
@@ -33,6 +47,16 @@ describe("projections", () => {
     expect(next.status).toBe("working");
     expect(next.acceptance).toBeNull();
     expect(next.observedPhase).toBe("planning");
+  });
+  it("installs native owner settings and real check observations without certifying completion", () => {
+    const task = {id:"t",status:"review",process:"stopped",checkout:{kind:"main",branch:"main"},acceptance:null,result:null} as Task;
+    const result = {kind:"work" as const,version:7,sourceVersion:"7",digest:"observed",summary:"Native checks",checks:[{name:"true",outcome:"passed" as const,detail:""}],acceptanceAvailable:false};
+    const settings = {model:"selected",effort:"",mode:"guarded" as const,language:"ru" as const};
+    const next = overlayTask(task, {settings,result}, "main");
+    expect(next.settings).toEqual(settings);
+    expect(next.result).toEqual(result);
+    expect(next.status).toBe("review");
+    expect(next.acceptance).toBeNull();
   });
   it("a project slice replaces only that project", () => {
     const start = emptyWorkspace();

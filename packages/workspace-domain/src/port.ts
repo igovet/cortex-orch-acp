@@ -15,7 +15,7 @@ export type ProjectSlice = { project: Project; tasks: Task[]; sessions: TaskSess
 /** A confirmed snapshot. `version` is a decimal string, and a store installs only a newer one. */
 export type ProjectionUpdate = { kind: "projection"; version: string } & ({ scope: "workspace"; state: WorkspaceState } | { scope: "project"; slice: ProjectSlice });
 /** What the owner decided about a task. The runtime knows nothing of these, so they come from the machine and sit over its facts. */
-export type TaskOverlay = Partial<Pick<Task, "title" | "titleState" | "acceptance" | "reviewActions" | "integrationFacts" | "closedAs" | "doneAt" | "archive" | "archiveQuestion" | "archiveAskAfter" | "targetBranch" | "sprintId" | "dependencies" | "integration" | "notVerifiedByCortex" | "purgeBlocker" | "work" | "checkout" | "settings" | "conflict" | "merge" | "resolvedBy">> & {
+export type TaskOverlay = Partial<Pick<Task, "title" | "titleState" | "acceptance" | "reviewActions" | "integrationFacts" | "closedAs" | "doneAt" | "archive" | "archiveQuestion" | "archiveAskAfter" | "targetBranch" | "sprintId" | "dependencies" | "integration" | "notVerifiedByCortex" | "purgeBlocker" | "work" | "checkout" | "settings" | "result" | "conflict" | "merge" | "resolvedBy">> & {
   status?: "ready_to_merge" | "done"; automaticReady?: boolean; planning?: boolean; purged?: boolean;
 };
 /**
@@ -29,9 +29,15 @@ export type ProjectFacts = { hasGit?: boolean; projectId: string; openBranch: st
   heldAnswers?: Record<string, string>;
   /** Why Cortex is not working for this project now, when it is not. */
   issue?: string | null };
-/** What the machine reports about itself. */
-export type MachineFacts = { machineId: string; patch: Partial<Machine>; engineUsage: EngineWeeklyUsage[]; options?: SessionOptions };
-export type PortUpdate = { kind: "registry"; projectIds: string[] } | ProjectionUpdate | { kind: "connection"; connection: PortConnection } | { kind: "facts"; facts: ProjectFacts } | { kind: "machine"; facts: MachineFacts }
+/** The machine's own background fetch of the engines' model lists: still running, and the connections whose fetch ended without a list. */
+export type CatalogueState = { running: boolean; failed: { connectionId: string; reason: string }[] };
+/**
+ * What the machine reports about itself. `machine.facts` carries the settings the first screen needs (config, connections,
+ * engine usage, the composer's options); `machine.overview` carries only the storage, retention, worktree, version, GitHub CLI
+ * and maintenance fields, and omits `engineUsage` and `options`, which an update then leaves as they were.
+ */
+export type MachineFacts = { machineId: string; patch: Partial<Machine>; engineUsage?: EngineWeeklyUsage[]; options?: SessionOptions; catalogue?: CatalogueState };
+export type PortUpdate = { kind: "preview"; slice: ProjectSlice; facts: ProjectFacts } | { kind: "enrichment"; update: ProjectionUpdate } | { kind: "project_state"; project: Project; issue: string | null; cause?: string | null } | { kind: "delta"; update: ProjectionUpdate } | { kind: "registry"; projectIds: string[] } | ProjectionUpdate | { kind: "connection"; connection: PortConnection } | { kind: "facts"; facts: ProjectFacts } | { kind: "machine"; facts: MachineFacts }
   /** What the machine can do changed, for example a project's Cortex started. Read everything again. */
   | { kind: "refresh" };
 
@@ -49,9 +55,12 @@ export type DirectoryEntry = { path: string; git: boolean };
 /** What a machine found for the text typed. `complete` is false when a limit ended the walk, and `cancelled` when a newer search took over. */
 export type DirectorySearch = { query: string; home: string; entries: DirectoryEntry[]; complete: boolean; cancelled?: boolean };
 
-/** `fresh` bypasses repository cache age; `full` rereads all projects even after event invalidations were consumed. */
-export type QueryParameters = { "capabilities.get": Record<string, never>; "project.snapshot": { projectId?: string; full?: boolean }; "project.facts": { projectId?: string; fresh?: boolean }; "machine.facts": Record<string, never> };
-export type QueryResults = { "capabilities.get": PortCapabilities; "project.snapshot": ProjectionUpdate[]; "project.facts": ProjectFacts[]; "machine.facts": MachineFacts[] };
+/**
+ * `fresh` bypasses repository cache age; `full` rereads all projects even after event invalidations were consumed.
+ * `machine.overview` is read on demand, when a screen that shows its fields opens; startup never asks for it.
+ */
+export type QueryParameters = { "capabilities.get": Record<string, never>; "project.snapshot": { projectId?: string; full?: boolean }; "project.facts": { projectId?: string; fresh?: boolean }; "machine.facts": Record<string, never>; "machine.overview": Record<string, never> };
+export type QueryResults = { "capabilities.get": PortCapabilities; "project.snapshot": ProjectionUpdate[]; "project.facts": ProjectFacts[]; "machine.facts": MachineFacts[]; "machine.overview": MachineFacts[] };
 export type QueryOperation = keyof QueryResults;
 
 export interface WorkspacePort {
@@ -85,6 +94,31 @@ export interface WorkspacePort {
 export type FileRead = { text: string | null; reason?: string; revision?: string | null; size?: number; readOnly?: string | null; writer?: string | null };
 /** `unknown` means the reply was lost, which says nothing about the write. */
 export type FileSaveResult = { outcome: "saved"; revision: string; size: number } | { outcome: "conflict"; revision: string | null } | { outcome: "writer_active"; writer: string } | { outcome: "refused"; message: string } | { outcome: "unknown" };
+
+/** Native read snapshots and patches use a separate generation/sequence domain from mutation receipts. */
+export type NativeTaskSnapshot = { projectId: string; generation: string; highWatermark: string; version: string; items: import("@cortex/workspace-contract").Task[] };
+export type NativeTaskDelta = { projectId: string; batch: { generation: string; streamKey: { scope: "project"; project_id: string }; fromSequence: string; throughSequence: string; changes: NativeTaskChange[] } };
+export type NativeTaskChange = { kind: "task" | "project"; id: string; baseVersion: string; newVersion: string; operation: { type: "remove" | "invalidate" } | { type: "upsert"; data: { kind: "task_projection"; data: import("@cortex/workspace-contract").Task } } };
+/** Throw on a gap or a conflicting base; callers keep confirmed state and resnapshot, never guess. */
+export function applyNativeTaskDelta(snapshot: NativeTaskSnapshot, delta: NativeTaskDelta): NativeTaskSnapshot {
+  const { batch } = delta;
+  if (delta.projectId !== snapshot.projectId || batch.streamKey.project_id !== snapshot.projectId || batch.generation !== snapshot.generation) throw new Error("Native stream changed");
+  if (compareVersions(batch.throughSequence, snapshot.highWatermark) <= 0) return snapshot;
+  if (BigInt(batch.fromSequence) !== BigInt(snapshot.highWatermark) + 1n || compareVersions(batch.throughSequence, batch.fromSequence) < 0) throw new Error("Native stream gap");
+  const items = new Map(snapshot.items.map(t => [t.taskId, t]));
+  for (const change of batch.changes) {
+    if (change.kind === "project") throw new Error("Native project requires resnapshot");
+    const prior = items.get(change.id);
+    if ((prior?.version ?? "0") !== change.baseVersion || compareVersions(change.newVersion, change.baseVersion) <= 0) throw new Error("Native entity base changed");
+    if (change.operation.type === "remove") items.delete(change.id);
+    else if (change.operation.type === "upsert") {
+      const task = change.operation.data.data;
+      if (task.taskId !== change.id || task.version !== change.newVersion) throw new Error("Native entity identity mismatch");
+      items.set(change.id, task);
+    } else throw new Error("Native entity requires resnapshot");
+  }
+  return { ...snapshot, highWatermark: batch.throughSequence, items: [...items.values()] };
+}
 
 const DECIMAL = /^(0|[1-9][0-9]*)$/;
 /** Versions are wire decimals, which can pass the safe integer range. */
@@ -165,7 +199,7 @@ export function applyFacts(state: WorkspaceState, facts: ProjectFacts): Workspac
 }
 
 export function applyMachineFacts(state: WorkspaceState, facts: MachineFacts): WorkspaceState {
-  return { ...state, machines: state.machines.map(m => m.id === facts.machineId ? { ...m, ...facts.patch } : m), engineUsage: facts.engineUsage, options: facts.options ?? state.options };
+  return { ...state, machines: state.machines.map(m => m.id === facts.machineId ? { ...m, ...facts.patch } : m), engineUsage: facts.engineUsage ?? state.engineUsage, options: facts.options ?? state.options };
 }
 
 export function applyProjection(state: WorkspaceState, update: ProjectionUpdate): WorkspaceState {

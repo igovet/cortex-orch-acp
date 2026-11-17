@@ -1,0 +1,256 @@
+{
+  "oracle": "cortex_runtime.delegation.revision.capture_revision",
+  "cases": [
+    {
+      "name": "empty",
+      "entries": [],
+      "expected": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "detail": null,
+        "manifest": []
+      }
+    },
+    {
+      "name": "source-unicode-link",
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        }
+      ],
+      "expected": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "5d1d3ce1abe6dffc5b86a8a588db61b6cccdcd59501c0aa0fd366f1c8fb50235",
+        "detail": null,
+        "manifest": [
+          "d\tfolder\t-\t-",
+          "f\tfolder/λ.txt\t13\t0b04824cf514e3363139deaf340e7780ff88239fd598df056849825fc7d3e5c0",
+          "f\tsource.txt\t7\tb8bb034f9b63bd0254fbc7c157cae746c75853f4643d6cea844dc48ddb57f522",
+          "l\talias\t-\tsource.txt"
+        ]
+      }
+    },
+    {
+      "name": "exclusions",
+      "entries": [
+        {
+          "path": "source.txt",
+          "kind": "f",
+          "text": "source\n"
+        },
+        {
+          "path": "folder",
+          "kind": "d"
+        },
+        {
+          "path": "folder/λ.txt",
+          "kind": "f",
+          "text": "Unicode 😀\n"
+        },
+        {
+          "path": "alias",
+          "kind": "l",
+          "target": "source.txt"
+        },
+        {
+          "path": ".cortex/private.txt",
+          "kind": "f",
+          "text": "private"
+        },
+        {
+          "path": ".cortex-dev/private.txt",
+          "kind": "f",
+          "text": "private"
+        },
+        {
+          "path": ".cortex-dev-owner.json",
+          "kind": "f",
+          "text": "private"
+        },
+        {
+          "path": ".cortex-workspace-dev.json",
+          "kind": "f",
+          "text": "private"
+        },
+        {
+          "path": "folder/node_modules/cache.txt",
+          "kind": "f",
+          "text": "cache"
+        },
+        {
+          "path": ".venv/cache.txt",
+          "kind": "f",
+          "text": "cache"
+        },
+        {
+          "path": ".claude/scheduled_tasks.lock",
+          "kind": "f",
+          "text": "volatile"
+        },
+        {
+          "path": ".claude/settings.json",
+          "kind": "f",
+          "text": "source"
+        }
+      ],
+      "expected": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "aad4b0168af6f3ea2b895e0b98fb5300fc85b55b75b6e8c67ac1abdf2ddaa8eb",
+        "detail": null,
+        "manifest": [
+          "d\t.claude\t-\t-",
+          "d\tfolder\t-\t-",
+          "f\t.claude/settings.json\t6\t41cf6794ba4200b839c53531555f0f3998df4cbb01a4d5cb0b94e3ca5e23947d",
+          "f\tfolder/λ.txt\t13\t0b04824cf514e3363139deaf340e7780ff88239fd598df056849825fc7d3e5c0",
+          "f\tsource.txt\t7\tb8bb034f9b63bd0254fbc7c157cae746c75853f4643d6cea844dc48ddb57f522",
+          "l\talias\t-\tsource.txt"
+        ]
+      }
+    },
+    {
+      "name": "volatile-symlink-is-source",
+      "entries": [
+        {
+          "path": ".claude/scheduled_tasks.lock",
+          "kind": "l",
+          "target": "../target"
+        }
+      ],
+      "expected": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "d36fcc0bcbe530376ce5cb7c2bd4db7b4fd7e6015afb712a5d40ff9615ce7634",
+        "detail": null,
+        "manifest": [
+          "d\t.claude\t-\t-",
+          "l\t.claude/scheduled_tasks.lock\t-\t../target"
+        ]
+      }
+    },
+    {
+      "name": "volatile-directory-is-source",
+      "entries": [
+        {
+          "path": ".claude/scheduled_tasks.lock/child",
+          "kind": "f",
+          "text": "source"
+        }
+      ],
+      "expected": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "1288e187b5d2458f29e89c0a5e4f3f2fafdb6c032a4adfc77ba400605a4dc1be",
+        "detail": null,
+        "manifest": [
+          "d\t.claude\t-\t-",
+          "d\t.claude/scheduled_tasks.lock\t-\t-",
+          "f\t.claude/scheduled_tasks.lock/child\t6\t41cf6794ba4200b839c53531555f0f3998df4cbb01a4d5cb0b94e3ca5e23947d"
+        ]
+      }
+    },
+    {
+      "name": "fifo-is-observed-not-opened",
+      "entries": [
+        {
+          "path": "pipe",
+          "kind": "p"
+        }
+      ],
+      "expected": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "be5d2df8b8e4d641c0f1ecabdca26aa5fced8c42f15cf684b5156ae02af66764",
+        "detail": null,
+        "manifest": [
+          "p\tpipe\t-\t-"
+        ]
+      }
+    },
+    {
+      "name": "dependency-symlink-is-source",
+      "entries": [
+        {
+          "path": "node_modules",
+          "kind": "l",
+          "target": "../outside"
+        }
+      ],
+      "expected": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "9d70030fa39d153fe31370325ff983adfb0c1fd2f873b03b840de9697ed2b8d5",
+        "detail": null,
+        "manifest": [
+          "l\tnode_modules\t-\t../outside"
+        ]
+      }
+    },
+    {
+      "name": "odd-names",
+      "entries": [
+        {
+          "path": "tab\tand\nnewline",
+          "kind": "f",
+          "text": "data"
+        },
+        {
+          "path": "😀",
+          "kind": "d"
+        }
+      ],
+      "expected": {
+        "kind": "observed",
+        "head": null,
+        "dirty_digest": "e78b65f36a0439a033ba21f108daae7f07addde26b6ed05e37eec4884db5f2d1",
+        "detail": null,
+        "manifest": [
+          "d\t😀\t-\t-",
+          "f\ttab\tand\nnewline\t4\t3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7"
+        ]
+      }
+    }
+  ],
+  "metadata": [
+    {
+      "size": 1048577,
+      "inode": 50340674,
+      "mtime": "1794565907983758749",
+      "ctime": "1794565907983758749",
+      "expected": "stat:1e2599c083eba18508647a0d9c73175b089c7080cc10d0f81c9936941dddb480"
+    },
+    {
+      "size": 2097152,
+      "inode": 50340675,
+      "mtime": "1794565907983790072",
+      "ctime": "1794565907983790072",
+      "expected": "stat:bcd74286e8d0ca95361614810e39414f4ab199d740481f2f16ed0c503502b125"
+    }
+  ],
+  "sources": {
+    "crates/workspace-service/machine_tools.py": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+    "src/cortex_runtime/delegation/revision.py": "f69d4f27986397d17e210225fcf88ebae0c4a35dac767bfa0d42ca1ac92e2880",
+    "src/cortex_runtime/workspace_api/projections.py": "2a12388eff6c93b2d4d6a19a1d250908c45f186a8de5880ba1556e2fb9d56109",
+    "src/cortex_runtime/orchestration/worker_checks.py": "f52084e77ab0af41749e04bae3b073620dd2a73a8de5e91891bebaada7ff4a9f",
+    "src/cortex_runtime/orchestration/check_closure.py": "6c044cc93eee1f36527f160fe8afa64a4a029460ac35d55368ecb573128c7a1e",
+    "src/cortex_runtime/delegation/evidence.py": "c8787ba189d5d007d74ebea73cf3116ab863fb145423c6bceea6683836cc8237"
+  }
+}

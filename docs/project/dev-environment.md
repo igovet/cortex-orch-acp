@@ -1,6 +1,6 @@
 # Persistent isolated dev Paseo environment
 
-> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed.
+> Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
 ## Adapter inventory observation (2026-10-27)
@@ -24,6 +24,19 @@ before isolated CLI qualification. Both new releases use ACP SDK 2.0.2;
 Codex 2.3.0 adds ACP v2 support and Claude added experimental v2 support in
 0.95.0. Cortex remains an ACP v1 client.
 
+## Adapter inventory observation (2026-11-16)
+
+`npm view` reported codex-acp 2.6.0, `@openai/codex` 0.169.0 and
+claude-agent-acp 0.107.2 as latest. codex-acp 2.6.0 declares `@openai/codex`
+`^0.166.0`, so the bundle pins 0.166.0 (the highest release that range admits),
+and claude-agent-acp is pinned at 0.107.0, inspected before the later 0.107.1
+and 0.107.2. The packed sources were read as untrusted data and the real
+adapters were launched with no prompt in a disposable `/tmp` project using the
+owner's existing native logins. See the
+[Codex](../features/codex-engine/index.md#current-support-260-2026-11-16) and
+[Claude](../features/claude-engine/index.md#current-support-01070-2026-11-16)
+evidence. No paid turn, Paseo run or desktop check was run.
+
 The optional standalone OpenCode's upstream v2 release is
 [2.2.0](https://github.com/anomalyco/opencode/releases/tag/v2.2.0);
 `npm view opencode-ai version` instead reports the separate **1.19.4** line,
@@ -37,6 +50,8 @@ plugin was changed. No-paid startup and focused adapter/discovery tests do not
 exercise paid engine turns or rendered client behavior.
 
 ## Installed Paseo version boundary
+
+The dated notes in this section record observations made with the former Python wrapper and qualification scripts (`cortex_paseo_dev.py`, `cortex_qualification_assert.py`, `cortex_package.py`). Those scripts were removed on 2026-11-16; the notes stay as history and do not qualify the Rust `paseo-dev` wrapper. Its `run`, `send`, `permit`, `wait` and `inspect` pass-through, `--check` and `gui` options still have to be rechecked against the installed Paseo before live use.
 
 > On 2026-11-03, a read-only `/opt/Paseo/resources/bin/paseo --version`
 > check reported installed Paseo **0.15.0**. Through the guarded wrapper,
@@ -256,8 +271,8 @@ Paseo home, daemon, or cortex-acp plugin. All Paseo and plugin work must use
 `~/.paseo-dev`, `~/.config/Paseo-dev`, and a disposable project. Do not use
 `scripts/update-paseo-plugin.sh`: it does not establish a dev-only daemon boundary.
 
-Run Paseo through [scripts/cortex_paseo_dev.py](../../scripts/cortex_paseo_dev.py).
-A read-only `--check` on 2026-09-29 selected `/home/igovet/.paseo-dev`, reported `/home/igovet/.paseo` as the protected production home, and exited 0. The wrapper source defaults to `~/.paseo-dev`, refuses the resolved production home, and blocks forwarded `--home` and `--host` overrides. It sets Cortex XDG config/state below the selected dev home and passes the checkout root for the local plugin; CLI calls discard every inherited `PASEO_*` variable and set `PASEO_HOME` to the selected isolated home. The check validates home selection only; it does not launch Paseo or verify the daemon endpoint, daemon state, Electron profile, or GUI isolation.
+Run Paseo through the guarded wrapper `scripts/cortex-paseo-tools.sh paseo-dev` ([scripts/cortex-paseo-tools.sh](../../scripts/cortex-paseo-tools.sh), source `crates/cortex-paseo-tools/src/paseo_dev.rs`; usage `paseo-dev [--paseo ABS_PATH] [--home ABS_PATH] [--installed-runtime] [--check] -- <paseo command...>` and `paseo-dev gui [--paseo] [--home] [--user-data-dir] [--port N] [--xvfb] [--installed-runtime]`).
+A read-only `--check` on 2026-09-29 (recorded against the former Python wrapper) selected `/home/igovet/.paseo-dev`, reported `/home/igovet/.paseo` as the protected production home, and exited 0. The wrapper source defaults to `~/.paseo-dev`, refuses the resolved production home, and blocks forwarded `--home` and `--host` overrides. It sets Cortex XDG config/state below the selected dev home and passes the checkout root for the local plugin; CLI calls discard every inherited `PASEO_*` variable and set `PASEO_HOME` to the selected isolated home. The check validates home selection only; it does not launch Paseo or verify the daemon endpoint, daemon state, Electron profile, or GUI isolation.
 
 The plugin connector answers the bridge's `session/close` locally, so Cortex never receives that unsupported method. `paseo run --model` and `--thinking` issue a pre-task `session/set_config_option`, which Cortex persists as the saved coordinator default because it cannot tell that pick from a composer pick. A live check that must keep its defaults should back up and restore the saved default, or omit `--model` and `--thinking`. In Paseo, a `session/cancel` followed by a `session/prompt` on the same session is steering; a lone cancel still pauses after the 5-second grace window (see the steering page).
 
@@ -296,8 +311,8 @@ For a requested guarded paid probe, supply both required flags and a reference
 naming the owner's request:
 
 ~~~bash
-scripts/cortex_codex_probe.py --i-authorize-paid-call --approval-ref owner-request-<date>-cli
-scripts/cortex_claude_probe.py --i-authorize-paid-call --approval-ref owner-request-<date>-cli
+scripts/cortex-paseo-tools.sh probe-codex --i-authorize-paid-call --approval-ref owner-request-<date>-cli --adapter /absolute/path/to/codex-acp
+scripts/cortex-paseo-tools.sh probe-claude --i-authorize-paid-call --approval-ref owner-request-<date>-cli --adapter /absolute/path/to/claude-agent-acp
 ~~~
 
 The default automated test suite remains no-paid. A request does not change the
@@ -325,7 +340,7 @@ and check the plugin as in the setup section, then, from a
 disposable project directory outside this checkout:
 
 ~~~bash
-W="python3 -B $CHECKOUT/scripts/cortex_paseo_dev.py --"
+W="$CHECKOUT/scripts/cortex-paseo-tools.sh paseo-dev --"
 $W run --provider cortex --model "$MODEL_ID_FROM_SETTINGS" --thinking "$EFFORT_FROM_SETTINGS" \
   --cwd "$PROJECT" --no-wait --json "<scenario prompt>"
 $W permit ls --json                      # pending permission requests
@@ -345,13 +360,10 @@ output, not only an absent structured value.
 
 Check outcomes against the disposable project's `.cortex/cortex.sqlite3`
 store, opened read-only: tasks, reports, review and verification records.
-The [bound inspector](../features/observability/index.md#bound-task-inspection) provides a
-metadata-only paged route once an exact owned host-to-ACP/task/epoch binding
-has actually been observed. It refuses busy/uncheckpointed storage and never
-initializes or repairs it. An opaque host agent ID or daemon stop alone is not
-binding, engine confirmation or a resource-release receipt.
+The read-only `cortex-paseo-tools` readers never initialize or repair a store. An opaque host agent ID or daemon stop alone is not
+binding, engine confirmation or a resource-release receipt (see [removed qualification tooling](#removed-python-era-qualification-tooling)).
 
-Qualification assertions require an exact task/current-owner binding and unique,
+Qualification evidence requires an exact task/current-owner binding and unique,
 matching assignment, attempt, engine session and native confirmation; missing,
 ambiguous, conflicting or replayed identities do not pass. Retained-output
 expectations validate complete, bound execution/output metadata and safe exit
@@ -378,24 +390,24 @@ Refresh only while the dev daemon is stopped. The clone reads production and wri
 only the dev home:
 
 ~~~bash
-python3 -B scripts/cortex_paseo_clone.py
+scripts/cortex-paseo-tools.sh paseo-clone
 ~~~
 
 The clone utility permits only `~/.paseo` as source and `~/.paseo-dev` as target,
 skips sockets, PID files, and locks, never copies production's daemon identity
-(top-level `server-id` and `daemon-keypair.json`; it keeps the dev home's own
-copies when they differ from production's, otherwise installed Paseo 0.10.2
-creates new ones on start), copies normal files to a staging directory, and
-uses SQLite's backup API for databases. It atomically replaces the dev home and
+(top-level `server-id` and `daemon-keypair.json`; the dev home keeps its own),
+copies normal files to a staging directory, and copies SQLite databases as
+consistent snapshots (`VACUUM INTO` over a read-only connection, without their
+`-wal`/`-shm`/`-journal` sidecars). It atomically replaces the dev home and
 preserves the previous dev home as a timestamped rollback directory. It never
 writes to production.
 
 After each refresh, set the distinct endpoint and enable plugins before starting:
 
 ~~~bash
-python3 -B scripts/cortex_paseo_dev.py -- \
+scripts/cortex-paseo-tools.sh paseo-dev -- \
   daemon config set daemon.listen 127.0.0.1:16767 --string
-python3 -B scripts/cortex_paseo_dev.py -- daemon config set pluginsEnabled true
+scripts/cortex-paseo-tools.sh paseo-dev -- daemon config set pluginsEnabled true
 ~~~
 
 ## Cortex settings preflight
@@ -408,18 +420,16 @@ profile only**:
 ~~~bash
 XDG_CONFIG_HOME="$HOME/.paseo-dev/cortex-xdg/config" \
 XDG_STATE_HOME="$HOME/.paseo-dev/cortex-xdg/state" \
-python3 -B scripts/cortex_acp_setup.py apply-routing-defaults
+scripts/cortex-paseo-tools.sh init-storage
 ~~~
 
-This validated install-only command creates absent routing/default files and
-preserves existing settings. It does not repair an existing malformed or legacy
+This install-only command creates the owner-private roots and the absent routing/default files from the bundled preset, and preserves existing settings (the same seeding runs when `cortex-acp` first starts). It does not repair an existing malformed or legacy
 policy; diagnose that policy explicitly instead. Nor does it update a valid policy
 written from an older preset: on 2026-10-08 the dev profile still denied bare
 `haiku` after the preset had enabled Haiku 5.5, so the dev picker could not show
 it. Compare the dev `routing.json` with the `routing` object of
 `policy/model-settings-default.json`; to adopt the preset, back the dev file up
-privately and write it with
-`cortex_runtime.configuration.management.update_routing` under the dev XDG
+privately and apply it with the Settings API (`cortex-paseo-tools config`, or the Paseo Settings screen) under the dev XDG
 variables above. Check the dev profile's saved
 coordinator model against its enabled models and current connection catalogue
 before a paid prompt; do not substitute a different route.
@@ -455,15 +465,14 @@ checkout. Pass `--installed-runtime` both to the daemon start that serves it and
 the install or update command; the wrapper then drops `CORTEX_PASEO_SOURCE_ROOT`,
 including an inherited value. Without the flag, the wrapper refuses `plugin install`
 from a source that is not a local directory and `plugin update`, because the daemon
-would otherwise launch this checkout. The flag cannot be combined with
-`--wire-trace`, which traces this checkout only. The build step writes its launch
+would otherwise launch this checkout. The build step writes its launch
 record to `~/.paseo-dev/cortex-xdg/config/cortex/paseo-plugin-launch.json` and
 leaves the owner's `~/.config/cortex/paseo-plugin-launch.json` unchanged:
 
 ~~~bash
-python3 -B scripts/cortex_paseo_dev.py --installed-runtime -- start --timeout 60 --json
-python3 -B scripts/cortex_paseo_dev.py --installed-runtime -- plugin install github:igovet/cortex-orch-acp:integrations/paseo --ref dev --json
-python3 -B scripts/cortex_paseo_dev.py gui --installed-runtime
+scripts/cortex-paseo-tools.sh paseo-dev --installed-runtime -- start --timeout 60 --json
+scripts/cortex-paseo-tools.sh paseo-dev --installed-runtime -- plugin install github:igovet/cortex-orch-acp:integrations/paseo --ref dev --json
+scripts/cortex-paseo-tools.sh paseo-dev gui --installed-runtime
 ~~~
 
 Restart the daemon without the flag before going back to a local directory plugin.
@@ -472,9 +481,9 @@ Start the isolated daemon, install or inspect the explicitly addressed local plu
 then launch Electron Desktop:
 
 ~~~bash
-python3 -B scripts/cortex_paseo_dev.py -- start --timeout 60 --json
-python3 -B scripts/cortex_paseo_dev.py -- plugin install "$PWD/integrations/paseo" --json
-python3 -B scripts/cortex_paseo_dev.py gui
+scripts/cortex-paseo-tools.sh paseo-dev -- start --timeout 60 --json
+scripts/cortex-paseo-tools.sh paseo-dev -- plugin install "$PWD/integrations/paseo" --json
+scripts/cortex-paseo-tools.sh paseo-dev gui
 ~~~
 
 If the cloned dev home already contains the local plugin record, installation may
@@ -485,7 +494,7 @@ has status `running`. Never install into `~/.paseo`.
 For Xvfb use:
 
 ~~~bash
-python3 -B scripts/cortex_paseo_dev.py gui --xvfb
+scripts/cortex-paseo-tools.sh paseo-dev gui --xvfb
 ~~~
 
 The `gui` helper selects `~/.paseo-dev`, the separate
@@ -518,12 +527,44 @@ refused.
 After a GUI check, stop the isolated daemon:
 
 ~~~bash
-python3 -B scripts/cortex_paseo_dev.py -- daemon stop --timeout 15 --json
+scripts/cortex-paseo-tools.sh paseo-dev -- daemon stop --timeout 15 --json
 ~~~
 
 In Paseo Desktop inspect the rendered timeline and the specific behavior under
 test. CLI output, logs and CDP inspection alone do not establish a rendered GUI
 result. Run the GUI only for a requested `desktop` check.
+
+### Rust entry store readers
+
+The guarded wrapper passes this checkout as `CORTEX_PASEO_SOURCE_ROOT`, so the
+isolated daemon launches the checkout's Rust `target/debug/cortex-acp` entry by
+default; an unbuilt binary refuses (see
+[Paseo launch](native-incoming-acp.md#paseo)). The plugin reads worker
+history, worker results, running commands, the pipeline, the project root and the
+task binding through `cortex-paseo-tools` from the same directory as `cortex-acp`,
+not through any interpreter. Build both into one target directory before starting the
+daemon, and run the no-paid route check:
+
+~~~bash
+timeout 180 cargo build --locked --offline -p cortex-acp -p cortex-paseo-tools
+npm --prefix integrations/paseo run test:store-reader
+~~~
+
+All of Settings goes through `cortex-paseo-tools config` for this launch: every read
+and every change (user defaults, routing, profiles, MCP servers, connections, project
+ceiling, default preset), model-list refresh, engine discovery, onboarding and
+download, with revision checks and fixed files. Plugin activation runs
+`cortex-paseo-tools setup` (cortex-acp's own first-run pass).
+The few shapes listed in
+[Settings under the Rust launch](native-incoming-acp.md#paseo-settings-under-the-rust-launch)
+(OS-keyring validation, an installed OpenCode binary's version probe, a refresh for
+an engine without a qualified native catalogue producer) show
+`config_api_unavailable` with their reason and change nothing.
+
+If `cortex-paseo-tools` is missing beside the selected binary, those panels and
+Settings show an explicit "cortex-paseo-tools ... is missing" message; nothing falls
+back. The route test uses fixture stores and homes only; a live dev-daemon
+run of the Rust entry is a paid check that needs its own owner request.
 
 ## Secondary CLI diagnostics
 
@@ -531,9 +572,9 @@ Use the guarded wrapper for daemon health, plugin registration and logs. When
 installing, always give the full absolute plugin path:
 
 ~~~bash
-python3 -B scripts/cortex_paseo_dev.py -- status --json
-python3 -B scripts/cortex_paseo_dev.py -- plugin ls --json
-python3 -B scripts/cortex_paseo_dev.py -- logs <agent-id> --json
+scripts/cortex-paseo-tools.sh paseo-dev -- status --json
+scripts/cortex-paseo-tools.sh paseo-dev -- plugin ls --json
+scripts/cortex-paseo-tools.sh paseo-dev -- logs <agent-id> --json
 ~~~
 
 For retained-history checks, omit `--tail` and retain exit status, output byte
@@ -564,294 +605,16 @@ disposable project; it cannot exercise Ctrl/Cmd+Enter or prove native Edit,
 draft replacement, attachment restoration or rendered controls. Desktop was
 not requested for the current work, so those interactions remain unqualified.
 
-## Route preflight before a paid CLI run
+## Removed Python-era qualification tooling
 
-An explicit user model request covers planned exact-route nodes, their retries
-and review fixes. A node without a model hint (the runtime-created mandatory review
-node, or a task left on `auto`) gets the model the user's own message named for its
-purpose ("review with Sonnet", "за аудит отвечает Opus", "Аудит только Opus"), or the
-model of a question option the user chose when the option names that purpose, or
-names no work of its own and its question asks a model for that purpose, ahead of
-pins; without such a
-request it follows owner pins, then automatic ranking. A `*` pin in the dev profile
-therefore decides the reviewer unless the user's request names a model for review.
-Before each requested paid run, check every stage against the owner-selected
-route:
+The Python scripts that supported a requested `cli` run were removed on 2026-11-16 and have no replacement: the route preflight (`paseo-dev route-preflight`), the task-inspection and outcome-assertion scripts (`cortex_inspect_task`, `cortex_qualification_assert`), the case observer (`cortex_qualification_observer`) and the read-only binding mode (`paseo-dev binding`). Their dated results above remain history. Until a supported replacement exists:
 
-~~~bash
-python3 -B scripts/cortex_paseo_dev.py route-preflight --route claude-agent-acp/haiku:high
-python3 -B scripts/cortex_paseo_dev.py route-preflight --route codex-acp/gpt-6-luna:high \
-  --project "$PROJECT"
-~~~
+- Before a paid `cli` run, resolve every stage's route by hand from the owner-selected settings (the dev profile's `routing.json`, and the `cortex-paseo-tools config` reads) and confirm that no stage, including the mandatory reviewer, would fall back to another route. A `*` pin in the dev profile decides the reviewer unless the user's request names a model for review. If a stage cannot be shown to run on the selected route, do not start the run.
+- After the run, read the outcome from the disposable project's `.cortex/cortex.sqlite3` through the read-only `cortex-paseo-tools` readers (`project-root`, `task-id`, `worker-history`, `worker-results`, `running-commands`, `pipeline`) and the `paseo-dev -- inspect`/`logs` output. State plainly that no automated assertion was run; an absent signal is never a pass, and a wait, an idle agent or the absence of `failed` is not a pass.
+- Keep each case within the ten-minute budget of the recipe below, with at most 60 seconds per wait and cleanup started no later than 6:30. Send at most one decision-free steering message (`send <agent-id> --prompt ... --no-wait`) and record that it was sent before relying on it; a repeated send is not evidence of continuation.
+- An opaque host agent ID or a daemon stop alone is not binding, engine confirmation or a resource-release receipt. Report each unobserved binding as unverified.
 
-The command reads only the routing policy that the dev daemon would load:
-`$PROJECT/.cortex/routing.json`, then `CORTEX_ROUTING`, then
-`~/.paseo-dev/cortex-xdg/config/cortex/routing.json`. It reports that file's kind
-and SHA-256 and refuses `~/.paseo`. It does not start, refresh or write anything.
-
-The exit status is the outcome:
-
-- **0 (`ready`)**: the reviewer is pinned to the exact route and selected
-  execution/reviewer efforts do not conflict with policy. This is policy-only
-  readiness, not live support or a specialist native confirmation.
-- **1 (refusal)**: the JSON names the refused stage and the route that would run
-  instead. Do not launch the paid run.
-
-For exact execution effort, the captured owner request must name both model and
-effort, for example `Use codex-acp/gpt-6.1-sol at medium effort throughout`.
-An editor thinking selection or reviewer-only pin does not set specialist effort.
-The runtime preserves that source-bound selection on covered planned nodes,
-retries and review fixes; explicit policy/support conflicts refuse without
-substitution. Explicit effort pins also refuse instead of clamping. Preflight
-reports `selected_effort_conflicts_with_policy` before launch, but live support
-and exact coordinator/specialist/reviewer native confirmations must still be
-checked separately. See [effort preservation](../features/routing-and-fallback/index.md#explicit-effort-preservation).
-
-To make the reviewer follow the selected route, change only the dev profile:
-
-1. Back up `routing.json` and `defaults.json` from
-   `~/.paseo-dev/cortex-xdg/config/cortex/` privately and record both hashes
-   before the run. Selecting a model or thinking level before the first prompt
-   (for example `paseo run --model ... --thinking ...`) persists that choice in
-   `defaults.json` (`Agent._apply_pre_task_selection`), so every run changes it.
-2. Add the role pin `"worker-code-reviewer": "ENGINE/MODEL:EFFORT"` with
-   `cortex_runtime.configuration.management.update_routing`, under the dev XDG
-   variables above. A role pin takes precedence over `*`. A planned node's route
-   in the plan is only a hint: unless the owner's recorded message requests the
-   exact route, a `*` pin wins (`model_hint_status: "ignored:pinned"`). Pin every
-   fixture role the scenario plans (for example `worker-backend-dev`) as well.
-3. Re-run the preflight.
-4. After each run, restore both files byte for byte from that run's own backup
-   and check the hashes. Restore only when the current file still matches what
-   the run left; never take a baseline from an older run.
-
-One pin serves one route, so routes run one after another. The reviewer's
-recorded basis is then `auto:pin` (an owner setting), not `user_request`.
-
-Start the dev daemon for a paid run only through an authorized
-`outside_command`. Observed on 2026-10-15 with
-`kernel.apparmor_restrict_unprivileged_userns=1`: a daemon started from a
-Cortex `command_run` sandbox could not create the nested user namespaces of the
-engine jail (`bwrap: No permissions to create a new namespace`), so every engine
-launch failed at `initialize`.
-
-### Assert the outcome
-
-Take the session from the owned agent's `runtimeInfo` (see
-[read-only dev binding](#read-only-dev-binding)), never from an earlier attempt,
-then assert the outcome on one complete inspection snapshot:
-
-~~~bash
-python3 -B scripts/cortex_qualification_assert.py --project "$PROJECT" \
-  --session "$ACP_SESSION" --task "$TASK" --owner-epoch "$OWNER_EPOCH" \
-  --expect-route worker-backend-dev=claude-agent-acp/haiku:high \
-  --expect-route worker-code-reviewer=claude-agent-acp/haiku:high \
-  --expect-closed-failure --expect-retained-output-bytes 65537
-~~~
-
-It exits 0 only when the task is `COMPLETED` (or the `--expect-state` given) with
-completed nodes, an approved actual review or valid runtime unchanged-project waiver, a passing latest verification and a
-recorded final text; each `--expect-route` role has only attempts whose native
-`worker_configuration_confirmed` engine/model/thinking match (dispatch alone does
-not count); `--expect-closed-failure` needs a failed worker check closed by a
-passed exact rerun; `--expect-retained-output-bytes` needs a zero-exit receipt
-with a bound, complete retained output of at least that size. Exit 1 lists every
-unmet expectation; exit 2 is an inspection refusal. It reads through the bound
-task inspector only and changes nothing; its regressions are
-`tests/test_qualification_assert.py`. A pending state such as `WAITING_USER`
-is a failed assertion, not a pass.
-
-For the mandatory-review scenario use `--require-review` and a tiny real
-disposable edit. Execution QA labels and synthesis prose are not a runtime
-verdict. Attach the exact returned same-attempt command receipt to automated
-checks; read/search calls have no such receipt. The
-[public read matrix](../features/tool-discovery-and-read-batch/index.md#executable-public-evidence)
-adds semantic assertions instead of relying on completion alone.
-
-### Observe and steer within the case budget
-
-A case supervisor imports `scripts/cortex_qualification_observer.py` instead of
-an inline body. It launches nothing: launch, steering and cleanup are callables
-the supervisor passes in, and its own reads go only through the bound task
-inspector. Its parts:
-
-- `supervise_cli` requires explicit owner request, CLI mode and exact route;
-  has no paid authority/model defaults; requires observed isolation, login,
-  build, plugin, supported-CLI, route and expectation preconditions before
-  invoking a launch adapter. It distinguishes preflight, uncertain launch,
-  dispatched and asserted phases; accepted is always false. Launch/cleanup
-  adapters own only the dev resources they started and must use supported
-  guarded commands, not hypothetical host APIs.
-- `bounded_command` runs adapter argv without a shell, within the remaining
-  observation/cleanup budget and a maximum 60-second wait. Timeout stops only
-  that subprocess group; excessive output refuses rather than truncating it.
-  Complete output is private to the adapter, never raw logs in a report.
-- `Budget` holds one case to at most 600 monotonic seconds, keeps at least 90 s
-  for cleanup, and caps each wait at 60 s.
-- `observe`/`collect_snapshot` read every page of one snapshot. A busy access
-  lock (the inspector's in-process `BlockingIOError`, `inspection_busy` in the
-  CLIs) is the only condition retried, for the same page, until the deadline;
-  persistent busy ends as `busy_expired`. A stale cursor restarts from the first
-  page at most three times. Any other refusal or exception ends the observation
-  at once with its code or exception class name, never its text. Pages with
-  another binding, digest or offset are refused. The reader's fail-closed
-  checks are unchanged: an uncheckpointed WAL stays a refusal.
-- `select_running_attempt` joins the current revision's running node to the
-  provisioning row whose `idempotency_key` is that node's `assignment_ref`. The
-  provisioning `assignment_id` (`a_...`) is a different identity and is never
-  compared. It also requires the ready attempt and session of the current owner
-  epoch, a `worker_configuration_confirmed` for that same attempt, session and
-  assignment, a reserved worker capacity row, and no terminal worker event. It
-  selects only when exactly one node qualifies.
-- `SteerOnce` sends at most one decision-free steer through the passed-in
-  control seam (for a live case, the wrapper's `send <agent-id> --prompt ...
-  --no-wait`). It records the send before calling it, so an uncertain send is
-  not repeated.
-- `check_continuation` requires the same attempt and session afterwards,
-  either still running or ending in that attempt's `WORKER_COMPLETED`.
-- `wait_absent` reports owned helpers as absent at the first check, absent
-  after the grace period, or still present.
-- `run_case` always runs cleanup, including after an exception, an overrun or
-  an interrupt.
-
-None of these results is acceptance; the outcome assertion above still decides.
-A wait, an idle agent or the absence of `failed` is not a pass. The no-paid
-regressions in `tests/test_qualification_observer.py` use real lock contention
-and a real controller-driven attempt with fake engines. They are not live
-worker-card protocol evidence, and not rendered GUI evidence; the Paseo bridge
-and presentation-input tests are a third, separate surface. The module adds no
-paid entry point, retry route or launch default. A paid case still needs the
-owner's explicit request, mode, route and run allowance.
-
-## Read-only dev binding
-
-With a fresh explicit read grant for the owned dev endpoint PID records and
-NEW disposable project, use the exact full UUID/workspace from that owned run:
-
-~~~bash
-python3 -B scripts/cortex_paseo_dev.py binding --agent "$AGENT_ID" \
-  --workspace "$WORKSPACE_ID" --project "$PROJECT" --timeout 10
-~~~
-
-This is a dev-only helper, not a plugin RPC. `binding` has no `--home`, endpoint
-or executable override and never auto-starts the daemon, registers a plugin,
-launches an engine, sends a prompt or changes settings. Observation timeout is
-1–30 seconds with separately bounded owned-child cleanup; output is bounded to
-8 KiB. Both private owned PID records must have valid provenance and distinct
-listen/PID/serverId; only the fixed dev loopback endpoint is used. Inherited
-PASEO variables are removed. Canonical project paths cannot overlap this checkout
-or either Paseo home. Permissions to read external files are not implied by this
-example; a refusal must not be bypassed.
-
-Anonymous connection only: authentication-required hosts refuse; do not copy
-credentials or synthesize an authenticated result. Two exact-agent fetches check
-provider/workspace/cwd and the strict existing runtimeInfo wrapper. Two guarded
-immutable reads check session/task/current durable owner, with canonical binding
-digest validation and before/after endpoint/server checks. No unrelated agent,
-workspace or latest-task enumeration occurs. Missing/ambiguous/stale/changed
-bindings, busy locks, unsafe/legacy storage and nonempty WAL refuse safely.
-Output retains `host`, `binding`, `binding_sha256`, `endpoint_sha256` and explicit
-`provenance`; retain the observation as an identity, not a lease or acceptance.
-Use its session/task/epoch in [bound task inspection](../features/observability/index.md#bound-task-inspection).
-
-Repository client 0.9.1 fake-wire tests establish the executable helper's
-positive/refusal behavior, not real installed-daemon behavior. Static inspection
-of installed Paseo/client 0.10.2 found the used exact-agent refresh/current,
-server-info and anonymous connection APIs; it does not prove current endpoint,
-authentication or owned-agent availability. A future authorized run must observe
-those facts afresh. Fixtures/exported metadata do not explain or fix the unknown
-cause of an earlier short live run, or prove engine, cycle, disconnect or resource
-closure. CLI is never rendered UI evidence.
-
-### Diagnose a refused binding without bypassing it
-
-Every failure keeps `available=false`, exit 1 and no binding.
-When the guarded task inspector itself returns a complete, canonical exit-1
-refusal, an additional `diagnostic` contains only `stage=task-discovery` and
-an allowlisted `reason` (for example `inspection_busy`,
-`inspection_uncheckpointed_wal`, `unsafe_storage`,
-`legacy_storage_migration_required` or `inspection_binding_mismatch`).
-That inspector diagnostic retains `error=binding_storage_refused`. Endpoint
-recheck/Python child failures can retain the same outer code but now identify
-`stage=endpoint-provenance` versus `task-discovery`, with only fixed local
-reasons (`spawn_failed`, `subprocess_failed`, `subprocess_terminated`,
-`timeout`, `output_overflow`, `invalid_output`). These are process observations,
-not decoded exception messages or proof of a storage condition.
-
-The wrapper separately identifies missing/inaccessible metadata at
-`endpoint-provenance` or `endpoint-recheck` (`metadata_unavailable`), unavailable
-input paths at `input-validation` (`path_unavailable`), helper startup at
-`helper-spawn` (`spawn_failed`), and bounded child supervision at `helper-output`.
-For example, missing PID metadata returns `binding_refused` plus
-`stage=endpoint-provenance, reason=metadata_unavailable`; it does not establish
-whether a daemon is stopped. A helper import failure before its main handler
-can only establish `helper-output/subprocess_failed`, not its private cause.
-
-`binding` is a live host observation, not an offline store reader: it reads
-the running dev daemon's `~/.paseo-dev/paseo.pid` record, fetches the exact
-agent's current `runtimeInfo` (the only source of its ACP session id) over that
-daemon's loopback WebSocket, and compares the daemon's `serverId` with the PID
-record before and after the storage reads. It also requires a valid,
-distinct `~/.paseo/paseo.pid` record, so the production daemon must be running
-(it is only read, never contacted). A normal `daemon stop` removes
-`~/.paseo-dev/paseo.pid`, so every binding run after the dev daemon stops
-refuses with `endpoint-provenance/metadata_unavailable`. No option recovers a
-binding from a stopped store later: the session id cannot be obtained without the
-host, and reading the Paseo registry or enumerating store tasks instead is a
-substitute reader. Run the binding (and the bound task inspection that uses
-its result) before stopping the dev daemon.
-
-Unknown, malformed, ambiguous, truncated or terminated output supplies no
-child-authored reason; the wrapper may still report its own safe process/output
-observation. Unknown exception codes remain generic. No exception text, paths, stdout/stderr
-bodies, host logs or binding are exposed. This diagnoses a new observation;
-it cannot recover the cause of an earlier generic refusal.
-Zero child exit is not success by itself: the wrapper requires the complete
-canonical envelope, exact identities and binding digest before forwarding it.
-
-Before any dependent live qualification, run the no-paid binding/task-inspection
-fixture commands in [verification](verification.md#fresh-process-isolated-targeted-launcher)
-under explicitly authorized scratch/dependency access. Passing fixtures prove
-helper behavior, not the old host/storage condition or a live identity.
-
-For a later explicitly authorized observation (not an offline diagnostic task):
-1. Confirm current installed CLI/bridge isolation and supported read-only commands
-   as required above, and validate the checkout artifact. `binding --help` and
-   fixture checks do not access a daemon or establish readiness.
-2. Obtain scoped read grants for dev endpoint provenance and a NEW owned
-   disposable target. With that authority, use
-   `python3 -B scripts/cortex_paseo_dev.py -- status --json` to observe readiness
-   of the already-running isolated dev daemon, retaining exit/completeness and
-   safe identities only. Do not auto-start it; any startup needs a separate
-   bounded setup decision that cannot resume unauthorized paid work.
-3. Once exact owned agent/workspace/project identities are supported by that
-   run and the host reports the agent idle (`wait` returned), execute the
-   guarded `binding` command above once while the dev daemon is still running.
-   Retain its complete receipt and diagnostics; only a valid returned binding
-   permits the bound metadata inspector, which also runs before the stop.
-   Stop on refusal, incomplete evidence or drift. Do not reuse consumed
-   historical target consent or substitute another reader.
-4. Only then stop the dev daemon. A binding first attempted after the stop
-   cannot succeed (see above); record it as unverified rather than retrying.
-
-A later guarded observation requires explicit read authority and a justified
-changed condition, not a retry for reassurance or an alternate SQLite reader:
-- Busy locks or nonempty WAL: let the normal runtime connection lifecycle
-  produce a checkpointed snapshot; never force a checkpoint or bypass the lock.
-  Runtime store connections are per operation, and SQLite removes the WAL when
-  the last one closes, so wait for the agent to be idle with the dev daemon
-  still running. Stopping the daemon to obtain a checkpoint also removes the
-  endpoint provenance the binding needs.
-- Unsafe/legacy/unsupported storage: stop and obtain a scoped setup/repair
-  decision; the inspector never changes modes, migrates or initializes.
-- Binding mismatch: establish the correct exact owned host/session/task through
-  supported observations. Never substitute a newer task or fabricate ownership.
-- Generic refusal: the underlying condition remains unknown. Request narrowly
-  scoped retained diagnostics/access rather than inferring sandbox, version,
-  corruption or contention.
-
-Do not repeatedly poll a refused target, restart a paid scenario just to get a
-different error, or accept a missing reason as success.
+The `--wire-trace` option and `cortex_trace_view` were removed as well; there is no supported wire-trace capture.
 
 ## Later ten-minute CLI recipe (not current authorization)
 
@@ -877,47 +640,6 @@ missing, report the run incomplete rather than extending the budget or passing
 an absent signal. Restore only the owned dev changes against retained backups
 and matching revisions; never touch production or another task's resources.
 
-## Opt-in private wire tracing
+## Wire tracing (removed)
 
-For an explicitly authorized dev daemon launch, `--wire-trace` opts in to the
-[developer-only trace](../features/observability/index.md#developer-only-wire-tracing).
-It is accepted only with `start` or `daemon start` at the canonical
-`~/.paseo-dev` home:
-
-```bash
-python3 -B scripts/cortex_paseo_dev.py --wire-trace -- start --timeout 60 --json
-```
-
-Start between tasks, after the existing dev-daemon stop procedure; starting an
-already-running daemon cannot change its environment. The wrapper sets
-`CORTEX_DEV_WIRE_TRACE=1` and `CORTEX_DEV_TRACE_HOME` only for this opt-in,
-with the existing checkout-source/XDG isolation. Ordinary wrapper invocations
-discard inherited trace opt-ins. The runtime refuses installed production
-payloads or non-dev state even if these variables are supplied.
-
-The gate's `.git`/`.cortex` ancestor check is scoped to the trace
-directory's own subtree, from it up to and including the guarded
-`~/.paseo-dev` home itself (W2); your own checkout living under `$HOME`
-being a Git repository never disables tracing, but a `.git`/`.cortex`
-marker *inside* `~/.paseo-dev` itself still refuses. `--wire-trace start`
-preflights this same gate before launching Paseo and fails visibly
-(`cortex_paseo_dev: --wire-trace preflight refused (...)`, exit 2) instead
-of starting a daemon whose tracing can never activate.
-
-`scripts/cortex_trace_view.py` (the read-only viewer invoked below) shares
-that same `_ancestors_up_to` scoping (W3): it only treats a `.git`/`.cortex`
-marker inside the guarded dev home as unsafe, never a Git checkout at
-`$HOME` itself or above it.
-
-Traces are confined to
-`~/.paseo-dev/cortex-xdg/state/cortex/wire-traces/`, outside Git and project
-storage, with private ownership/modes and capped rotation. Existing permissive
-or symlinked targets stop tracing rather than being changed. The read-only
-`python3 -B scripts/cortex_trace_view.py --task "$TASK" --pretty` command
-filters surviving records. Read the trace guide for redaction, missing IDs,
-rotation and completeness limits. Do not publish raw traces: redaction does
-not make private prompts, file/report bodies or thought updates public.
-
-Disable by stopping only the dev daemon and starting it without
-`--wire-trace`. No production launch, daemon configuration, plugin install,
-paid prompt or GUI qualification is authorized by enabling logging.
+The opt-in private wire tracing (`paseo-dev --wire-trace`) and its viewer (`cortex_trace_view`) were Python tooling and were removed on 2026-11-16 without replacement. `paseo-dev` now refuses `--wire-trace`. Enabling no logging authorizes a launch, daemon configuration, plugin install, paid prompt or GUI qualification.

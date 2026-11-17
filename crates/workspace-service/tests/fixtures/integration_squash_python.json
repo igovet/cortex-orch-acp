@@ -1,0 +1,4237 @@
+{
+  "oracle": "machine_tools.integrate",
+  "gitEnv": {
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_AUTHOR_NAME": "Fixture",
+    "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+    "GIT_COMMITTER_NAME": "Fixture",
+    "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
+    "GIT_CONFIG_COUNT": "0"
+  },
+  "sources": {
+    "crates/workspace-service/machine_tools.py": "b8232d24f056283777303170c023dbd2cff760b0dc4d7bc458760ca83b9e6b36",
+    "crates/workspace-service/task_git.py": "0fa78d3dd9be542b0dd22cdf19949173229cdfdc63a3bc5ce72771384e6be0db",
+    "src/cortex_runtime/workspace_api/projections.py": "2a12388eff6c93b2d4d6a19a1d250908c45f186a8de5880ba1556e2fb9d56109",
+    "src/cortex_runtime/delegation/revision.py": "f69d4f27986397d17e210225fcf88ebae0c4a35dac767bfa0d42ca1ac92e2880",
+    "src/cortex_runtime/orchestration/worker_checks.py": "f52084e77ab0af41749e04bae3b073620dd2a73a8de5e91891bebaada7ff4a9f",
+    "src/cortex_runtime/orchestration/check_closure.py": "6c044cc93eee1f36527f160fe8afa64a4a029460ac35d55368ecb573128c7a1e"
+  },
+  "cases": [
+    {
+      "name": "success",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "a0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "a1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+        "method": "squash",
+        "message": "Integrate completed task",
+        "requestId": "squash-one"
+      },
+      "reports": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "expected": {
+        "ok": true,
+        "result": {
+          "done": true
+        }
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "doneAt": "$NOW",
+            "integration": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+              "message": "Integrate completed task",
+              "method": "squash",
+              "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+              "targetBranch": "main"
+            },
+            "keep": "untouched",
+            "status": "done",
+            "targetBranch": "main",
+            "work": "merged"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Integrate completed task",
+        "targetContent": "completed task\n",
+        "targetStatus": ""
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    },
+    {
+      "name": "commit-failed",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        },
+        {
+          "path": "$BASE/hooks/pre-commit",
+          "content": "#!/bin/sh\nexit 1\n",
+          "executable": true
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "a0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "a1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+        "method": "squash",
+        "message": "Integrate completed task",
+        "requestId": "squash-one"
+      },
+      "reports": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "expected": {
+        "ok": false,
+        "code": "integration_failed",
+        "message": "Git could not finish the target commit. Its previous staging selection was restored; the task commit is retained. Inspect the target checkout in Changes and fix its Git identity or commit hooks, then commit the retained changes there and refresh the task. Do not repeat Merge while the target has uncommitted changes."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "keep": "untouched",
+            "status": "ready_to_merge",
+            "targetBranch": "main"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Base",
+        "targetContent": "completed task\n",
+        "targetStatus": "M a.txt"
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    },
+    {
+      "name": "head-changed",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        },
+        {
+          "path": "$BASE/hooks/pre-commit",
+          "content": "#!/bin/sh\nhead=$(git rev-parse HEAD)\ntree=$(git rev-parse \"HEAD^{tree}\")\nnext=$(printf \"Hook commit\\n\" | git commit-tree \"$tree\" -p \"$head\") || exit 2\ngit update-ref HEAD \"$next\" \"$head\" || exit 3\nexit 1\n",
+          "executable": true
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "a0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "a1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+        "method": "squash",
+        "message": "Integrate completed task",
+        "requestId": "squash-one"
+      },
+      "reports": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "expected": {
+        "ok": false,
+        "code": "integration_unknown",
+        "message": "A commit was recorded before integration stopped. Inspect Git history and refresh the task before continuing; do not repeat the merge blindly."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "keep": "untouched",
+            "status": "ready_to_merge",
+            "targetBranch": "main"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Hook commit",
+        "targetContent": "completed task\n",
+        "targetStatus": "M  a.txt"
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    },
+    {
+      "name": "dirty-target",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        },
+        {
+          "path": "$BASE/target/a.txt",
+          "content": "unrelated target edit\n",
+          "executable": false
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "a0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "a1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+        "method": "squash",
+        "message": "Integrate completed task",
+        "requestId": "squash-one"
+      },
+      "reports": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "expected": {
+        "ok": false,
+        "code": "dirty_target",
+        "message": "The target checkout has uncommitted work. Commit or move it yourself first."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "keep": "untouched",
+            "status": "ready_to_merge",
+            "targetBranch": "main"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Base",
+        "targetContent": "unrelated target edit\n",
+        "targetStatus": "M a.txt"
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    },
+    {
+      "name": "source-drift",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "late edit\n",
+          "executable": false
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "a0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "a1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+        "method": "squash",
+        "message": "Integrate completed task",
+        "requestId": "squash-one"
+      },
+      "reports": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "This result or its workspace changed. Rerun checks and review the new result."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "keep": "untouched",
+            "status": "ready_to_merge",
+            "targetBranch": "main"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Base",
+        "targetContent": "base\n",
+        "targetStatus": ""
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    },
+    {
+      "name": "accepted-drift",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "a0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "a1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+        "method": "squash",
+        "message": "Integrate completed task",
+        "requestId": "squash-one"
+      },
+      "reports": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "expected": {
+        "ok": false,
+        "code": "workspace_drift",
+        "message": "Files changed after acceptance. Rerun checks and accept the new result."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "keep": "untouched",
+            "status": "ready_to_merge",
+            "targetBranch": "main"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Base",
+        "targetContent": "base\n",
+        "targetStatus": ""
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    },
+    {
+      "name": "fresh-result",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "a0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "a1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched",
+            "requiresFreshResult": {
+              "resultId": "wr_e1",
+              "version": "1"
+            }
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+        "method": "squash",
+        "message": "Integrate completed task",
+        "requestId": "squash-one"
+      },
+      "reports": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "expected": {
+        "ok": false,
+        "code": "review_required",
+        "message": "The source changed after this result. Run fresh checks and review the new result before integration."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "keep": "untouched",
+            "requiresFreshResult": {
+              "resultId": "wr_e1",
+              "version": "1"
+            },
+            "status": "ready_to_merge",
+            "targetBranch": "main"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Base",
+        "targetContent": "base\n",
+        "targetStatus": ""
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    },
+    {
+      "name": "review-block",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "a0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "a1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"BLOCK\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+        "method": "squash",
+        "message": "Integrate completed task",
+        "requestId": "squash-one"
+      },
+      "reports": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "expected": {
+        "ok": false,
+        "code": "checks_required",
+        "message": "Independent review is not approved. Request changes to complete review."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "keep": "untouched",
+            "status": "ready_to_merge",
+            "targetBranch": "main"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Base",
+        "targetContent": "base\n",
+        "targetStatus": ""
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    },
+    {
+      "name": "missing-report",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "a0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "a1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+        "method": "squash",
+        "message": "Integrate completed task",
+        "requestId": "squash-one"
+      },
+      "reports": [],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "This result or its workspace changed. Rerun checks and review the new result."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "keep": "untouched",
+            "status": "ready_to_merge",
+            "targetBranch": "main"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Base",
+        "targetContent": "base\n",
+        "targetStatus": ""
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    },
+    {
+      "name": "wrong-digest",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "a0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "a1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "method": "squash",
+        "message": "Integrate completed task",
+        "requestId": "squash-one"
+      },
+      "reports": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "This result or its workspace changed. Rerun checks and review the new result."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "keep": "untouched",
+            "status": "ready_to_merge",
+            "targetBranch": "main"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Base",
+        "targetContent": "base\n",
+        "targetStatus": ""
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    },
+    {
+      "name": "empty-message",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "a0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "a1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+        "method": "squash",
+        "message": "  ",
+        "requestId": "squash-one"
+      },
+      "reports": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "expected": {
+        "ok": false,
+        "code": "empty_message",
+        "message": "Write a commit message first."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "keep": "untouched",
+            "status": "ready_to_merge",
+            "targetBranch": "main"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Base",
+        "targetContent": "base\n",
+        "targetStatus": ""
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    },
+    {
+      "name": "informational",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1','ANSWER_SUBMITTED','{}','runtime','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+        "method": "squash",
+        "message": "Integrate completed task",
+        "requestId": "squash-one"
+      },
+      "reports": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "expected": {
+        "ok": false,
+        "code": "checks_required",
+        "message": "This is an informational answer, not verified code for merging."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "keep": "untouched",
+            "status": "ready_to_merge",
+            "targetBranch": "main"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Base",
+        "targetContent": "base\n",
+        "targetStatus": ""
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    },
+    {
+      "name": "no-verification",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "a0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "a1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+        "method": "squash",
+        "message": "Integrate completed task",
+        "requestId": "squash-one"
+      },
+      "reports": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "expected": {
+        "ok": false,
+        "code": "stale_result",
+        "message": "This result or its workspace changed. Rerun checks and review the new result."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "keep": "untouched",
+            "status": "ready_to_merge",
+            "targetBranch": "main"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Base",
+        "targetContent": "base\n",
+        "targetStatus": ""
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    },
+    {
+      "name": "runtime-failed-check",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "a0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "a1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "UPDATE runtime_tasks SET plan_json=? WHERE task_id='r1'",
+          [
+            "{\"verification\": [[\"tool\"]]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_FAILED",
+            "{\"revision\": 0, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\", \"checks\": [{\"argv\": [\"tool\"], \"complete\": true, \"exit_code\": 1, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\"}]}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+        "method": "squash",
+        "message": "Integrate completed task",
+        "requestId": "squash-one"
+      },
+      "reports": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "expected": {
+        "ok": false,
+        "code": "checks_required",
+        "message": "Run the current runtime verification checks before accepting work."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "keep": "untouched",
+            "status": "ready_to_merge",
+            "targetBranch": "main"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Base",
+        "targetContent": "base\n",
+        "targetStatus": ""
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    },
+    {
+      "name": "worker-failed-check",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "a0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"checks\": [{\"name\": \"Check\", \"outcome\": \"failed\"}]}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "a1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "main",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+        "method": "squash",
+        "message": "Integrate completed task",
+        "requestId": "squash-one"
+      },
+      "reports": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "expected": {
+        "ok": false,
+        "code": "checks_required",
+        "message": "Run the unpassed checks first, or request changes. Only recorded technical blockers may be acknowledged."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "keep": "untouched",
+            "status": "ready_to_merge",
+            "targetBranch": "main"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Base",
+        "targetContent": "base\n",
+        "targetStatus": ""
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    },
+    {
+      "name": "missing-target",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "a0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "a1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "missing",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+        "method": "squash",
+        "message": "Integrate completed task",
+        "requestId": "squash-one"
+      },
+      "reports": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "expected": {
+        "ok": false,
+        "code": "unknown_branch",
+        "message": "The target branch must exist locally."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "keep": "untouched",
+            "status": "ready_to_merge",
+            "targetBranch": "missing"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Base",
+        "targetContent": "base\n",
+        "targetStatus": ""
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    },
+    {
+      "name": "invalid-target",
+      "steps": [
+        {
+          "argv": [
+            "init",
+            "-b",
+            "main"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.name",
+            "Offline fixture"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "user.email",
+            "fixture@invalid"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "commit.gpgsign",
+            "false"
+          ]
+        },
+        {
+          "argv": [
+            "config",
+            "core.hooksPath",
+            "$BASE/hooks"
+          ]
+        },
+        {
+          "path": "$ROOT/.gitignore",
+          "content": ".cortex/\n.cortex-dev/\n",
+          "executable": false
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "base\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Base"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "checkout",
+            "-b",
+            "task"
+          ]
+        },
+        {
+          "path": "$ROOT/a.txt",
+          "content": "completed task\n",
+          "executable": false
+        },
+        {
+          "argv": [
+            "add",
+            "."
+          ]
+        },
+        {
+          "argv": [
+            "commit",
+            "-m",
+            "Task result"
+          ]
+        },
+        {
+          "argv": [
+            "rev-parse",
+            "HEAD"
+          ]
+        },
+        {
+          "argv": [
+            "worktree",
+            "add",
+            "$BASE/target",
+            "main"
+          ]
+        }
+      ],
+      "rows": [
+        [
+          "INSERT INTO workspace_projects VALUES (?,?,?,?,1)",
+          [
+            "p1",
+            "$ROOT",
+            "fixture",
+            "now"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_tasks(task_id,project_id,description,version,execution_id,created_at) VALUES ('t1','p1','Build task',1,?,'now')",
+          [
+            "e1"
+          ]
+        ],
+        [
+          "INSERT INTO tasks VALUES ('r1',?,'now')",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_tasks(task_id,state,goal,synthesis,created_at,updated_at) VALUES ('r1',?,'Goal',?,'now','now')",
+          [
+            "COMPLETED",
+            "Answer"
+          ]
+        ],
+        [
+          "INSERT INTO task_owners VALUES ('r1','owner',1,'now')",
+          []
+        ],
+        [
+          "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+          [
+            "$ROOT"
+          ]
+        ],
+        [
+          "INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',?,1,'now')",
+          [
+            1
+          ]
+        ],
+        [
+          "INSERT INTO reports VALUES ('report1','r1','report','result.md','now')",
+          []
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n0",
+            "execution",
+            "a0",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_nodes VALUES ('r1',0,?,'worker-backend-dev','Objective','[]','[]',?,'completed',?,?)",
+          [
+            "n1",
+            "review",
+            "a1",
+            "{\"report_ref\": \"report1\", \"report_digest\": \"75823ac83556de6d2c89fac435d243bbf7303a601c4d352687c07e366e82840c\", \"verdict\": \"APPROVE\"}"
+          ]
+        ],
+        [
+          "INSERT INTO runtime_events(task_id,type,payload_json,actor,created_at) VALUES ('r1',?,?,'runtime','now')",
+          [
+            "VERIFICATION_PASSED",
+            "{\"revision\": 0, \"revision_digest\": \"85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7\", \"checks\": []}"
+          ]
+        ]
+      ],
+      "saved": {
+        "tasks": {
+          "t1": {
+            "status": "ready_to_merge",
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "checkout": {
+              "kind": "main"
+            },
+            "targetBranch": "-bad",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "keep": "untouched"
+          }
+        }
+      },
+      "params": {
+        "confirmed": true,
+        "taskId": "t1",
+        "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+        "method": "squash",
+        "message": "Integrate completed task",
+        "requestId": "squash-one"
+      },
+      "reports": [
+        {
+          "path": "r1/result.md",
+          "content": "# Offline reference\n\nCompleted work evidence.\n"
+        }
+      ],
+      "expected": {
+        "ok": false,
+        "code": "invalid_branch",
+        "message": "Choose a valid target branch."
+      },
+      "after": {
+        "tasks": {
+          "t1": {
+            "acceptance": {
+              "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+            },
+            "acceptedRevision": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7",
+            "baseRevision": "aa9459651d9ce853482de89e9fe8695a76af0e66",
+            "checkout": {
+              "kind": "main"
+            },
+            "keep": "untouched",
+            "status": "ready_to_merge",
+            "targetBranch": "-bad"
+          }
+        },
+        "sprints": [],
+        "drafts": {},
+        "messages": [],
+        "comments": {}
+      },
+      "observation": {
+        "sourceHead": "607aac3929bcc16fcb624c2b163403e1c1552a6d",
+        "targetSubject": "Base",
+        "targetContent": "base\n",
+        "targetStatus": ""
+      },
+      "digest": "85636ce0b14409b22aebfeeb5b54a690ebbfcfaa3386b3409c2be45ecc4697d7"
+    }
+  ]
+}

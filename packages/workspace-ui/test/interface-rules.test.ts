@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { HELP } from "../src/orch-help";
 
-/** The rules a source file can answer on its own. What needs layout is in sweep.measure.py. */
+/** The rules a source file can answer on its own. What needs layout is in sweep.measure.mjs. */
 const files = (dir: string): string[] => readdirSync(dir).flatMap(name => { const path = join(dir, name); return statSync(path).isDirectory() ? files(path) : /\.tsx?$/.test(name) ? [path] : []; });
 // This package's sources, from the package or the repository root, where a bare "src" is another tree.
 const SRC = ["src", join("packages", "workspace-ui", "src")].find(dir => existsSync(join(dir, "workspace.css")) && existsSync(join(dir, "composer.tsx")))!;

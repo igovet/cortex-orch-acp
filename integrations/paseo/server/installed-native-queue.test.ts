@@ -13,7 +13,7 @@ const bundle = readFileSync(bundlePath, "utf8");
 
 // Evaluate only the selected installed helper module with explicit stand-ins
 // for its dependencies, never the application, accounts or daemon.
-function helper(marker: string, dependencies: any[] = []) {
+function helper(marker: string, dependencies: any[] = [], identities: Record<number, number> = {}) {
   const at = bundle.indexOf(marker);
   assert.ok(at >= 0, `Installed helper missing: ${marker}`);
   const start = bundle.lastIndexOf("__d(", at);
@@ -25,6 +25,10 @@ function helper(marker: string, dependencies: any[] = []) {
     __d(fn: any, _id: number, imports: number[]) { factory = fn; ids = imports; },
   }, { timeout: 1000 });
   assert.equal(ids.length, dependencies.length, "Installed helper dependencies changed");
+  // Positional stand-ins are bound to exact dependency identities where given.
+  for (const [index, id] of Object.entries(identities)) {
+    assert.equal(ids[Number(index)], id, "Installed helper dependency identity changed");
+  }
   const exports: any = {};
   factory({}, (id: number) => {
     const index = ids.indexOf(id);
@@ -35,12 +39,17 @@ function helper(marker: string, dependencies: any[] = []) {
 }
 
 const attachments = helper("e.userAttachmentsOnly=function");
+const attachmentsId = Number(bundle.slice(bundle.lastIndexOf("__d(", bundle.indexOf("e.userAttachmentsOnly=function")),
+  bundle.indexOf("\n__d(", bundle.indexOf("e.userAttachmentsOnly=function"))).match(/\},(\d+),\[[\d,]*\]\);?$/)?.[1]);
+assert.ok(Number.isInteger(attachmentsId), "Installed attachment helper identity missing");
 const actions = helper("e.runAlternateSendAction=function");
 let nextId = 0;
+// Installed 0.15.3 imports: upload limits (unused by queue helpers), attachment
+// helpers, composer submit splitter (unused by queue helpers), message ids, i18n.
 const queueHelpers = helper("e.queueComposerMessage=function", [
-  attachments, {}, { generateMessageId: () => `native-${++nextId}` },
+  {}, attachments, {}, { generateMessageId: () => `native-${++nextId}` },
   { i18n: { t: () => "Failed to send" } },
-]);
+], { 1: attachmentsId });
 let state = new Map<string, any[]>();
 const queue = {
   read: (id: string) => state.get(id) ?? [],

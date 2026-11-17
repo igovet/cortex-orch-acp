@@ -1,4 +1,4 @@
-// The rendered layout gate: static production bundle, fake data, no watchers or engines. Add a screen with one entry in layout-fit.py.
+// The rendered layout gate: static production bundle, fake data, no watchers or engines. Add a screen with one entry in layout-fit.driver.mjs.
 import {build} from "vite";
 import {createServer} from "node:http";
 import {spawn} from "node:child_process";
@@ -35,7 +35,6 @@ try {
  const url="http://127.0.0.1:"+server.address().port+"/";
  // The rule for boxed labels (one line, capitals in the middle) is shared with the page captures.
  const labelFit=await readFile(new URL("./label-fit.js",import.meta.url),"utf8");
- const child=spawn("timeout",["--kill-after=5","3000","docker","run","--rm","-i","--network","host","--user",process.getuid()+":"+process.getgid(),"-e","HOME=/tmp","-e","CW_MIN_WINDOW="+minimum[1]+"x"+minimum[2],"-e","CW_SIDEBAR_MAX="+sidebar[1],"-e","CW_LABEL_FIT="+labelFit,"-v",shots+":/evidence","cortex-workspace-rendered:ubuntu26.04","python3","-B","-",url,label,...process.argv.slice(3)],{stdio:["pipe","inherit","inherit"]});
- child.stdin.end(await readFile(new URL("./layout-fit.py",import.meta.url)));
+ const child=spawn("timeout",["--kill-after=5","3000","docker","run","--rm","-i","--network","host","--user",process.getuid()+":"+process.getgid(),"-e","HOME=/tmp","-e","CW_MIN_WINDOW="+minimum[1]+"x"+minimum[2],"-e","CW_SIDEBAR_MAX="+sidebar[1],"-e","CW_LABEL_FIT="+labelFit,"-v",shots+":/evidence","-v",fileURLToPath(new URL(".",import.meta.url))+":/driver:ro",(process.env.CW_RENDERED_IMAGE??"cortex-workspace-rendered:ubuntu26.04"),"node","/driver/layout-fit.driver.mjs",url,label,...process.argv.slice(3)],{stdio:"inherit"});
  process.exitCode=await new Promise((resolve,reject)=>{child.on("error",reject);child.on("exit",code=>resolve(code??1));});
 }finally{await new Promise(resolve=>server.close(resolve));}

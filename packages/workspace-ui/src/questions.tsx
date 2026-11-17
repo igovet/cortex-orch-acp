@@ -1,4 +1,4 @@
-import { createSignal, onCleanup, Show, useContext, type Accessor, type JSX } from "solid-js";
+import { createSignal, onCleanup, Show, untrack, useContext, type Accessor, type JSX } from "solid-js";
 import type { AttachmentInput, CommandReceipt, WorkspaceCommand } from "@cortex/workspace-domain";
 import { AttachChips, createAttachments, createDictation, MessageComposer } from "./composer";
 import { useWs } from "./ctx";
@@ -36,6 +36,12 @@ function Panel(props: Shared & { ask: Accessor<Ask>; active: boolean }) {
     void sent?.then(r => { if (r.ok) { setChosen(null); setText(""); files.clear(); } });
   };
   const held = () => ask().answer ? `Ready: ${ask().answer!.text}. It goes with the other answers.` : null;
+  // A question with options always keeps its answer line, so choosing one fills the line instead of adding it and the page
+  // does not move under the pointer.
+  const answerLine = () => option() ? <>Answer: <strong>{option()!.label}</strong></> : ask().options.length ? <>Answer: <span class="faint">not chosen yet</span></> : undefined;
+  // One model and effort row for the life of this question. Built inside the composer's slot it would be built again, menus
+  // and all, whenever the question's record was read again, so the card would flicker while its task runs.
+  const route = props.route?.(untrack(ask));
   return <div class="dc-panel" id={`decision-${ask().id}`} role={props.many ? "tabpanel" : undefined} aria-hidden={props.active ? undefined : "true"} inert={props.active ? undefined : true}>
     <div class="dc-q"><ResultText breaks text={ask().text} /></div>
     <Show when={ask().unavailable}><div class="cap st-warn ws-dc-note">{ask().unavailable}</div></Show>
@@ -47,8 +53,8 @@ function Panel(props: Shared & { ask: Accessor<Ask>; active: boolean }) {
     <Show when={typed() && !text().trim()}>{t => <div class="cap muted ws-dc-note"><ResultText breaks text={`Your answer: ${t()}`} /></div>}</Show>
     <Show when={props.many && held()}>{h => <div class="cap muted ws-dc-note">{h()}</div>}</Show>
     <MessageComposer class="dc-answer" label="Your answer" placeholder={ask().options.length ? "Or write your own answer…" : "Write your answer…"} text={text()} onText={write} files={files} mic={mic}
-      route={props.route?.(ask())}
-      effect={option() ? <>Answer: <strong>{option()!.label}</strong></> : undefined} off={off()}
+      route={route}
+      effect={answerLine()} off={off()}
       send={{ label: "Send answer", needs: props.needs, why: sendWhy(), go: () => send(), insertAndSend: value => send(value) }} />
   </div>;
 }

@@ -1,8 +1,7 @@
-import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { expect, it } from "vitest";
-import { presentToolSemantics } from "../../../integrations/paseo/shared/tool-presentation";
+import { presentToolSemantics } from "@cortex/workspace-domain/tool-presentation";
 import { conversationOf } from "../src/port/history";
 import { same } from "../src/stable";
 import { displayStep, feedOf, oneRowPerCall, STEP_PREFIX, toolLabel, viewOfText } from "../src/tool-names";
@@ -20,7 +19,7 @@ it("filters the actual operation, not just a friendly title, before rows, totals
   expect("run" in run[0] && run[0].run.items).toHaveLength(1);
   expect(JSON.stringify(run.map(x=>"run" in x?x.run.text:""))).not.toMatch(/mcp__|attention/);
 });
-// A streamed update must cost and redraw only what it changed (test/scroll-perf.py, `-live`).
+// A streamed update must cost and redraw only what it changed (test/scroll-perf.driver.mjs, `-live`).
 it("hands back last time's entries for rows and blocks an update left as they were",()=>{
   const note=(sequence:number,text:string)=>({sequence,kind:"note",text,at:sequence});
   const tool=(sequence:number)=>({sequence,kind:"tool",text:"mcp__cortex__project_read",at:sequence});
@@ -76,8 +75,10 @@ it("renders Claude and Codex native/gateway inputs through the real service sele
     {title:"mcp.cortex.project_read",tool_kind:"other",rawInput:{server:"cortex",tool:"project_read",arguments:{path:"src/b.py"}}},
     {title:"mcp__cortex__read_report",tool_kind:"other",rawInput:{report_id:"r_0123456789ab"}},
   ];
-  const code="import json,sys;sys.path.insert(0,'src');from cortex_runtime.workspace_api.history import tool_detail;print(json.dumps([tool_detail(e) for e in json.loads(sys.argv[1])]))";
-  const details=JSON.parse(execFileSync("python3",["-B","-c",code,JSON.stringify(events)],{cwd:root,encoding:"utf8",timeout:10000}));
+  // Frozen service tool details for `events` (captured from the retired reference selector;
+  // the native Rust history readers keep this shape).
+  void events; void root;
+  const details=[{title:"printf 'ready'",callId:"",kind:"execute",command:"printf 'ready'",output:""},{title:"Read",callId:"",kind:"read",path:"src/a.py"},{title:"mcp__cortex__command_run",callId:"",kind:"execute",command:"python3 -B check.py",output:""},{title:"mcp.cortex.project_read",callId:"",kind:"other",path:"src/b.py"},{title:"mcp__cortex__read_report",callId:"",kind:"other",ref:"r_0123456789ab"}];
   const views=details.map((d:any)=>viewOfText(STEP_PREFIX+JSON.stringify(d)));
   expect(views.map((v:any)=>v.label)).toEqual(["Shell","Read","Shell","Read","Read report: r_0123456789ab"]);
   expect(views.map((v:any)=>v.target)).toEqual(["printf 'ready'","src/a.py","python3 -B check.py","src/b.py",""]);

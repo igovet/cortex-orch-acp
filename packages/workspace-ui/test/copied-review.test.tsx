@@ -40,8 +40,8 @@ it.skipIf(!socket)("existing answer and technically blocked work accept through 
       expect(root.textContent).not.toContain("1 check failed");
       accept()!.click();
       if (item.technical) {
-        await until(() => !!document.querySelector('dialog[aria-label="Accept with open checks"] input'));
-        const d = document.querySelector('dialog[aria-label="Accept with open checks"]')!;
+        await until(() => !!document.querySelector('dialog[data-dialog="Accept with open checks"] input'));
+        const d = document.querySelector('dialog[data-dialog="Accept with open checks"]')!;
         const confirm = d.querySelector<HTMLButtonElement>("[data-bar=\"dialog\"] .btn-primary")!;
         expect(confirm.getAttribute("aria-disabled")).toBe("true");
         d.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click();

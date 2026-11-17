@@ -7,11 +7,864 @@ The local wire version is 1.8. See [protocol](protocol.md) and
 For update, native/API-key connection, voice-settings and command-control behavior,
 see [desktop maintenance and controls](maintenance-and-controls.md).
 
+## Python-independent native service startup
+
+The only host command is `workspace-service <allowed-root> <runtime-root>` (plus the one-argument MCP relay and the internal maintenance-worker mode). The absolute runtime root is checked as a source checkout or this channel's installed bundle, and no interpreter or helper script is required to bind the socket. The legacy ACP child, `agent_launcher.py`, `machine_tools.py`, the three- and five-argument forms, `--fixture-launcher`, `CORTEX_WORKSPACE_NATIVE=0` and `projects.resynchronize` were removed on 2026-11-16: the workspace service has only the native Rust execution host. `LaunchSpec::native` is the single launch specification. The trusted asset root supplies bundle/voice lookup; it cannot be supplied by socket JSON. Native machine capability stays advertised.
+
+Native Git/files, task pages and saved history, Settings reads/saves/native actions, and engine login-command lookup/recheck/reference registration are native routes. Startup does not launch an engine or refresh credentials. Registered project identities are still listed independently of store readability or activation.
+
+account or paid-model qualification.
+
+## Native machine boundary
+
+`project.config.read` runs entirely in Rust (the former `PythonCoreMachinePort` was removed). It reads the registered project's routing file and
+Core's live read-only project-ceiling row. The editor retains project-only rules,
+all three engine entries, policy and quota fields, sorted ceiling sets, exact
+SHA-256 tokens and numeric revisions; absent overrides stay absent, and malformed
+routing keeps its byte revision with the existing empty editor. It does not
+substitute effective user/environment rules or initialize a missing store. A
+registered linked checkout with no root-local store retains the legacy missing-store
+refusal rather than silently loading another checkout's settings.
+Private owner defaults and connection-registry metadata retain their validation
+refusals; no credential reference, catalog body or engine is opened. Reads use
+bounded no-follow/nonblocking regular-file opens, and refuse oversized settings
+rather than delegate or return partial data. Each configuration file is bounded
+by the existing native frame budget; stored settings rows share that bound.
+
+The 125 current-Python offline cases in
+[`project-config-python.json`](../../crates/workspace-service/tests/fixtures/project-config-python.json)
+are captured by
+the former generator `generate_project_config_fixture` (removed with the Python runtime).
+Service-boundary comparisons run in the private module tests with no helper or
+engine configured, preserve project/configuration bytes (excluding SQLite's
+shared-memory reader slots), and use short socket roots independently of TMPDIR.
+Machine config.save now uses the [native writer](../configuration.md#native-machine-saves);
+engine.connection login-command lookup, recheck status/reference registration and
+API-key creation use native Rust. API keys retain canonical private secret-file
+storage, separate registry transactions and known-failure removal/opt-out; uncertain
+storage outcomes never switch providers or replay. Valid keyring validation and
+installers/onboarding outside their pre-effect refusals are refused natively (the on-demand Python provider was removed); stale-revision and installer pre-effect refusals are native. Catalog refresh
+preserves its read-only empty/null/empty-argv/relative subset and adds a working
+native Codex/Claude observer for direct commands, qualified two-argument Codex/Claude
+installs and native-account/API-key secret-file launches. Unicode labels and
+scrubbed noisy-peer logs have recorded coverage. Sixty-two recorded captures of the former Python implementation
+(54 prior cases and eight OpenCode pre-probe failures) compare full replies/files/modes
+and exact prompt-free transcripts
+with zero helper calls; startup still exercises native observation.
+Qualified [OpenCode metadata-only pre-probe failures](../configuration.md#opencode-pre-probe-rejection)
+now stay native without logs, binary probes, a jail or snapshots, and so does the
+exact-hash Codex 2.3.0 bundle (its adapter is byte-identical to the recorded former patch). Potentially
+usable OpenCode installs, keyrings, unqualified
+Codex/Claude candidates, unsafe names/roots, missing locks and unqualified projections
+are refused as a whole before effects. Unqualified post-observation
+outcomes refuse without provider replay. Qualified Codex installs resolve
+nested/hoisted npm dependencies, generate private source-guarded adapter/launcher
+artifacts and merge offline debug-model efforts. Their catalog launcher now uses
+the compiled Rust service as a Linux shebang interpreter, not Python or a shell;
+safe legacy artifacts migrate atomically without replay. 39 offline
+execution comparisons cover checks, argv/environment/cwd/stdio, timeout/reaping
+and final PID/status/signals. Catalog comparisons explicitly validate this one
+artifact-content change and preserve all other comparisons. Unsupported service
+interpreter paths refuse before effects. See
+[the exact producer limits](../configuration.md#native-launch-capable-catalog-producer)
+and [prelaunch catalog refresh](../configuration.md#native-prelaunch-catalog-refresh).
+See [per-action engine setup](../configuration.md#retained-engine-connection-setup)
+for command, persistence and fallback boundaries.
+Machine config.read is passive native display; config.action runs connection rename
+and session-limit edits, confirmed default-preset reset and profile
+read/create/save/update/delete/deactivate in Rust. Filesystem-reference validation
+and connection removal now also use Rust, including canonical single-link owned
+secret-file unlinking without reading contents. Qualified preset apply and format-1/2
+four-section profile activation use Rust; wider ignored profile-document metadata is
+also native; valid keyring validation, unsupported removal
+defaults, custom preset documents and other activation/numeric shapes are refused natively.
+Other unported producers refuse before admission. This is not an
+installed-client qualification.
+
+### Native project settings saves
+
+`project.config.save` is native (the former `PythonCoreMachinePort` was removed).
+Both routing and project ceilings use native validation and exact revision checks.
+Routing retains supported-key ordering, unknown nested metadata, Unicode, numeric
+formatting and owner-only atomic replacement. Ceilings retain the existing compact
+JSON columns and timestamp-based revision material; the Core immediate transaction
+preserves project defaults and refuses removing a defaults-bearing row.
+The shared private `connections.lock` serializes with retained owner settings
+writers; narrowing is checked against that locked user ceiling. Missing stores
+are never initialized and no scheduler ownership is acquired.
+
+The full reply is prepared and budgeted before effects. A failed post-rename
+directory sync or uncertain database operation reports an unknown outcome,
+not permission to repeat or delegate the write. No engine, credential file,
+catalog refresh or configuration revalidation process is launched.
+Routing-save replies include bounded cached model-effort display observations;
+these do not establish route eligibility.
+
+The 94 disposable-project cases in
+[`project-config-save-python.json`](../../crates/workspace-service/tests/fixtures/project-config-save-python.json),
+captured by
+the former generator `generate_project_config_save_fixture` (removed with the Python runtime),
+compare complete replies, routing bytes/modes and saved ceiling rows. Eleven
+additional real Python captures compare observed/default-only/conflicting/invalid
+catalog efforts. Native tests cover concurrent revision arbitration, unsafe lock
+and target files, SQL rollback and uncertain post-replacement failure, without a
+configured helper or engine. Independently produced ceiling clocks and their
+derived revisions are validated against actual rows before clock-only normalization.
+
+Native limits deliberately refuse oversized replies/files/rows, unsafe storage,
+nonfinite or excessively nested JSON, and preserved integers outside the exact
+64-bit range instead of writing rounded metadata. Invalid *other routing source*
+diagnostics are sanitized native messages, not Python parser exception text.
+The retained child environment does not forward `CORTEX_ROUTING`; save replies
+therefore preserve the service's project/user precedence. Machine config.read has
+its separate native boundary; remaining config.action variants, engine.connection
+mutations outside the native gates are refused natively (the Python provider was removed).
+
+`config.mcp.discover` runs completely in Rust. It retains the nested observation/refusal envelope, only sends
+initialize/initialized/tools-list, and never persists configuration or calls a
+tool. Keep-env markers use the private channel registry; configured values and
+credential-shaped description text are scrubbed. The native external-MCP
+Landlock/seccomp boundary enforces explicit read/write/network grants, refuses
+protected descendants, and kills the process group on success, timeout or
+cancellation. This is a cooperative same-user boundary, not hostile-code
+isolation or the Python mount-namespace sandbox. Missing containment refuses
+launch. Grant trees above 50,000 entries refuse; owner files retain the native
+frame budget. Protocol budgets remain 15 seconds, 256 KiB buffered, 32 messages
+per reply, 20 pages and 1,000 tools. Unix/runtime scratch roots remain short
+independently of TMPDIR.
+
+[`mcp-discovery-python.json`](../../crates/workspace-service/tests/fixtures/mcp-discovery-python.json)
+contains 77 offline current-Python operation replies and 110 redaction cases,
+captured by
+the former generator `generate_mcp_discovery_fixture` (removed with the Python runtime).
+Capture substitutes only sandbox argv construction for a disposable toy stdio
+peer; it does not qualify the Python sandbox. Native tests separately exercise
+real filesystem/network containment, explicit grants, and descendant cleanup
+on success, timeout and cancellation, without a helper or model engine.
+The fixture peer was a Python script when the captures were recorded; production discovery has no interpreter
+dependency and can run any configured supported stdio executable. Native service
+startup is independent of Python as described above; neither result qualifies an installed app.
+
+`product.integrate` now performs read-only admission in Rust: exact confirmation,
+saved readiness/acceptance digest, local already-in-target observation and the
+bound completed-runtime prerequisite. The refusal order and envelopes are compared
+with 57 offline Python cases in `crates/workspace-service/tests/integration_admission.rs`,
+captured by the former generator `generate_integration_fixture` (removed with the Python runtime) beside it. Refusals preserve overlay,
+SQL authority, real index, HEAD and user bytes; missing stores are not initialized.
+A bound completed result can now use the existing native result/source validator
+and a narrow local squash: the source must be the clean, already-committed project
+folder, the target an existing clean worktree and ancestor of that source, and
+cleanup must not be requested. Report/review/check validation, current source,
+fresh-result and accepted-revision fences precede every effect. The machine lock
+covers overlay access and the existing durable operation intent precedes Git.
+A known target-commit failure restores its exact previous index only if HEAD is
+unchanged. A real `git merge --squash` content conflict (unmerged index entries)
+is reported as `integration_conflict`, not as a hook failure: because a squash
+writes no `MERGE_HEAD`, `git reset --merge` undoes the conflict markers, staged
+task files and `SQUASH_MSG`, and only a then-clean target gets its exact previous
+index back; otherwise the reply says the target may still hold the conflict. A
+merge Git refuses before writing files restores the index and names likely
+overwritten files. Unit cases in `src/machine/integration_squash.rs` force both
+with real Git. Changed HEAD, cancellation, timeout or post-Git overlay-save failure
+remain uncertain, with no helper fallback or blind repeat. Normal hooks remain
+active. Success persists the existing Done/integration shape, not a runtime
+completion or new scheduler. Seventeen additional offline Python reply/state/Git
+cases in `fixtures/integration_squash_python.json` include success, real hook
+failure, changed-HEAD uncertainty and result/source/review refusals; capture uses
+the former generator `generate_integration_squash_fixture` (removed with the Python runtime) beside the existing tests. Socket roots
+remain short even under a long TMPDIR. Unsupported receipt/closure evidence,
+source staging, same-branch commits, target updates/conflicts, temporary target
+creation, PRs and cleanup are refused before effects. Unported configuration/setup
+is refused natively (the on-demand Python provider was removed).
+
+Current legacy source-bound verification for plain and Git task roots now reads
+natively in `product.read` and `product.facts`. Rust reproduces the legacy sorted
+manifest bytes and SHA-256, including Unicode, symlink targets, nonregular
+entries, dependency/store exclusions and the path-exact regular engine lock.
+The recorded task workspace, not necessarily the logical store root, supplies
+the source. Files above 1 MiB or the 512 MiB content budget retain the legacy
+size/inode/mtime/ctime identity; smaller files are freshly hashed without a
+content cache. No-follow descriptor-relative traversal and before/after state
+checks fail closed on observed races. Without a Git list, the 50,000-entry/
+20-second bounds never produce a partial digest. Git selection uses fixed
+installed Git in a no-owner-home, no-network bubblewrap view with read-only
+project/metadata mounts and disabled hooks/fsmonitor. Linked-worktree pointers
+and common metadata are supported. Unavailable Git/sandbox/metadata uses the
+legacy whole-tree fallback; a successful list selects tracked and untracked,
+not-ignored paths plus the root ignore boundary, with the legacy 300-second
+scan budget and no entry cap. Non-UTF-8/malformed or over-64-MiB lists, private-mask
+enumeration limits, non-UTF-8 source names/targets and depth of 129 or more
+directory components retain the provider. Runtime event/check revision,
+exact command, completeness, integer exit and digest rules, current review/report
+integrity, open-check acknowledgement and fresh-result fences retain their DTOs.
+A displayed Accept control is not an acceptance mutation or rerun closure.
+the former generator `generate_source_verification_fixture` (removed with the Python runtime) captures the offline Python reference
+in `fixtures/legacy-source.json` and `fixtures/task-source-verification.json`
+under `crates/workspace-service/tests/`; the Rust tests need no helper or engine.
+the former generator `generate_git_source_fixture` (removed with the Python runtime) additionally captures four Git manifests and
+eleven exact control DTOs in `fixtures/legacy-git-source.json` and
+`fixtures/task-git-source-verification.json`. The listed-walk interpreter uses
+actual fixture-only Git file lists; this is separate from real sandbox success.
+The capture host and Rust transport checks report unavailable sandbox listing
+and exercise the bounded whole-tree fallback, not positive sandbox qualification.
+Literal-gap rerun successes now also read natively: the latest finished attempt
+must match the current owner's epoch, exact target hash/argv/cwd, reviewed and
+current source digest, unique ordered request/start/finish records, complete
+exit-zero check and the exact author's observed publication. Private retained
+output is fully read without following links, with owner/mode/link-count,
+length and before/after identity checks; bodies above 8 MiB retain the provider.
+An unchanged exact literal worker or runtime-verification target can carry only
+a missing-command/tool blocker across owners, never a pass or permission grant.
+The 135 offline Python cases in `fixtures/task-rerun-closures.json` are captured
+by the former generator `generate_rerun_closure_fixture` (removed with the Python runtime) under `crates/workspace-service/tests/`;
+they compare both machine read DTOs without a helper or engine at test time.
+These seeded stores test interpretation, not live check execution. Unknown,
+replayed, stale, malformed, truncated or mismatched evidence never becomes a
+pass. Final-verification gap closures also read natively: exact unique runtime
+start/output receipts for every planned command must bind the reviewed current
+source, and the recorded gap must match its author's completion and publication
+(or review digest). Later pending, failed or ambiguous reruns supersede a closure;
+derived closed_by fields do not prove one. The fixture includes 63 final-verification
+cases, including duplicate commands, policy blockers, missing/changed reports and
+private-output failures. Receipt-derived failed/passed targets still retain the
+interpreter, as do existing size/materialization boundaries.
+Native acceptance and owner-deletion boundaries are described below.
+
+Saved draft `product.task` actions `edit`, `settings` and `rename`, plus private `target`, `reopen`, `restore` and `sprint` linking, now run natively when checkout options are materialized. Draft edits preserve attachment bytes and unrelated options; expected-version and execution-identity checks arbitrate against Start in the same Core transaction as version/outbox updates. `rename` alone also applies to a started, finished or closed task: it changes only the owner-visible title option, never the saved request, settings or lifecycle, and a cleared or deleted task refuses it with `not_editable`. Sprint linking preserves dependency order, refuses started tasks and holds the Start arbitration transaction across the private JSON replacement. Private target/reopen/restore changes neither start work nor certify a result. The unchanged response and persistence shapes are compared with offline Python fixtures in `crates/workspace-service/tests/task_actions.rs`, captured by the former generator `generate_task_action_fixture` (removed with the Python runtime). Legacy unmaterialized checkout projections, and structured or floating-point rename titles outside the native text-title surface, still delegate before any effect. Owner `close` (including external/already-in-target), `archive`, `auto_ready`, `merged` and `resolution_started` now run in Rust as private presentation actions. External closure preserves the confirmation/conflict/settlement/containment refusal order, checks session/root/epoch, unknown launches and live workers, and rechecks settlement under the Core immediate transaction through overlay replacement. Archive preserves the unmerged-work question, including dirty/changed-head and missing/removed worktree cases. Conflict handoff retains guidance and clears acceptance, without resolving files. These actions never transition the scheduler, certify checks or mutate Git/user files. Their replies and persisted JSON/SQLite state are compared with the 87-case offline capture from the former generator `generate_task_lifecycle_fixture` (removed with the Python runtime) in `tests/task_actions.rs` (both under `crates/workspace-service/`). Owner acceptance and archive-discard answers now also run in Rust within the native evidence/materialized-checkout boundary described below. Manual file choices and merge finish/abort now use Rust as described below; integration validation/effects outside the committed-source local squash slice are refused natively (the former Python provider was removed). An uncertain native mutation never falls back or automatically replays.
+
+### Native owner review decisions
+
+`product.task` actions `accept` and `answer_archive` now use Rust for
+materialized checkouts and the existing native result-evidence surface.
+Acceptance preserves the completed/current execution, project/session/owner,
+unknown-Start, digest, fresh-result and evidence-version gates. Existing report,
+independent-review, verification, source-drift and technical-blocker validation
+is shared with native result controls, not inferred from model text. Open
+automated checks require literal acknowledgement; manual checks do not become
+automated blockers or outcome counts. The persisted acceptance retains the
+owner's original version/digest values, exact open counts and a fresh legacy
+checkout digest. Informational answers need no invented verification.
+
+The machine lock protects the overlay. Acceptance revalidates under Core's
+immediate writer transaction through the private JSON replacement, preventing
+Start/owner-state changes between validation and save. It neither completes the
+runtime nor creates a check receipt. A denied archive-discard answer postpones
+the question using the existing retention setting; a literal confirmed discard
+binds consent to the exact legacy checkout digest. It deletes no files or task.
+Unobservable source records no consent; later purge still rechecks the digest,
+unmerged work and its independent deletion fences.
+
+The 110 cases in
+[`task-review-python.json`](../../crates/workspace-service/tests/fixtures/task-review-python.json),
+captured offline by
+the former generator `generate_task_review_fixture` (removed with the Python runtime),
+compare replies, persisted JSON and SQLite rows through `Service::machine`
+without a helper or engine. Cases include plain/Git/worktree sources, unknown
+starts, foreign bindings, stale versions/digests, manual and policy-blocked
+checks, failed reviews, drift, unreadable files and both archive answers.
+Additional native tests exercise exclusive store access and real overlay-write
+failure: neither invokes Python or changes authoritative runtime state.
+
+Legacy unmaterialized options, unsupported/bounded-out result and source
+evidence, and oversized legacy retention intervals are refused **before**
+effects. No error after saving the overlay becomes a helper retry. The five
+retained configuration/connection operation families remain unfinished; merge
+finish/abort now use the native path below. Native startup is independent of
+Python, but this is not installed-client or paid-model qualification.
+
+### Native manual file resolution
+
+`product.task / resolve_block` now runs in Rust for materialized checkouts and
+string-identified file/block records. It preserves busy handoff, missing conflict,
+stale file/block, invalid choice, unsafe mode/stage, symlink and binary refusals.
+The selected ours/theirs/both lines replace the whole displayed file with a final
+newline, preserving its executable mode. Git stages only that literal path.
+Private paths are rejected; the shared descriptor-relative writer refuses linked
+parents/files and revision drift. Native reads/writes are bounded to 512 KiB.
+Malformed legacy shapes and oversized selected text are refused before effects.
+
+The private machine lock spans inspection, the durable intent, file replacement,
+staging and JSON save. A supplied request identity is checked before legacy
+projection fallback: finished replies replay; dispatched/unknown intents refuse
+with an unknown outcome; changed payloads conflict. After file replacement is
+attempted, every failure stays unknown, even if Git or the JSON save failed.
+Cancellation leaves a dispatched intent. Nothing forces Git, restores user files,
+or retries through Python. Callers without a request identity retain the existing
+new-operation semantics, not inferred replay safety. The service's registered-root
+and single-owner fences remain unchanged; this action neither settles runtime
+work nor certifies a result.
+
+The 36 real-Git offline Python cases in
+[`task-resolution-python.json`](../../crates/workspace-service/tests/fixtures/task-resolution-python.json),
+captured by
+the former generator `generate_task_resolution_fixture` (removed with the Python runtime),
+cover all three choices, executable files, worktrees, unsafe add/delete/mode
+conflicts, binary/empty lines, Unicode/space paths, stale inputs and missing stores.
+Replies, saved JSON, SQLite rows, file bytes/mode and Git index/status/HEAD compare
+through `Service::machine` with no Python helper or engine configured.
+Native Git's existing sanitized failure message intentionally replaces the raw
+Python stderr in the non-repository case; the refusal code/envelope are unchanged.
+Native regressions exercise real index-lock and overlay-permission failures,
+keyed success/unknown replay, changed payloads, exclusive store access,
+private-path refusal and pre-effect legacy fallback. They do not qualify
+process-kill crash timing or positive native sandbox capabilities.
+
+### Native merge finish and abort
+
+`product.task / finish_merge` and `abort_merge` now use Rust for the existing
+materialized-checkout boundary. Busy Cortex handoff, checkout identity and
+missing-conflict refusals precede effects. Finish refuses unmerged entries or
+a failed staged diff check (including markers/whitespace), commits with the
+existing message only when MERGE_HEAD exists, clears acceptance/status and
+records the finished merge. It does not stage additional paths. Abort invokes
+only `git merge --abort`, clears the retained merge/acceptance and preserves
+the other task fields. Neither action certifies a result or completes runtime work.
+
+The machine lock spans reads, intent persistence, Git and the private JSON save.
+A successful commit must have the observed HEAD and merge HEAD as parents;
+a successful abort must leave HEAD unchanged. Both require MERGE_HEAD gone.
+Normal hooks remain enabled, and no force, automatic restoration or retry is
+added. Any error after attempting Git or overlay replacement remains unknown,
+including hooks that commit then fail and successful Git followed by a failed
+save. Supplied identities replay a finished reply or refuse dispatched/unknown
+effects before any legacy projection fallback; changed payloads conflict.
+Callers without keys retain the existing new-operation semantics.
+The registered-root and single-owner fences are unchanged. External same-user
+Git processes can race this cooperative lock; Git and overlay writes are not
+one atomic transaction.
+
+The 38 offline current-Python real-Git cases in
+[`task-merge-python.json`](../../crates/workspace-service/tests/fixtures/task-merge-python.json),
+captured by
+the former generator `generate_task_merge_fixture` (removed with the Python runtime),
+compare service replies, saved JSON/SQLite rows, file/index/status, MERGE_HEAD,
+commit tree/parents/message, and same-attempt exact HEAD preservation on replay.
+Fixtures cover resolved/unresolved/staged markers/whitespace, already manually
+committed merges, worktrees, unrelated staged/untracked work, busy/stale inputs,
+missing stores and actual hooks. Disposable paths, capability presence and
+validated wall-clock timestamps are normalized; new commit timestamps/hashes
+are not compared across runs. Native failures intentionally exclude Python
+stderr. Failed attempted commits/aborts return an unknown-effect envelope
+rather than Python's settled Git failure, even when a particular failure left
+no change. Real index-lock and overlay-permission regressions test both actions,
+unknown replay/payload conflicts, exclusive store access and invalid identities.
+Tests need no Python helper or engine and use short socket roots independently
+of TMPDIR. Process-kill crash timing and real-client GUI behavior are unqualified.
+
+Shared unmaterialized legacy options/absent option-table projections still
+are refused before effects, as are the existing unsupported evidence paths.
+There is no merge-action-specific Python branch on the native boundary.
+The machine operations that were directly delegated to the former Python provider, and are now refused natively, are `config.action` variants
+other than connection rename/session limits, filesystem-reference validation,
+removal with supported defaults (including canonical secret-file unlink), qualified
+preset apply, default-preset reset, profile read/create/save/update/delete/deactivate
+and qualified format-1/2 four-section activation, and `engine.connection` actions other
+than native `login_command`/`recheck`; config.read
+is passive native display and config.save uses the native all-surface writer without
+fallback. Unqualified profile materialization documents and wider modeled/backing-file
+numbers are refused natively; ignored wider profile-document metadata
+is now native. Current routing activation requires model-policy version 2 in both
+providers; missing/other-version refusal shapes are native; there is no additional MCP-management config.action verb to migrate:
+MCP add/edit/remove/enable/validation already use native config.save, with explicit
+discovery on native config.mcp.discover. See [per-action providers](../configuration.md#native-machine-actions).
+Project saves use the native boundary above. Integration
+outside the committed-source local squash slice, unsupported legacy facts,
+receipt-backed worker actions still need migration. The retained mode and its Python launcher were removed.
+
+### Native owner deletion
+
+Two action-qualified operations, `product.task`/`purge` and `product.task`/`clear_old`, run natively for materialized checkout projections. This does not migrate the entire `product.task` surface. Purge requires literal confirmation and an archive. Clear-old rechecks literal confirmation, a nonnegative non-future numeric cutoff, finished/unarchived state, a numeric completion time at or before that cutoff, and absence of unmerged work. Booleans are not timestamps. Stale preview and unmerged-work refusals retain the existing shapes and private archive question.
+
+The shared Core purge serializes against Start using the exclusive cooperative store-access lock, retains a durable deletion intent before runtime-file teardown, and rejects unknown/unbound launches, active work, process/capacity protection and running worker nodes. Running-node refusal is intentionally stricter than the legacy Python purge, which can delete a terminal row containing a running node. No owner state was used to establish this difference. No scheduler transition, acceptance or check evidence is inferred. A missing task in an existing store refuses rather than being treated as a successful replay. A missing store is not initialized. Discard consent is checked against the legacy manifest digest; unavailable or unsupported observations are not consent. Only clean, registered worktrees with Cortex ownership evidence can be removed, without force; other worktrees remain retained.
+
+Replies, private JSON and task/options/project state plus nine table counts are compared against 117 offline Python captures in
+[`task-deletion-python.json`](../../crates/workspace-service/tests/fixtures/task-deletion-python.json), produced by
+the former generator `generate_task_deletion_fixture` (removed with the Python runtime).
+Tests run with no helper or engine, using short socket roots. Reclaimed byte counts are validated as measured nonnegative integers before normalization because independent SQLite files have different physical sizes; success/failure statuses and every other reply field are compared unchanged. Tests also cover active/unknown launches, retained and removed worktrees, dirty/changed HEAD, valid/stale discard digests, cutoff boundaries, exact public-removal counts and foreign-key integrity. Separate native tests preserve the stronger running-worker and exclusive-access fences and simulate an overlay-save failure after committed deletion: no Python fallback or second deletion occurs. A blocked checkpoint reports failed reclamation while retaining the committed deletion. Main.rs's Python launcher and the retained config.action/engine.connection operations remain; native file resolution and merge finish/abort are described above.
+
+Standalone machine calls run inside the Rust service: repository snapshots (status, changes, log, branches and worktrees), explicit Git mutations, folder search, plain-checkout file read/save/locate, machine settings/overview/diagnostics/logs, private message/comment queues and sprint-container JSON. Installed Git remains the subprocess boundary; these calls do not launch Python. Initial Git reads retain the existing frontend refresh/coalescing behavior and DTOs. Untracked directories collapse above 2,000 files; if more than 2,000 entries remain after collapsing, the service reports a bounded inspection refusal rather than silently omitting files or claiming repository absence.
+
+Git mutations retain explicit confirmation, staging selection, normal hooks/filters, ff-only pull and non-forcing push by configured remote name. An empty index causes one automatic `git add -A -- <literal paths>`, not a call per file. A native Git write records a private intent before dispatch and its sanitized reply afterward. Git command identities supplied by the desktop prevent same-key re-dispatch; unresolved effects stay unknown and changed payloads conflict. Records contain digests rather than command text, URLs or raw diagnostics. Older callers without an identity cannot reconcile by the missing key; they must inspect Git instead of repeating an ambiguous action.
+
+Machine configuration actions/engine connection setup, remaining retained task lifecycle/review actions and integration validation/effects outside the committed-source local squash slice and receipt-backed worker withdrawals are refused natively (the former Python helper behind `CoreMachinePort` was removed). Explicit owner workflow descriptions, maintenance, retention cleanup and destructive sprint deletion now run in Rust. Sprint deletion freezes membership and persists a start fence before cancellation; Core rejects a fresh Start for a deleting member. A retained deletion intent and exclusive cooperative store-access lock cover per-task file/row teardown; active, unknown or process-protected executions refuse purge. Dirty or unproven worktrees remain kept, never force-removed. Reclamation outcomes are explicit and do not turn a committed deletion into a failure. Qualified native-owned controls and their worker/check/settings facts use the Rust path described below. Repository snapshots and `repo.context` read Core-owned task baseline/checkout options through a validated Rust Core live read-only store; missing stores are not initialized. Overview resolves the channel-specific logical store through Core, including verified linked worktrees. File read/save operations use the same native store boundary to check runtime writers. For an existing store, save holds a Core immediate transaction across the writer check and descriptor-relative replacement, serializing it with Start admission. Missing runtime bindings, unreadable stores or unresolved active worktree paths refuse rather than proving the checkout quiet. Plain standalone file saves use descriptor-relative no-follow traversal, a required base digest, a second pre-replacement check and atomic replacement; binary/non-UTF-8/oversized writes are refused. These machine operations introduce no second scheduler. The same service now hosts a reusable Core draft writer and claims a cooperative project/channel lease before controller launch. Draft creation without attachments bypasses ACP using the existing wire contract; other task mutations retain their handlers. See [native draft writes](protocol.md#native-draft-writes-through-the-existing-desktop-contract) for the limits.
+
+Directory search preserves ranking, allowed/private-root exclusions and count/depth/deadline bounds. Cancelling/replacing a search stops its wait and cooperatively stops traversal. A kernel-blocked filesystem thread cannot be killed in-process; it retains one of two permits, so it cannot create unbounded threads or block the async reactor/service shutdown. A hard deadline reports incomplete results, never successful completeness. These source checks are not installed-package, rendered-GUI or full all-Rust cutover qualification.
+
+Standalone `product.read` and empty-worker `product.facts` requests read saved overlays/options, waiting controls and bound informational answers natively. Completed-work controls now validate report digests, current-revision review verdicts/waivers, provisioned and unprovisioned check disclosures and absent, stale or digest-less verification. Missing reports, changed content and unverified work cannot enable acceptance. Old-revision and non-runtime rerun records do not affect current controls. Current rerun controls with no possible source-bound closure now use native latest-event interpretation per assignment/check index, including pending/ambiguous outcomes, complete failures, timeouts and same-owner technical blockers. Recorded successes remain unverified, not closures; stale-owner outcomes cannot certify checks. Runtime-verification controls apply an attempt only when its event is newer than the verification. Source-bound rerun claims failing necessary closure conditions (including failed, incomplete, stale, truncated and digest-mismatched observations) also read natively; no alternate native hash replaces the exact source observer. Potentially valid rerun closures, cross-owner technical-blocker carry, provisioned passes with a matching gateway authorization and provisioned failed-check withdrawal claims are refused natively (the former Python provider was removed). Model-supplied current-outcome and correction-display fields never establish a withdrawal. So do unmaterialized legacy worktree options, stores without optional Workspace option tables, and evidence beyond native bounds (16,000 synthesis/result-JSON bytes, 1,000 nodes or 8 MiB per report). The task-facts cutover is incomplete. Local integration presentation compares content with a private shadow index/object directory and never promotes a task status; missing or failed containment evidence stays false. Offline Python-oracle DTOs and disposable-store checks live in `crates/workspace-service/tests/task_facts.rs`; the former generator `generate_task_work_fixture` (removed with the Python runtime), the former generator `generate_task_provision_fixture` (removed with the Python runtime) and the former generator `generate_task_attempt_fixture` (removed with the Python runtime) capture completed-work cases without engines or owner stores. Rerun evidence beyond 1,000 records or 16,000 payload bytes, and malformed revision/target/result bindings, are likewise refused natively.
+
+Standalone `workers` and worker bundles in `product.facts` now read retained assignment/attempt identities, terminal status, selected tool/edit/command activity, guidance delivery and confirmed route predecessor chains directly through Rust Core. History retains the existing 200-event and shared byte budgets, canonical attempt-bound `wa2` cursors with independent task/runtime positions, sparse split-call enrichment and explicit clipping notices. Later inserts cannot enter an older page. Read/report bodies, thoughts and foreign-attempt/channel activity are not exposed. Displayed worker checks remain claims, never acceptance evidence. Possible receipt-backed withdrawals, noncanonical timestamp forms, unsupported request shapes and evidence beyond the native bounds (1,000 rows or 8 MiB per intermediate query) are refused natively (the former Python provider was removed). Offline fixtures in `fixtures/worker-facts.json` are captured by the former generator `generate_worker_fixture` (removed with the Python runtime); source-bound nonclosure controls in `fixtures/task-source-nonpass-facts.json` by the former generator `generate_source_nonpass_fixture` (removed with the Python runtime), all under `crates/workspace-service/tests/`. Neither generator uses an engine or an owner store.
+
+Coordinator detail requests (`workers` with `workerId=coordinator:<task>`) now read the registered task's retained ACP session directly in Rust. The existing messages, plans, selected tools/edits/commands, status and confirmed route DTOs retain the 100-row scan and 60,000-byte page budget. `wh1` continuations bind project, task, session, page size and a fixed high watermark; later inserts cannot enter older pages, and session replacement invalidates old cursors. Sparse tool updates enrich retained input across page boundaries, with the original 100-update clipping notice. Hidden bookkeeping, thoughts, read bodies and report bodies stay out of the display. Malformed retained updates retain an unavailable-content row; unsupported request/display shapes, private report diff blocks, noncanonical timestamps and intermediate reads above 1,000 rows or 8 MiB still use the retained interpreter. Offline Python DTOs in `fixtures/coordinator-facts.json` are captured by the former generator `generate_coordinator_fixture` (removed with the Python runtime) under `crates/workspace-service/tests/`; tests run with no Python helper or engine. The full receipt/closure validator remains on the migration provider; native Git source observations do not substitute for its receipt checks.
+
+Native `product.read` attachment requests read the registered task's saved options
+through Core, including before activation, returning a validated array (including a genuinely empty array),
+not the unrelated presentation product object. A missing task or invalid saved
+attachment array refuses. The same files start with the task (see [Attachments](#attachments)).
+
+Completed native task facts display the retained synthesis alongside observed
+checks. Their freshness comparison uses a fresh native project observation, not
+an unrelated Git presentation digest; a subsequent file change still makes the
+result stale. Owner check reruns remain observations, not task certification.
+
+## Native service restart recovery
+
+Native owner opening and service Stop share a settlement boundary: an in-flight
+activation cannot install a new runtime after Stop returns. Project opens remain
+concurrent and do not hold the machine-state mutex over recovery.
+
+After acquiring the exclusive native scheduler lease, activation reconciles retained
+tasks before publishing the project as ready. Fully settled checkpoints continue
+execution, independent review and contained verification through the service-owned
+pump, without an extra Start or an incoming ACP request.
+
+A service death is not a process wait. Unsettled sessions/reservations, interrupted
+controls and unfinished verification intents retain an explicit unknown-outcome
+blocker; no old prompt, guidance, answer delivery or command is replayed. Old
+channels are revoked and uncertain capacity stays occupied. Open questions and
+wait records survive, with continuation disabled when their exact session is lost;
+already-claimed answer deliveries become orphaned. Paused tasks remain paused.
+This does not implement ACP session reattachment or automatic adoption of unknown
+effects. Source checks use fake-engine SIGKILL journeys and settled checkpoint
+reopens in `crates/workspace-service/tests/native_desktop.rs`.
+
+## Native route candidate binding
+
+`crates/workspace-service/src/native_routes.rs` is an additive read-only building
+block used by the production service route provider. It reads the first existing routing file
+from the project channel store, explicit `CORTEX_ROUTING`, then user configuration;
+files are never merged or seeded. User defaults and approved connection records
+bind only to genuine cached, fingerprint-checked catalog identities. Exact saved
+connection/model defaults survive changed catalog route fingerprints. Enabled and
+deny policy apply; providers restrict worker pins, not manual coordinators.
+
+It supports a restricted explicit worker-pin subset, with observed parameters and
+explicit refusals for missing effort selection, unsupported model policy or absent
+automatic ranking. It does not compose live account/quota observations, task/project
+ceilings or live account/quota qualification. The configured provider separately
+checks executable access and builds native session routes for the desktop;
+unsupported selection is refused before Start. Legacy-owned projects remain fenced. Focused no-paid checks: `cargo test --locked --offline -p
+workspace-service --test native_routes`.
+
+## Native session-host boundary
+
+The additive `crates/workspace-service/src/native_sessions.rs` API holds the Core
+project lease and uses one writer executor for durable channel issuance,
+provisioning, capacity, task actions and question decisions. Coordinator/worker
+processes use `cortex-engine`, the ancestry-bound MCP broker and a concrete Core
+channel provider. Tool calls recheck authority inside the write transaction;
+chat and turn termination never become lifecycle authority. Worker questions,
+execution/review results, validated plan intake and informational coordinator
+answers are advertised. Plan admission checks the bounded DAG, unique ids,
+reserved/known roles, canonical private-safe scopes, ordered read-only outputs,
+owner denials and literal verification argv with an availability probe. The
+accepted revision, pending nodes, events and retry receipt commit together.
+Execution results publish complete inline Markdown through Core's private draft
+and immutable report journal. A persisted full-payload intent precedes file effects;
+changed retries conflict, and a failure after publication reuses that report on an
+exact retry. Report integrity is checked before the result event, node status and
+receipt commit together. Full result summaries are retained without truncation.
+Passed-check claims and by-reference report submissions remain refused until native
+worker command evidence and explicit report-publication handlers are implemented.
+Review results now bind a fresh host project observation and an independent
+review attempt. Drift durably rebinds/refuses the verdict instead of accepting a
+stale review. Native engine permission requests are cancelled, not approved by
+a placeholder policy.
+
+The trusted embedding calls `NativeHost::advance` after a settled turn/process wait
+or a service reopen. It uses the existing Core scheduler and review/fix budgets,
+claims durable assignment identities, and returns dispatch descriptions; it never
+selects an unqualified production route. A pending, unprovisioned review can
+resume with its same identity after reopen. An unfinished, provisioned node whose
+owned process wait was retained as terminated uses Core's bounded retry/backoff
+and a fresh assignment/session; the stopped-review test resumes through completion.
+Reported workers still hold capacity until an owned wait. Ambiguous/live processes
+are not automatically relaunched.
+
+After approval (or Core's observed no-change waiver), the host runs each planned
+argv directly, with no shell wrapper, in the fixed Linux Landlock/seccomp read-only
+profile. The profile requires observed ABI 3+ support, clears inherited environment,
+allows read-only project/system paths, excludes private stores/Git and host home,
+denies network sockets, and currently grants no temporary/cache writes. It fails
+closed on unsupported hosts with `native_verification_sandbox_unavailable`,
+including failure to enter containment after preparation. Plan preflight preserves
+that diagnostic; it does not misreport a missing executable or retry unsandboxed.
+Tests exercise the real journey when containment works and assert plan refusal
+without acceptance when the required capability is unavailable. Long project and
+TMPDIR paths are covered: the broker retains its private filesystem socket but
+addresses it through an owned parent-directory fd under `/proc/<pid>/fd`.
+This is not parity with Python's ignored-cache overlay.
+Each command has a 60-second deadline and a 1 MiB bound per output stream.
+Truncation, timeout, signal or nonzero exit cannot pass. Intents precede effects;
+unsettled verification after restart remains unknown rather than rerunning.
+Receipts bind exact argv, owner epoch, revision and reviewed digest. Failed
+verification returns through Core's bounded replan path. Reconciliation derives
+synthesis from retained summaries and rechecks report integrity, open checks/input,
+project identity and confirmed process exits before completion.
+
+The API supports owner cancellation, pause and version-checked resume, and worker
+question-answer delivery to the same bound session. A claimed answer is not
+replayed after uncertainty. Pause revokes old channels; resume requires a new
+continuation rather than reviving the old engine. Capacity remains held until
+an owned wait confirms process exit; unknown effects remain ambiguous.
+
+Native sessions compose the canonical coordinator and all 23 worker profiles from
+an embedded generated bundle. Required shared skills are inlined, conditional
+skills/references remain available through role-authorized `read_skill`, and only
+Codex receives the schema-derived served-tool supplement. Check freshness with
+`scripts/cortex-xtask.sh generate-instructions check`; regenerate with `write`
+after canonical profile/skill edits. This is build-time data generation, not a
+dependency of any kind during native session creation.
+
+`NativeHost::bind_workspace` is a trusted hook for an already-created native task,
+not a model tool or desktop Start implementation. It checks project/actor/root,
+the native creation marker and owner epoch, and commits a unique execution binding,
+a separate logical display session and public outbox entries atomically. Exact
+rebinds return the existing identity; conflicting, legacy or stale bindings refuse.
+Actual child ACP sessions stay bound independently in provisioning records. Native
+messages and minimal tool title/status activity are copied into the logical
+session's history with attempt-namespaced tool ids. Thoughts and raw tool
+inputs/outputs are excluded; bounded message/title previews mark clipping.
+Committed history changes emit the existing UI deltas. A settled reply drains prior
+queued updates before returning, without turning chat into execution authority.
+The fake-engine test observes these projections and their persistence after reopen;
+it is not a desktop command-path or automatic restart-recovery qualification.
+
+### Qualified native desktop Start
+
+The ordinary `Service::workspace` command handler now routes `tasks.start` to
+a service-owned native controller when a trusted embedding provides qualified
+routes through `Service::bind_native`. Selection precedes scheduler construction;
+existing format-12 Python-owned tasks are adopted by native recovery under the
+single-owner fences, retaining their history and unknown-effect barriers.
+Native errors never fall back to the retained mutation adapter.
+
+Core validates the activated project/actor, draft version and null initial epoch,
+then commits native runtime creation, owner epoch, saved input/options event,
+logical execution/session, Start intent, immutable receipt and outbox together.
+Engine provisioning happens afterward. Admission and the serialized progress pump
+remain owned if the request/window disappears. An exact retry returns the same
+receipt without another prompt; changed payloads conflict. The pump settles each
+owned process before advancing through worker, independent review, contained host
+verification and Core completion. Errors retain a diagnostic and stop rather than
+inventing a result. The existing versioned native deltas carry the final task state.
+
+The production service launcher binds `ConfiguredRoutes` through `Service::bind_native`
+by default. It uses the same channel-isolated HOME/XDG settings roots as the retained
+runtime, without discovery subprocesses, login or settings writes. Start preflights
+coordinator, general execution and independent-review routes; other plan roles are
+requalified when dispatched. Exact defaults and explicit role/alias/wildcard pins
+are supported. Automatic ranking and nontrivial model policy remain explicit
+refusals, not a first-catalog-entry fallback. Codex, Claude and OpenCode approved
+commands are checked for executable access without a model call. Only absolute
+PATH directories resolve approved bare names; project-relative commands refuse.
+Selected observed parameters are applied and confirmed against live ACP session
+options before prompting. Credential-directory presence is not fresh login evidence.
+The service binary itself provides the authenticated MCP stdio relay.
+
+The retained-controller fixtures, the emergency `CORTEX_WORKSPACE_NATIVE=0` retained mode and the legacy ACP child were removed on 2026-11-16; there is no opt-out, and socket/webview fields cannot select another host. The built-binary no-paid test launches the actual service with
+private HOME/XDG/store and a PATH fake engine, then creates/starts through its socket
+and observes native ownership, independent review, verification and completion.
+This does not qualify real accounts, rendered desktop behavior or an installed archive.
+Missing first-run config/state directories report a missing-policy refusal without
+creating files. Machine-facts assembly keeps its own configuration snapshot across
+project reads, so concurrent activation or settings-save cache invalidation cannot
+turn that read into a null-configuration failure.
+Candidate route binding alone is not live account authorization. A draft saved with a
+model (route id or model name), effort, access mode and language starts like the Python
+adapter's workspace Start: the host qualifies that choice with the per-task coordinator
+route before admission, Core records it as the task's initial settings and switches the
+task access mode, and coordinator turns use it. An unavailable model refuses with
+`native_task_route_unavailable`, an effort the route does not advertise with
+`unsupported_dependent_setting`, and malformed saved settings with
+`native_task_settings_invalid`, all before any task is admitted. Sprint tasks inherit the
+sprint's settings and start the same way. Creation-time attachments are retained with the task and delivered to its engine sessions. A native host runs every engine session, command
+and verification in the project folder, so it cannot run a task in a separate worktree:
+`service.capabilities` reports `taskWorktrees: false`, the composer and Edit task do not
+offer **Separate worktree** there, and Start of a draft already saved with one refuses with
+`native_worktree_unavailable` ("Edit the task to work in the project folder") before any
+task is admitted.
+
+The no-paid `cargo test --locked --offline -p workspace-service --test native_desktop`
+test enters the actual command handler with Rust fake coordinator/worker/reviewer
+processes, a disposable store and real bounded host verification. It asserts
+completion, execution identity, a versioned completion delta, transaction rollback,
+exact replay, changed-payload conflict and unqualified-route refusal. Through the
+production configured route provider it also starts a single task and a sprint task
+saved with Claude `claude-sonnet-5` or Codex `gpt-6.1-sol` and a high effort, checking
+that each coordinator is configured with that model under the engine's own effort
+option id, and refuses an unavailable saved model and an unadvertised effort. Its retained
+launcher is `/bin/false`: successful activation and zero children establish no
+Python controller launch or mutation on that native path. This is source/protocol
+evidence, not rendered GUI, installed archive or real-account qualification.
+
+### Legacy task adoption
+
+Native workspace-service activation opens existing format-12 stores under the
+shared scheduler fence and the Core lifetime fence before any recovery writes.
+For each nonterminal Python-owned task, one transaction advances the CAS owner
+epoch, records `NATIVE_TASK_ADOPTED`, revokes old channels and moves matching
+desktop execution/wait bindings to the new epoch. Original `TASK_CREATED`
+provenance and logical session/execution identities remain unchanged. Reopening
+does not adopt again; terminal histories and explicit pauses are not resumed.
+
+A finished (completed, cancelled or failed) Python-run desktop task is adopted
+the same way when its execution binding is otherwise valid, recording
+`NATIVE_TASK_ADOPTED` with `finished: true` and replaying nothing. Without it
+every owner action on such a task (Request changes, a message, Continue, Retry,
+Close) was refused `native_execution_binding_invalid`. Its finished result is
+presented read-only as a result from an earlier version of Cortex, with its own
+result identity (the task's latest event) and a placeholder digest, never
+acceptable, with Request changes as the way to a fresh result; a closed card
+reads "This task is closed." and a cancelled task "This task stopped without a
+result to review." instead of "Wait for Cortex to finish this result."
+
+Activation never fails because of one old task. Recovery settles the retired
+host's leftovers (process records without an end time, never-started worker
+rows, rows of tasks that have no runtime record) only from durable evidence and
+isolates each task's recovery, as described in
+[recovery](../features/recovery-and-replacement/index.md#native-attempts-left-unconfirmed-by-an-earlier-host).
+
+Settled planning, execution, review and verification checkpoints continue through
+the native driver. Pending coordinator questions wait for the owner's answer;
+settled worker questions continue on a fresh assignment/session with retained
+answers. Retry backoff remains in force. Claimed deliveries are orphaned, never
+redelivered. Unreleased capacity, nonterminated provisioning, unmatched legacy
+command/check starts and unfinished native effects retain explicit unknown-outcome
+recovery barriers. Acquiring a scheduler lock alone never proves an old process or
+effect terminated. Older installed runtimes that ignore the cooperative fence
+remain outside this guarantee; this is not engine-session reattachment.
+
+No-paid tests seed Python-style format-12 tasks and exercise service activation,
+owner-epoch rejection, question list/answer controls, independent review and
+verification with fake engines on disposable stores. Namespace-capable execution
+is required for positive command journeys; a namespace-refusal branch is not a
+passing adoption journey. This does not qualify an installed archive or real clients.
+
+### Native desktop task controls
+
+For native-owned executions, the ordinary `executions.prompt`,
+`executions.cancel`, `executions.control` and `decisions.answer` handlers now
+reach the same NativeHost without a retained-child mutation. Adopted legacy tasks
+use their existing desktop identities with the new owner epoch.
+Native binding checks include the registered
+project/actor/root, exact execution and logical session, native creation/adoption marker
+and current owner epoch. No route supplied by desktop JSON authorizes dispatch.
+
+Stop and Pause establish a resumable PAUSED hold and wait for the owned pump's
+process shutdown before replying. Resume requires the current displayed task
+version. Resume continues the retained task from the saved state: it supersedes
+nothing, keeps open and ready worker waits and pending questions answerable, and
+re-enters the driver (lost-worker retry for interrupted workers, coordinator
+recovery for an interrupted planning turn). A Resume that refuses (for example
+`native_shutdown_unconfirmed`) commits nothing and leaves the task paused, and a
+recovery barrier recorded while paused (`native_session_outcome_unknown`) is
+never erased: the task returns as RECOVERING for Retry. Explicit `retry` and owner
+steering settle the old process, retain its prior revision/results, supersede
+obsolete questions and start a fresh coordinator/plan. None of them revive a
+revoked channel. An admitted control whose finish receipt never committed is
+closed as an explicit `outcome: unknown` receipt carrying the task revision; the
+same request keeps replaying as `native_control_outcome_unknown`, the task holds
+in RECOVERING until the owner retries, and later restarts do not raise it again.
+A follow-up or incoming start uses the task's own coordinator route (explicit
+choice, else the route pinned when the task started); only a task with neither
+needs a resolvable owner default. A failed first prompt keeps its draft and a
+retry of the same text reuses it. Steering text is retained
+in the event stream and display history. Attachments of an owner message are validated before admission and retained with it (see Attachments); an invalid file refuses before mutation. Retry is allowed only for waiting/blocked/recovering work, not a
+completed task. As with Python steering, an owner message (Request changes) to a
+COMPLETED or FAILED result reopens it in the same transaction: `TASK_REOPENED`,
+unsettled result text and blocker cleared, then a fresh plan. A cancelled task, or
+one the owner already closed, refuses with `task_not_resumable`.
+
+Questions are projected through bounded, execution-version-bound pages (up to
+100 items per page, with an explicit refusal above 1,000 retained questions).
+Answers validate the complete batch, question/options, versions, epoch and session
+in one transaction. The existing wait claim delivers to the same waiting worker
+once. Unknown delivery stays unknown, rather than automatically resending.
+A durable authenticated result from that exact attempt after the claimed delivery
+can settle an ACP reply lost because result publication revoked its channel.
+
+Confirmed `mark_resolved` / `close_task` closes unfinished work without certifying
+it: Core retains CANCELLED, and a durable owner-resolution marker maps the UI to
+Done / Closed as is / Not verified by Cortex. It is not runtime-certified
+COMPLETED. Closing an accepted result (or one Ready on its own) as is keeps it
+checked: it reads Closed as is, accepted v<n> (or verified), and only an unchecked
+result reads not verified. A task closed as is leaves its changes in place, so its
+Changes tab keeps them: a worktree task's own diff, or, in the shared project
+folder, only the files its workers recorded writing. Closing a COMPLETED result records a certified owner resolution. Stop,
+steering, answers and owner resolution all invalidate the native outbox and feed
+versioned UI deltas. As in the Python adapter, the UI then records the card's own
+disposition: `product.task` `close` (Done, with the chosen close kind) after Close
+task, and `reopen` after Request changes. These are native Rust overlay actions,
+not retained-helper mutations.
+
+A COMPLETED native result is presented with the same review actions as Python's
+`result_projection`: `reviewActions` and `acceptanceAvailable` come from the
+report, review and runtime-verification evidence, and the result identity
+(`sourceVersion`, digest) is the one Accept and owner check reruns validate. Native
+verification records the native verifier's digest of the project folder, so the
+evidence is bound in that domain, never in the Python `capture_revision` domain.
+Runtime verification and independent review decide acceptance: once the runtime's
+own verification of the current version passed on the unchanged folder, a
+worker's or reviewer's self-reported check that is only `unverified` (for example
+`revision_mismatch`, run before the last edit, or `trivial_command`) or `not_run`
+is shown on the result card as a note ("The runtime's own verification of this
+version passed. N self-reported checks it does not cover are shown for information
+and do not block acceptance:" followed by up to ten named checks). Such notes need
+no acknowledgement and are not counted as open checks. A self-reported `failed`
+check, a policy-blocked one, a failed or missing runtime verification and an
+unapproved review still block Accept (`crates/workspace-service/src/machine/task_facts_work.rs`).
+Changed files after the result disable Accept with the Request changes action.
+For a task of a sprint that works in the project folder itself, later tasks write
+the same folder, so its result is compared on the files it recorded writing: while
+each of them (the latest Cortex write or reconciliation of that path before the
+verification) still holds exactly that content and none of the task's commands is
+left without its recorded end, the result keeps its verified identity and is not
+stale. A change to one of its own files makes it stale; outside a sprint, or in a
+worktree, the whole folder still counts. Commands' and engine-native writes that
+Cortex did not record are not part of that comparison, just as they are not part
+of the files the app commits for a project-folder task. A result the app itself
+committed (`work: merged`, an `integration` of method `commit` whose digest is
+the result's) is not stale merely because the commit moved HEAD.
+The desktop's Accept and check-rerun commands use the result from the machine
+facts shown on screen, ahead of the raw wire result. This also works when the
+wire result adapter is absent or carries a different digest. An explicit empty
+result clears the old identity rather than falling back to it. Accept still
+requires a source version and matching displayed digest; the service revalidates
+current evidence before saving the decision. Mock-transport screen tests exercise
+the actual Accept button and its exact outgoing identity; these are not
+installed-desktop or paid-engine qualification.
+
+The same `native_desktop` no-paid test now covers each control through the real
+service handler, same-session question continuation, Stop-to-Resume completion,
+fresh Retry dispatch, non-certified closure, stale versions, exact replay and
+versioned terminal deltas with an impossible retained launcher. Port tests cover
+the close/reopen card dispositions after native controls, Core tests the reopen
+and worktree refusals, and a service unit test accepts a seeded completed native
+result and refuses it after the files change.
+Complete report/tool parity, full permissions, production route/instruction
+qualification, restart recovery and installed-package rebuild/real-input
+qualification remain unfinished.
+
+The five additional native owner controls now have real effects:
+- `worker_message` binds a live assignment/attempt, records guidance and queues it
+  to that worker. It waits for the current ACP prompt's cancellation reply before
+  prompting the same session. A waiting-question worker can also receive guidance.
+  The receipt says queued, not consumed; a completed prompt marks delivery, and an
+  unknown or abandoned delivery stays unverified. Worker guidance carries no files: attachments refuse with `native_attachments_unavailable` and the worker composer says so.
+- `worker_stop` revokes only the exact bound assignment before settling its process
+  and capacity. Independent siblings continue; no-runnable-work handling leaves an
+  owner wait, never successful completion or an automatic retry of the stopped work.
+  Native task sessions currently run sequentially; other tasks are unaffected.
+- `command_stop` requires the exact live host-verifier reference and a reason.
+  The owned process group is killed/reaped and its incomplete receipt cannot pass.
+  Unobserved engine-native commands remain unavailable. A separate stop lane also
+  permits cancellation while an owner check-rerun handler is waiting.
+- `rerun_check` requires the current stored check name/index, result version and
+  observed project digest. Only retained current-revision argv can run, under the
+  same bounded read-only sandbox. A fresh receipt replaces that displayed check
+  observation; the rerun is not task certification or an acceptance bypass.
+- `task_settings` validates and persists task-local next-use settings. Coordinator
+  model choices stay on the approved default connection and existing eligible
+  catalog; effort must be observed/supported. Response language applies to later
+  sessions. Guarded is the only supported access mode; Development/Auto refuse.
+  Existing live sessions are not silently reconfigured.
+
+Native `product.read`, `product.facts` and `workers` presentation reads use the
+same Rust store for these settings, guidance, worker states and host command
+observations. They start from the private overlay merged with each task's
+store-owned options (checkout with the checkout's current branch, settings, base
+revision, saved draft title) and the local integration facts of tasks in Ready to
+merge, exactly as the helper read does; a task created after the overlay was last
+written is therefore presented with its checkout (a project-folder task stays
+Ready to finish after a relaunch), never as a record without one. Host check
+receipts are those of the current result only: after Request changes a task keeps
+its plan revision until its next execution baseline, so receipts recorded before
+its latest `TASK_REOPENED` are not presented, and a reopened task shows no result
+(and no Accept) until its next run records one. Workers of an earlier version (a
+node revision older than the plan's, or not newer than the latest reopen) carry
+`superseded: true`, and while a reopened task has no result the Inspector counts
+only the current version's worker checks. A worker's page lists, besides its
+Cortex commands and edits with their receipts, its other tool steps (reads, skill
+reads, searches, Git and engine tools) from the same retained display rows and
+`Workspace step` selection the task timeline uses
+(`cortex_core::projections::tool_step`), bound to the worker by its attempt; its
+Cortex commands and writes are not repeated as steps unless refused. Rows carry
+their recorded time and are ordered by it. A worker read returns the newest 200
+rows; a cut sets `activityPartial` and an `activityCursor` (`na1.<time>.<sequence>`,
+or `na2…` when the worker's queued messages continue separately), and a read of
+that worker with the cursor returns the next older rows (and older queued
+messages in the worker's `messages`), so every command, edit, tool step, note and
+message stays reachable; narration, edit-diff and step-text byte budgets only
+shorten a row's content. A reply over the frame moves the oldest rows of the
+largest worker behind such a cursor; it is refused only when nothing more can be
+moved. A task with many tasks, workers or guidance messages is never refused: the
+reply names a cut under a top-level `partial` object (`tasks`, `workers`,
+`size`). A coordinator page (`coordinator:<task>`) holds only the coordinator's own
+session rows, paged by its own cursor; rows whose message or tool-call identity
+names a worker attempt belong to that worker's page, and so does a command run on
+a worker's channel (a command on the coordinator's channel appears on neither
+worker page). The Conversation omits worker narration and worker tool calls.
+Check receipts of the current result are read newest first up to 1000; beyond that
+the result is marked `checksPartial` and Accept is refused (presentation and the
+Accept command alike) with a readable reason, never decided from part of the
+set. A worker last seen running under a task that has since ended is shown as not
+confirmed and never counted as running; a failed refresh names the time of the
+data still shown. Task deltas trigger the existing presentation enrichment. Check presentation does
+not advertise acceptance. The `native_desktop` fixture positively exercises all
+five handlers with real fake-engine processes, temp stores, UI deltas, exact
+replay/conflict checks and an impossible retained launcher. Worker-stop coverage
+uses an attempt identity, checks the stopped worker's confirmed exit/capacity release
+at the stop receipt, and holds an independent sibling's ACP reply after its result
+commit. Global cleanup assertions wait for that sibling's retained process-exit
+observation, not merely its completed node. Service teardown separately joins its
+cancelled supervision/event tasks before returning, allowing the endpoint lock to
+be released when the caller drops the service. Command-stop coverage also stops an
+owner rerun while that handler is waiting. Separate port/domain
+tests cover native check forwarding and non-certifying presentation overlays.
+For read-only/no-namespace fixture runs, build the test executable first and run it with a short `TMPDIR`
+(the Python wrapper that selected one, `restricted_native_checks`, was removed). A short temporary prefix leaves room for the desktop service's Unix socket
+namespace; it does not change the filesystem restrictions. Other
+executables should keep the default long prefix for broker long-path coverage.
+The native API must not open beside another owner.
+Updated production legacy ingress and native executors share a separate
+process-lifetime `.scheduler-owner.lock`. Conflicting owners refuse with
+`scheduler_owner_busy`. Bare NativeHost opens still refuse unadopted legacy tasks
+with `legacy_runtime_tasks_active`; service recovery is the explicit takeover path.
+Marked or adopted unfinished native tasks refuse legacy startup with
+`native_runtime_tasks_active`. Failed or cancelled/completed histories
+are terminal for this admission check; their presence does not block opening the
+other host. New native task creation records its host marker transactionally.
+The legacy facade serializes first-use
+runtime construction and retains its guard during ambiguous teardown; native
+session references keep the writer lane and guard alive after the host handle
+is dropped. Older installed runtimes and direct test adapters do not honor this
+cooperative fence. Qualified native command composition uses it; production launch authorization remains gated.
+The trusted host's result-receipt query supports reconciliation after worker
+revocation or a service reopen. It checks task owner identity/epoch and does not
+replay publication, relaunch a worker or certify the task. A reported worker's
+capacity remains reserved until its owned process wait confirms exit.
+The no-paid native-session tests use disposable stores and Rust fake ACP/relay
+processes, not an installed app or a real engine account. They cover
+create → plan → worker result → independent review → actual sandboxed verification
+→ completed, pending-review reopen, a scoped review fix loop, failing verification
+and truncated-output rejection. Observer bounds currently refuse symlink/special
+files, files above 16 MiB, trees above 64 MiB, lists above 100,000 files or bounded
+Git output overflow; such refusals are not successful observations.
+
 ## Recorded data and pending questions
 
 An action receipt acknowledges the service reply, not completion of a later display refresh. Task and sprint actions reconcile their own project in the background and show Updating confirmed state until that read settles; a failed read retains the previous view and offers Retry. A newer command reply fences pre-reply reads. Confirmed renames and queue controls can display immediately, but a failed or unknown action never applies its requested change. New/activated projects still reread registry and capabilities. Product and worker facts share one helper call; Git inspection overlaps rather than serializing those reads.
 
+A confirmed draft rename also returns the SQLite task version committed by that
+write. The port keeps it for Start immediately, without awaiting the board refresh;
+an older in-flight snapshot cannot replace it. The service still checks the actual
+current version, so a competing edit may legitimately refuse Start without replay.
+
 Machine connectivity and task process confirmation are separate. An unconfirmed task on a connected machine shows one notice with one icon, explains that the machine is connected but cannot confirm whether the task is running or stopped, and offers **Re-check state**. The composer stays read-only and points to that control, not a fictitious reconnect requirement. Re-check rereads the existing projections; a still-unknown reply stays blocked and points to Machine settings → Diagnostics. A failed read keeps the task and a retry explanation. No task is resumed, stopped or replayed by this read.
+
+A matching bound `RECOVERING` / `recovery` / `recovering` projection with `waitReason: turn_interrupted` and no contradictory-evidence warning is different: the cancelled turn is waiting for an owner message. It shows **Interrupted** under Needs you, with **Send a message to continue from the recorded state**. Re-check installs that same recorded wait and restores messaging; it does not itself continue work. The generic Working indicator and Mark as handled card are absent. The task is not declared physically stopped, so process-quiescence guards remain in force. Missing bindings, mismatched runtime facts and other recovery states stay unconfirmed.
+
+Only a task that waits on the owner (Needs you, or a merge conflict) shows the **Waiting for you** card; a cancelled or failed run has no decision and shows none. **Mark as handled** appears only where the machine offers it. A task closed with **Close task** reads as closed (Done, not certified) from the cancellation the close committed, even when an earlier host refused its finish receipt because an engine exit was unconfirmed.
 
 Coordinator messages and selected tool steps use the retained public `history.page`
 sequence, not the coordinator's one-line status note. Available history rows
@@ -59,7 +912,7 @@ A task that has never started offers **Edit task…** in its title bar and board
 
 **Close sprint…** is visible beside the sprint actions (in the sprint's actions menu when the title band is narrow) and asks for confirmation. It archives the sprint container and stops its automatic queue and planner. It does **not** cancel, accept, merge, close, archive or delete member tasks or discard files: unfinished tasks remain in the project outside active sprint grouping, and tasks already running continue. Individual task closure and unmerged-work/archive decisions keep their existing confirmations. The closed sprint disappears from active lists, sidebar, search and New task choices, and appears under **Archive → Closed sprints**, with its retained Summary. Closed sprint controls cannot restart its queue or accept new members. This is not permanent deletion or release qualification.
 
-**Delete sprint…** is a separate permanent action in the sprint menu, also available on a closed sprint. Its single confirmation names the task count and says running work will stop. The service pauses the queue, fences new starts and continuation controls, cancels each bound execution through the existing task-wide stop path, and waits a bounded time for confirmed runtime/process quiescence. It removes member tasks, their conversations/questions and the sprint from product lists; it never selects another sprint's tasks. A failed or unconfirmed stop leaves the sprint under Archive with a reason and the same Delete action for retry. Repeating a successful deletion returns its recorded result.
+**Delete sprint…** is a separate permanent action in the sprint menu, also available on a closed sprint. Its single confirmation names the task count and says running work will stop. The service pauses the queue, fences new starts and continuation controls, cancels each bound execution through the existing task-wide stop path, and waits a bounded time for confirmed runtime/process quiescence. It removes member tasks, their conversations/questions and the sprint from product lists; it never selects another sprint's tasks. A failed or unconfirmed stop leaves the sprint in place, marked Deleting in the project's sidebar row and as a strip on its board ("Deleting, 1 task left: <title>, waiting for its stop"), with Retry delete… on the sprint's summary; it is not listed under Archive's closed sprints, and it never hides or blocks other sprints. The confirmation dialog shows a refusal once, on the action's error line. A deletion that started but still waits for a task closes the dialog (pressing again would change nothing) and its receipt line names each remaining task by its title with what to do (for example, still waiting for Cortex to confirm that its engine processes stopped: stop or close it; reopening Cortex while no other agent app works in the project folder lets Cortex confirm it), never by its internal id or a raw refusal code; the sprint's Deleting strip and Retry delete… carry it on. A worker left running when the service was killed is settled when the service restarts (see [native attempts left unconfirmed](../features/recovery-and-replacement/index.md#native-attempts-left-unconfirmed-by-an-earlier-host)), so a retried deletion completes. Members already deleted (`purged`, or listed in the sprint's `deletedTaskIds`) leave the sprint's displayed membership and are never required on the task board; only the members that still exist are. When a project's data read keeps failing, the board's strip keeps its owner wording and adds the read's precise cause (for example the sprint and the task identities a board did not hold). Repeating a successful deletion returns its recorded result.
 
 Only a clean worktree with recorded app-creation provenance and a matching Git checkout may be removed, using non-forcing Git removal. Dirty, unproven legacy or unavailable worktrees are retained and their paths are shown in a dismissible notice. The project folder and all Git branches (including unmerged commits) remain untouched. This does not grant permission to discard files. Successful deletion updates the window immediately from the service acknowledgement; a background refresh cannot resurrect deleted tasks. Bulk deletion skips per-task VACUUM, leaving physical space reclamation to ordinary cleanup.
 
@@ -159,9 +1012,9 @@ Ready to merge reads two independent facts. **Already in <branch>** means the ta
 
 For separate branches, containment compares the saved task baseline with current tracked and untracked task content, excludes private helper paths, and reverse-checks the binary-capable patch against the local target in disposable Git index/object storage. The real index, objects and working files are unchanged. Missing baselines/worktrees, conflicts, unreadable or oversized content and failed patch comparisons never assert separate-branch containment. This context-sensitive comparison remains conservative for later overlapping edits.
 
-When checkout and target are the same branch, there is no merge, squash, PR or same-branch from/to flow. The service reads the task’s successful channel-bound file-write receipts, not the whole shared checkout. Exact recorded content in the target or its bounded local ancestry counts as landed, even when another task later edits that file. A known Git baseline bounds that history; without one, historical matches must not predate the write receipt. Missing/incomplete receipts, unsupported deletions or links, content beyond the lookup budget and ambiguous edits remain unknown, not a positive assertion. Older tasks are evaluated on refresh with the evidence already retained; no rerun or data repair is needed.
+When checkout and target are the same branch, there is no merge, squash, PR or same-branch from/to flow. The service reads the task’s successful channel-bound file-write receipts, not the whole shared checkout. For the native runtime these are its own file tools' records: each `NATIVE_PROJECT_WRITTEN` event of a trusted channel of the task, confirmed by that channel's completed `project_write`/`project_edit` request receipt with the same path and full-content SHA-256 (the bytes Cortex wrote). An event without such a receipt stays unconfirmed. Exact recorded content in the target or its bounded local ancestry counts as landed, even when another task later edits that file. A known Git baseline bounds that history; without one, historical matches must not predate the write receipt. Missing/incomplete receipts, unsupported deletions or links, content beyond the lookup budget and ambiguous edits remain unknown, not a positive assertion. Older tasks are evaluated on refresh with the evidence already retained; no rerun or data repair is needed.
 
-Pending recorded files offer **Commit to <branch>…**, with owner confirmation and the existing acceptance/evidence gates. Only those exact files are staged and committed; another staged file is preserved. A different staged version of a task file, changed content, symlink path or unrecorded mode change refuses this operation. The UI lists pending paths and warns when other uncommitted files share the checkout. No reset, stash or push occurs. A successful local commit is labelled Committed, not Merged. Unknown attribution explains its limit and offers **Close as is…** or **Done outside the app** after finishing in Git, rather than a meaningless merge. A folder without Git keeps Close as is and Set up Git.
+Pending recorded files offer **Commit to <branch>…**, with owner confirmation and the existing acceptance/evidence gates. Only those exact files are staged and committed; another staged file is preserved. A different staged version of a task file, changed content, symlink path or unrecorded mode change refuses this operation. The UI lists pending paths and warns when other uncommitted files share the checkout. No reset, stash or push occurs. A successful local commit is labelled Committed, not Merged. Unknown attribution explains its limit and offers **Close as is…** or **Done outside the app** after finishing in Git, rather than a meaningless merge. The explanation names where the task works (the project folder or its checkout) and says which limit applies: no file-write receipt at all (an engine that edits files with its own tools leaves none, so there is no record of which files the task changed), or receipts that could not be confirmed. A folder without Git keeps Close as is and Set up Git.
 
 When a remote exists, a separate line reports pushed/unpushed from the target's last-fetched tracking reference, or unknown if none is available. It never fetches or pushes and never blocks closure. With no remote, no push-status line is shown.
 
@@ -183,7 +1036,7 @@ On activation, a saved materialized sprint whose members are missing from the se
 
 Retracted worker checks (withdrawn probes or invocation errors) are rederived from the persisted result, exact provisioning and command receipts, not the reviewer-only `current_outcome` field. Valid retractions are omitted from the active result checks and worker overview counts, as in the runtime's own completion gate. They neither block Accept/Ready to merge nor count as passes. Other failures, missing receipts and current runtime verification requirements remain blocking.
 
-Sprint creation first checks that the chosen model exists in the current selectable catalogue. A missing/unavailable model refuses with a connect/select-model explanation, keeps the description in the form and creates no sprint or planning task. A preset name alone is not a connected model. Sprint creation offers the same **Where it works** choice as a single task: **Project folder** (the currently open local branch) or **Separate worktree**. The machine default fills the form until the owner chooses; unsupported worktrees and non-Git folders use Project folder with an explanation. Creation saves its chosen checkout kind, route and target before starting description-only planning. Planning and Summary show the saved checkout choice. Every task materialized from the plan inherits the sprint checkout kind, overriding per-item plan hints; worktree mode uses the existing per-task worktree preparation on explicit start, not one shared sprint checkout. Manual and automatic starts use those same saved task options. No checkout is created during planning, no existing checkout moves, and machine defaults are not rewritten. Older sprints without a saved choice keep their per-item/default Project folder behavior. The choice is fixed for that sprint; task execution/recovery semantics are unchanged. The service uses a separate bounded read-only/plan-mode auxiliary session in an empty temporary directory, with no project tools or runtime task. It returns a validated dependency plan or an owner question; it must not implement the description or claim project inspection. The planner must ask the owner, not decide itself, when the description explicitly requires an owner question. For a multi-item plan, the planner supplies each task's self-contained scope, acceptance criteria and relevant owner answers in plain text; only minimal shared context belongs there, never sibling work or serialized conversation records. An unanswered owner-question requirement belongs only to its own item. The service does not append the whole sprint to every item. A sole planned task retains the original owner requirements and plain-text follow-ups as a safeguard against a shortened summary; oversized combined descriptions refuse rather than truncate. Scope decomposition remains model-generated, not a filesystem permission boundary. Create tasks materializes the plan as unstarted user tasks. Only Run sprint or an explicit task Start begins execution. The auxiliary turn explicitly requests the task-plan JSON as well as supplying session instructions. Invalid prose, task/dependency validation errors, incomplete output and engine-stage failures produce a service-owned readable explanation beside Resume planning, outside the scrollable conversation; raw model output and engine errors are not displayed. Resume clears the current failure notice while retaining conversation history. Invalid output or interrupted planning never produces a ready state with a null plan. Cancellation fences late output and closes the auxiliary session; older hidden planning runs are stopped through their execution control. Materialized tasks inherit its settings and target; changing a task target makes that target explicit. Sprint-target changes propagate to inherited task targets, not explicit overrides. Once tasks are materialized, change their routes individually rather than silently rewriting them.
+Sprint creation first checks that the chosen model exists in the current selectable catalogue. A missing/unavailable model refuses with a connect/select-model explanation, keeps the description in the form and creates no sprint or planning task. A preset name alone is not a connected model. Sprint creation offers the same **Where it works** choice as a single task: **Project folder** (the currently open local branch) or **Separate worktree**. The machine default fills the form until the owner chooses; unsupported worktrees and non-Git folders use Project folder with an explanation. Creation saves its chosen checkout kind, route and target before starting description-only planning. Planning and Summary show the saved checkout choice. Every task materialized from the plan inherits the sprint checkout kind, overriding per-item plan hints; worktree mode uses the existing per-task worktree preparation on explicit start, not one shared sprint checkout. Manual and automatic starts use those same saved task options. No checkout is created during planning, no existing checkout moves, and machine defaults are not rewritten. Older sprints without a saved choice keep their per-item/default Project folder behavior. The choice is fixed for that sprint; task execution/recovery semantics are unchanged. The service uses a separate bounded read-only/plan-mode auxiliary session in an empty temporary directory, with no project tools or runtime task. It returns a validated dependency plan or an owner question; it must not implement the description or claim project inspection. The planner must ask the owner, not decide itself, when the description explicitly requires an owner question. For a multi-item plan, the planner supplies each task's self-contained scope, acceptance criteria and relevant owner answers in plain text; only minimal shared context belongs there, never sibling work or serialized conversation records. An unanswered owner-question requirement belongs only to its own item. The service does not append the whole sprint to every item. A sole planned task retains the original owner requirements and plain-text follow-ups as a safeguard against a shortened summary; oversized combined descriptions refuse rather than truncate. Scope decomposition remains model-generated, not a filesystem permission boundary. Create tasks materializes the plan as unstarted user tasks. Only Run sprint or an explicit task Start begins execution. The auxiliary turn explicitly requests the task-plan JSON as well as supplying session instructions. An invalid reply is first corrected once: the service starts one more planning pass (its own deadline) that repeats the request with the exact validation error and the required schema. The parser accepts a missing or single-string `dependsOn`, truncates a title over 200 characters and extracts exactly one JSON object from surrounding prose or a code fence; duplicate keys, unknown dependency keys and cycles are always errors. If the second reply is also invalid, planning is cancelled with a stable code and the failing task (1-based index and key) and rule, for example "task 4 (t4): description is empty". Invalid prose, task/dependency validation errors, incomplete output and engine-stage failures produce a service-owned readable explanation beside Resume planning, outside the scrollable conversation; raw model output and engine errors are not displayed. Resume clears the current failure notice while retaining conversation history. Invalid output or interrupted planning never produces a ready state with a null plan. Cancellation fences late output and closes the auxiliary session; older hidden planning runs are stopped through their execution control. Materialized tasks inherit its settings and target; changing a task target makes that target explicit. Sprint-target changes propagate to inherited task targets, not explicit overrides. Once tasks are materialized, change their routes individually rather than silently rewriting them.
 
 The activated service child advances automatic sprints without a window.
 It reads bounded runtime projections, pauses for questions, unknown outcomes,
@@ -196,7 +1049,7 @@ A lost active session after service restart remains unknown, not silently resume
 Before synthesis, the runtime attempts each exact executable worker check reported
 as `not_run` or `unverified` once on that observed source revision. An existing matching final
 verification receipt avoids a duplicate run. Policy/paid-consent blockers remain
-blocked and explicitly not run, never converted to failures or automatically executed. Plan submission and verification repair first probe program availability in the real verification sandbox, using the same final launch path and check directory. An unavailable probe environment does not establish that the check program is missing; an incomplete wrapper command is refused rather than declared available. Workers declare checks early with the same preflight; it proves availability only, not success. Missing tools require an isolated project-private installation or an executable alternative, without sudo or system changes. If neither is possible, the responsible worker asks the owner immediately through the existing question route. New unrunnable executable gap declarations are refused before publication. A nonzero test result is a failure, not a technical waiver.
+blocked and explicitly not run, never converted to failures or automatically executed. Plan submission and verification repair first probe program availability in the real verification sandbox, using the same final launch path and check directory. A bare program name is looked up on the command search path that verifier and worker commands share: the project's `.venv/bin`, `venv/bin` and `node_modules/.bin`, then the service's inherited `PATH`, so a tool the owner installed through a version manager link (for example `/usr/local/bin/node` into `~/.nvm`) is found by the plan check exactly where workers run it. An unavailable probe environment does not establish that the check program is missing; an incomplete wrapper command is refused rather than declared available. Workers declare checks early with the same preflight; it proves availability only, not success. Missing tools require an isolated project-private installation or an executable alternative, without sudo or system changes. If neither is possible, the responsible worker asks the owner immediately through the existing question route. New unrunnable executable gap declarations are refused before publication. A nonzero test result is a failure, not a technical waiver.
 
 Human-only judgements and legacy gap items without a recorded command appear separately as **Check manually**. They keep their original evidence and explanation but do not enter passed/failed counters, offer Rerun, or block owner Accept. Legacy items with a recorded command remain rerunnable; an actual missing-program exit is a visible failed run, not a fabricated pass.
 
@@ -303,9 +1156,11 @@ call. These sessions have no task channel, external MCP or filesystem/terminal
 bridge, run from an empty temporary directory, and require read-only/plan mode.
 They do not change owner settings.
 
-Generated titles use the existing product overlay and polling path, including
-materialized sprint tasks. Planned titles are not silently recorded as owner
-renames. A user rename always records titleState=user, even for identical text.
+Generated titles use the existing product overlay and polling path. A
+materialized sprint task is named by its plan item's own title: joining the
+sprint (`product.task` `sprint` with `title`) records it as the task's title with
+titleState=generated, not as an owner rename, and never over an owner's title. An
+item without a title of its own keeps the description label. A user rename always records titleState=user, even for identical text.
 Generation and rename serialize through the same file lock and atomic write;
 a late result cannot overwrite an owner rename or resurrect a purged task.
 No storage migration or wire-version change is required.
@@ -315,8 +1170,8 @@ No storage migration or wire-version change is required.
 Every form where the owner writes a message or creates work accepts a file picker,
 dragged files and pasted clipboard images: new task and new sprint, the task
 conversation (including paused resume and review discussion), queued messages,
-direct-worker messages, every answer inside a question card, planning messages, Request
-changes, diff comments and conflict-resolution guidance. Text-only fields such as
+every answer inside a question card, planning messages, Request
+changes, diff comments and conflict-resolution guidance. A message to one worker (guidance) is the exception: the native service carries no files to a single worker, so its Attach button stays off with that reason, while a message about the task takes files. Text-only fields such as
 names, branches, searches and commit messages take no attachments. Files appear as
 removable chips with their name and, for images, a small thumbnail. A queued
 message is the exception: its row in the queue shows no chips. The message keeps
@@ -363,8 +1218,7 @@ with no plain text therefore asks the native clipboard for PNG, then any other i
 GTK can decode, re-encoded as PNG within the same 4 MiB limit. Plain text is pasted
 as usual, and no clipboard text or file path is read natively. Task creation retains
 validated bytes in the private draft options until explicit Start snapshots them.
-Direct-worker files are snapshotted with the identified guidance record and reach
-only that channel at its next successful Cortex tool response. Resource references,
+Native delivery: the draft's files are decoded and checked once more inside the Start admission and committed as the task's first source revision (private bodies in mode 0600 under the task's `.source_blocks`, SHA-256 digest and size recorded; the admission event carries no file bytes). An owner message (follow-up, Request changes, resume guidance) or a question answer retains its files as the next revision, in the same transaction as the message or answer, bound to the request by a fingerprint of the exact bodies, so a replay retains nothing twice. All of a task's retained bodies together stay within 10 MiB. Each engine session receives a body once, as the engine's advertised prompt capabilities allow (images as image blocks, text as resources, PDF only for Claude, anything else as a named marker), and later prompts refer to it by marker. Direct worker guidance carries no files (`native_attachments_unavailable`). Resource references,
 not filesystem paths, are delivered. Neither saving a draft nor attaching a file
 starts a model call.
 
@@ -376,9 +1230,10 @@ Task Stop records `PAUSED` independently of ACP turn cancellation, from a runnin
 task-level or worker question/access wait, or between-turn state. It preserves pending
 question identities, batches and assignment-local waits transactionally; questions
 stay visible with answering disabled, and runtime access reconciliation is held.
-Resume restores the saved state; a question wait still requires the original
-answer. Other interrupted work enters the runtime's recorded recovery path rather
-than replaying the interrupted prompt. The hold survives service restart, and only
+Resume restores the saved state without interrupting or replanning; a question
+wait still requires the original answer and stays answerable after Resume. Work
+interrupted by Pause continues through the driver's own lost-worker retry or
+coordinator recovery rather than replaying the interrupted prompt. The hold survives service restart, and only
 an explicit owner Resume reconstructs the exact recorded session metadata. Resume
 refuses a stale display version or changed owner. Stop is urgent intent for the
 exact execution and does not require the background progress version to remain
@@ -468,18 +1323,17 @@ quality are not implied by fixture checks.
 
 ## Focused no-paid checks
 
-Use checkout-local Python and sequential checks; do not run the entire suite.
+Use sequential checks under `umask 022` with `~/.cargo/bin/cargo`; do not run the entire suite.
 
 ```sh
-timeout 70 .venv/bin/python -B -m pytest -q --timeout=25 tests/test_workspace_task_options.py tests/test_workspace_task_git.py tests/test_workspace_purge.py tests/test_workspace_scheduler.py tests/test_workspace_machine_tools.py
-timeout 80 .venv/bin/python -B -m pytest -q --timeout=60 tests/test_workspace_titles.py tests/test_workspace_service_integration.py tests/test_workspace_journey.py
+timeout 900 ~/.cargo/bin/cargo test --locked --offline -p workspace-service --test task_actions --test service --test machine
 ~/.cargo/bin/cargo test --locked -p workspace-service --test terminal
 ~/.cargo/bin/cargo test --locked -p cortex-workspace-desktop --no-default-features
 npm --prefix packages/workspace-ui test -- test/terminal.test.tsx test/terminal-client.test.ts test/voice.test.tsx
-# Voice fixture and model cache prepared in disposable container artifacts:
-python3 -B packaging/container/check_rendered.py --container --artifacts <build>/artifacts --only voice
+# Voice: needs voice-model/ and voice-fixture.wav beside the built binaries, else the stage is recorded as not_applicable:
+scripts/cortex-xtask.sh check-rendered --artifacts <build>/artifacts --only voice
 # Against freshly built native binaries; disposable no-network container, no images:
-python3 -B packaging/container/check_rendered.py --container --artifacts <build>/artifacts --only terminal
+scripts/cortex-xtask.sh check-rendered --artifacts <build>/artifacts --only terminal
 npm --prefix packages/workspace-ui run typecheck
 npm --prefix packages/workspace-ui test -- test/real-port.test.ts test/real-screens.test.tsx test/store.test.ts
 ```
