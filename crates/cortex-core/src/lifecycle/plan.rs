@@ -83,7 +83,13 @@ pub fn verification(v: &Value) -> CoreResult<Vec<Vec<String>>> {
         .collect()
 }
 /// Routing fields a node carries into model/route selection.
-pub const ROUTING_FIELDS: [&str; 5] = ["complexity", "work_kind", "provider", "model", "model_reason"];
+pub const ROUTING_FIELDS: [&str; 5] = [
+    "complexity",
+    "work_kind",
+    "provider",
+    "model",
+    "model_reason",
+];
 /// Routing view of a node: a planned node's own entry, or the routing recorded for
 /// a runtime-created node (fix, review). Unknown nodes route with defaults.
 pub fn node_routing(plan: &Value, node: &str) -> Value {
@@ -291,28 +297,18 @@ pub fn accept_routed_tx(
         if live {
             return refuse("workers_still_live_or_unknown");
         }
-        let denied = db
-            .prepare(
-                "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_STEERING'",
-            )?
-            .query_map([task], |r| r.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
+        // The owner's write denials in force (lifted ones excluded).
+        let denied = super::steering::denials(db, task)?;
         for n in canonical["tasks"].as_array().unwrap() {
             if policy::read_only(n["role"].as_str().unwrap(), "execution") {
                 continue;
             }
-            for row in &denied {
-                let v: Value = serde_json::from_str(row)?;
-                if let Some(paths) = v["deny_write"].as_array() {
-                    if n["scope"].as_array().unwrap().iter().any(|s| {
-                        paths.iter().any(|p| {
-                            p.as_str()
-                                .is_some_and(|p| policy::overlaps(s.as_str().unwrap(), p))
-                        })
-                    }) {
-                        return refuse("write_denied");
-                    }
-                }
+            if n["scope"].as_array().unwrap().iter().any(|s| {
+                denied
+                    .iter()
+                    .any(|p| policy::overlaps(s.as_str().unwrap(), p))
+            }) {
+                return refuse("write_denied");
             }
         }
         let revision = revision + 1;

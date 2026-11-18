@@ -1,18 +1,21 @@
 import { batch, createEffect, createMemo, createSignal, createUniqueId, For, Match, on, onCleanup, Show, Switch, useContext, type Accessor } from "solid-js";
-import { dependencyProblem, runBlocker, type AttachmentInput, type PlanItem, type Sprint, type TaskSettings, type WorkspaceState } from "@cortex/workspace-domain";
-import { reportHeight } from "./autogrow";
+import { dependencyProblem, runBlocker, type PlanItem, type Sprint, type TaskSettings, type WorkspaceState } from "@cortex/workspace-domain";
 import { AttachChips, createAttachments, createDictation, MessageComposer, RouteBar } from "./composer";
 import { useWs } from "./ctx";
 import { FieldEdit } from "./field-edit";
 import { createFollow } from "./follow";
+import { Pill } from "./worker";
 import { createUnsent, ScreenActive } from "./freshness";
 import { A, I, Keyed, MenuItem, placeFocus, Pop } from "./kit";
 import { ActionBar, Page, revealCutIn, revealWhenCut, SectionHead, StatusLane, Toolbar, type StripItem, type StripTone } from "./layout";
 import { Hint } from "./settings-kit";
-import { Answered, QuestionTabs, type Ask } from "./questions";
+import { Answered, QuestionForm, type AskAnswer } from "./questions";
 import type { Route } from "./router";
 import { clock, sprintTitle, sprintView, type ProjectSummary } from "./selectors";
+import { share } from "./stable";
 import { ResultText } from "./result-text";
+import { CopySource, MessageTools } from "./message-copy";
+import { SentMessages } from "./sent";
 import { createLabel, itemTitle, planCaption, planGraph, planningAsks, planningThread, planRows, queueStall, sprintGap, sprintSummary, type PlanRow } from "./sprint-model";
 import { graphCounts, planLayers } from "./plan-graph";
 import { GraphView, type GraphApi, type GraphMemory } from "./sprint-graph";
@@ -189,41 +192,72 @@ function Conversation(props: { sprint: Sprint; hidden?: boolean; onUnsent?: (uns
   const mic = createDictation();
   const files = createAttachments();
   const session = () => ws.store.state().sessions.find(x => x.taskId === s().planningTaskId);
-  const asks = createMemo(() => planningAsks(s(), session()));
+  // A planner event rebuilds every question as a new object: an unchanged one stays the old object, so its chosen option and draft stay.
+  const asks = createMemo<ReturnType<typeof planningAsks>>(prev => share(prev, planningAsks(s(), session())), []);
   const thread = createMemo(() => planningThread(s(), session()));
-  const answer = (ask: Ask, text: string, optionId: string | null, attachments?: AttachmentInput[]) => ws.run({ type: "answer_planning", sprintId: s().id, answer: text, attachments, now: ws.store.clock(), ...(ask.id === "planning" ? {} : { decisionId: ask.id, optionId }) });
+  // One owner action answers every open question of the run at once; the planner's model and effort are not part of an answer.
+  const answer = (answers: AskAnswer[]) => {
+    const [first] = answers;
+    if (!first) return undefined;
+    const planned = first.ask.id !== "planning";
+    return ws.run({ type: "answer_planning", sprintId: s().id, answer: first.text, attachments: first.attachments, now: ws.store.clock(), ...(planned ? { decisionId: first.ask.id, optionId: first.optionId } : {}),
+      ...(planned && answers.length > 1 ? { answers: answers.map(a => ({ decisionId: a.ask.id, answer: a.text, optionId: a.optionId, attachments: a.attachments })) } : {}) });
+  };
+  // As in a task: while the planner works and the field is empty the button stops planning; stopped, it resumes it.
+  const planEmpty = () => !text().trim() && files.files().length === 0;
+  const planControl = () => s().planning === "planning" && asks().length === 0 && planEmpty() ? { label: "Stop", icon: "stop", needs: "cancel_planning" as const, go: () => void ws.run({ type: "cancel_planning", sprintId: s().id }), effect: "Stop cancels planning and keeps the conversation; Resume continues it. Write a message to send it instead." }
+    : s().planning === "cancelled" ? { label: "Resume", icon: "play", needs: "resume_planning" as const, go: () => void ws.run({ type: "resume_planning", sprintId: s().id }), effect: "Resume continues planning." }
+    : null;
   const closed = () => s().planning === "created" ? "Tasks are created. Edit them on the Board." : s().planning === "cancelled" ? "Planning is cancelled. Resume it to continue." : null;
-  const send = (value: string) => { if (value.trim() && !files.busy()) ws.ok({ type: "plan_message", sprintId: s().id, text: value, attachments: files.files(), now: ws.store.clock() }, () => { setText(""); files.clear(); }); };
+  // A message to the planner reads in the conversation from the press and leaves the field then; one that does not arrive
+  // keeps its text and files on its line, with Retry and Edit.
+  const sentHere = () => ({ kind: "sprint" as const, sprintId: s().id });
+  const send = (value: string) => {
+    if (!value.trim() || files.busy()) return;
+    const attachments = files.files();
+    setText(""); files.clear();
+    void ws.run({ type: "plan_message", sprintId: s().id, text: value, attachments, now: ws.store.clock() });
+    follow.jump();
+  };
+  createEffect(() => {
+    const back = ws.store.sends.returned(sentHere());
+    if (!back) return;
+    ws.store.sends.take();
+    setText(t => t.trim() ? `${t.trimEnd()}\n${back.text}` : back.text); files.add(back.attachments ?? []);
+  });
   const settings = (): TaskSettings => ({ model: "opus[1m]", effort: "high", mode: "development", language: "auto", ...s().settings });
   createUnsent(() => !!text().trim() || files.files().length > 0);
   createEffect(() => props.onUnsent?.(!!text().trim() || files.files().length > 0));
-  const [height, setHeight] = createSignal(0);
-  let dock!: HTMLDivElement, timeline: HTMLDivElement | undefined;
-  reportHeight(() => dock, setHeight);
+  let timeline: HTMLDivElement | undefined;
   // A conversation reads from its latest line, as the task's does: it opens at its end and stays there until the owner scrolls up.
-  const follow = createFollow(() => timeline, () => thread().length + asks().length + (s().plan?.version ?? 0));
+  const follow = createFollow(() => timeline, () => thread().length + ws.store.sends.shown(sentHere()).length + asks().length + (s().plan ? 1 : 0));
   return <section class="sp-conv" aria-label="Planning conversation" hidden={props.hidden}>
-    <div class="timeline" ref={timeline} onScroll={follow.onScroll} style={{ "--dock-clear": `${height() + 16}px` }}><div class="tl-in">
-      <div class="brief"><ResultText breaks text={s().description} /><AttachChips files={s().attachments} open /><div class="meta"><Show when={ws.t("planningBadge")}><span>{ws.t("planningBadge")}</span></Show></div></div>
+    <div class="timeline" ref={timeline} onScroll={follow.onScroll}><div class="tl-in">
+      <div class="brief"><ResultText breaks text={s().description} /><AttachChips files={s().attachments} open /><div class="meta"><Show when={ws.t("planningBadge")}><span>{ws.t("planningBadge")}</span></Show><Show when={s().description}><CopySource text={s().description} /></Show></div></div>
       <Keyed each={thread()} by={e => e.key}>{e => <Switch>
-        <Match when={e().kind === "note"}><div class="ai"><ResultText breaks text={e().text} /><AttachChips files={e().attachments} open /></div></Match>
+        <Match when={e().kind === "note"}><div class="ai"><ResultText breaks text={e().text} /><AttachChips files={e().attachments} open /></div><MessageTools text={e().text} /></Match>
         <Match when={e().kind === "qa"}><Answered question={e().question ?? ""} answer={e().text} at={e().at} files={e().attachments} /></Match>
-        <Match when={e().kind === "message"}><div class="mine"><ResultText breaks text={e().text} /><AttachChips files={e().attachments} open /></div><div class="mine-meta"><I n="check" s={12} />Sent to the planner<Show when={e().at !== null}><span>{clock(e().at)}</span></Show></div></Match>
+        <Match when={e().kind === "message"}><div class="mine"><ResultText breaks text={e().text} /><AttachChips files={e().attachments} open /></div><div class="mine-meta"><I n="check" s={12} />Sent to the planner<Show when={e().at !== null}><span>{clock(e().at)}</span></Show><CopySource text={e().text} /></div></Match>
         <Match when={e().kind === "event"}><div class="answered"><I n="check" s={14} /><span>{e().text}</span><Show when={e().at !== null}><span class="faint">{clock(e().at)}</span></Show></div></Match>
       </Switch>}</Keyed>
+      <SentMessages place={sentHere()} />
       {/* The proposed plan is a line in the conversation, and the line opens the Plan tab. */}
       <Show when={s().plan}>{plan => <div class="answered sp-plan-line"><I n="layers" s={14} />
         <span class="grow">{s().planning === "created" && s().materializedVersion !== null ? `Tasks created from Plan v${s().materializedVersion}` : `Plan v${plan().version} proposed: ${plan().items.length} task${plan().items.length === 1 ? "" : "s"}`}</span>
         <Show when={props.onOpenPlan}>{open => <button class="btn btn-line" onClick={() => open()()}>Open plan</button>}</Show>
       </div>}</Show>
-      <Show when={asks().length > 0}><QuestionTabs asks={asks()} needs="answer_planning" blocked={() => undefined} note={() => null} onAnswer={answer}
-        route={ask => <RouteBar id={`plan-answer-${ask.id}`} up compact needs="set_sprint_settings" settings={settings()} onChange={patch => ws.run({ type: "set_sprint_settings", sprintId: s().id, settings: patch })} />} waiting={ask => ask.at === null ? "" : clock(ask.at)} /></Show>
+      <Show when={asks().length > 0}><QuestionForm asks={asks()} needs="answer_planning" blocked={() => undefined} projectId={s().projectId} note={() => null} onSend={answer}
+        waiting={ask => ask.at === null ? "" : clock(ask.at)} /></Show>
       <Show when={s().planning === "planning"}><div class="answered"><I n="loader" s={14} class="spin" />Working on the plan</div></Show>
     </div></div>
-    <div class="dock" ref={dock}>
-      <MessageComposer label="Message the planner" inputId="ws-plan-input" placeholder="Ask for changes to the plan…" text={text()} onText={setText} files={files} mic={mic} off={closed() ?? undefined}
+    <div class="dock">
+      <Pill follow={follow} />
+      <MessageComposer label="Message the planner" inputId="ws-plan-input" placeholder="Ask for changes to the plan, tag @files…" text={text()} onText={setText} files={files} mic={mic} off={closed() ?? undefined}
+        suggest={{ projectId: s().projectId }}
         route={<RouteBar id="plan" up compact needs="set_sprint_settings" settings={settings()} onChange={patch => ws.run({ type: "set_sprint_settings", sprintId: s().id, settings: patch })} />}
-        send={{ label: "Send to the planner", needs: "plan_message", why: files.busy() ? "Attachments are still loading" : text().trim() ? undefined : "Write a message first", go: () => send(text()), insertAndSend: send }} />
+        effect={planControl()?.effect}
+        send={planControl() ? { label: planControl()!.label, needs: planControl()!.needs, go: planControl()!.go, run: { icon: planControl()!.icon } }
+          : { label: "Send to the planner", needs: "plan_message", why: files.busy() ? "Attachments are still loading" : text().trim() ? undefined : "Write a message first", go: () => send(text()), insertAndSend: send }} />
     </div>
   </section>;
 }
@@ -570,7 +604,9 @@ function SummaryTab(props: { route: SprintRoute; sprint: Sprint }) {
   const gapStrip = createGapStrip(() => props.sprint);
   const queueStrip = createQueueStrip(() => props.sprint);
   // An unfinished deletion says what is left and what it waits for; its retry is the header's Retry delete.
-  const deletion = (): StripItem[] => props.sprint.deletion ? [{ id: "deletion", tone: "warn", role: "status", icon: <I n="hourglass" s={14} class="st-warn" />, text: sprintView(ws.store.index(), props.sprint).state }] : [];
+  // One strip for the life of the page: a machine read changes its words, never the strip.
+  const deleting: StripItem = { id: "deletion", tone: "warn", role: "status", icon: <I n="hourglass" s={14} class="st-warn" />, get text() { return sprintView(ws.store.index(), props.sprint).state; } };
+  const deletion = (): StripItem[] => props.sprint.deletion ? [deleting] : [];
   const status = createMemo<StripItem[]>(() => [...deletion(), ...(data().rows.length > 0 && gapStrip() ? [gapStrip()!] : []), ...(queueStrip() && !props.sprint.deletion ? [queueStrip()!] : [])]);
   return <Page class="l-work sp-page" scroll="none" head={<Tabs route={props.route} sprint={props.sprint} />} status={<StatusLane items={status()} />}>
     <div class="page"><div class="page-in">

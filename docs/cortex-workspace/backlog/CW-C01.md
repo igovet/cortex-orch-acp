@@ -1,6 +1,6 @@
 # CW-C01: Versioned schemas, capabilities and generated TS/Rust contract fixtures
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: the local Workspace wire contract (version 1.8), its generated TypeScript and Rust fixtures and the capability list exist ([protocol](../protocol.md)); the public versioned contract for other clients is not complete; no-paid checks only · **Phase:** 3+ · **Size:** L
 
 ## Goal
 

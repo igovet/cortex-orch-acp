@@ -167,7 +167,7 @@ fn pipeline_draft_rejects_unfilled_server_placeholder() {
         api.create_draft("t", "worker", "pipeline", "x")
             .unwrap_err()
             .code(),
-        "runtime_owned_pipeline"
+        "runtime_owned_operation"
     );
     let d = api.create_pipeline_draft("t", "owner", "d").unwrap();
     assert!(d.markdown.contains("{{CURRENT_WORK_GRAPH}}"));

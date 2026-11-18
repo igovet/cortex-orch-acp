@@ -246,8 +246,9 @@ scripts/cortex-xtask.sh test-fast
   cortex-acp -p cortex-paseo-tools -p workspace-service`), `cargo` (900 s: the
   headless crates `workspace-protocol`, `cortex-core`, `cortex-engine`,
   `workspace-service`, `cortex-acp`, `cortex-paseo-tools` and `cortex-xtask`),
-  `desktop` (900 s: `cortex-workspace-desktop --no-default-features`), `ui` and
-  `desktop-ui` (Vitest with `--testTimeout=60000`, 600 s each), `paseo-typecheck`
+  `desktop` (900 s: `cortex-workspace-desktop --no-default-features`), `remote`
+  (900 s: `workspace-remote`, `workspace-client` and `cortex-workspace-android`), `ui`,
+  `desktop-ui` and `phone-ui` (Vitest with `--testTimeout=60000`, 600 s each), `paseo-typecheck`
   (600 s) and one `paseo-<name>` step per `test:*` script in
   `integrations/paseo/package.json` (180 s each).
 - `--list` prints the steps without running them; `--only NAMES` and `--skip NAMES`
@@ -690,17 +691,26 @@ observed RemoteDesktop pointer API, not DOM events, preload probes or accessible
 actions. The saved-plan-with-unloaded-tasks regression must leave Inbox, Archive,
 Settings and the sidebar usable. A separate fake-engine journey checks project
 registration/activation, description-only creation, real keyboard typing and OS
-clipboard text paste, an external GTK file drag through hit-testing, start, a
-visible two-question batch, opening a synthetic worker, Stop/Resume (each
-must show the exact opposite task button; matching text elsewhere never counts),
+clipboard text paste, an external GTK file drag through hit-testing, start, the
+visible coordinator question, opening a synthetic worker, Stop/Resume (Start,
+Stop and Resume are the action button of the group named Task composer; each
+press must show the exact opposite button there, the only button of that name in
+the window, so matching text or a stale control elsewhere never counts),
 result/review, every current Settings navigation page and sidebar toggles.
-Choosing an answer only selects it; the journey submits each with Send answer and
-checks the second selected tab, not question text also present in the transcript.
+Choosing an answer only selects it; the journey submits the answer form with its
+one Send answer control and requires that control to leave (the form hides it
+from the press) and the answer to be recorded in the store, not question text
+also present in the transcript. Its fixture asks
+one question; the one-form batch with its single Send answers control is covered
+by the Workspace UI tests, not by this gate.
 The Activate control and a directly inserted worker's Work details target must
 retain exact text and rectangles throughout stationary-pointer sampling, including
 a question-answer reconciliation. Samples retain baseline/current rectangles and
 monotonic timestamps; a missing target or any movement fails immediately. The
-worker must reach the window before navigation, and opening a task must expose its
+worker must reach the window before navigation: the task bar's Work details link
+must count every worker the store records for the task (one per runtime node
+with a delegation provisioning record, as the service lists them), so the
+bare label that stands before any worker arrives never satisfies it. Opening a task must expose its
 Task progress and details panel, not merely a Start button on the board. Before replacing a fixture after a deliberate stop,
 the harness requires an inactive unit with `Result=success`, then clears only that
 disposable unit\'s start counter. This separates fixture restarts from the shipped
@@ -794,6 +804,18 @@ npm --prefix prototypes/cortex-workspace/desktop run test
 scripts/cortex-xtask.sh package check
 scripts/cortex-xtask.sh profiles check
 ```
+
+Remote access and the Android app add these no-paid targeted checks (loopback only: no relay, no device, no emulator):
+
+```
+umask 022 && timeout 900 cargo test --locked --offline -p workspace-remote -p workspace-client -p cortex-workspace-android
+umask 022 && timeout 900 cargo test --locked --offline -p workspace-service --test remote
+umask 022 && timeout 900 cargo test --locked --offline -p workspace-service --lib remote_policy
+npm --prefix apps/cortex-workspace-android run typecheck
+npm --prefix apps/cortex-workspace-android run test
+```
+
+They cover pairing, the tunnel, refusals, revoke, restart, private-file permissions and the link format; the closed remote method policy and one end-to-end run through a real service on a temporary socket; both request-policy profiles; the phone and Remote access interface tests (`npm --prefix packages/workspace-ui run test`) and the app's shell test. `workspace-remote` and `workspace-client` also cross-compile for `aarch64-linux-android`, and a debug APK of the app was built on the development machine. Not verified: anything on a physical Android device or emulator (install, launch, camera and QR scan, touch, keyboard, Back, lifecycle, network changes), a connection through a relay, pairing between a real phone and a real desktop, the rendered layout gates for the phone markup, the Android job of the release workflow (never run) and the Remote access page in the native desktop window. These are not release gates.
 
 `scripts/cortex-xtask.sh test-fast` (see [test matrix](test-matrix.md)) runs the bounded no-paid cargo, Vitest and Paseo suites sequentially in one command.
 

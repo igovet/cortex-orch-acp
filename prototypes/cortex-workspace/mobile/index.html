@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cortex Workspace: Android mockups</title>
+<link rel="stylesheet" href="../mockups/styles.css">
+<link rel="stylesheet" href="mobile.css">
+</head>
+<body>
+<!-- Static design mockup. Synthetic content only: no backend, no credentials, no runtime evidence. -->
+<header class="sheet-h">
+  <h1>Android: что отличается от десктопа</h1>
+  <p>Статические макеты, 390 × 844. Тот же общий интерфейс, что и в десктопе на узкой ширине; здесь показаны только экраны и правила, которых в десктопе нет. Данные вымышленные.</p>
+  <p class="theme"><button class="btn btn-line" onclick="document.documentElement.dataset.theme=document.documentElement.dataset.theme==='light'?'dark':'light'">Светлая / тёмная</button></p>
+</header>
+
+<main class="sheet">
+
+<!-- 1 -->
+<section class="shot" id="s1">
+  <h2>1. Первый запуск: машин нет</h2>
+  <div class="phone touch">
+    <div class="sys"><span>9:41</span><span class="grow"></span><span>5G</span><span>82%</span></div>
+    <div class="p-body center">
+      <img class="logo" src="../../../apps/cortex-workspace-desktop/public/cortex-256.png" alt="">
+      <h3>Connect to your machine</h3>
+      <p class="muted">This phone works with projects on a computer running the desktop app. Nothing runs on the phone itself.</p>
+      <ol class="steps">
+        <li><span class="n">1</span><span>On the computer, open Settings, then Remote access.</span></li>
+        <li><span class="n">2</span><span>Turn on Allow remote access. It shows a QR code.</span></li>
+        <li><span class="n">3</span><span>Scan it here and confirm on the computer.</span></li>
+      </ol>
+    </div>
+    <div class="p-foot">
+      <button class="btn btn-primary wide"><i class="i i-expand"></i>Scan QR code</button>
+      <button class="btn btn-line wide">Enter pairing code</button>
+    </div>
+    <div class="gest"></div>
+  </div>
+  <p class="why">Локальной машины нет, поэтому вместо Home приложение открывается здесь. Других действий нет.</p>
+</section>
+
+<!-- 2 -->
+<section class="shot" id="s2">
+  <h2>2. Сканирование QR</h2>
+  <div class="phone touch">
+    <div class="sys"><span>9:41</span><span class="grow"></span><span>5G</span><span>82%</span></div>
+    <div class="bar"><button class="ib"><i class="i i-arrow-left"></i></button><span class="title">Scan QR code</span><span class="ib"></span></div>
+    <div class="cam"><div class="finder"><i></i><i></i><i></i><i></i></div><span>Point the camera at the code on the computer</span></div>
+    <div class="p-foot">
+      <div class="note-box plain"><i class="i s14 i-lock"></i><span>The code works once and expires in 5 minutes. Nothing is sent before both sides confirm.</span></div>
+      <button class="btn btn-line wide">Enter pairing code instead</button>
+    </div>
+    <div class="gest"></div>
+  </div>
+  <p class="why">Камера нужна только на этом экране. Если разрешение не дано, остаётся ввод кода вида 7KQ2-M9XD.</p>
+</section>
+
+<!-- 3 -->
+<section class="shot" id="s3">
+  <h2>3. Сверка и подтверждение на компьютере</h2>
+  <div class="phone touch">
+    <div class="sys"><span>9:41</span><span class="grow"></span><span>5G</span><span>82%</span></div>
+    <div class="bar"><button class="ib"><i class="i i-x"></i></button><span class="title">Add machine</span><span class="ib"></span></div>
+    <div class="p-body">
+      <div class="mrow big"><span class="tile"><i class="i i-laptop"></i></span><div><div class="name">igor-workstation</div><div class="cap muted">Ubuntu 26.04 · 3 projects</div></div></div>
+      <p>Both sides show a fingerprint. Continue only if they are exactly the same.</p>
+      <div class="fpr one"><div><span class="lab">This phone sees</span><code>4F2A 91C7 D03E</code></div><div><span class="lab">The computer shows</span><code>4F2A 91C7 D03E</code></div></div>
+      <label class="fld"><span class="lab">Name for this machine</span><input class="inp" value="Workstation"></label>
+      <div class="note-box plain"><i class="i s14 i-loader"></i><span>Waiting for you to press Allow on the computer. No project data has been sent.</span></div>
+    </div>
+    <div class="p-foot">
+      <button class="btn btn-line wide">Cancel</button>
+    </div>
+    <div class="gest"></div>
+  </div>
+  <p class="why">Последнее слово за компьютером: пока там не нажато Allow, телефон ничего не получает. Отпечаток виден на обоих экранах.</p>
+</section>
+
+<!-- 4 -->
+<section class="shot" id="s4">
+  <h2>4. Home после подключения</h2>
+  <div class="phone touch">
+    <div class="sys"><span>9:41</span><span class="grow"></span><span>5G</span><span>82%</span></div>
+    <div class="bar"><button class="ib"><i class="i i-panel-left"></i></button><span class="title">Home</span><button class="btn btn-primary"><i class="i s14 i-plus"></i>New task</button></div>
+    <div class="p-body flush">
+      <div class="sec-h pad"><span>Needs you</span><a class="more">3 · Inbox</a></div>
+      <div class="group">
+        <a class="need3"><span class="kind st-warn"><i class="i s14 i-question"></i>Question<span class="age">3m</span></span><span class="ask">Which concurrency level should the regression test assert?</span><span class="where">atlas-api / Fix token refresh race</span></a>
+        <a class="need3"><span class="kind st-warn"><i class="i s14 i-eye"></i>Review<span class="age">12m</span></span><span class="ask">Result v1 is ready: 2 passed, 1 not run</span><span class="where">atlas-api / Fix token refresh race</span></a>
+        <a class="need3"><span class="kind st-ok"><i class="i s14 i-merge"></i>Finish<span class="age">1h</span></span><span class="ask">Accepted v2: cw/rotate-signing-keys into main</span><span class="where">atlas-api / Rotate the signing keys monthly</span></a>
+      </div>
+      <div class="sec-h pad"><span>Projects</span><span class="more">3</span></div>
+      <div class="group">
+        <a class="prow"><span class="mono-tile t1">A</span><span class="grow trunc">atlas-api</span><span class="cap muted">1 working</span><span class="cap st-warn">1 needs you</span><i class="i s14 i-chevron-right faint"></i></a>
+        <a class="prow"><span class="mono-tile t2">B</span><span class="grow trunc">billing-service</span><span class="cap muted">2 working</span><i class="i s14 i-chevron-right faint"></i></a>
+        <a class="prow"><span class="mono-tile t3">N</span><span class="grow trunc">northwind-web</span><span class="cap faint">Idle</span><i class="i s14 i-chevron-right faint"></i></a>
+      </div>
+    </div>
+    <div class="gest"></div>
+  </div>
+  <p class="why">Тот же Home, что в десктопе. Отличия: нет полосы вкладок и кнопок окна, строки и кнопки выше под палец.</p>
+</section>
+
+<!-- 5 -->
+<section class="shot" id="s5">
+  <h2>5. Меню (боковая панель)</h2>
+  <div class="phone touch">
+    <div class="sys"><span>9:41</span><span class="grow"></span><span>5G</span><span>82%</span></div>
+    <div class="under"><div class="bar"><span class="ib"><i class="i i-panel-left"></i></span><span class="title">Home</span></div></div>
+    <div class="scrim"></div>
+    <nav class="drawer">
+      <button class="machine-m"><i class="i i-laptop"></i><span class="grow"><span class="name trunc">Workstation</span><span class="cap st-ok">Connected · direct</span></span><i class="i s14 i-chevrons-v faint"></i></button>
+      <div class="sb-top">
+        <a class="nav"><i class="i i-plus"></i>New task</a>
+        <a class="nav"><i class="i i-inbox"></i>Inbox<span class="count">3</span></a>
+        <a class="nav"><i class="i i-search"></i>Search</a>
+        <a class="nav" aria-current="page"><i class="i i-home"></i>Home</a>
+        <a class="nav"><i class="i i-archive"></i>Archive<span class="count">1</span></a>
+      </div>
+      <div class="sb-scroll">
+        <div class="sb-h"><span>Projects</span></div>
+        <a class="proj"><span class="mono-tile t1">A</span><span class="trunc">atlas-api</span><span class="sig st-warn">Needs you 1</span></a>
+        <a class="task-row"><i class="i s14 i-question st-warn"></i><span class="trunc">Fix token refresh race</span><span class="sig">Needs you</span></a>
+        <a class="task-row"><i class="i s14 i-loader st-run"></i><span class="trunc">Meter API calls per workspace</span><span class="sig">Working</span></a>
+        <a class="task-row"><i class="i s14 i-eye faint"></i><span class="trunc">Rotate the signing keys</span><span class="sig">Review</span></a>
+        <a class="proj"><span class="mono-tile t2">B</span><span class="trunc">billing-service</span></a>
+        <a class="proj"><span class="mono-tile t3">N</span><span class="trunc">northwind-web</span></a>
+      </div>
+      <div class="sb-usage"><span class="um"><span>Claude</span><span class="bar-u"><i style="width:62%"></i></span><span>62%</span></span><span class="um"><span>Codex</span><span class="bar-u"><i style="width:18%"></i></span><span>18%</span></span></div>
+      <div class="sb-foot"><button class="btn"><i class="i s14 i-folder-plus"></i>Add project</button><span class="grow"></span><span class="ib"><i class="i i-settings"></i></span></div>
+    </nav>
+    <div class="gest"></div>
+  </div>
+  <p class="why">Та же боковая панель десктопа, выезжает поверх страницы. Сверху машина и состояние связи. Add project выбирает папку на удалённой машине.</p>
+</section>
+
+<!-- 6 -->
+<section class="shot" id="s6">
+  <h2>6. Выбор машины</h2>
+  <div class="phone touch">
+    <div class="sys"><span>9:41</span><span class="grow"></span><span>5G</span><span>82%</span></div>
+    <div class="under"><div class="bar"><span class="ib"><i class="i i-panel-left"></i></span><span class="title">Home</span></div></div>
+    <div class="scrim"></div>
+    <div class="bsheet">
+      <div class="grab"></div>
+      <div class="sec-h pad"><span>Machines</span></div>
+      <a class="mrow sel"><span class="tile"><i class="i i-laptop"></i></span><div class="grow"><div class="name">Workstation</div><div class="cap st-ok">Connected · direct</div></div><i class="i i-check"></i></a>
+      <a class="mrow"><span class="tile"><i class="i i-server"></i></span><div class="grow"><div class="name">GPU box</div><div class="cap muted">Connected · through relay</div></div></a>
+      <a class="mrow"><span class="tile"><i class="i i-laptop"></i></span><div class="grow"><div class="name">Home laptop</div><div class="cap faint">Offline · last seen yesterday 22:14</div></div></a>
+      <div class="p-foot in"><button class="btn btn-line wide"><i class="i s14 i-plus"></i>Add machine</button></div>
+    </div>
+    <div class="gest"></div>
+  </div>
+  <p class="why">Одна машина за раз, как в десктопе; Inbox и Archive собирают все. Пункта «This machine» нет. Видно, прямое соединение или через relay.</p>
+</section>
+
+<!-- 7 -->
+<section class="shot" id="s7">
+  <h2>7. Вопрос в задаче</h2>
+  <div class="phone touch">
+    <div class="sys"><span>9:41</span><span class="grow"></span><span>5G</span><span>82%</span></div>
+    <div class="bar"><button class="ib"><i class="i i-arrow-left"></i></button><span class="title">Fix token refresh race</span><button class="ib"><i class="i i-more"></i></button></div>
+    <div class="tbar"><span class="grow trunc muted">Executing, 0 of 2 steps done</span><button class="btn"><i class="i s14 i-list"></i>Details</button></div>
+    <div class="p-body feed">
+      <p class="msg">Plan r2 locks the rotation, adds a version column and covers it with a concurrency test.</p>
+      <div class="fold"><i class="i s14 i-chevron-right"></i>Plan r2: 0 of 2 done</div>
+      <div class="qcard">
+        <div class="row"><span class="st-warn row"><i class="i s14 i-question"></i>Question</span><span class="grow"></span><span class="cap faint">waiting 3m</span></div>
+        <div class="q">Which concurrency level should the regression test assert?</div>
+        <button class="opt"><span class="k">1</span><span><b>50 parallel refreshes</b><span class="cap muted">Matches production peak</span></span></button>
+        <button class="opt"><span class="k">2</span><span><b>200 parallel refreshes</b><span class="cap muted">Stress, 40 s per run</span></span></button>
+        <button class="opt"><span class="k">3</span><span><b>Both, with 200 marked slow</b></span></button>
+        <div class="composer m"><div class="ph">Or write your own answer…</div><div class="row"><span class="ib"><i class="i i-clip"></i></span><span class="ib"><i class="i i-mic"></i></span><span class="grow"></span><span class="ib send"><i class="i i-arrow-up"></i></span></div></div>
+      </div>
+    </div>
+    <div class="team"><i class="i s14 i-loader st-run"></i><span class="grow trunc">Backend Dev · Working</span><span class="cap muted">2 of 2</span></div>
+    <div class="gest"></div>
+  </div>
+  <p class="why">Та же карточка вопроса. Варианты во всю ширину, высота строки 48 px. Назад возвращает туда, откуда пришли. Подсказок клавиш нет.</p>
+</section>
+
+<!-- 8 -->
+<section class="shot" id="s8">
+  <h2>8. Связь потеряна</h2>
+  <div class="phone touch">
+    <div class="sys"><span>9:41</span><span class="grow"></span><span>No network</span><span>82%</span></div>
+    <div class="bar"><button class="ib"><i class="i i-arrow-left"></i></button><span class="title">Fix token refresh race</span><button class="ib"><i class="i i-more"></i></button></div>
+    <div class="conn"><i class="i s14 i-wifi-off"></i><span class="grow">Reconnecting to Workstation… Shown as of 9:38.</span><button class="btn btn-sm">Retry</button></div>
+    <div class="p-body feed stale">
+      <p class="msg">Plan r2 locks the rotation, adds a version column and covers it with a concurrency test.</p>
+      <div class="fold"><i class="i s14 i-chevron-right"></i>Plan r2: 0 of 2 done</div>
+      <div class="qcard">
+        <div class="row"><span class="st-warn row"><i class="i s14 i-question"></i>Question</span><span class="grow"></span><span class="cap faint">as of 9:38</span></div>
+        <div class="q">Which concurrency level should the regression test assert?</div>
+        <button class="opt" aria-disabled="true"><span class="k">1</span><span><b>50 parallel refreshes</b><span class="cap muted">Matches production peak</span></span></button>
+        <button class="opt" aria-disabled="true"><span class="k">2</span><span><b>200 parallel refreshes</b><span class="cap muted">Stress, 40 s per run</span></span></button>
+        <div class="composer m off"><div class="ph">Not connected. Your answer is not sent until the machine is reachable.</div><div class="row"><span class="ib"><i class="i i-clip"></i></span><span class="ib"><i class="i i-mic"></i></span><span class="grow"></span><span class="ib send"><i class="i i-arrow-up"></i></span></div></div>
+      </div>
+    </div>
+    <div class="gest"></div>
+  </div>
+  <p class="why">Последнее известное состояние остаётся на экране с временем. Действия выключены с причиной; ничего не ставится в очередь «на потом», чтобы ответ не выглядел отправленным.</p>
+</section>
+
+<!-- 9 -->
+<section class="shot" id="s9">
+  <h2>9. Настройки: машины и этот телефон</h2>
+  <div class="phone touch">
+    <div class="sys"><span>9:41</span><span class="grow"></span><span>5G</span><span>82%</span></div>
+    <div class="bar"><button class="ib"><i class="i i-arrow-left"></i></button><span class="title">Settings</span><span class="ib"></span></div>
+    <div class="p-body flush">
+      <div class="sec-h pad"><span>Machines</span><span class="more">3</span></div>
+      <div class="group">
+        <a class="mrow"><span class="tile"><i class="i i-laptop"></i></span><div class="grow"><div class="name">Workstation</div><div class="cap st-ok">Connected · direct</div></div><i class="i s14 i-chevron-right faint"></i></a>
+        <a class="mrow"><span class="tile"><i class="i i-server"></i></span><div class="grow"><div class="name">GPU box</div><div class="cap muted">Connected · through relay</div></div><i class="i s14 i-chevron-right faint"></i></a>
+        <a class="mrow"><span class="tile"><i class="i i-laptop"></i></span><div class="grow"><div class="name">Home laptop</div><div class="cap faint">Offline · last seen yesterday 22:14</div></div><i class="i s14 i-chevron-right faint"></i></a>
+      </div>
+      <div class="pad"><button class="btn btn-line wide"><i class="i s14 i-plus"></i>Add machine</button></div>
+      <div class="sec-h pad"><span>This phone</span></div>
+      <div class="group">
+        <a class="srow"><span class="grow">Appearance</span><span class="cap muted">System</span><i class="i s14 i-chevron-right faint"></i></a>
+        <a class="srow"><span class="grow">App lock</span><span class="cap muted">Fingerprint</span><i class="i s14 i-chevron-right faint"></i></a>
+        <a class="srow"><span class="grow">Relay server</span><span class="cap muted">Default</span><i class="i s14 i-chevron-right faint"></i></a>
+        <a class="srow"><span class="grow">About and updates</span><span class="cap muted">1.0.6</span><i class="i s14 i-chevron-right faint"></i></a>
+      </div>
+    </div>
+    <div class="gest"></div>
+  </div>
+  <p class="why">Настройки самой машины (подключения, оркестрация, хранилище) открываются из её строки и те же, что в десктопе. У телефона своих мало: тема, блокировка, relay, версия.</p>
+</section>
+
+<!-- 10 -->
+<section class="shot wide" id="s10">
+  <h2>10. Десктоп: Settings → Remote access (нужен для сопряжения)</h2>
+  <div class="desk">
+    <h3>Remote access</h3>
+    <p class="muted">Lets your phone or another computer work with the projects on this machine. Traffic is encrypted end to end; the relay only forwards it.</p>
+    <div class="drow"><div class="grow"><div class="name">Allow remote access</div><div class="cap muted">Off by default. Turning it off disconnects every device.</div></div><label class="sw"><input type="checkbox" checked><i></i></label></div>
+    <div class="pairbox">
+      <div class="qr" aria-label="QR code placeholder"></div>
+      <div class="grow">
+        <div class="name">Pair a device</div>
+        <div class="cap muted">Scan with the phone app, or type the code.</div>
+        <div class="pcode">7KQ2-M9XD</div>
+        <div class="cap faint">Works once · expires in 4:32</div>
+        <div class="row" style="margin-top:8px"><button class="btn btn-line">New code</button><button class="btn">Copy link</button></div>
+      </div>
+    </div>
+    <div class="askbox">
+      <div class="row"><i class="i i-shield st-warn"></i><span class="name">Pixel 9 wants to connect</span></div>
+      <div class="fpr one"><div><span class="lab">This machine shows</span><code>4F2A 91C7 D03E</code></div><div><span class="lab">The phone must show</span><code>4F2A 91C7 D03E</code></div></div>
+      <div class="row end"><button class="btn btn-line">Deny</button><button class="btn btn-primary">Allow</button></div>
+    </div>
+    <div class="sec-h"><span>Devices</span><span class="n">2</span></div>
+    <div class="group">
+      <div class="drow"><i class="i i-monitor faint"></i><div class="grow"><div class="name">Galaxy S24</div><div class="cap muted">Paired 2 Nov · last connected today 9:12</div></div><button class="btn btn-line">Revoke</button></div>
+      <div class="drow"><i class="i i-laptop faint"></i><div class="grow"><div class="name">Home laptop</div><div class="cap muted">Paired 28 Oct · last connected yesterday</div></div><button class="btn btn-line">Revoke</button></div>
+    </div>
+  </div>
+  <p class="why">Сейчас эта страница в десктопе — заглушка. Сопряжение начинается здесь: включить доступ, показать QR, подтвердить устройство, потом отозвать при необходимости.</p>
+</section>
+
+</main>
+</body>
+</html>

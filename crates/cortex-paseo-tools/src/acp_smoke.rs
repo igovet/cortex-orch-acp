@@ -37,10 +37,13 @@ impl Report {
         self.checks.push(entry);
     }
     fn skip(&mut self, name: &str, reason: &str) {
-        self.checks.push(json!({"name": name, "status": "skip", "detail": reason}));
+        self.checks
+            .push(json!({"name": name, "status": "skip", "detail": reason}));
     }
     fn all_passed(&self) -> bool {
-        self.checks.iter().all(|c| matches!(c["status"].as_str(), Some("pass" | "skip")))
+        self.checks
+            .iter()
+            .all(|c| matches!(c["status"].as_str(), Some("pass" | "skip")))
     }
 }
 
@@ -61,9 +64,19 @@ fn cortex_version(root: &Path) -> String {
 /// connection registry (correctly) refuses any ancestor that contains such a marker.
 fn safe_tmp_base() -> PathBuf {
     let env_tmp = std::env::var("TMPDIR").ok();
-    for candidate in [env_tmp.as_deref(), Some("/var/tmp"), Some(std::env::temp_dir().to_str().unwrap_or("/tmp"))].into_iter().flatten() {
+    for candidate in [
+        env_tmp.as_deref(),
+        Some("/var/tmp"),
+        Some(std::env::temp_dir().to_str().unwrap_or("/tmp")),
+    ]
+    .into_iter()
+    .flatten()
+    {
         let path = Path::new(candidate);
-        let writable = path.is_dir() && fs::metadata(path).map(|m| m.permissions().mode() & 0o200 != 0).unwrap_or(false);
+        let writable = path.is_dir()
+            && fs::metadata(path)
+                .map(|m| m.permissions().mode() & 0o200 != 0)
+                .unwrap_or(false);
         if writable && !path.join(".git").exists() && !path.join(".cortex").exists() {
             return path.to_path_buf();
         }
@@ -74,7 +87,10 @@ fn safe_tmp_base() -> PathBuf {
 fn unique_dir(base: &Path, prefix: &str) -> Result<PathBuf, String> {
     let token = fs::read_to_string("/proc/sys/kernel/random/uuid").map_err(|e| e.to_string())?;
     let path = base.join(format!("{prefix}{}", token.trim().replace('-', "")));
-    fs::DirBuilder::new().mode(0o700).create(&path).map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&path)
+        .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
     path.canonicalize().map_err(|e| e.to_string())
 }
 
@@ -97,13 +113,22 @@ fn remove_tree(path: &Path) -> std::io::Result<()> {
 }
 
 fn count_tasks(project: &Path, channel: &str) -> Result<i64, String> {
-    let store = project.join(if channel == "dev" { ".cortex-dev" } else { ".cortex" }).join("cortex.sqlite3");
+    let store = project
+        .join(if channel == "dev" {
+            ".cortex-dev"
+        } else {
+            ".cortex"
+        })
+        .join("cortex.sqlite3");
     if !store.exists() {
         return Ok(0);
     }
-    let connection = rusqlite::Connection::open_with_flags(&store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|e| format!("cannot open the task store read-only: {e}"))?;
-    connection.query_row("SELECT count(*) FROM tasks", [], |row| row.get(0)).map_err(|e| format!("task count unavailable: {e}"))
+    let connection =
+        rusqlite::Connection::open_with_flags(&store, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| format!("cannot open the task store read-only: {e}"))?;
+    connection
+        .query_row("SELECT count(*) FROM tasks", [], |row| row.get(0))
+        .map_err(|e| format!("task count unavailable: {e}"))
 }
 
 /// Seed one fake API-key connection and an exact eligible fake route policy below one config root.
@@ -111,7 +136,11 @@ fn seed_fixture_connection(config_root: &Path) -> Result<(), String> {
     let cortex = config_root.join("cortex");
     let secrets = cortex.join("secrets");
     for dir in [config_root, cortex.as_path(), secrets.as_path()] {
-        fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(|e| e.to_string())?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(|e| e.to_string())?;
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
     }
     let id = "cn_5a0e00000001";
@@ -128,7 +157,10 @@ fn seed_fixture_connection(config_root: &Path) -> Result<(), String> {
         }},
         "override_history": {},
     });
-    write_private(&cortex.join("connections.json"), &format!("{}\n", serde_json::to_string_pretty(&registry).unwrap()))?;
+    write_private(
+        &cortex.join("connections.json"),
+        &format!("{}\n", serde_json::to_string_pretty(&registry).unwrap()),
+    )?;
     let routing = json!({
         "model_policy_version": 2,
         "enabled": {"codex-acp": ["smoke-placeholder-model"]},
@@ -138,12 +170,20 @@ fn seed_fixture_connection(config_root: &Path) -> Result<(), String> {
             "policy": {"smoke-placeholder-model": {}},
         }},
     });
-    write_private(&cortex.join("routing.json"), &format!("{}\n", serde_json::to_string_pretty(&routing).unwrap()))
+    write_private(
+        &cortex.join("routing.json"),
+        &format!("{}\n", serde_json::to_string_pretty(&routing).unwrap()),
+    )
 }
 
 fn write_private(path: &Path, text: &str) -> Result<(), String> {
     use std::io::Write;
-    let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     file.write_all(text.as_bytes()).map_err(|e| e.to_string())
 }
 
@@ -151,13 +191,23 @@ fn request(id: u64, method: &str, params: Value) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 }
 
-fn run_smoke(root: &Path, binary: &Path, fixture: bool, report: &mut Report, keep: bool) -> Result<Value, String> {
+fn run_smoke(
+    root: &Path,
+    binary: &Path,
+    fixture: bool,
+    report: &mut Report,
+    keep: bool,
+) -> Result<Value, String> {
     let base = safe_tmp_base();
     let project = unique_dir(&base, "cortex-acp-smoke-project-")?;
     let home = unique_dir(&base, "cortex-acp-smoke-home-")?;
     let outcome = smoke(root, binary, fixture, report, &project, &home);
     if keep {
-        eprintln!("acp-smoke: kept {} and {}", project.display(), home.display());
+        eprintln!(
+            "acp-smoke: kept {} and {}",
+            project.display(),
+            home.display()
+        );
     } else {
         for path in [&project, &home] {
             if let Err(error) = remove_tree(path) {
@@ -168,7 +218,14 @@ fn run_smoke(root: &Path, binary: &Path, fixture: bool, report: &mut Report, kee
     outcome
 }
 
-fn smoke(root: &Path, binary: &Path, fixture: bool, report: &mut Report, project: &Path, home: &Path) -> Result<Value, String> {
+fn smoke(
+    root: &Path,
+    binary: &Path,
+    fixture: bool,
+    report: &mut Report,
+    project: &Path,
+    home: &Path,
+) -> Result<Value, String> {
     if project.starts_with(root) {
         return Err("refusing to use the repository checkout as an ACP project root".into());
     }
@@ -177,11 +234,20 @@ fn smoke(root: &Path, binary: &Path, fixture: bool, report: &mut Report, project
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let env: Vec<(String, String)> = [
-        ("PATH", std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())),
+        (
+            "PATH",
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
+        ),
         ("HOME", home.display().to_string()),
         ("XDG_CONFIG_HOME", config_home.display().to_string()),
         ("XDG_STATE_HOME", state_home.display().to_string()),
-        ("LANG", std::env::var("LANG").ok().filter(|l| !l.is_empty()).unwrap_or_else(|| "C.UTF-8".into())),
+        (
+            "LANG",
+            std::env::var("LANG")
+                .ok()
+                .filter(|l| !l.is_empty())
+                .unwrap_or_else(|| "C.UTF-8".into()),
+        ),
         // No engine download into this disposable HOME.
         ("CORTEX_ENGINE_UPDATE", "off".into()),
         ("CORTEX_ACP_RUNTIME_ROOT", root.display().to_string()),
@@ -191,13 +257,21 @@ fn smoke(root: &Path, binary: &Path, fixture: bool, report: &mut Report, project
     .collect();
     if fixture {
         // A compiled binary has a channel, not an env-selected one: seed both possible roots.
-        let channels: Value = serde_json::from_str(&fs::read_to_string(root.join("crates/workspace-protocol/channels.json")).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-        let namespace = channels["dev"]["config_namespace"].as_str().ok_or("channels.json lacks the dev config namespace")?;
+        let channels: Value = serde_json::from_str(
+            &fs::read_to_string(root.join("crates/workspace-protocol/channels.json"))
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let namespace = channels["dev"]["config_namespace"]
+            .as_str()
+            .ok_or("channels.json lacks the dev config namespace")?;
         seed_fixture_connection(&config_home)?;
         seed_fixture_connection(&config_home.join(namespace))?;
     }
-    report.skip("schema:frames", "no JSON-schema validator in this tool; frame fields are checked individually");
+    report.skip(
+        "schema:frames",
+        "no JSON-schema validator in this tool; frame fields are checked individually",
+    );
 
     let mut session = AgentSession::spawn(&[binary.display().to_string()], &env, project)?;
     let mut protocol_version = Value::Null;
@@ -211,30 +285,62 @@ fn smoke(root: &Path, binary: &Path, fixture: bool, report: &mut Report, project
         let result = &init["result"];
         protocol_version = result["protocolVersion"].clone();
         let channel = result["_meta"]["cortexChannel"].as_str().unwrap_or("");
-        report.record("initialize:compiled_channel", matches!(channel, "release" | "dev"), Some(json!(channel)));
-        report.record("initialize:protocol_version_1", protocol_version == json!(1), Some(protocol_version.clone()));
+        report.record(
+            "initialize:compiled_channel",
+            matches!(channel, "release" | "dev"),
+            Some(json!(channel)),
+        );
+        report.record(
+            "initialize:protocol_version_1",
+            protocol_version == json!(1),
+            Some(protocol_version.clone()),
+        );
         let caps = &result["agentCapabilities"];
-        report.record("initialize:loadSession_true", caps["loadSession"] == json!(true), Some(caps.clone()));
+        report.record(
+            "initialize:loadSession_true",
+            caps["loadSession"] == json!(true),
+            Some(caps.clone()),
+        );
         report.record(
             "initialize:image_prompt_capability",
-            caps["promptCapabilities"] == json!({"image": true, "audio": false, "embeddedContext": true}),
+            caps["promptCapabilities"]
+                == json!({"image": true, "audio": false, "embeddedContext": true}),
             Some(caps["promptCapabilities"].clone()),
         );
 
-        session.send(&request(2, "session/new", json!({"cwd": project, "mcpServers": []})))?;
+        session.send(&request(
+            2,
+            "session/new",
+            json!({"cwd": project, "mcpServers": []}),
+        ))?;
         let created = session.recv(READ_TIMEOUT)?;
         if created.get("error").is_some() {
             // A failed session/new never gets its available_commands_update; fail now with the real error.
-            return Err(format!("session/new returned an error: {}", created["error"]));
+            return Err(format!(
+                "session/new returned an error: {}",
+                created["error"]
+            ));
         }
         let session_id = created["result"]["sessionId"].as_str().map(String::from);
-        report.record("session/new:has_session_id", session_id.as_deref().is_some_and(|s| !s.is_empty()), None);
-        let options = created["result"]["configOptions"].as_array().cloned().unwrap_or_default();
-        let ids: std::collections::BTreeSet<&str> = options.iter().filter_map(|o| o["id"].as_str()).collect();
+        report.record(
+            "session/new:has_session_id",
+            session_id.as_deref().is_some_and(|s| !s.is_empty()),
+            None,
+        );
+        let options = created["result"]["configOptions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let ids: std::collections::BTreeSet<&str> =
+            options.iter().filter_map(|o| o["id"].as_str()).collect();
         let language_and_access = ids == ["access_mode", "language"].into_iter().collect();
         if fixture {
             // The fixture is API-key based; native session routes currently require native-account auth.
-            report.record("session/new:native_api_key_fixture_not_routable", language_and_access, Some(json!(options)));
+            report.record(
+                "session/new:native_api_key_fixture_not_routable",
+                language_and_access,
+                Some(json!(options)),
+            );
         } else {
             report.record(
                 "session/new:no_model_option_without_connections",
@@ -242,16 +348,22 @@ fn smoke(root: &Path, binary: &Path, fixture: bool, report: &mut Report, project
                 Some(json!(options)),
             );
             let access = options.iter().find(|o| o["id"] == "access_mode");
-            let values: std::collections::BTreeSet<&str> =
-                access.and_then(|o| o["options"].as_array()).into_iter().flatten().filter_map(|o| o["value"].as_str()).collect();
+            let values: std::collections::BTreeSet<&str> = access
+                .and_then(|o| o["options"].as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|o| o["value"].as_str())
+                .collect();
             report.record(
                 "session/new:access_mode_option_shape",
-                access.is_some_and(|o| o["currentValue"] == "development") && values == ["auto", "development", "guarded"].into_iter().collect(),
+                access.is_some_and(|o| o["currentValue"] == "development")
+                    && values == ["auto", "development", "guarded"].into_iter().collect(),
                 Some(access.cloned().unwrap_or(Value::Null)),
             );
         }
         let commands = session.recv(READ_TIMEOUT)?;
-        let names: std::collections::BTreeSet<String> = commands["params"]["update"]["availableCommands"]
+        let names: std::collections::BTreeSet<String> = commands["params"]["update"]
+            ["availableCommands"]
             .as_array()
             .into_iter()
             .flatten()
@@ -266,12 +378,24 @@ fn smoke(root: &Path, binary: &Path, fixture: bool, report: &mut Report, project
         let session_id = session_id.ok_or("no session id to prompt")?;
         session.send(&request(3, "session/prompt", json!({"sessionId": session_id, "prompt": [{"type": "text", "text": "/cortex-status"}]})))?;
         let chunk = session.recv(READ_TIMEOUT)?;
-        report.record("cortex_status:agent_message_chunk", chunk["params"]["update"]["sessionUpdate"] == "agent_message_chunk", None);
+        report.record(
+            "cortex_status:agent_message_chunk",
+            chunk["params"]["update"]["sessionUpdate"] == "agent_message_chunk",
+            None,
+        );
         let status = session.recv(READ_TIMEOUT)?;
-        report.record("cortex_status:end_turn", status["result"]["stopReason"] == "end_turn", Some(status.clone()));
+        report.record(
+            "cortex_status:end_turn",
+            status["result"]["stopReason"] == "end_turn",
+            Some(status.clone()),
+        );
         let channel_name = if channel == "dev" { "dev" } else { "release" };
         match count_tasks(project, channel_name) {
-            Ok(count) => report.record("cortex_status:no_task_created", count == 0, Some(json!(count))),
+            Ok(count) => report.record(
+                "cortex_status:no_task_created",
+                count == 0,
+                Some(json!(count)),
+            ),
             Err(error) => report.record("cortex_status:no_task_created", false, Some(json!(error))),
         }
 
@@ -281,7 +405,9 @@ fn smoke(root: &Path, binary: &Path, fixture: bool, report: &mut Report, project
         let error = &refused["error"];
         report.record(
             "normal_prompt:orchestration_unavailable",
-            error["code"] == -32001 && error["message"] == "orchestration_unavailable" && error["data"]["reason"] == "no_configuration_revision",
+            error["code"] == -32001
+                && error["message"] == "orchestration_unavailable"
+                && error["data"]["reason"] == "no_configuration_revision",
             Some(error.clone()),
         );
         Ok(())
@@ -335,8 +461,13 @@ pub fn run(argv: &[String]) -> (String, i32) {
         Ok(found) => versions = found,
         Err(error) => report.record("harness:fatal", false, Some(json!(error))),
     }
-    let run_id = fs::read_to_string("/proc/sys/kernel/random/uuid").map(|u| u.trim().to_string()).unwrap_or_default();
-    let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    let run_id = fs::read_to_string("/proc/sys/kernel/random/uuid")
+        .map(|u| u.trim().to_string())
+        .unwrap_or_default();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
     let summary = json!({
         "entry": {"kind": "rust", "argv": [binary]}, "versions": versions, "checks": report.checks,
         "all_passed": report.all_passed(), "run_id": run_id, "timestamp": timestamp,
@@ -344,7 +475,10 @@ pub fn run(argv: &[String]) -> (String, i32) {
     let text = serde_json::to_string_pretty(&summary).unwrap_or_default();
     match &report_path {
         Some(path) => {
-            let written = path.parent().map_or(Ok(()), fs::create_dir_all).and_then(|()| fs::write(path, format!("{text}\n")));
+            let written = path
+                .parent()
+                .map_or(Ok(()), fs::create_dir_all)
+                .and_then(|()| fs::write(path, format!("{text}\n")));
             if let Err(error) = written {
                 eprintln!("acp-smoke: cannot write {}: {error}", path.display());
                 return (String::new(), 1);
@@ -353,9 +487,17 @@ pub fn run(argv: &[String]) -> (String, i32) {
         None => eprintln!("{text}"),
     }
     if !report.all_passed() {
-        let failed: Vec<String> =
-            report.checks.iter().filter(|c| c["status"] == "fail").map(|c| format!("{}: {}", c["name"].as_str().unwrap_or(""), c["detail"])).collect();
-        eprintln!("acp-smoke: FAILED ({} check(s)): {}", failed.len(), failed.join("; "));
+        let failed: Vec<String> = report
+            .checks
+            .iter()
+            .filter(|c| c["status"] == "fail")
+            .map(|c| format!("{}: {}", c["name"].as_str().unwrap_or(""), c["detail"]))
+            .collect();
+        eprintln!(
+            "acp-smoke: FAILED ({} check(s)): {}",
+            failed.len(),
+            failed.join("; ")
+        );
     }
     (String::new(), i32::from(!report.all_passed()))
 }

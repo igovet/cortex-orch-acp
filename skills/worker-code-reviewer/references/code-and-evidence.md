@@ -14,16 +14,18 @@ use its own tools first for every code discovery question: definitions, callers,
 impact and implementation reads. Use repository-native search or file reads only
 for literal text, configuration and non-code files, for paths the index does not
 cover, or when no matching healthy index exists. Discover the needed operation
-names and read their complete advertised schemas.
+names and read their complete advertised schemas. The operations described below
+belong to that external server, never to the Cortex server: use one only when your
+session lists it under that server, and otherwise use the Cortex read tools.
 
-Call `list_projects` once and select the project whose full root path matches the
-exact workspace, not a similar project or another worktree; never guess a project
-name from the path. If multiple entries match, compare `index_status` and relevant
-`check_index_coverage` results to select the healthy index covering the assigned
+List the server's indexed projects once and select the one whose full root path
+matches the exact workspace, not a similar project or another worktree; never guess
+a project name from the path. If multiple entries match, compare their index status
+and relevant coverage checks to select the healthy index covering the assigned
 scope. A ready index can still exclude the entire subsystem. If no matching index
-exists and `index_repository` is among your granted tools, make one initial attempt
-for the authorized exact workspace root; otherwise record the missing index as a
-limitation. Do not substitute the logical repository root for a linked worktree,
+exists and the server's indexing operation is among your granted tools, make one
+initial attempt for the authorized exact workspace root; otherwise record the
+missing index as a limitation. Do not substitute the logical repository root for a linked worktree,
 change ignore rules, or retry argument variations after an indexing error.
 
 An indexer can reject an otherwise valid linked worktree. Treat that failed single
@@ -33,12 +35,12 @@ worktree can still be rejected by an indexer; do not assume another worktree's
 successful index covers it. Follow the live schema for tool arguments: this guidance
 only determines when an index attempt is appropriate.
 
-Use the smallest operation that answers the question: `search_graph` for definitions,
-`trace_path` for callers, dependencies and impact paths, and `get_code_snippet` for the
-selected implementation. Use scoped `get_architecture` for orientation, or
-`get_graph_schema` before a complex `query_graph`; `detect_changes` serves an
-established Git comparison. Literal/configuration/documentation text may use
-`search_code` or bounded native search. Follow live schemas for arguments.
+Use the smallest operation that answers the question: the server's definition
+search, its caller/dependency/impact trace and its implementation snippet read.
+Use its scoped architecture overview for orientation, or its graph schema before
+a complex graph query; its change detection serves an established Git comparison.
+Literal/configuration/documentation text may use the server's text search or bounded
+native search. Follow live schemas for arguments.
 
 Confirm consequential graph findings against current source. Check coverage for cited or
 edited paths and scopes behind negative or exhaustive claims. Follow returned

@@ -2,7 +2,7 @@ import { createMemo, createSignal, For, Match, Show, Switch, type JSX } from "so
 import type { Problem } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { onScreen } from "./freshness";
-import { A, I, MenuItem, Pop } from "./kit";
+import { A, I, Keyed, MenuItem, Pop } from "./kit";
 import { ActionBar, ReasonSlot, SectionHead } from "./layout";
 import type { HelpText } from "./orch-help";
 import type { Route } from "./router";
@@ -24,12 +24,12 @@ export function SetH(props: { title: JSX.Element; count?: number; children?: JSX
 }
 
 export function Seg<T extends string>(props: { label: string; value: T; options: readonly { id: T; label: string; icon?: string; off?: string }[]; onChange: (id: T) => void; disabled?: string }) {
-  return <div class="seg tall" role="group" aria-label={props.label}><For each={props.options}>{o => {
-    const off = () => o.off ?? props.disabled;
-    return <button aria-current={props.value === o.id ? "true" : "false"} aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) props.onChange(o.id); }}>
-      <Show when={o.icon}><I n={o.icon!} s={14} /></Show>{o.label}
+  return <div class="seg tall" role="group" aria-label={props.label}><Keyed each={props.options} by={o => o.id}>{o => {
+    const off = () => o().off ?? props.disabled;
+    return <button aria-current={props.value === o().id ? "true" : "false"} aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) props.onChange(o().id); }}>
+      <Show when={o().icon}><I n={o().icon!} s={14} /></Show>{o().label}
     </button>;
-  }}</For></div>;
+  }}</Keyed></div>;
 }
 /** The box shows what the draft says, so a refused change snaps back. Read through a memo: a conditional prop read in a handler would build a computation with no owner. */
 export function Sw(props: { label: string; checked: boolean; onChange: (on: boolean) => void; disabled?: string }) {
@@ -57,7 +57,7 @@ export function Pick(props: { id: string; label: string; value: string; options:
       <span class="trunc">{text()}</span><I n="chevron-down" s={12} />
     </button>
     <Pop id={props.id} class="pop-right" align="right" label={props.label}>
-      <For each={props.options}>{o => <MenuItem label={o.label} sub={o.sub ?? o.off} disabled={o.off} check={o.id === props.value} onSelect={() => props.onPick(o.id)} />}</For>
+      <Keyed each={props.options} by={o => o.id}>{o => <MenuItem label={o().label} sub={o().sub ?? o().off} disabled={o().off} check={o().id === props.value} onSelect={() => props.onPick(o().id)} />}</Keyed>
     </Pop>
   </>;
 }
@@ -134,7 +134,7 @@ export function Adv(props: { id: string; label?: string; force?: boolean; childr
   </div>;
 }
 export function Tabs(props: { label: string; tabs: readonly { id: string; label: string; n?: number; off?: string }[]; current: string; route: (id: string) => Route }) {
-  return <div class="tabs ws-tabs" role="tablist" aria-label={props.label}><For each={props.tabs}>{t => <Show when={!t.off} fallback={<span class="tab" role="tab" aria-selected="false" aria-disabled="true" data-why={t.off}>{t.label}</span>}><A class="tab" role="tab" aria-selected={props.current === t.id ? "true" : "false"} to={props.route(t.id)}>{t.label}<Show when={t.n !== undefined}><span class="n">{t.n}</span></Show></A></Show>}</For></div>;
+  return <div class="tabs ws-tabs" role="tablist" aria-label={props.label}><Keyed each={props.tabs} by={t => t.id}>{t => <Show when={!t().off} fallback={<span class="tab" role="tab" aria-selected="false" aria-disabled="true" data-why={t().off}>{t().label}</span>}><A class="tab" role="tab" aria-selected={props.current === t().id ? "true" : "false"} to={props.route(t().id)}>{t().label}<Show when={t().n !== undefined}><span class="n">{t().n}</span></Show></A></Show>}</Keyed></div>;
 }
 
 function Review<T>(props: { d: Draft<T> }) {

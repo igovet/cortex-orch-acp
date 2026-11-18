@@ -25,7 +25,7 @@ function mount(open=false, enabled=true, failure=false) {
 }
 it("notifies once for an unseen question off-task, not on every refresh or reconnect", async()=>{
   const h=mount();
-  await flush(); expect(h.notify).toHaveBeenCalledWith("Fix the race");
+  await flush(); expect(h.notify).toHaveBeenCalledWith({label:"Fix the race",target:{kind:"question",project:"p",task:"t",decision:"q"}});
   h.setState(s=>({...s})); await flush(); expect(h.notify).toHaveBeenCalledTimes(1);
   h.setState(s=>({...s,machines:s.machines.map(m=>({...m,connection:"disconnected"}))}));
   h.setState(s=>({...s,machines:s.machines.map(m=>({...m,connection:"connected"}))}));
@@ -44,7 +44,7 @@ it("names a delivery failure instead of pretending a notification arrived",async
 it("notifies for a hidden planning run through its visible sprint",async()=>{
   const h=mount(false); h.notify.mockClear();
   h.setState(s=>({...s,tasks:[],sprints:[{id:"sprint",projectId:"p",description:"Plan",title:"Sprint work",planningTaskId:"t",runMode:"manual",targetBranch:null,planning:"question",conversation:[],plan:null,materializedVersion:null,taskIds:[],queueState:"idle",pauseReason:null}],sessions:s.sessions.map(t=>({...t,decisions:t.decisions.map(d=>({...d,id:"planning-q"}))}))}));
-  await flush(); expect(h.notify).toHaveBeenCalledWith("Sprint work");
+  await flush(); expect(h.notify).toHaveBeenCalledWith({label:"Sprint work",target:{kind:"planning",project:"p",sprint:"sprint",decision:"planning-q"}});
 });
 // Live run: after an app relaunch the OS notification for a question shown and announced before the restart fired again.
 it("does not announce a question again after a relaunch, but announces one that arrived while the app was closed",async()=>{
@@ -58,5 +58,5 @@ it("does not announce a question again after a relaunch, but announces one that 
 });
 it("still notifies when the saved list is unreadable",async()=>{
   localStorage.setItem(SEEN_QUESTIONS_KEY,"{not json");
-  const h=mount(); await flush(); expect(h.notify).toHaveBeenCalledWith("Fix the race");
+  const h=mount(); await flush(); expect(h.notify).toHaveBeenCalledWith(expect.objectContaining({label:"Fix the race"}));
 });

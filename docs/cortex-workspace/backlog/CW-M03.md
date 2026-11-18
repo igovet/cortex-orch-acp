@@ -1,6 +1,6 @@
 # CW-M03: Mobile file/Git conflict flow and desktop return; owner Gate M
 
-**Status:** planned · **Phase:** 2 · **Size:** M
+**Status:** Partly recorded: the owner approved the static mockups and listed decisions on 2026-11-17; physical-device and accessibility observations are not recorded · **Phase:** 2 · **Size:** M
 
 ## Goal
 Mobile file/Git conflict flow and desktop return; owner Gate M.

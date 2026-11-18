@@ -23,7 +23,10 @@ union Event {
 }
 
 pub fn delete_window(window: &str) -> Res<()> {
-    let id: c_ulong = window.trim().parse().map_err(|_| "window id is not a number".to_string())?;
+    let id: c_ulong = window
+        .trim()
+        .parse()
+        .map_err(|_| "window id is not a number".to_string())?;
     let name = CString::new("libX11.so.6").unwrap();
     let lib = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW) };
     if lib.is_null() {
@@ -38,8 +41,10 @@ pub fn delete_window(window: &str) -> Res<()> {
         Ok(unsafe { std::mem::transmute_copy::<*mut c_void, T>(&p) })
     }
     let open: unsafe extern "C" fn(*const c_char) -> *mut c_void = sym(lib, "XOpenDisplay")?;
-    let intern: unsafe extern "C" fn(*mut c_void, *const c_char, c_int) -> c_ulong = sym(lib, "XInternAtom")?;
-    let send: unsafe extern "C" fn(*mut c_void, c_ulong, c_int, c_long, *mut Event) -> c_int = sym(lib, "XSendEvent")?;
+    let intern: unsafe extern "C" fn(*mut c_void, *const c_char, c_int) -> c_ulong =
+        sym(lib, "XInternAtom")?;
+    let send: unsafe extern "C" fn(*mut c_void, c_ulong, c_int, c_long, *mut Event) -> c_int =
+        sym(lib, "XSendEvent")?;
     let flush: unsafe extern "C" fn(*mut c_void) -> c_int = sym(lib, "XFlush")?;
     let close: unsafe extern "C" fn(*mut c_void) -> c_int = sym(lib, "XCloseDisplay")?;
     unsafe {

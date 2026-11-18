@@ -1,0 +1,38 @@
+# iroh-relay 1.4.x configuration (plain HTTP behind a TLS-terminating proxy).
+# Keys verified against iroh-relay 1.4.1 src/main.rs (struct Config).
+
+# Relay service on. (default true)
+enable_relay = true
+
+# Plain HTTP listener. There is deliberately NO [tls] section: Traefik terminates
+# TLS and forwards plain HTTP here. Port 8080 because the container is non-root
+# and cannot bind port 80. Without [tls] the relay serves /relay, /ping,
+# /healthz, /generate_204, / and /robots.txt all on this one socket.
+http_bind_addr = "[::]:8080"
+
+# QUIC address discovery needs its own UDP port and a TLS certificate held by the
+# relay itself (Traefik cannot terminate it). Left off; see README.md.
+enable_quic_addr_discovery = false
+
+# Metrics (Prometheus text) are off. When enabled they listen on a separate port
+# (default 9090) and must never be exposed through Traefik.
+enable_metrics = false
+# metrics_bind_addr = "[::]:9090"
+
+# Access control. Device authorization never rests on the relay: it only
+# forwards end-to-end encrypted traffic and cannot read or authorize anything.
+# Open mode lets any endpoint use the relay.
+access = "everyone"
+# To restrict (use one form instead of the line above; TOML does not allow both):
+#   access.allowlist = ["<endpoint-id-hex>", "<endpoint-id-hex>"]
+#   access.denylist  = ["<endpoint-id-hex>"]
+# Other modes in 1.4.1: access.shared_token = ["..."] (also env IROH_RELAY_ACCESS_TOKEN)
+# and [access.http] url = "..." (POST callback). Both need a secret or a service.
+
+# Optional rate limits (disabled when absent). Values are examples only.
+# [limits]
+# accept_conn_limit = 50.0       # new connections per second
+# accept_conn_burst = 100
+# [limits.client.rx]
+# bytes_per_second = 2097152     # per client, incoming; must be set to use a burst
+# max_burst_bytes = 8388608

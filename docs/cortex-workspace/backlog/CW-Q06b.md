@@ -1,6 +1,6 @@
 # CW-Q06b: Android pilot checklist and Android qualified-support statement
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Not implemented; mobile, gated by Gate M · **Phase:** 3+ · **Size:** M
 
 Split from [CW-Q06](CW-Q06.md) for the Android client. This is a mobile qualification item and is gated by Gate M. The desktop pilot is in [CW-Q06a](CW-Q06a.md).
 

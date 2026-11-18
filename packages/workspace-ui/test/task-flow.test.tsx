@@ -17,10 +17,11 @@ const settled = async () => { for (let i = 0; i < 12; i++) await flush(); };
 const $ = <T extends Element = HTMLElement>(selector: string) => document.querySelector<T>(selector);
 const all = <T extends Element = HTMLElement>(selector: string) => [...document.querySelectorAll<T>(selector)];
 const button = (text: string) => all("button").find(b => b.textContent?.trim().startsWith(text) || b.getAttribute("aria-label") === text)!;
-/** Chooses an option of the question on view; choosing alone sends nothing. */
-const choose = (label: string) => all('.dc-panel:not([aria-hidden="true"]) .opt').find(o => o.textContent?.includes(label))!.click();
-/** Presses the paper plane of the question on view. */
-const plane = async () => { $<HTMLButtonElement>('.dc-panel:not([aria-hidden="true"]) [aria-label="Send answer"]')!.click(); await settled(); };
+/** Chooses an option of a question of the form; choosing alone sends nothing. */
+const choose = (label: string) => all(".dc-panel .opt").find(o => o.textContent?.includes(label))!.click();
+/** Presses the form's one Send answers button. */
+const sendAll = async () => { button("Send answers").click(); await settled(); };
+const write = (field: HTMLTextAreaElement, value: string) => { field.value = value; field.dispatchEvent(new Event("input", { bubbles: true })); };
 async function mount(port: Parameters<typeof Workspace>[0]["port"], path: string) {
   history.replaceState(null, "", path);
   const root = document.createElement("div");
@@ -78,62 +79,92 @@ const questions = [
 ];
 
 describe("several questions at once", () => {
-  it("shows every question of a planning run as a tab, with the count, and each can be read", async () => {
+  const answered = (s: ReturnType<typeof planning>) => s.calls.filter(c => c.operation === "decisions.answer").map(c => c.message as { target: string; payload: { batchId: string; answers: { decisionId: string; text: string; optionId: string | null }[] } });
+
+  it("shows every question of a planning run in one form, with the count, each with its own answer", async () => {
     const s = planning({ decisions: questions });
     await mount(s.port, SPRINT);
     expect(all(".dc")).toHaveLength(1);
-    expect(all(".dc-tab").map(t => t.textContent?.trim())).toEqual(["1", "2", "3"]);
+    expect(all(".dc-tab")).toEqual([]);
     expect($(".dc-h")?.textContent).toBe("3 questions" + $(".dc-h .r")!.textContent);
-    const shown = () => all('.dc-panel:not([aria-hidden="true"]) .dc-q').map(q => q.textContent);
-    expect(shown()).toEqual(["Who is it for?"]);
-    all(".dc-tab")[2].click(); await settled();
-    expect(shown()).toEqual(["Which style?"]);
-    expect(all(".dc-tab")[2].getAttribute("aria-selected")).toBe("true");
+    expect(all(".dc-panel .dc-q").map(q => q.textContent)).toEqual(["Who is it for?", "What should a visitor do?", "Which style?"]);
+    expect(all(".dc-panel").map(p => p.getAttribute("aria-label"))).toEqual(["Question 1 of 3", "Question 2 of 3", "Question 3 of 3"]);
+    expect(all(".dc textarea").map(t => t.getAttribute("aria-label"))).toEqual(["Your answer to question 1", "Your answer to question 2", "Your answer to question 3"]);
+    // One button sends them all: no question has a paper plane of its own.
+    expect(all('.dc [aria-label="Send answer"]')).toEqual([]);
+    expect(all(".dc button").filter(b => b.textContent?.trim() === "Send answers")).toHaveLength(1);
   });
 
-  it("choosing an option only prepares the answer; the plane sends it", async () => {
+  it("offers no model or effort in the answer form: the answer goes into the run's own session", async () => {
+    const s = planning({ decisions: questions });
+    await mount(s.port, SPRINT);
+    expect($(".dc .c-route")).toBeNull();
+    expect(all(".dc [aria-label]").filter(el => /^(Coordinator model|Reasoning effort)/.test(el.getAttribute("aria-label")!))).toEqual([]);
+  });
+
+  it("choosing an option only prepares the answer; writing adds the owner's words to it", async () => {
     const s = planning({ decisions: questions });
     await mount(s.port, SPRINT);
     choose("Home buyers");
+    await settled();
     expect(all(".opt").find(o => o.textContent?.includes("Home buyers"))?.getAttribute("aria-checked")).toBe("true");
-    expect(all('.dc-tab[aria-label$="answered"]')).toEqual([]);
-    expect($('.dc-panel:not([aria-hidden="true"]) .mc-effect')?.textContent).toBe("Answer: Home buyers");
-    // Writing your own answer replaces the chosen option, so the plane sends what the card shows.
-    const field = $<HTMLTextAreaElement>('.dc-panel:not([aria-hidden="true"]) [aria-label="Your answer"]')!;
-    field.value = "Both, really"; field.dispatchEvent(new Event("input", { bubbles: true })); await settled();
-    expect(all(".opt").find(o => o.textContent?.includes("Home buyers"))?.getAttribute("aria-checked")).toBe("false");
-    await plane();
-    expect(all('.dc-tab[aria-label$="answered"]').map(t => t.dataset.ask)).toEqual(["d1"]);
+    expect(all(".dc-panel .mc-effect")[0]?.textContent).toBe("Answer: Home buyers");
+    // The owner may choose an option and add their own words: both stay, as one answer.
+    write($<HTMLTextAreaElement>('[aria-label="Your answer to question 1"]')!, "Both, really"); await settled();
+    expect(all(".opt").find(o => o.textContent?.includes("Home buyers"))?.getAttribute("aria-checked")).toBe("true");
+    expect($<HTMLTextAreaElement>('[aria-label="Your answer to question 1"]')!.value).toBe("Both, really");
+    expect($(".dc-send")?.textContent).toContain("1 of 3 answered");
+    expect(answered(s)).toEqual([]);
   });
 
-  it("marks each answer on its tab, moves on, and sends the batch once, whatever order they came in", async () => {
+  it("waits for an answer to every question, then sends the whole batch once with the one button", async () => {
     const s = planning({ decisions: questions });
     await mount(s.port, SPRINT);
-    all(".dc-tab")[1].click(); await settled();
-    choose("Only look"); await plane();
-    expect(s.calls.filter(c => c.operation === "decisions.answer")).toEqual([]);
-    expect(all('.dc-tab[aria-label$="answered"]').map(t => t.dataset.ask)).toEqual(["d2"]);
-    expect($(".dc-tabs .r")?.textContent).toBe("1 of 3 answered");
-    expect(all('.dc-panel:not([aria-hidden="true"]) .dc-q').map(q => q.textContent)).toEqual(["Who is it for?"]);
-    choose("Home buyers"); await plane();
-    choose("Warm"); await plane();
-    const sent = s.calls.filter(c => c.operation === "decisions.answer").map(c => c.message as { payload: { answers: { decisionId: string; text: string; optionId: string | null }[] } });
+    choose("Only look"); choose("Home buyers"); await settled();
+    expect(button("Send answers").getAttribute("aria-disabled")).toBe("true");
+    expect(button("Send answers").dataset.why).toBe("Answer every question first: 2 of 3 answered");
+    await sendAll();
+    expect(answered(s)).toEqual([]);
+    choose("Warm"); await settled();
+    expect(button("Send answers").getAttribute("aria-disabled")).toBeNull();
+    await sendAll();
+    const sent = answered(s);
     expect(sent).toHaveLength(1);
+    expect(sent[0].target).toBe("b");
     expect(sent[0].payload.answers.map(a => [a.decisionId, a.text, a.optionId])).toEqual([["d1", "Home buyers", "o1"], ["d2", "Only look", "o3"], ["d3", "Warm", "o4"]]);
+    // Sent, the questions read as answered and never come back as open ones, though the machine's record has not caught up.
+    expect(all(".dc .qa-a").map(a => a.textContent)).toEqual(["Home buyers", "Only look", "Warm"]);
+    expect(button("Send answers")).toBeUndefined();
+    expect(all(".dc .opt")).toEqual([]);
+    expect($('.dc [role="status"]')?.textContent).toBe("Answers sent; work continues with them.");
+    s.send({ type: "invalidated", projectId: "p" }); await settled();
+    expect(all(".dc .opt")).toEqual([]);
+    expect(answered(s)).toHaveLength(1);
   });
 
-  it("keeps an unsent answer changeable until the last one goes", async () => {
+  it("keeps every answer and says why when the machine refuses the batch, and sends again on request", async () => {
     const s = planning({ decisions: questions });
+    let refuse = true;
+    s.answers["decisions.answer"] = message => ({ requestId: (message as { requestId: string }).requestId, outcome: refuse ? "busy" : "recorded", target: "b", entityVersion: "3", recordedAt: "2026-11-05T00:00:00Z" });
     await mount(s.port, SPRINT);
-    choose("Home buyers"); await plane();
-    all(".dc-tab")[0].click(); await settled();
-    expect(all(".opt").find(o => o.textContent?.includes("Home buyers"))?.getAttribute("aria-checked")).toBe("true");
-    choose("Offices"); await plane();
-    expect(all(".opt").find(o => o.textContent?.includes("Offices"))?.getAttribute("aria-checked")).toBe("true");
-    expect(s.calls.filter(c => c.operation === "decisions.answer")).toEqual([]);
+    choose("Offices"); choose("Only look");
+    write($<HTMLTextAreaElement>('[aria-label="Your answer to question 3"]')!, "Warm,\nbut calm"); await settled();
+    await sendAll();
+    expect(answered(s)).toHaveLength(1);
+    expect($('.dc [role="alert"]')?.textContent).toMatch(/Your answers are kept/);
+    expect(all(".opt").filter(o => o.getAttribute("aria-checked") === "true").map(o => o.querySelector(".t")?.textContent)).toEqual(["Offices", "Only look"]);
+    expect($<HTMLTextAreaElement>('[aria-label="Your answer to question 3"]')!.value).toBe("Warm,\nbut calm");
+    expect(all(".dc .qa")).toEqual([]);
+    refuse = false;
+    await sendAll();
+    const sent = answered(s);
+    expect(sent).toHaveLength(2);
+    expect(sent[1].payload.answers.map(a => a.text)).toEqual(["Offices", "Only look", "Warm,\nbut calm"]);
+    expect($('.dc [role="alert"]')).toBeNull();
+    expect(all(".dc .qa")).toHaveLength(3);
   });
 
-  it("uses one tab card for a task's open questions too, and a single question has no tabs", async () => {
+  it("uses one form for a task's open questions too, and a single question keeps its own Send answer", async () => {
     const tasks = [wireTask({ executionId: "e", phase: "waiting", runtimeState: "WAITING_USER", executionState: "waiting_user" })];
     const s = planning({ decisions: questions.slice(0, 2) });
     s.answers["product.read"] = undefined;
@@ -142,12 +173,24 @@ describe("several questions at once", () => {
     s.answers["machine.call"] = message => (message as { op: string }).op === "product.read" ? { ok: true, result: { tasks: {}, sprints: [], messages: [] } } : machine(message);
     await mount(s.port, `/m/${LOCAL_MACHINE_ID}/t/task-1`);
     expect(all(".timeline .dc")).toHaveLength(1);
-    expect(all(".dc-tab")).toHaveLength(2);
+    expect(all(".timeline .dc .dc-panel")).toHaveLength(2);
+    expect($(".timeline .dc .c-route")).toBeNull();
+    choose("Home buyers"); choose("Only look"); await settled();
+    await sendAll();
+    expect(s.calls.filter(c => c.operation === "decisions.answer").map(c => (c.message as { payload: { answers: { text: string }[] } }).payload.answers.map(a => a.text))).toEqual([["Home buyers", "Only look"]]);
     dispose?.(); document.body.innerHTML = "";
     s.answers["decisions.list"] = () => ({ items: questions.slice(0, 1), nextCursor: null, highWatermark: "4" });
     await mount(createRealPort({ transport: s.transport, actorId: "owner", registry: true }), `/m/${LOCAL_MACHINE_ID}/t/task-1`);
-    expect(all(".dc-tab")).toEqual([]);
     expect($(".dc-h")?.textContent).toContain("Question");
+    expect(button("Send answers")).toBeUndefined();
+    expect($('.dc [aria-label="Send answer"]')).not.toBeNull();
+    expect($(".timeline .dc .c-route")).toBeNull();
+    // Once recorded, the plane leaves and the question reads as answered.
+    choose("Home buyers"); await settled();
+    $<HTMLElement>('.dc [aria-label="Send answer"]')!.click(); await settled();
+    expect($('.dc [aria-label="Send answer"]')).toBeNull();
+    expect(all(".dc .qa-a").map(a => a.textContent)).toEqual(["Home buyers"]);
+    expect($('.dc [role="status"]')?.textContent).toBe("Answer sent; work continues with it.");
   });
 
   it("names how many questions wait in the Inbox", async () => {
@@ -207,10 +250,10 @@ describe("the plan under a resting pointer", () => {
   it("keeps a half-written other answer through the same reads", async () => {
     const s = planning({ decisions: questions });
     await mount(s.port, SPRINT);
-    const field = $<HTMLTextAreaElement>('.dc-panel:not([aria-hidden="true"]) [aria-label="Your answer"]')!;
+    const field = $<HTMLTextAreaElement>('[aria-label="Your answer to question 2"]')!;
     field.value = "Half written"; field.dispatchEvent(new Event("input", { bubbles: true }));
     s.send({ type: "invalidated", projectId: "p" }); await settled();
-    expect($('.dc-panel:not([aria-hidden="true"]) [aria-label="Your answer"]')).toBe(field);
+    expect($('[aria-label="Your answer to question 2"]')).toBe(field);
     expect(field.value).toBe("Half written");
   });
 

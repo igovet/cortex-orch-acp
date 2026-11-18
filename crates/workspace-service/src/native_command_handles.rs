@@ -224,7 +224,12 @@ pub(super) async fn execute(
         timeout: args["timeout_seconds"].as_u64().unwrap_or(1800),
     };
     let before = native_commands::check_digest(root.clone(), &argv).await;
-    let mut child = Command::new(std::env::current_exe()?)
+    let mut launcher = Command::new(std::env::current_exe()?);
+    // Read now, so a changed tool search path applies from the next command on.
+    if let Some(path) = crate::tool_path::current() {
+        launcher.env("PATH", path);
+    }
+    let mut child = launcher
         .arg(supervisor::MODE)
         .env_remove("CORTEX_CHANNEL_SECRET")
         .stdin(Stdio::piped())

@@ -46,13 +46,34 @@ it("says the task waits for the owner, not that it is working, while its questio
   expect(document.querySelector(".timeline")!.textContent).not.toContain("Working…");
   // The header says the same thing.
   expect(document.body.textContent).toContain("Needs you");
-  // A sibling still running is work going on: then the line and the header both say Working.
+  // A sibling still running is work going on: the line has a spinner again, and speaking for the coordinator it waits for that worker.
   const next = world({ status: "needs_you" }, [stopped, worker({ id: "w2", role: "frontend-dev" })], [question], [{ id: "e-d1", kind: "decision", decisionId: "d1" }]);
   p.emit(projection("2", next)); await settle();
-  expect(document.querySelector(".timeline [role=status]")?.textContent).toBe("Working…");
-  // Working again once the answer is in.
+  expect(document.querySelector(".timeline [role=status]")?.textContent).toBe("Waiting for frontend-dev…");
+  expect(document.querySelector(".timeline [role=status] .spin")).not.toBeNull();
+  // Still working once the answer is in, while the worker runs.
   p.emit(projection("3", world({ status: "working" }, [worker({ id: "w2" })], []))); await settle();
+  expect(document.querySelector(".timeline [role=status]")?.textContent).toBe("Waiting for backend-dev…");
+  p.emit(projection("4", world({ status: "working" }, [], []))); await settle();
   expect(document.querySelector(".timeline [role=status]")?.textContent).toBe("Working…");
+});
+
+it("explains a wait while decision details are unavailable", async () => {
+  await mount(world({ status: "needs_you", issue: null }, [], []));
+  expect(document.querySelector("#decision-issue")?.textContent).toContain("Use Answer in the task header");
+});
+
+it("renders an available question even before its timeline reference arrives", async () => {
+  await mount(world({ status: "needs_you" }, [], [question]));
+  expect(document.querySelector(".timeline")?.textContent).toContain(question.text);
+  expect(document.querySelector(".timeline")?.textContent).toContain("Start again");
+});
+
+it("shows sent attachment chips when runtime history trims the message", async () => {
+  const state = world({ status: "working" }, [], [], [{id:"h",kind:"said",text:"Look here"}]);
+  state.messages = [{id:"sent",taskId:"t",workerId:null,text:" Look here\n",mode:"send_now",delivery:"recorded",at:1,deliveredAt:1,failure:null,attachments:["clipboard.png"]}];
+  await mount(state);
+  expect(document.querySelector(".timeline .mine")?.textContent).toContain("clipboard.png");
 });
 
 const LONG_GOAL = ["Project: tally library (plain Node.js, CommonJS, no dependencies).", "Goal: add formatAll(registry) to src/format.js.", "Requirements:",

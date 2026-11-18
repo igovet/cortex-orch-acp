@@ -131,7 +131,7 @@ role-scoped package references under the same allowlist as its parent skill.
 Projects add their own procedures with `/skill-management`, described in
 [commands and project skill management](../skill-management/index.md). A project skill
 is created under `.agents/skills/<name>/` and listed to the session; it is read by its
-exact path through `read_skill`.
+name or path through `read_skill`.
 
 The design workflow asks workers to prefer an applicable session-listed project skill over
 a bundled one, subject to project instructions, authorization and the agreed brief. That

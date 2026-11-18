@@ -410,7 +410,7 @@ impl<'a> Publisher<'a> {
         key: &str,
     ) -> CoreResult<Draft> {
         if template == "pipeline" {
-            return refuse("runtime_owned_pipeline");
+            return refuse("runtime_owned_operation");
         }
         self.create(task, owner, template, key)
     }

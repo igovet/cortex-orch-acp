@@ -24,7 +24,18 @@ fn config_with(value: &str, effort: &str) -> Value {
         json!({"id":id,"name":id,"category":category,"type":"select","currentValue":current,
             "options":values.iter().map(|v| json!({"value":v,"name":v})).collect::<Vec<_>>()})
     };
-    let mut options = json!([{"id":"model","type":"select","currentValue":value,"options":[{"value":"fixture-model","name":"Fixture"},{"value":"fixture-other","name":"Other fixture"}]}, {"id":"mode","type":"select","currentValue":"agent","options":(["agent","agent-full-access","default","acceptEdits","bypassPermissions","cortex"].map(|m|json!({"value":m,"name":m})))}]);
+    let mut options = json!([{"id":"model","type":"select","currentValue":value,"options":[{"value":"fixture-model","name":"Fixture"},{"value":"fixture-other","name":"Other fixture"}]}, {"id":"mode","type":"select","currentValue":"agent","options":(["agent","agent-full-access","workspace-write","default","acceptEdits","bypassPermissions","cortex","read-only","plan"].map(|m|json!({"value":m,"name":m})))}]);
+    // A project holding `no-restricted-modes` gets an adapter that offers only
+    // wide modes (no `read-only`/`plan`), like one without a read-only preset.
+    if std::path::Path::new("no-restricted-modes").exists() {
+        options[1]["options"] = json!([
+            "agent",
+            "agent-full-access",
+            "acceptEdits",
+            "bypassPermissions"
+        ]
+        .map(|m| json!({"value":m,"name":m})));
+    }
     let list = options.as_array_mut().unwrap();
     // Each shape also advertises the real model id its owner catalog lists.
     let real_model = match effort_option() {
@@ -37,6 +48,13 @@ fn config_with(value: &str, effort: &str) -> Value {
             .as_array_mut()
             .unwrap()
             .push(json!({"value":model,"name":model}));
+    }
+    // A project holding `model-alias` gets the Claude adapter's `default` alias: an entry named
+    // "Default (recommended)" whose description names the concrete model.
+    if std::path::Path::new("model-alias").exists() {
+        list[0]["options"].as_array_mut().unwrap().push(
+            json!({"value":"default","name":"Default (recommended)","description":"Opus 5.5"}),
+        );
     }
     match effort_option() {
         Some("reasoning_effort") => {
@@ -91,8 +109,8 @@ fn reconciliation_fixture(mode: &str, scenario: &str, context: &Value) -> Option
     {
         return Some(
             // A repair that replaces the failed check must be a real command: a
-        // trivial one such as `true` is refused (KI-03).
-        json!({"name":"verification_submit","arguments":{"verification":[["/usr/bin/cmp","/dev/null","/dev/null"]],"request_key":"repair"}}),
+            // trivial one such as `true` is refused (KI-03).
+            json!({"name":"verification_submit","arguments":{"verification":[["/usr/bin/cmp","/dev/null","/dev/null"]],"request_key":"repair"}}),
         );
     }
     if context["state"] != "RECONCILING" {
@@ -114,7 +132,9 @@ fn reconciliation_fixture(mode: &str, scenario: &str, context: &Value) -> Option
     // completion to the coordinator (ASK_USER_REQUIRED).
     if (scenario == "reconcile-question"
         || scenario == "reconcile-repair" && has("VERIFICATION_REVISED")
-        || scenario == "reconcile-repair-late" && has("VERIFICATION_REVISED") && has("ASK_USER_REQUIRED"))
+        || scenario == "reconcile-repair-late"
+            && has("VERIFICATION_REVISED")
+            && has("ASK_USER_REQUIRED"))
         && !has("USER_ANSWER_RECEIVED")
     {
         return Some(
@@ -171,6 +191,8 @@ pub async fn main() {
     }
     let mut servers = HashMap::new();
     let mut external_entries = HashMap::new();
+    // Each session's `session/new` `_meta`, checked by the `session-meta:` prompts.
+    let mut session_metas: HashMap<String, Value> = HashMap::new();
     let mut input = BufReader::new(tokio::io::stdin());
     let mut output = tokio::io::stdout();
     let mut count = 0;
@@ -183,7 +205,47 @@ pub async fn main() {
     let mut auto_roles = HashMap::<String, &'static str>::new();
     let mut models = HashMap::<String, String>::new();
     let mut efforts = HashMap::<String, String>::new();
-    while let Ok(Some(r)) = wire::read_frame(&mut input).await {
+    // Frames come from one reader task, so the loop can also wake on a timer: a worker
+    // prompt held by the plain `hold` scenario finishes its turn normally once
+    // `scenario.txt` no longer names a hold, like a real worker that keeps running,
+    // and stays cancellable until then.
+    let (frames_in, mut frames) = tokio::sync::mpsc::channel::<Value>(64);
+    tokio::spawn(async move {
+        while let Ok(Some(r)) = wire::read_frame(&mut input).await {
+            if frames_in.send(r).await.is_err() {
+                break;
+            }
+        }
+    });
+    let mut releasable = HashMap::<String, Value>::new();
+    let mut released = std::collections::VecDeque::<Value>::new();
+    loop {
+        let r = if let Some(r) = released.pop_front() {
+            r
+        } else if releasable.is_empty() {
+            match frames.recv().await {
+                Some(r) => r,
+                None => break,
+            }
+        } else {
+            tokio::select! {
+                r = frames.recv() => match r {
+                    Some(r) => r,
+                    None => break,
+                },
+                _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                    if !std::fs::read_to_string("scenario.txt").unwrap_or_default().contains("hold") {
+                        for (sid, mut frame) in releasable.drain() {
+                            held.remove(&sid);
+                            frame["__fixture_released"] = json!(true);
+                            released.push_back(frame);
+                        }
+                    }
+                    continue;
+                }
+            }
+        };
+        let replayed = r.get("__fixture_released").is_some();
         let id = r.get("id").cloned().unwrap_or(Value::Null);
         let method = r["method"].as_str().unwrap_or("");
         let sid = r["params"]["sessionId"].as_str().unwrap_or("").to_owned();
@@ -310,6 +372,7 @@ pub async fn main() {
                     }
                     Err(_) => acp,
                 };
+                session_metas.insert(sid.clone(), r["params"]["_meta"].clone());
                 servers.insert(sid.clone(), listed.first().cloned().unwrap_or(Value::Null));
                 external_entries.insert(
                     sid.clone(),
@@ -377,10 +440,23 @@ pub async fn main() {
                 // A project that holds `record-prompts` gets every received prompt
                 // appended to `prompt-log.jsonl`, so tests can inspect the exact blocks.
                 // A read-only session (a reviewer) cannot write there and is simply not recorded.
-                if std::path::Path::new("record-prompts").exists() {
+                // A reviewer never writes it, even where its sandbox would allow the write:
+                // a reviewer's own project change refuses its review.
+                if std::path::Path::new("record-prompts").exists()
+                    && !replayed
+                    && mode != "desktop-reviewer"
+                {
                     use std::io::Write as _;
-                    if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open("prompt-log.jsonl") {
-                        let _ = writeln!(log, "{}", json!({"session":sid,"prompt":r["params"]["prompt"]}));
+                    if let Ok(mut log) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("prompt-log.jsonl")
+                    {
+                        let _ = writeln!(
+                            log,
+                            "{}",
+                            json!({"session":sid,"prompt":r["params"]["prompt"]})
+                        );
                     }
                 }
                 let raw = r["params"]["prompt"][0]["text"].as_str().unwrap_or("");
@@ -494,9 +570,9 @@ pub async fn main() {
                         && b["data"] == "YWJj"
                         && b["mimeType"] == "image/png"));
                     // input.txt is text: embedded as text, never as base64.
-                    assert!(blocks.iter().any(
-                        |b| b["type"] == "resource" && b["resource"]["text"] == "snapshot"
-                    ));
+                    assert!(blocks
+                        .iter()
+                        .any(|b| b["type"] == "resource" && b["resource"]["text"] == "snapshot"));
                 }
                 if std::fs::read_to_string("scenario.txt")
                     .unwrap_or_default()
@@ -532,7 +608,9 @@ pub async fn main() {
                 .unwrap_or(Value::Null);
                 let is_second = assignment["node"] == "second";
                 let n = prompts.entry(sid.clone()).or_default();
-                *n += 1;
+                if !replayed {
+                    *n += 1;
+                }
                 let full_scenario = std::fs::read_to_string("scenario.txt").unwrap_or_default();
                 // Reports whether this worker or reviewer session was given the owner's
                 // task language, in words the test can find in the retained transcript.
@@ -631,6 +709,9 @@ pub async fn main() {
                     || scenario.trim() == "guidance-preempt" && *n <= 2
                     || scenario.trim() == "stop-siblings" && !is_second
                 {
+                    if scenario.trim() == "hold" {
+                        releasable.insert(sid.clone(), r.clone());
+                    }
                     held.insert(sid, id);
                     continue;
                 }
@@ -711,9 +792,28 @@ pub async fn main() {
                         {
                             tasks.as_array_mut().unwrap().push(json!({"id":"second","role":"backend-dev","objective":"Change other.txt","dependencies":[],"scope":["other.txt"],"model":"auto"}));
                         }
-                        json!({"name":"plan_submit","arguments":{"request_key":"plan","plan":{
+                        // Owner messages handed over after verified work: this fixture's
+                        // messages need no further change, so it answers directly.
+                        let verified_guidance = raw
+                            .contains("Owner messages received while the work ran")
+                            && context["state"] == "PLANNING"
+                            && context["retained_decisions"].as_array().is_some_and(|a| {
+                                a.iter().any(|e| e["type"] == "VERIFICATION_PASSED")
+                            });
+                        if verified_guidance {
+                            // The answer names the first message it was handed, so a test can
+                            // see what reached this turn.
+                            let first = raw
+                                .split("\n\n1. ")
+                                .nth(1)
+                                .and_then(|s| s.lines().next())
+                                .unwrap_or_default();
+                            json!({"name":"answer_submit","arguments":{"text":format!("Owner guidance applied ({first}); the verified work needs no further change."),"request_key":"guided-answer"}})
+                        } else {
+                            json!({"name":"plan_submit","arguments":{"request_key":"plan","plan":{
                             "tasks":tasks,
                             "verification":if slow {json!([["/usr/bin/cmp","/dev/zero","/dev/zero"]])} else if (full_scenario=="reconcile-repair" || full_scenario=="reconcile-repair-late") && context["revision"]==0 { json!([["/bin/false"]]) } else {json!([["/usr/bin/cmp","/dev/null","/dev/null"]])}}}})
+                        }
                     } else if mode == "desktop-worker"
                         && full_scenario == "reconcile-worker-replan"
                         && context["revision"] == 1
@@ -734,7 +834,8 @@ pub async fn main() {
                     {
                         assert!(
                             raw.contains("Owner guidance")
-                                && (raw.contains("Use the owner output") || raw.contains("Second guidance"))
+                                && (raw.contains("Use the owner output")
+                                    || raw.contains("Second guidance"))
                         );
                         wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Guidance observed in same worker session."}}}})).await.unwrap();
                         json!({"name":"ask_question","arguments":{"question":"Guidance received; next?","options":["Continue","Wait"],"request_key":"guidance-question"}})
@@ -761,7 +862,52 @@ pub async fn main() {
                             )
                             .unwrap();
                         }
-                        let mut arguments = json!({"report":"# Fixture report\\n\\nObserved disposable fixture.","summary":"Fixture result.","checks":[],"request_key":"result"});
+                        // The report follows the brief's skeleton (`report.sections`) when this
+                        // prompt carries the brief, otherwise every required section heading.
+                        let skeleton: Vec<String> = raw
+                            .lines()
+                            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                            .find(|v| v["report"]["sections"].is_array())
+                            .map(|b| {
+                                b["report"]["sections"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .filter_map(|s| s["heading"].as_str().map(str::to_owned))
+                                    .collect()
+                            })
+                            .unwrap_or_else(|| {
+                                [
+                                    "Evidence and work",
+                                    "Verification",
+                                    "Risks and remaining work",
+                                    "Changes",
+                                    "Evidence examined",
+                                    "Findings",
+                                    "Gaps and next steps",
+                                    "Executed checks",
+                                    "Failures and gaps",
+                                    "Assessment",
+                                    "Evidence reviewed",
+                                    "Proposed work graph",
+                                    "Risks and open questions",
+                                    "Documentation changes",
+                                    "Validation",
+                                    "Limits and follow-up",
+                                    "Verdict",
+                                    "Coverage",
+                                ]
+                                .map(|h| format!("## {h}"))
+                                .to_vec()
+                            });
+                        let mut report =
+                            String::from("# Fixture report\n\nObserved disposable fixture.");
+                        for heading in skeleton {
+                            report.push_str(&format!(
+                                "\n\n{heading}\n\nObserved disposable fixture."
+                            ));
+                        }
+                        let mut arguments = json!({"report":report,"summary":"Fixture result.","checks":[],"request_key":"result"});
                         if mode == "desktop-worker"
                             && full_scenario.starts_with("reconcile-")
                             && !consultant
@@ -790,6 +936,32 @@ pub async fn main() {
                 {
                     let mut params: Value = serde_json::from_str(&text[5..]).unwrap();
                     let expected = params.as_object_mut().unwrap().remove("__fixture_expect");
+                    // Fixture-only message chunks streamed before the tool call and after its reply.
+                    let stream = |key: &str, params: &mut Value| {
+                        params
+                            .as_object_mut()
+                            .unwrap()
+                            .remove(key)
+                            .map(|v| {
+                                v.as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .map(|c| c.as_str().unwrap().to_owned())
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default()
+                    };
+                    let (before, after) = (
+                        stream("__fixture_before", &mut params),
+                        stream("__fixture_after", &mut params),
+                    );
+                    let chunk = |text: &str| {
+                        json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk",
+                        "messageId":"fixture-midstream","content":{"type":"text","text":text}}}})
+                    };
+                    for text in &before {
+                        wire::write_frame(&mut output, &chunk(text)).await.unwrap();
+                    }
                     if mode.starts_with("desktop-") {
                         for update in [
                             json!({"sessionUpdate":"tool_call","toolCallId":"fixture-call","title":"Fixture step","status":"in_progress","rawInput":{"private":"not-public"}}),
@@ -854,7 +1026,14 @@ pub async fn main() {
                         "project_git",
                         "command_run",
                         "read_large_output",
-                        "access_request"
+                        "access_request",
+                        "project_mkdir",
+                        "project_delete",
+                        "project_skill_link",
+                        "task_get_context",
+                        "read_capsule",
+                        "check_preflight",
+                        "read_batch"
                     ]
                     .contains(&v["name"].as_str().unwrap())));
                     if mode == "desktop-coordinator" && scenario.trim() == "routing-menu" {
@@ -892,10 +1071,16 @@ pub async fn main() {
                             );
                         }
                     }
-                    if params["name"] == "user_question_request" && reply.get("error").is_none() {
+                    for text in &after {
+                        wire::write_frame(&mut output, &chunk(text)).await.unwrap();
+                    }
+                    // A refused call (a JSON-RPC refusal or a structured tool error) opened nothing.
+                    let accepted =
+                        reply.get("error").is_none() && reply["result"]["isError"] != true;
+                    if params["name"] == "user_question_request" && accepted {
                         wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update",
                             "params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk",
-                            "content":{"type":"text","text":"Forbidden post-question rewrite"}}}})).await.unwrap();
+                            "content":{"type":"text","text":"Post-question coordinator text"}}}})).await.unwrap();
                     }
                     if scenario.trim() == "stop-siblings" {
                         // Result commit precedes the ACP reply and owned process wait.
@@ -914,7 +1099,7 @@ pub async fn main() {
                     // The worker process dies while its question is still open.
                     if scenario.trim() == "question-exit"
                         && params["name"] == "ask_question"
-                        && reply.get("error").is_none()
+                        && accepted
                     {
                         std::process::exit(1);
                     }
@@ -943,7 +1128,12 @@ pub async fn main() {
                     // The next turn's text directly follows the previous turn's last chunk.
                     let update = json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Next turn."}});
                     wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":update}})).await.unwrap();
-                    wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}})).await.unwrap();
+                    wire::write_frame(
+                        &mut output,
+                        &json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}),
+                    )
+                    .await
+                    .unwrap();
                     continue;
                 }
                 if mode == "native-host" && text == "native-chunked" {
@@ -988,6 +1178,34 @@ pub async fn main() {
                     held.insert(sid, id);
                     continue;
                 }
+                // `session-meta:<json>`: the turn ends normally when every given
+                // JSON pointer of the session's `session/new` `_meta` holds the given
+                // value (a missing `_meta` is `null`), with `refusal` otherwise.
+                if let Some(body) = text.strip_prefix("session-meta:") {
+                    let expected: serde_json::Map<String, Value> =
+                        serde_json::from_str(body).unwrap();
+                    let meta = session_metas.get(&sid).cloned().unwrap_or(Value::Null);
+                    let held = expected.iter().all(|(pointer, value)| {
+                        if pointer.is_empty() {
+                            &meta == value
+                        } else if let Some(tool) = pointer.strip_prefix("disallowed:") {
+                            meta["claudeCode"]["options"]["disallowedTools"]
+                                .as_array()
+                                .is_some_and(|a| a.iter().any(|t| t == tool))
+                                == value.as_bool().unwrap_or(false)
+                        } else {
+                            meta.pointer(pointer).unwrap_or(&Value::Null) == value
+                        }
+                    });
+                    wire::write_frame(
+                        &mut output,
+                        &json!({"jsonrpc":"2.0","id":id,
+                        "result":{"stopReason":if held {"end_turn"} else {"refusal"}}}),
+                    )
+                    .await
+                    .unwrap();
+                    continue;
+                }
                 if text == "permission" {
                     let pid = json!(format!("permission-{sid}"));
                     permissions.insert(pid.to_string(), (id, sid.clone()));
@@ -1016,6 +1234,7 @@ pub async fn main() {
                 .unwrap();
             }
             "session/cancel" => {
+                releasable.remove(&sid);
                 if let Some(id) = held.remove(&sid) {
                     wire::write_frame(
                         &mut output,

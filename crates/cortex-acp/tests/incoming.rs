@@ -10,6 +10,9 @@ use cortex_engine::{
     wire,
 };
 use namespace_host::native_effects;
+// The reused sandbox source resolves the owner's tool search path through the crate root.
+#[allow(unused_imports)]
+use namespace_host::tool_path;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -268,7 +271,10 @@ async fn rollover_and_reconciliation() {
         let mut c = Client::new();
         let sid = c.open(&f.0).await;
         c.send(3,"session/prompt",json!({"sessionId":sid,"prompt":[{"type":"text","text":"Never lose constraint α; keep all owner decisions."}]})).await;
-        if matches!(scenario, "reconcile-question" | "reconcile-repair" | "reconcile-repair-late") {
+        if matches!(
+            scenario,
+            "reconcile-question" | "reconcile-repair" | "reconcile-repair-late"
+        ) {
             loop {
                 let frame = c.recv().await;
                 if frame["method"] == "session/request_permission" {
@@ -303,6 +309,25 @@ async fn rollover_and_reconciliation() {
         assert!(response.get("error").is_none(), "{scenario}: {response}");
         assert_eq!(
             f.query("SELECT count(*) FROM runtime_tasks WHERE state='COMPLETED'"),
+            1,
+            "{scenario}"
+        );
+        // The incoming task has its one runtime pipeline: the initial edition first,
+        // a newer edition for each later boundary, the completed state on top.
+        assert_eq!(
+            f.query("SELECT count(*) FROM reports WHERE kind='pipeline'"),
+            1,
+            "{scenario}"
+        );
+        assert_eq!(
+            f.query("SELECT count(*) FROM editions e JOIN reports r ON r.id=e.report_id WHERE r.kind='pipeline'
+                AND e.sequence=(SELECT min(sequence) FROM editions WHERE report_id=r.id) AND e.title='Initial pipeline'"),
+            1,
+            "{scenario}"
+        );
+        assert_eq!(
+            f.query("SELECT count(*) FROM editions e JOIN reports r ON r.id=e.report_id WHERE r.kind='pipeline'
+                AND e.sequence=(SELECT max(sequence) FROM editions WHERE report_id=r.id) AND e.title='Runtime COMPLETED'"),
             1,
             "{scenario}"
         );
@@ -538,9 +563,13 @@ async fn outside_client_consent() {
         loop {
             let frame = c.recv().await;
             if frame["method"] == "session/request_permission" {
+                // Every ask is one owner-decision card naming role, operation, path and reason.
                 assert_eq!(
                     frame["params"]["toolCall"]["title"],
-                    "Write outside the project"
+                    format!(
+                        "Owner decision: worker-backend-dev wants to write {} because it writes outside the project",
+                        path.display()
+                    )
                 );
                 wire::write_frame(c.input.as_mut().unwrap(),&json!({"jsonrpc":"2.0","id":frame["id"],
                     "result":{"outcome":{"outcome":"selected","optionId":if approve {"allow"} else {"deny"}}}})).await.unwrap();
@@ -735,7 +764,7 @@ async fn access_modes_and_startup_recovery() {
     .await
     .unwrap();
     assert_eq!(f.query("SELECT count(*) FROM runtime_events WHERE type='NATIVE_ACCESS_SWITCHED' AND json_extract(payload_json,'$.mode')='auto'"),1);
-    assert_eq!(f.query("SELECT count(*) FROM runtime_events WHERE type='NATIVE_ACCESS_MODE_CONFIRMED' AND json_extract(payload_json,'$.mode')='agent-full-access'"),1);
+    assert_eq!(f.query("SELECT count(*) FROM runtime_events WHERE type='NATIVE_ACCESS_MODE_CONFIRMED' AND json_extract(payload_json,'$.mode')='workspace-write'"),1);
     c.send(
         4,
         "session/set_mode",
@@ -1276,7 +1305,25 @@ async fn separate_task_cancel_preserves_parent() {
     .await;
     assert!(c.response(4).await.get("error").is_none());
     std::fs::write(f.0.join("scenario.txt"), "hold").unwrap();
-    c.send(5, "session/set_config_option", json!({"sessionId":sid,"configId":"cortex_queued_message","value":json!({"clientMessageId":"parent-answer","content":[{"type":"text","text":"Detailed"}]}).to_string()})).await;
+    // A message no longer cancels the worker's open question; answering it resumes the
+    // same worker, which then holds its turn.
+    let question: String = cortex_core::Store::open(f.key(), cortex_core::OpenMode::LiveReadOnly)
+        .unwrap()
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT id FROM pending_questions WHERE status='open'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    c.send(
+        5,
+        "session/set_config_option",
+        json!({"sessionId":sid,"configId":"cortex_question_answer",
+        "value":json!({"questionId":question,"answer":"Detailed"}).to_string()}),
+    )
+    .await;
     assert!(c.response(5).await.get("error").is_none());
     tokio::time::timeout(Duration::from_secs(15), async {
         while !f.0.join("worker-entered").exists() {
@@ -1363,10 +1410,22 @@ async fn separate_task_cancel_preserves_parent() {
     c.close().await;
 }
 
+/// Select the Guarded access mode, in which an engine permission request asks the client.
+async fn set_guarded(c: &mut Client, sid: &str) {
+    c.send(
+        30,
+        "session/set_mode",
+        json!({"sessionId":sid,"modeId":"guarded"}),
+    )
+    .await;
+    let r = c.response(30).await;
+    assert!(r.get("error").is_none(), "{r}");
+}
 async fn permission() {
-    // The engine's request reaches the client unchanged except for the
-    // client session id; the engine receives exactly the chosen offered
-    // one-shot option, and its own reply text follows the decision.
+    // The engine's request reaches the client with its tool call id and offered
+    // options unchanged, the client session id and the owner-decision title
+    // (role, operation, subject, reason); the engine receives exactly the chosen
+    // offered one-shot option, and its own reply text follows the decision.
     for (label, option, reply) in [
         ("permission", "yes", "approved"),
         ("reject", "no", "denied"),
@@ -1375,6 +1434,8 @@ async fn permission() {
         std::fs::write(f.0.join("scenario.txt"), "incoming-permission").unwrap();
         let mut c = Client::new();
         let sid = c.open(&f.0).await;
+        // Auto (the default) allows the request itself; only an asking mode shows the card.
+        set_guarded(&mut c, &sid).await;
         c.send(
             3,
             "session/prompt",
@@ -1390,7 +1451,7 @@ async fn permission() {
                 assert_eq!(
                     request["params"],
                     json!({"sessionId":sid,
-                    "toolCall":{"toolCallId":"fixture-permission","title":"Fixture permission"},
+                    "toolCall":{"toolCallId":"fixture-permission","title":"Owner decision: worker-backend-dev wants to run Fixture permission because it is not provably contained in the project"},
                     "options":[{"optionId":"yes","name":"Allow once","kind":"allow_once"},
                         {"optionId":"no","name":"Reject once","kind":"reject_once"}]})
                 );
@@ -1458,6 +1519,7 @@ async fn stale_permission_and_eof() {
         std::fs::write(f.0.join("scenario.txt"), "incoming-permission").unwrap();
         let mut c = Client::new();
         let sid = c.open(&f.0).await;
+        set_guarded(&mut c, &sid).await;
         c.send(
             3,
             "session/prompt",
@@ -1478,9 +1540,11 @@ async fn stale_permission_and_eof() {
         wire::write_frame(c.input.as_mut().unwrap(),&json!({"jsonrpc":"2.0","id":request["id"],
             "result":{"outcome":{"outcome":"selected","optionId":if cancel_first{"yes"}else{"not-offered"}}}})).await.unwrap();
         if !cancel_first {
+            // An answer that is not the card's offered Allow is the owner's Deny: the
+            // engine receives its own reject option, never an allowance.
             tokio::time::timeout(Duration::from_secs(10), async {
                 while f.query(
-                    "SELECT count(*) FROM runtime_events WHERE type='NATIVE_PERMISSION_CANCELLED'",
+                    "SELECT count(*) FROM runtime_events WHERE type='NATIVE_PERMISSION_DECIDED' AND json_extract(payload_json,'$.outcome.optionId')='no'",
                 ) == 0
                 {
                     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1683,7 +1747,15 @@ async fn skill_proposals() {
             );
         }
         c.close().await;
-        assert_eq!(f.query("SELECT count(*) FROM host_transcript WHERE text LIKE \'%Forbidden post-question rewrite%\'"),0);
+        // Coordinator text the engine emits after its own question is recorded in the
+        // incoming ACP session and in the task's Workspace display session alike.
+        let after = |name: &str| {
+            f.query(&format!("SELECT count(*) FROM host_transcript h JOIN acp_host_sessions s USING(session_id)
+            WHERE h.text LIKE '%Post-question coordinator text%' AND json_extract(s.client_info,'$.name')='{name}'"))
+        };
+        let asked = f.query("SELECT count(*) FROM runtime_events WHERE type='USER_QUESTION_REQUESTED' AND json_extract(payload_json,'$.coordinator')=1");
+        assert_eq!(after("cortex-rust-acp"), asked.min(1), "{label}");
+        assert_eq!(after("cortex-native"), asked.min(1), "{label}");
         assert!(!f.0.join(".agents").exists());
         assert_eq!(
             std::fs::read_to_string(f.0.join("work.txt")).unwrap(),
@@ -1801,12 +1873,33 @@ async fn paseo_cancel_hold() {
     })
     .await
     .unwrap();
+    // The message interrupts nothing: the held worker keeps running in EXECUTING.
+    assert_eq!(f.query("SELECT count(*) FROM runtime_events WHERE type IN ('TURN_INTERRUPTED','LIVE_ASSIGNMENTS_CANCELLED')"), 0);
+    assert_eq!(
+        f.query("SELECT count(*) FROM runtime_tasks WHERE state='EXECUTING'"),
+        1
+    );
+    assert_eq!(
+        f.query("SELECT count(*) FROM runtime_nodes WHERE status='running'"),
+        1
+    );
+    assert_eq!(f.query("SELECT count(*) FROM runtime_events WHERE type='USER_STEERING' AND json_extract(payload_json,'$.delivery')='boundary'"), 1);
+    // The worker finishes its own turn; the coordinator then receives the message once.
     std::fs::write(f.0.join("scenario.txt"), "").unwrap();
     assert_eq!(c.response(4).await["result"]["stopReason"], "end_turn");
     assert_eq!(
         f.query("SELECT count(*) FROM runtime_events WHERE type='USER_STEERING' AND json_extract(payload_json,'$.text')='New direction'"),
         1
     );
+    assert_eq!(
+        f.query("SELECT count(*) FROM runtime_events WHERE type='STEERING_DELIVERED'"),
+        1
+    );
+    assert_eq!(
+        f.query("SELECT count(*) FROM runtime_events WHERE type='TURN_INTERRUPTED'"),
+        0
+    );
+    assert_eq!(f.query("SELECT count(*) FROM runtime_nodes WHERE revision=1 AND stage='execution' AND status='completed'"), 1);
     tokio::time::sleep(Duration::from_secs(6)).await;
     assert_eq!(
         f.query("SELECT count(*) FROM runtime_events WHERE type='OWNER_TASK_PAUSED'"),
@@ -1964,9 +2057,14 @@ async fn busy_answers() {
     );
     // A number names an offered option, as on Python's card.
     // An image typed with the answer is retained for the engine, not dropped.
-    c.send(7, "session/prompt", json!({"sessionId":sid,"prompt":[
+    c.send(
+        7,
+        "session/prompt",
+        json!({"sessionId":sid,"prompt":[
         {"type":"text","text":" 2 "},{"type":"image","mimeType":"image/png","data":"YWJj"},
-        {"type":"image","mimeType":"image/svg+xml","data":"PHN2Zy8+"}]})).await;
+        {"type":"image","mimeType":"image/svg+xml","data":"PHN2Zy8+"}]}),
+    )
+    .await;
     let typed = c.response(7).await;
     assert_eq!(typed["result"]["stopReason"], "end_turn", "{typed}");
     wire::write_frame(c.input.as_mut().unwrap(),&json!({"jsonrpc":"2.0","id":card["id"],
@@ -1976,8 +2074,14 @@ async fn busy_answers() {
     assert_eq!(f.query("SELECT count(*) FROM pending_questions WHERE status='answered' AND answer_text='Brief'"),1);
     assert_eq!(f.query("SELECT count(*) FROM source_blocks WHERE kind='image' AND availability='stored' AND mime='image/png'"),1);
     assert_eq!(f.query("SELECT count(*) FROM source_blocks WHERE availability='inaccessible' AND reason='unsupported_image_type'"),1);
-    assert_eq!(f.query("SELECT count(*) FROM runtime_events WHERE type='USER_ANSWER_ATTACHMENTS'"),1);
-    assert_eq!(f.query("SELECT count(*) FROM runtime_events WHERE type='USER_STEERING'"),0);
+    assert_eq!(
+        f.query("SELECT count(*) FROM runtime_events WHERE type='USER_ANSWER_ATTACHMENTS'"),
+        1
+    );
+    assert_eq!(
+        f.query("SELECT count(*) FROM runtime_events WHERE type='USER_STEERING'"),
+        0
+    );
     assert_eq!(
         f.query("SELECT count(*) FROM pending_questions WHERE status='answered'"),
         1
@@ -2271,7 +2375,10 @@ async fn shared_project_agents() {
         )
         .await;
     assert_eq!(first.response(3).await["result"]["stopReason"], "end_turn");
-    assert_eq!(f.query("SELECT count(*) FROM runtime_tasks WHERE state='COMPLETED'"), 1);
+    assert_eq!(
+        f.query("SELECT count(*) FROM runtime_tasks WHERE state='COMPLETED'"),
+        1
+    );
     // The fixture worker changes work.txt; restore it so the next task also has work.
     std::fs::write(f.0.join("work.txt"), "before").unwrap();
     // The first process is still alive; a second agent opens, runs and completes.
@@ -2286,10 +2393,15 @@ async fn shared_project_agents() {
         .await;
     let reply = second.response(3).await;
     assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
-    assert_eq!(f.query("SELECT count(*) FROM runtime_tasks WHERE state='COMPLETED'"), 2);
+    assert_eq!(
+        f.query("SELECT count(*) FROM runtime_tasks WHERE state='COMPLETED'"),
+        2
+    );
     // Once the second agent is idle it hands the lease back to the first.
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    first.send(4, "session/new", json!({"cwd":f.0,"mcpServers":[]})).await;
+    first
+        .send(4, "session/new", json!({"cwd":f.0,"mcpServers":[]}))
+        .await;
     let again = first.response(4).await;
     assert!(again.get("error").is_none(), "{again}");
     first.close().await;

@@ -27,6 +27,7 @@ pub async fn maintenance_worker(state: &Path, id: &str) -> io::Result<()> {
 mod native_access;
 mod native_activity;
 mod native_attachments;
+mod native_batch;
 #[doc(hidden)]
 pub mod native_codex_runtime;
 mod native_command_handles;
@@ -34,23 +35,36 @@ mod native_command_sandbox;
 #[doc(hidden)]
 pub mod native_command_supervisor;
 mod native_commands;
+mod native_context_tools;
 mod native_controls;
 mod native_documents;
 mod native_driver;
 mod native_effects;
+mod native_engine_policy;
 mod native_instructions;
 pub mod native_mcp;
 mod native_owner_controls;
+mod native_owner_decisions;
+mod native_pipeline;
 mod native_project;
+mod native_project_ops;
 mod native_recovery;
 mod native_results;
 pub mod native_routes;
 pub mod native_runtime;
 mod native_sandbox;
 pub mod native_sessions;
+mod native_skills;
 mod native_sources;
+mod native_tool_errors;
+mod notifier;
 mod project_guard;
+mod remote;
+pub mod remote_policy;
+mod session_bus;
+pub mod short_text_engine;
 mod terminal;
+pub mod tool_path;
 mod voice;
 pub use launch::LaunchSpec;
 use local::{canonical_directory, failure, uid};
@@ -159,11 +173,17 @@ pub struct Service {
     stopping: AtomicBool,
     shutdown: watch::Sender<bool>,
     events: broadcast::Sender<Value>,
+    /// Wakes the sprint loop for one project after a change that can move a sprint on.
+    sprint_wake: native_driver::sprints::SprintWake,
     helper: machine::Helper,
     searches: directories::Searches,
     core: Arc<core_host::Registry>,
     terminals: Mutex<terminal::Manager>,
     voice: Mutex<voice::Manager>,
+    /// The embedded remote-access host, once the real service started it.
+    remote: std::sync::OnceLock<remote::Remote>,
+    /// Desktop notifications for owner moments, raised by the service itself (see `notifier`).
+    notifier: notifier::Notifier,
 }
 fn identity() -> io::Result<String> {
     let mut bytes = [0; 16];
@@ -259,11 +279,14 @@ impl Service {
             stopping: AtomicBool::new(false),
             shutdown,
             events,
+            sprint_wake: Default::default(),
             helper: machine::Helper::default(),
             searches: directories::Searches::default(),
             core: Arc::new(core_host::Registry::default()),
             terminals: Mutex::new(terminal::Manager::default()),
             voice: Mutex::new(voice::Manager::default()),
+            remote: std::sync::OnceLock::new(),
+            notifier: Default::default(),
         });
         Ok(service)
     }
@@ -279,6 +302,43 @@ impl Service {
     }
     pub fn subscribe(&self) -> broadcast::Receiver<Value> {
         self.events.subscribe()
+    }
+    /// Starts the embedded remote-access host (off until the owner enables it; the flag
+    /// persists). A host that cannot start leaves the service running and `remote.status`
+    /// reporting why. Called once by the real service; bare test services have no host.
+    pub async fn start_remote(&self) {
+        let relay = workspace_remote::default_relay().map(str::to_owned);
+        self.start_remote_with(Vec::new(), relay).await
+    }
+    /// [`Service::start_remote`] on explicit bind addresses and an explicit default relay
+    /// (tests bind loopback only and name no relay, so they never reach the network).
+    #[doc(hidden)]
+    pub async fn start_remote_with(
+        &self,
+        bind_addrs: Vec<std::net::SocketAddr>,
+        default_relay: Option<String>,
+    ) {
+        if self.remote.get().is_some() {
+            return;
+        }
+        let started = remote::start(
+            &self.config.state_dir,
+            &self.endpoint.path,
+            bind_addrs,
+            default_relay,
+        )
+        .await;
+        if let remote::Remote::Running(host) = &started {
+            // An open settings page rereads remote access whenever the host's state moves.
+            let mut changes = host.subscribe();
+            let events = self.events.clone();
+            tokio::spawn(async move {
+                while changes.changed().await.is_ok() {
+                    let _ = events.send(json!({"type":"remote_state"}));
+                }
+            });
+        }
+        let _ = self.remote.set(started);
     }
     pub async fn projects(&self) -> Value {
         json!(self.state.lock().await.projects)
@@ -322,7 +382,7 @@ impl Service {
     pub async fn status(&self) -> Value {
         json!({"stopping":self.stopping.load(Ordering::SeqCst),"actorId":actor(),
             "channel":workspace_protocol::channel::current().name,"application":workspace_protocol::channel::current().title,
-            "engines":self.engine_setup(),"transport":"unix","protocol":{"major":1,"minor":0}})
+            "engines":self.engine_setup(),"notifications":self.notifier.status(),"transport":"unix","protocol":{"major":1,"minor":0}})
     }
     pub async fn project_status(&self, id: &str) -> io::Result<Value> {
         let state = self.state.lock().await;
@@ -680,6 +740,8 @@ impl Service {
                     state.native.insert(id.into(), runtime);
                     state.failures.remove(id);
                     drop(state);
+                    // A project that just opened gets its first sprint pass now, not on some later wake.
+                    self.sprint_wake.project(id);
                     self.project_changed(id);
                     return Ok(json!({"projectId":id,"executionHost":"rust","recovery":"fresh"}));
                 }
@@ -744,6 +806,7 @@ impl Service {
         let command = request.get("payload").is_some();
         if command {
             request["actorId"] = json!(actor());
+            request["payload"] = self.resolved_attachments(request["payload"].take()).await?;
         }
         workspace_protocol::validate(if command { "Command" } else { "Query" }, &request)
             .map_err(|_| failure("invalid_workspace_request"))?;
@@ -798,6 +861,18 @@ impl Service {
         }
         Err(self.inactive(id).await)
     }
+    /// Owner files travel as saved references (`product.attachment`). Core and the engine
+    /// prompt get the bodies read here, at this moment; inline bytes are refused here.
+    async fn resolved_attachments(&self, mut value: Value) -> io::Result<Value> {
+        let state = self.config.state_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            machine::attachment_files::resolve_all(&state, &mut value)
+                .map(|()| value)
+                .map_err(|e| failure(e.code))
+        })
+        .await
+        .map_err(|_| failure("machine_tool_failed"))?
+    }
     /// A message for the bound session goes down the same prompt path as the owner's first one.
     /// The reply comes when that turn ends, so what is confirmed here is delivery, not completion.
     pub async fn prompt_execution(
@@ -815,7 +890,14 @@ impl Service {
             // request itself never carries file bytes.
             let capture = match attachments.as_array() {
                 Some(items) if items.is_empty() => None,
-                _ => Some(cortex_core::input::capture_from_wire(&attachments).map_err(|e| failure(e.code()))?),
+                _ => Some(
+                    cortex_core::input::capture_from_wire(
+                        &self
+                            .resolved_attachments(json!({"attachments":attachments}))
+                            .await?["attachments"],
+                    )
+                    .map_err(|e| failure(e.code()))?,
+                ),
             };
             return native.control_input(id.into(), json!({"projectId":id,"executionId":execution,"action":"prompt","text":text,"attachments":[],"requestId":match request_id {Some(key)=>key.to_owned(),None=>format!("owner-{}",identity()?)}}), capture).await;
         }
@@ -848,6 +930,10 @@ impl Service {
         self.finish_stop().await
     }
     async fn finish_stop(&self) -> io::Result<()> {
+        // Remote devices lose their tunnel first; the persisted on/off flag is kept.
+        if let Some(remote::Remote::Running(host)) = self.remote.get() {
+            host.shutdown().await;
+        }
         self.voice.lock().await.stop().await;
         self.terminals.lock().await.stop().await;
         let _activations = self.native_activation.write().await;
@@ -969,7 +1055,7 @@ impl Service {
             "service.status" if params == json!({}) => Ok(self.status().await),
             "service.stop" if params == json!({}) => Ok(json!({"outcome":"stop_requested"})),
             "service.capabilities" if params == json!({}) => Ok(
-                json!({"channel":workspace_protocol::channel::current().name,"application":workspace_protocol::channel::current().title,"methods":["native.query","native.board","service.status","service.capabilities","service.subscribe","service.stop","projects.list","projects.register","projects.rename","projects.remove","projects.activate","projects.status","workspace","executions.cancel","executions.prompt","executions.control","machine.call","directories.search","directories.cancel","terminal.open","terminal.read","terminal.write","terminal.resize","terminal.close","voice.start","voice.read","voice.stop","voice.cancel"],"machine":true,"permissions":false,"sessionOptions":false,
+                json!({"channel":workspace_protocol::channel::current().name,"application":workspace_protocol::channel::current().title,"methods":["native.query","native.board","service.status","service.capabilities","service.subscribe","service.stop","projects.list","projects.register","projects.rename","projects.remove","projects.activate","projects.status","workspace","executions.cancel","executions.prompt","executions.control","machine.call","directories.search","directories.cancel","terminal.open","terminal.read","terminal.write","terminal.resize","terminal.close","voice.start","voice.read","voice.stop","voice.cancel","remote.status","remote.enable","remote.pairing.start","remote.pairing.cancel","remote.pairing.decide","remote.devices.revoke","remote.relay.set","notifications.report","notifications.opened","notifications.take"],"machine":true,"permissions":false,"sessionOptions":false,
                     // The native host runs every task in the project folder (no task worktrees).
                     "taskWorktrees":false}),
             ),
@@ -1009,6 +1095,10 @@ impl Service {
                     "projects.activate" => self.activate(&p.project_id).await,
                     _ => self.project_status(&p.project_id).await,
                 }
+            }
+            // Owner-only: the remote tunnel's policy refuses every `remote.*` method.
+            method if method.starts_with("remote.") => {
+                remote::call(self.remote.get(), method, params).await
             }
             method if method.starts_with("voice.") => {
                 let request = workspace_protocol::voice::parse(method, params)
@@ -1059,8 +1149,23 @@ impl Service {
                 .await
             }
             "machine.call" => {
+                // An owner action on the board (accept, close, a sprint control) can resolve an
+                // owner moment without a runtime event; the notifier reads that project again.
+                let project = matches!(
+                    params["op"].as_str(),
+                    Some("product.task" | "product.sprint" | "product.integrate")
+                )
+                .then(|| params["projectId"].as_str().map(str::to_owned))
+                .flatten();
                 let call = serde_json::from_value(params).map_err(|_| failure("invalid_params"))?;
-                self.machine(call).await
+                let reply = self.machine(call).await;
+                if let Some(project) = project {
+                    self.notifier.touch(&project);
+                }
+                reply
+            }
+            method if method.starts_with("notifications.") => {
+                self.notifications_call(method, params).await
             }
             _ => Err(failure("unsupported_method")),
         }

@@ -61,10 +61,7 @@ fn fill(fixture: &Fixture, template: &str) -> String {
         text.replace_range(start..=end, &revision);
     }
     if text.contains("{revs}") {
-        let view = result(
-            fixture,
-            r#"{"action":"read","surface":"routing_profiles"}"#,
-        );
+        let view = result(fixture, r#"{"action":"read","surface":"routing_profiles"}"#);
         let revisions = py::dumps(view.get("current_revisions")).unwrap();
         text = text.replace("{revs}", &revisions);
     }
@@ -91,7 +88,13 @@ fn normalize(text: &str, timestamped: bool) -> String {
 /// The fixture's files with modes and (normalized) contents. The project
 /// store's own database and sidecars are compared through reads instead.
 fn tree(fixture: &Fixture, timestamped: bool) -> String {
-    fn walk(path: &Path, store: &Path, fixture_base: &[u8], timestamped: bool, out: &mut Vec<String>) {
+    fn walk(
+        path: &Path,
+        store: &Path,
+        fixture_base: &[u8],
+        timestamped: bool,
+        out: &mut Vec<String>,
+    ) {
         if path.starts_with(store) && path != store && !path.ends_with("routing.json") {
             return;
         }
@@ -119,7 +122,13 @@ fn tree(fixture: &Fixture, timestamped: bool) -> String {
     }
     let mut out = Vec::new();
     let store = fixture.at("workspace/.cortex");
-    walk(&fixture.base, &store, fixture.base.to_str().unwrap().as_bytes(), timestamped, &mut out);
+    walk(
+        &fixture.base,
+        &store,
+        fixture.base.to_str().unwrap().as_bytes(),
+        timestamped,
+        &mut out,
+    );
     out.join("\n")
 }
 
@@ -136,11 +145,9 @@ fn prepare(fixture: &mut Fixture, case: &Case) {
         }
     }
     if case.store {
-        let key = cortex_core::store::ProjectKey::new(
-            Path::new(&fixture.project()),
-            workspace_channel(),
-        )
-        .unwrap();
+        let key =
+            cortex_core::store::ProjectKey::new(Path::new(&fixture.project()), workspace_channel())
+                .unwrap();
         cortex_core::store::Store::open(key, cortex_core::store::OpenMode::Initialize).unwrap();
     }
 }

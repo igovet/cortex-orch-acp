@@ -1,6 +1,6 @@
 # CW-H03: Bounded fan-out, history paging and slow-client resync
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: reads are demand-driven and bounded, and conversation history pages by forward cursor ([protocol](../protocol.md)); slow-client resync is not confirmed in code · **Phase:** 3+ · **Size:** L
 
 ## Goal
 

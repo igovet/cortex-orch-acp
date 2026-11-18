@@ -1,6 +1,6 @@
 # CW-U16: Desktop application self-update from GitHub releases
 
-**Status:** Partial source implementation; no privileged update qualification · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: update page with release detection, SHA-256 check, downgrade refusal and rollback states ([maintenance and controls](../maintenance-and-controls.md)); no signature verification; no release is published; privileged install is not verified on a real host · **Phase:** 3+ · **Size:** L
 
 The built Updates page and checksum-only release workflow are described in
 [desktop maintenance and controls](../maintenance-and-controls.md). The proposed

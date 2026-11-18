@@ -15,9 +15,9 @@ const LANGUAGE_DESCRIPTION: &str =
 /// Python `configuration.access_mode.LABELS`/`DESCRIPTIONS`.
 pub fn access_label(mode: &str) -> (&'static str, &'static str) {
     match mode {
-        "development" => ("Development mode", "Workers can work anywhere on this computer without asking. A deletion still asks you first. Docker and arbitrary code can bypass filesystem masks."),
-        "auto" => ("Auto mode", "Workers can work anywhere on this computer and nothing asks you, deletions included. .git/.cortex protection, role limits and MCP checks still apply."),
-        _ => ("Guarded mode", "Workers work inside the project. Asks you before a deletion, a write outside the project or a command outside the sandbox."),
+        "development" => ("Development mode", "Workers can work anywhere on this computer. Engine file tools read outside the project without asking; a deletion, an engine write outside the project, credential or key files, Git control files and engine or Cortex settings ask you first. A writing worker's commands read and write anywhere your account can without asking; other roles' commands read anywhere and write nowhere. Docker and arbitrary code can bypass filesystem masks."),
+        "auto" => ("Auto mode", "Workers can work anywhere on this computer and nothing asks you, deletions, credential files and Git or engine settings included; every such step is recorded. Commands read and write anywhere your account can. Cortex private state stays off limits and read-only roles and reviewers stay read-only. The engine process itself is not sandboxed."),
+        _ => ("Guarded mode", "Workers write only inside the project. Engine file tools ask you before a read or write outside the project, a deletion, credential or key files, Git control files and engine or Cortex settings, and a web fetch; a command outside the sandbox asks too. Commands in the sandbox can read, but not write, anything your account can read, outside the project included, without asking."),
     }
 }
 /// Python `access_mode_state`: the ACP `modes` a Paseo client shows.
@@ -154,7 +154,7 @@ impl IncomingHost {
         self.runtime.host.mcp.validate_client(entries).map_err(err)
     }
     pub fn bind_permissions(&self, provider: Arc<dyn crate::native_sessions::ClientPermissions>) {
-        *self.runtime.host.permissions.write().unwrap() = Some(provider);
+        self.runtime.host.bind_permissions(provider);
     }
     pub async fn recover(&self) -> io::Result<()> {
         self.recovered

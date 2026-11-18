@@ -5448,6 +5448,12 @@
       "type": "index"
     },
     {
+      "name": "host_updates_by_call",
+      "sql": "CREATE INDEX host_updates_by_call ON host_updates(session_id, json_extract(update_json,'$.toolCallId'), seq) WHERE json_valid(update_json)",
+      "tbl_name": "host_updates",
+      "type": "index"
+    },
+    {
       "name": "pending_questions",
       "sql": "CREATE TABLE pending_questions (\n id TEXT PRIMARY KEY,\n task_id TEXT NOT NULL REFERENCES tasks(id),\n assignment_ref TEXT,\n dedup_key TEXT NOT NULL,\n text TEXT NOT NULL,\n options_json TEXT,\n status TEXT NOT NULL DEFAULT 'open',\n answer_text TEXT,\n answer_source TEXT,\n created_at TEXT NOT NULL,\n answered_at TEXT,\n UNIQUE(task_id, dedup_key)\n)",
       "tbl_name": "pending_questions",

@@ -1,5 +1,5 @@
 import { createContext, useContext, type Accessor, type JSX } from "solid-js";
-import type { CommandReceipt, ConnectOutcome, ConnectResult, Machine, McpServer, SurfaceKey, WorkspaceCommand } from "@cortex/workspace-domain";
+import type { CommandReceipt, ConnectOutcome, ConnectResult, Machine, McpServer, SurfaceKey, WorkerRoute, WorkspaceCommand } from "@cortex/workspace-domain";
 import type { CopyKey } from "./copy";
 import type { WsDialog } from "./dialogs";
 import type { Buffers } from "./editor-buffers";
@@ -52,8 +52,37 @@ export type WindowChrome = {
   closeError?: Accessor<string | null>;
 };
 
+/** What a phone knows of the one machine its workspace shows. The phone has no machine of its own. */
+export type PhoneMachineView = { name: string; state: "connecting" | "connected" | "offline"; path: "direct" | "relay" | "unknown" | null; lastConnectedAt: number | null };
+/**
+ * A phone around the shared interface: no tabs, no window controls, a drawer for the sidebar, and touch sizes. The machine
+ * sheet and the phone's own settings belong to the phone shell, so the workspace only asks it to open them.
+ */
+export type PhoneFrame = {
+  kind: "phone";
+  machine: Accessor<PhoneMachineView>;
+  openMachines: () => void;
+  openSettings: () => void;
+  retry: () => void;
+  /** Receives the workspace once it exists, and null when it goes. */
+  attach: (workspace: PhoneWorkspace | null) => void;
+};
+/** What the phone shell may ask of the workspace it holds. */
+export type PhoneWorkspace = {
+  /** Closes the top-most menu, dialog or drawer, else goes back. False when there was nothing left to close or go back to. */
+  back: () => boolean;
+  /** Opens this machine's own settings (connections, orchestration, storage). */
+  openMachineSettings: () => void;
+};
+/** Which shell the interface runs in. The desktop is the default and changes nothing. */
+export type Shell = { kind: "desktop" } | PhoneFrame;
+
 export type Ws = {
-  notify?: (label: string) => Promise<void>;
+  /** The shell around the interface. A phone has no tab strip, terminal, editor or shortcut hints. */
+  shell: Shell;
+  /** A keyboard hint, or nothing where there is no keyboard to speak of. */
+  keys: (hint: string) => string | undefined;
+  notify?: import("./notification-target").Notify;
   store: WorkspaceStore; router: Router; panels: Panels; theme: Theme;
   /** Open files and the owner's unsaved text, above every screen. */
   buffers: Buffers;
@@ -69,7 +98,7 @@ export type Ws = {
   settings: SettingsState;
   /** Screens with nothing to inspect turn the Inspector off, with the reason on its toggle. */
   inspectable: Accessor<boolean>;
-  /** Archive a Done task; unmerged work asks first. */
+  /** Archive a Done task: straight to the Archive, with its work kept and no question. */
   archiveTask: (taskId: string) => void;
   run: (command: WorkspaceCommand) => Promise<CommandReceipt>;
   /** Runs `then` when the command was recorded. What it shows still comes from the next projection. */
@@ -87,8 +116,8 @@ export type Ws = {
   /** The name of the external editor control, for what this computer has. */
   externalLabel: () => string;
   t: (key: CopyKey) => string;
-  /** A model and effort in the words the session uses. */
-  route: (route: { model: string; effort: string } | null) => string | null;
+  /** A recorded engine, model and effort in the words the session uses. */
+  route: (route: WorkerRoute | null) => string | null;
   newId: (kind: "machine" | "project") => string;
   unique: () => string;
   terminal?: TerminalPort;

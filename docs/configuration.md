@@ -1202,7 +1202,7 @@ and native engine accounts and resolve the exact coordinator against
 one observed selectable route. Missing or unsupported model/effort observations
 still fail closed; this snapshot is not live qualification.
 
-The preset makes `gpt-6-astra` flagship-only, never a deep-tier automatic candidate.
+The preset makes `gpt-6.2-astra` flagship-only, never a deep-tier automatic candidate.
 Only `opus[1m]` lists `implementation_frontend_design` in `preferred_for`.
 Synced from the owner's 2026-10-20 production routing update, Opus's
 `preferred_for` had narrowed to `design`, `planning`,
@@ -1222,7 +1222,7 @@ an explicit hint: the hint is ignored on tier mismatch rather than ranked
 against the owner's preference, and the owner's eligible Sonnet/Sol preferences
 serve that tier instead. Opus still serves `design`, `implementation_backend` and
 `implementation_frontend` through its remaining `deep`/`flagship` tiers once
-work escalates or is otherwise eligible for those tiers. Sol's (`gpt-6.1-sol`)
+work escalates or is otherwise eligible for those tiers. Sol's (`gpt-6.2-sol`)
 `preferred_for` also gained `testing`, `investigation` and `writing` in that
 sync; the 2026-10-27 priority refinement removes testing, debugging and writing again. The latest refresh removes Sol's free-text condition (`preferred_when: null`),
 so its listed `preferred_for` kinds apply without a route hint, including on

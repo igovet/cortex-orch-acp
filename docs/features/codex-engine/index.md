@@ -222,13 +222,35 @@ internal compaction has never been observed in a real client, for either
 
 ## Current runtime gateway policy
 
-The private adapter and CLI wrapper disable native shell/view-image tools,
-agents, hooks, plugins, apps and native question tools through supported config.
-Native `apply_patch` remains available, bounded by the engine jail. Every turn
-requests `dangerFullAccess`, `untrusted` approval and the user reviewer; the jail,
-not Codex's nested sandbox, is the filesystem boundary. Authenticated Cortex MCP
-operations provide scoped project access. Account configuration and credentials
-remain in the production native account.
+The native Codex launcher and codex-acp's thread config disable native
+shell/view-image tools, agents, hooks, plugins, apps and native question tools
+through supported config, verified with `codex features list` before App Server
+starts. Native `apply_patch` remains available; Codex has no supported switch for
+it. The Codex process is not sandboxed by Cortex. Cortex selects the session mode
+by the channel's capability, never by the access mode, and never selects
+`agent-full-access`: a read-only channel (the coordinator, a read-only profile or a
+review-stage session) runs in `read-only` (read-only sandbox, approval on request;
+its approval requests reach the runtime, which refuses every one that is not a
+contained read or search), and its start is refused with
+`restricted_mode_unavailable` when the adapter does not offer that mode; a writing
+worker runs in `workspace-write` (sandbox rooted at the project, approvals sent to
+Cortex rather than to Codex's automatic reviewer as in `agent`, which is never
+selected): `apply_patch` edits inside the project without asking, and every
+escalation is answered by the runtime by the access mode's decision table (see
+[native engines](../permissions-and-containment/index.md#native-engines)): an edit
+outside the project, into credential or key material or into Git control and
+engine/Cortex configuration asks the owner in Guarded and Development and is
+allowed and recorded in Auto; one into Cortex private state is refused in every
+mode. codex-acp offers no way to exclude a path from the writable root, so an
+in-project `apply_patch` into `.cortex`, `.cortex-dev`, a credential file or a Git
+control file is not prevented. Codex has no native read tool here, so the read
+rows of the table do not arise. Codex's
+`unified_exec` feature stays listed as enabled: in Codex CLI 0.166.0 neither
+`-c features.unified_exec=false`, a `config.toml` entry nor `--disable
+unified_exec` changes it, and whether it offers an exec path while `shell_tool` is
+off has not been observed in a live run. Authenticated Cortex MCP operations
+provide scoped project access. Account configuration and credentials remain in the
+production native account.
 
 The wrapper verifies installed shapes and checks that account MCP servers are
 disabled for this child before starting App Server. Unsupported versions or changed
@@ -372,8 +394,7 @@ control) — see
 [permissions](../permissions-and-containment/index.md#access-mode-guarded-and-auto).
 `session/set_mode` sets only that mode. Fresh ACP sessions initialize Development
 for brokered writing-worker host commands; Guarded and explicit Auto remain
-selectable. Development does not change the Codex engine jail, native-tool policy
-or worker engine mode floor; see the permission page for Docker/alias limits.
+selectable. No access mode changes the Codex session mode or native-tool policy; see the permission page for Docker/alias limits.
 
 The `/cortex-model <route label or route id>` slash command still selects
 a whole route (any provider) at once, for a host with no
@@ -622,7 +643,7 @@ authenticated channel.
 Installed Codex CLI 0.155.1 reports native `tool_search` as removed, so Cortex
 cannot rely on dynamic, names-first schema retrieval through the current Codex
 ACP adapter. Every model in its catalogue (`gpt-5.6-luna`/`terra`/`sol`,
-`gpt-6-astra`) is `tool_mode: code_mode_only`, and
+`gpt-6-astra`, `gpt-6.2-sol`, `gpt-6.2-astra`) is `tool_mode: code_mode_only`, and
 `tool_search_always_defer_mcp_tools` is fixed on. The model therefore sees one
 JavaScript `exec` tool; the `cortex` MCP tools are nested behind it as
 `tools.mcp__cortex__<name>(...)` and listed in `ALL_TOOLS` as

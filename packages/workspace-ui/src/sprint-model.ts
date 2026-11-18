@@ -1,7 +1,7 @@
 import { dependencyReady, isOpen, openPlanningQuestion, runBlockerOf, runOrder, type AttachmentInput, type PlanItem, type Sprint, type Task, type TaskSession } from "@cortex/workspace-domain";
 import type { Ask } from "./questions";
 import { checksLine } from "./review-model";
-import { readyLabel, type TaskView, type WorkspaceIndex } from "./selectors";
+import { readyLabel, readyStep, type TaskView, type WorkspaceIndex } from "./selectors";
 
 export const itemTitle = (item: PlanItem) => item.title ?? item.description;
 
@@ -28,11 +28,11 @@ export function planningThread(sprint: Sprint, session: TaskSession | undefined)
     // An answer still waiting for the rest of its batch stays on its tab.
     if (asked.some(d => d.held && d.answer?.text === entry.text)) return;
     const at = settled.findIndex(d => d.answer!.text === entry.text), decision = at < 0 ? null : settled.splice(at, 1)[0];
-    out.push({ key: `qa:${decision?.id ?? i}`, kind: "qa", question: decision?.text ?? question ?? "", text: entry.text, at: decision?.answer?.at ?? entry.at ?? null, attachments: entry.attachments });
+    out.push({ key: `qa:${decision?.id ?? i}`, kind: "qa", question: decision?.text ?? question ?? "", text: entry.text, at: decision?.answer?.at ?? entry.at ?? null, attachments: entry.attachments?.length ? entry.attachments : decision?.answer?.attachments });
     question = null;
   });
   flush("end");
-  return [...out, ...settled.map((d): ThreadEntry => ({ key: `qa:${d.id}`, kind: "qa", question: d.text, text: d.answer!.text, at: d.answer!.at }))];
+  return [...out, ...settled.map((d): ThreadEntry => ({ key: `qa:${d.id}`, kind: "qa", question: d.text, text: d.answer!.text, at: d.answer!.at, attachments: d.answer!.attachments }))];
 }
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
@@ -199,7 +199,7 @@ export function queueStall(index: WorkspaceIndex, sprint: Sprint): { reason: str
   const ready = (v: TaskView) => v.task.dependencies.every(id => { const d = index.byId.get(id); return !!d && dependencyReady(d.task); });
   if (!drafts.length || drafts.some(ready)) return null;
   const first = drafts[0], dep = first.task.dependencies.map(id => index.byId.get(id)).find(d => !d || !dependencyReady(d.task));
-  return dep ? { reason: `${first.task.title} waits for ${dep.task.title} to reach Ready to merge`, taskId: dep.id } : { reason: `${first.task.title} waits for a task that is not loaded`, taskId: null };
+  return dep ? { reason: `${first.task.title} waits for ${dep.task.title} to reach ${readyStep(dep.task, dep.target, dep.project.hasGit)}`, taskId: dep.id } : { reason: `${first.task.title} waits for a task that is not loaded`, taskId: null };
 }
 /** Why the sprint cannot go to the Archive yet, or null. Every recorded task must be loaded and done, not only the visible ones. */
 export function sprintArchiveBlocked(index: WorkspaceIndex, sprint: Sprint): string | null {

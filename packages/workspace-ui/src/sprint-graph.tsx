@@ -722,13 +722,13 @@ export function GraphView(props: GraphViewProps) {
 
     <Pop id={ids.status} class="gv-pop" align="left" label="Show tasks by status">
       <div class="mi-h">Show tasks by status</div>
-      <For each={counts()}>{c => <label class="mi"><input type="checkbox" class="ws-ck" checked={filter().has(c.id)} onChange={e => toggleFilter(c.id, e.currentTarget.checked)} /><I n={c.icon} s={14} /><span class="grow">{c.label}</span><span class="ct">{c.n}</span></label>}</For>
+      <Keyed each={counts()} by={c => c.id}>{c => <label class="mi"><input type="checkbox" class="ws-ck" checked={filter().has(c().id)} onChange={e => toggleFilter(c().id, e.currentTarget.checked)} /><I n={c().icon} s={14} /><span class="grow">{c().label}</span><span class="ct">{c().n}</span></label>}</Keyed>
       <div class="mi-sep" />
       <button class="mi" onClick={() => setFilter(new Set())}><span class="grow">Clear status</span></button>
     </Pop>
     <Pop id={ids.layers} class="gv-pop gv-layers" align="left" label="Dependency layers">
       <div class="mi-h">Dependency layers</div>
-      <div class="gv-pop-scroll"><For each={g().layers}>{l => <label class="mi"><input type="checkbox" class="ws-ck" checked={!l.collapsed} onChange={e => setColl(l.layer, !e.currentTarget.checked)} /><span class="grow">Layer {l.layer + 1}</span><span class="ct">{l.keys.length} tasks</span></label>}</For></div>
+      <div class="gv-pop-scroll"><Keyed each={g().layers} by={l => String(l.layer)}>{l => <label class="mi"><input type="checkbox" class="ws-ck" checked={!l().collapsed} onChange={e => setColl(l().layer, !e.currentTarget.checked)} /><span class="grow">Layer {l().layer + 1}</span><span class="ct">{l().keys.length} tasks</span></label>}</Keyed></div>
       <div class="mi-sep" />
       <button class="mi" onClick={() => setAll(() => true)}><span class="grow">Collapse all</span></button>
       <button class="mi" onClick={() => setAll(() => false)}><span class="grow">Expand all</span></button>

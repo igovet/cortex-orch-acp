@@ -1,13 +1,15 @@
 import { createEffect, createMemo, createSignal, createUniqueId, For, lazy, on, onCleanup, Show, Suspense, untrack, useContext } from "solid-js";
-import type { ProjectRepo, RepoCheckout } from "@cortex/workspace-domain";
+import type { FolderListing, FolderOverview, ProjectRepo, RepoCheckout } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { Code, Counts, Diff, GitLetter, type HunkActions } from "./diff";
 import { bufferKey, hasUnsaved, saveWord, UNCONFIRMED_WRITER, type FileBuffer } from "./editor-buffers";
+import { FilePreview, ViewSwitch, viewKind, viewPlan, type FileViewMode } from "./file-view";
 import { ScreenActive } from "./freshness";
 import { languageOf } from "./highlight";
-import { A, I, Modal } from "./kit";
+import { A, I, Keyed, Modal } from "./kit";
 import { ActionBar, revealCutIn, Toolbar } from "./layout";
-import { addedLines, allDirs, checkoutFiles, dirName, fileName, searchFiles, sourceOf, splitMatch, treeRows } from "./review-model";
+import { addedLines, allDirs, checkoutFiles, codeTree, dirName, fileName, searchFiles, sourceOf, splitMatch, treeRows, type FolderView } from "./review-model";
+import { same } from "./stable";
 import type { Route } from "./router";
 
 /** Its own chunk, so the first window pays nothing for an editor until a file opens. */
@@ -64,7 +66,7 @@ function GoToFile(props: { open: boolean; paths: string[]; onClose: () => void; 
 }
 
 const sameFiles = (a: ReturnType<typeof checkoutFiles>, b: ReturnType<typeof checkoutFiles>) =>
-  a.diffs === b.diffs && a.tree.length === b.tree.length && a.tree.every((path, i) => path === b.tree[i]);
+  (a.diffs === b.diffs || (!a.diffs.length && !b.diffs.length)) && a.tree.length === b.tree.length && a.tree.every((path, i) => path === b.tree[i]);
 
 /** Tree, tabs, the file and its diff for one checkout. `at` builds the address, so the same view serves a project and a task. */
 export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; file?: string; line?: number; at: (file: string, line?: number) => Route }) {
@@ -86,7 +88,46 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
   const diffOf = (path: string) => data().diffs.find(d => d.path === path);
   const working = (path: string) => props.checkout.files.find(f => f.path === path);
   const paths = createMemo(() => { const changed = new Set(data().diffs.map(d => d.path)); return onlyChanged() ? data().tree.filter(p => changed.has(p)) : data().tree; });
-  const rows = createMemo(() => treeRows(paths(), collapsed()));
+  // Beyond the snapshot's Git files, the tree shows everything in the folder, read only on demand: what the snapshot
+  // leaves out (ignored files, ignored and untracked folders, collapsed) and one level of each folder the owner opens.
+  const [overview, setOverview] = createSignal<FolderOverview | null>(null, { equals: same });
+  const [folders, setFolders] = createSignal<ReadonlyMap<string, FolderView>>(new Map());
+  const [opened, setOpened] = createSignal<ReadonlySet<string>>(new Set());
+  const tree = createMemo(() => onlyChanged() ? undefined : codeTree(paths(), overview(), folders()));
+  // A lazy folder stays closed until the owner opens it.
+  const shut = createMemo(() => {
+    const t = tree();
+    if (!t?.lazy.size) return collapsed();
+    const all = new Set(collapsed());
+    for (const dir of t.lazy) if (!opened().has(dir)) all.add(dir);
+    return all;
+  });
+  const rows = createMemo(() => treeRows(paths(), shut(), tree()));
+  // Go to file finds what the tree has shown, listed folders included.
+  const known = createMemo(() => tree()?.items.filter(p => !p.endsWith("/")) ?? data().tree);
+  let listing = 0;
+  const putFolders = (dirs: string[], view: (dir: string) => FolderView | undefined, keep: (dir: string) => boolean) => setFolders(prev => {
+    const next = new Map([...prev].filter(([dir]) => keep(dir)));
+    for (const dir of dirs) { const v = view(dir); if (v) next.set(dir, same(prev.get(dir), v) ? prev.get(dir)! : v); }
+    return next.size === prev.size && [...next].every(([dir, v]) => prev.get(dir) === v) ? prev : next;
+  });
+  /** One bounded read per call; `withOverview` also rereads what the snapshot leaves out. */
+  const list = async (dirs: string[], withOverview: boolean, keep: (dir: string) => boolean = () => true) => {
+    const at = listing, checkoutId = props.checkout.id;
+    for (let i = 0; i === 0 || i < dirs.length; i += 32) {
+      const chunk = dirs.slice(i, i + 32), first = i === 0;
+      let read: FolderListing | { error: string };
+      try { read = await ws.store.listFolders(checkoutId, { dirs: chunk, overview: withOverview && first }); }
+      catch (e) { read = { error: e instanceof Error && e.message ? e.message : "This folder could not be read." }; }
+      if (at !== listing) return;
+      if ("error" in read) { const error = read.error; putFolders(chunk, () => ({ error }), dir => keep(dir) || !chunk.includes(dir)); continue; }
+      if (withOverview && first) setOverview(read.overview);
+      const byDir = new Map(read.folders.map(f => [f.dir, "code" in f ? { error: f.message } : { entries: f.entries, more: f.more, exact: f.exact }] as const));
+      putFolders(chunk, dir => byDir.get(dir), dir => keep(dir) || chunk.includes(dir));
+    }
+  };
+  /** Code's own refresh: on open, on the owner's refresh and after the owner's save here. Never on a timer. */
+  const refreshTree = () => { const kept = [...untrack(opened)].filter(dir => untrack(folders).has(dir)); void list(kept, true, dir => kept.includes(dir)); };
   const open = () => props.file ?? null;
   const bufferOf = (path: string) => ws.buffers.list().find(b => b.key === bufferKey(props.checkout.id, path)) ?? null;
   const buffer = createMemo(() => open() ? bufferOf(open()!) : null);
@@ -98,8 +139,35 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
   const locked = (b: FileBuffer) => !!b.readOnly || (!!writer() && !edit() && !hasUnsaved(b));
   const source = createMemo(() => open() ? sourceOf(props.repo, props.checkout, data().diffs, open()!) : null);
   const added = createMemo(() => addedLines(open() ? diffOf(open()!) : undefined));
+  // Each file keeps the owner's last choice of preview or source; a new one opens as its type suggests.
+  const [views, setViews] = createSignal<Record<string, FileViewMode>>({});
+  const plan = createMemo(() => viewPlan(open() ?? ""));
+  const view = () => { const f = open(); return (f ? views()[f] : undefined) ?? plan().initial; };
+  const setView = (next: FileViewMode) => { const f = open(); if (f) setViews(all => ({ ...all, [f]: next })); ws.setCodeMode("file"); };
+  const switchable = () => plan().modes.length > 1 || view() !== plan().initial;
+  const [reloaded, setReloaded] = createSignal(0);
+  onCleanup(ws.buffers.subscribe(key => { if (key === buffer()?.key) setReloaded(n => n + 1); }));
+  // The preview shows what the editor holds, read again each time it is shown, so unsaved text is what is previewed.
+  const previewText = createMemo(() => {
+    reloaded();
+    if (view() !== "preview") return null;
+    const b = buffer();
+    if (b?.loaded && !b.missing) return ws.buffers.text(b.key);
+    const s = source();
+    return s && !s.partial ? s.lines.join("\n") : null;
+  });
+  const previewReason = () => editable() && !buffer()?.loaded ? "Opening…" : buffer()?.missing ?? (source()?.partial ? ws.t("partialFile") : ws.t("noFileCopy"));
   const found = createMemo(() => searchFiles(props.repo, props.checkout, data().diffs, data().tree, query(), matchCase()));
-  const toggleDir = (dir: string) => { const next = new Set(collapsed()); if (next.has(dir)) next.delete(dir); else next.add(dir); setCollapsed(next); };
+  const toggleDir = (dir: string, lazy?: boolean) => {
+    if (!lazy) { const next = new Set(collapsed()); if (next.has(dir)) next.delete(dir); else next.add(dir); setCollapsed(next); return; }
+    if (!shut().has(dir)) { setOpened(all => new Set([...all].filter(d => d !== dir))); return; }
+    // Opening reads this one folder's own entries once; what was read before shows meanwhile.
+    setOpened(all => new Set([...all, dir]));
+    if (collapsed().has(dir)) { const next = new Set(collapsed()); next.delete(dir); setCollapsed(next); }
+    if (!folders().has(dir)) putFolders([dir], () => ({ loading: true }), () => true);
+    void list([dir], false);
+  };
+  const collapseAll = () => { setOpened(new Set<string>()); setCollapsed(new Set(rows().filter(r => r.kind === "dir").map(r => r.path).concat(allDirs(paths())))); };
   const show = (file: string, line?: number) => ws.go(props.at(file, line));
   const ensure = (path: string, preview: boolean) => setTabs(list => {
     if (list.some(t => t.path === path)) return preview || !list.some(t => t.path === path && t.preview) ? list : list.map(t => t.path === path ? { ...t, preview: false } : t);
@@ -113,12 +181,13 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
     if (path === open()) { const last = next.at(-1)?.path ?? data().diffs[0]?.path ?? data().tree[0]; if (last) ws.go(props.at(last), { replace: true }); }
   };
   const close = (path: string) => { const b = bufferOf(path); if (b && hasUnsaved(b)) setAsking(path); else drop(path); };
-  const saveNow = () => { const b = buffer(); if (b && !saveBlocked(b)) void ws.buffers.save(b.key); };
+  const saveNow = () => { const b = buffer(); if (b && !saveBlocked(b)) void ws.buffers.save(b.key).then(refreshTree); };
   const saveAndDrop = async (path: string) => {
     const b = bufferOf(path);
     setAsking(null);
     if (!b) return;
     await ws.buffers.save(b.key);
+    refreshTree();
     const after = bufferOf(path);
     if (after && !hasUnsaved(after)) drop(path);
   };
@@ -149,6 +218,10 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
   const checkoutId = createMemo(() => props.checkout.id);
   const spot = createMemo(() => `${props.file ?? ""}:${props.line ?? ""}`);
   createEffect(on(checkoutId, () => setTabs([]), { defer: true }));
+  // Opening Code or another checkout lists anew; so does coming back to this screen.
+  createEffect(on(checkoutId, () => { listing++; setOverview(null); setFolders(new Map()); setOpened(new Set<string>()); refreshTree(); }));
+  let away = false;
+  createEffect(() => { if (!shown()) { away = true; return; } if (away) { away = false; refreshTree(); } });
   createEffect(() => { const f = props.file; if (f) ensure(f, !diffOf(f)); });
   // Unsaved text keeps its tab, also after leaving this screen and coming back.
   createEffect(() => { for (const b of ws.buffers.unsaved()) if (b.checkoutId === props.checkout.id) ensure(b.path, false); });
@@ -161,6 +234,9 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
     const line = props.line;
     if (line === undefined) return;
     ws.setCodeMode("file");
+    // A line is found in the source, so that is what a jump to it shows.
+    const f = untrack(open);
+    if (f && untrack(view) !== "source") setViews(all => ({ ...all, [f]: "source" }));
     queueMicrotask(() => document.getElementById(`code-line-${line}`)?.scrollIntoView?.({ block: "center" }));
   }));
   const onKey = (e: KeyboardEvent) => {
@@ -187,21 +263,26 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
     <div class="code-body">
       <aside class="side-pane" aria-label="Files" ref={revealCutIn}>
         <Toolbar small class="side-h" start={<div class="seg" role="group" aria-label="Left pane"><button aria-current={left() === "files" ? "true" : "false"} onClick={() => ws.setCodeLeft("files")}>Files</button><button aria-current={left() === "search" ? "true" : "false"} onClick={() => ws.setCodeLeft("search")}>Search</button></div>}
-          end={<button class="ib" aria-label="Collapse all" onClick={() => setCollapsed(new Set(allDirs(paths())))}><I n="chevrons-v" s={14} /></button>} />
+          end={<><button class="ib" aria-label="Refresh files" onClick={() => { refreshTree(); void ws.store.refreshProjectFacts(props.repo.projectId, true); }}><I n="refresh" s={14} /></button><button class="ib" aria-label="Collapse all" onClick={collapseAll}><I n="chevrons-v" s={14} /></button></>} />
         <Show when={left() === "files"} fallback={<div class="tree" aria-label="Search results">
           <div class="ws-search"><input class="inp ws-find-in" aria-label="Search files" placeholder="Search in files" value={query()} onInput={e => setQuery(e.currentTarget.value)} ref={el => queueMicrotask(() => el.focus())} />
             <div class="row ws-mt6"><span class="cap faint">{query() ? `${found().total} match${found().total === 1 ? "" : "es"} in ${found().files.length} file${found().files.length === 1 ? "" : "s"}` : "Type to search"}</span><span class="grow"></span>
               <button class="ib cap ws-aa" aria-label="Match case" aria-pressed={matchCase()} onClick={() => setMatchCase(!matchCase())}>Aa</button></div></div>
-          <For each={found().files}>{f => <>
-            <div class="res-file"><I n="file" s={12} class="faint" /><span class="trunc">{f.path}</span><span class="faint ws-res-n">{f.hits.length}</span></div>
-            <For each={f.hits}>{h => { const part = () => splitMatch(h.text.trim(), query(), matchCase()); return <button class="res-hit" onClick={() => show(f.path, h.line)}><span class="n">{h.line}</span><span>{part().before}<mark>{part().hit}</mark>{part().after}</span></button>; }}</For>
-          </>}</For>
+          {/* Kept by path and line: a read that changes the checkout searches again, and a result still found keeps its row. */}
+          <Keyed each={found().files} by={f => f.path}>{f => <>
+            <div class="res-file"><I n="file" s={12} class="faint" /><span class="trunc">{f().path}</span><span class="faint ws-res-n">{f().hits.length}</span></div>
+            <Keyed each={f().hits} by={h => String(h.line)}>{h => { const part = () => splitMatch(h().text.trim(), query(), matchCase()); return <button class="res-hit" onClick={() => show(f().path, h().line)}><span class="n">{h().line}</span><span>{part().before}<mark>{part().hit}</mark>{part().after}</span></button>; }}</Keyed>
+          </>}</Keyed>
         </div>}>
           <Toolbar small class="side-opts" start={<label class="sw-l"><span class="sw"><input type="checkbox" aria-label="Only changed files" checked={onlyChanged()} onChange={e => setOnlyChanged(e.currentTarget.checked)} /><i></i></span>Only changed</label>} end={<span class="cap faint">{data().diffs.length} changed</span>} />
           <div class="tree" role="tree" aria-label="Files">
-            <For each={rows()}>{row => row.kind === "dir"
-              ? <button class="tn" role="treeitem" style={{ "--d": row.depth }} aria-expanded={!collapsed().has(row.path)} onClick={() => toggleDir(row.path)}><I n={collapsed().has(row.path) ? "chevron-right" : "chevron-down"} s={14} /><span class="trunc">{row.name}</span></button>
-              : <button class="tn" role="treeitem" style={{ "--d": row.depth }} aria-current={open() === row.path ? "true" : undefined} onClick={() => show(row.path)}><I n="file" s={14} /><span class="trunc">{row.name}</span><Show when={diffOf(row.path)}>{d => <GitLetter status={d().status} />}</Show></button>}</For>
+            {/* Kept by kind and path: the rows are rebuilt whenever a folder opens or the checkout's files move, and a row that
+                is still there must keep its node, so focus, hover and the tree's scroll stay where they were. */}
+            <Keyed each={rows()} by={r => `${r.kind}:${r.path}`}>{row => row().kind === "more"
+              ? <div class="tn ws-tree-note" role="treeitem" style={{ "--d": row().depth }}><span class="trunc">{row().name}</span></div>
+              : row().kind === "dir"
+              ? <button class="tn" classList={{ "ws-ignored": !!row().ignored }} role="treeitem" style={{ "--d": row().depth }} aria-label={row().ignored ? `${row().name}, ignored` : undefined} aria-expanded={!shut().has(row().path)} onClick={() => toggleDir(row().path, row().lazy)}><I n={shut().has(row().path) ? "chevron-right" : "chevron-down"} s={14} /><span class="trunc">{row().name}</span></button>
+              : <button class="tn" classList={{ "ws-ignored": !!row().ignored }} role="treeitem" style={{ "--d": row().depth }} aria-label={row().ignored ? `${row().name}, ignored` : undefined} aria-current={open() === row().path ? "true" : undefined} onClick={() => show(row().path)}><I n={row().link ? "link" : "file"} s={14} /><span class="trunc">{row().name}</span><Show when={diffOf(row().path)}>{d => <GitLetter status={d().status} />}</Show></button>}</Keyed>
           </div>
         </Show>
       </aside>
@@ -220,6 +301,7 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
           <Toolbar small class="ecrumb" label="File" mid={<span class="ws-crumb"><Show when={dirName(path())}><I n="folder" s={12} class="faint" /><span class="trunc ws-crumb-d" data-whole={dirName(path())}>{dirName(path()).split("/").join(" / ")}</span><I n="chevron-right" s={12} class="faint" /></Show><span class="ws-fg trunc" data-whole={path()}>{fileName(path())}</span>
               <Show when={diff()}>{d => <span class="tnum trunc ws-against l-compact-hide"><Counts add={d().add} del={d().del} /> against <span class="mono">{props.checkout.base}</span></span>}</Show></span>}
             end={<>
+              <Show when={switchable()}><ViewSwitch view={view()} onView={setView} /></Show>
               <Show when={buffer()?.loaded && !buffer()?.missing && buffer()}>{b => <><span id={saveState} class="ws-save-state" role="status">{saveWord(b()) || "No changes"}</span>
                 <button class="btn btn-sm" aria-label={`Save ${fileName(path())}`} aria-disabled={saveBlocked(b()) ? "true" : undefined} data-why={saveBlocked(b())} aria-describedby={saveBlocked(b()) ? saveState : undefined} onClick={saveNow}>Save</button></>}</Show>
               <button class="btn btn-sm" onClick={() => setGoTo(true)}>Go to file</button>
@@ -234,6 +316,7 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
           </>}</Show>
           <Show when={working(path())?.filter}>{driver => <div class="strip info"><span>{driver() === "lfs" ? "Git LFS" : `Git filter: ${driver()}`} · Content comparison is unavailable; no filter is run.</span></div>}</Show>
           <Show when={mode() === "file"} fallback={<div class="ebody ws-flush"><Show when={diff()} fallback={<div class="note-panel"><span class="w500">No changes in this file</span><span>It matches {props.checkout.base}.</span></div>}>{d => <Diff file={d()} layout={mode() === "split" ? "split" : "unified"} actions={actions(path())} />}</Show></div>}>
+            <Show when={view() === "source"} fallback={<FilePreview path={path()} plan={plan()} text={previewText()} reason={previewReason()} readMedia={() => ws.store.readMedia(props.checkout.id, path())} onSource={() => setView("source")} />}>
             <Show when={buffer()?.loaded && !buffer()?.missing && buffer()} fallback={<Show when={!editable() || buffer()?.missing} fallback={<div class="ebody"><div class="note-panel"><span>Opening…</span></div></div>}>
               <div class="ebody"><Show when={source()} fallback={<div class="note-panel"><span class="w500">{buffer()?.missing ?? ws.t("noFileCopy")}</span></div>}>{s => <>
                 <Show when={s().partial}><div class="cap faint ws-pad">{ws.t("partialFile")}</div></Show>
@@ -241,13 +324,21 @@ export function CodeView(props: { repo: ProjectRepo; checkout: RepoCheckout; fil
                 <div class="code"><For each={s().lines}>{(line, i) => <div id={`code-line-${i() + 1}`} class={`cl${added().has(i() + 1) ? " chg" : ""}${props.line === i() + 1 ? " hit" : ""}`}><span class="n">{i() + 1}</span><span class="m"></span><span class="c"><Code path={path()} text={line} /></span></div>}</For></div>
               </>}</Show></div>
             </Show>}>{b => <div class="ebody ws-flush ws-editor"><Suspense fallback={<div class="note-panel"><span>Opening…</span></div>}><CodeEditor buffer={b()} locked={locked(b())} line={props.line} changed={added()} onSave={saveNow} /></Suspense></div>}</Show>
+            </Show>
           </Show>
         </>}</Show>
       </section>
     </div>
-    <GoToFile open={goTo()} paths={data().tree} onClose={() => setGoTo(false)} onPick={show} />
+    <GoToFile open={goTo()} paths={known()} onClose={() => setGoTo(false)} onPick={show} />
     <CloseFile buffer={asking() ? bufferOf(asking()!) : null} onCancel={() => setAsking(null)} onDiscard={() => { const path = asking(); setAsking(null); if (path) drop(path); }} onSave={() => { const path = asking(); if (path) void saveAndDrop(path); }} />
   </>;
+}
+
+/** What a file that is not text is, for the Inspector: a picture, a recording, a PDF or another binary file has no language. */
+export function fileType(path: string): string | undefined {
+  const kind = viewKind(path), ext = (path.split("/").pop() ?? "").split(".").pop()?.toUpperCase() ?? "";
+  const named = ({ image: "Image", video: "Video", audio: "Audio" } as Record<string, string>)[kind];
+  return named ? `${named} (${ext})` : kind === "pdf" ? "PDF document" : kind === "binary" ? `Binary file (${ext})` : undefined;
 }
 
 /** The Inspector's facts about the open file and its checkout. */
@@ -259,7 +350,7 @@ export function CodePanel(props: { repo: ProjectRepo; checkout: RepoCheckout; fi
   const task = () => props.checkout.taskId ? ws.store.index().byId.get(props.checkout.taskId) ?? null : null;
   return <>
     <Show when={props.file}>{path => <div class="ins-sec"><div class="ins-h"><span>File</span></div>
-      <dl class="kv"><dt>Path</dt><dd class="mono">{path()}</dd><dt>Language</dt><dd>{languageOf(path())}</dd><Show when={lines() !== undefined}><dt>Lines</dt><dd>{lines()}</dd></Show><Show when={diff()?.changedBy}><dt>Changed by</dt><dd>{diff()!.changedBy}</dd></Show></dl>
+      <dl class="kv"><dt>Path</dt><dd class="mono">{path()}</dd><Show when={fileType(path())} fallback={<><dt>Language</dt><dd>{languageOf(path())}</dd></>}>{t => <><dt>Type</dt><dd>{t()}</dd></>}</Show><Show when={lines() !== undefined}><dt>Lines</dt><dd>{lines()}</dd></Show><Show when={diff()?.changedBy}><dt>Changed by</dt><dd>{diff()!.changedBy}</dd></Show></dl>
       <Show when={diff()}><button class="btn btn-sm ws-mt8" onClick={() => ws.setCodeMode("inline")}>Show diff</button></Show></div>}</Show>
     <div class="ins-sec"><div class="ins-h"><span>Checkout</span></div>
       <dl class="kv"><Show when={task()}>{v => <><dt>Task</dt><dd><A class="lnk" to={{ name: "task", machine: v().machine.id, task: v().id }}>{v().task.title}</A></dd></>}</Show><dt>Branch</dt><dd class="mono">{props.checkout.branch}</dd><dt>Autosave</dt><dd><A class="lnk" to={{ name: "settings", section: "appearance", machine: null }}>{ws.panels.autosave() ? "On" : "Off"}</A></dd></dl></div>

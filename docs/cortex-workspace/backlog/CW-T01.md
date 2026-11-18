@@ -1,6 +1,6 @@
 # CW-T01: Service-owned PTY sessions
 
-**Status:** local project slice built; task/worktree sessions and wider qualification remain planned · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: service-owned PTY sessions in the xterm.js terminal ([IDE and Git](../ide-and-git.md)); a terminal round trip passes in the no-paid container journey; not verified on a real session · **Phase:** 3+ · **Size:** L
 
 The local slice uses portable-pty 0.9.0 and xterm.js 6.0.0 with fit addon 0.11.0 (DOM renderer). It has one owner shell per registered project, including in task views; the initial cwd is the project folder, not the task worktree. Ctrl+J opens/hides it. Bounds, same-user authority and cleanup limits are in [security](../security.md#owner-terminal-built-local-linux). This does not qualify remote terminals or the CW-F03 GPU fixture.
 

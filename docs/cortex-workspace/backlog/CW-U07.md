@@ -1,6 +1,6 @@
 # CW-U07: Per-machine orchestration settings
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies · **Phase:** 3+ · **Size:** L
+**Status:** Implemented for the local machine: per-machine orchestration settings, editable MCP servers and per-tool access ([screens](../SCREENS.md#orchestration-settings-desktop)); settings for remote machines do not exist; per-tool engine access and per-role access remain open decisions · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Per-machine settings. They hold the orchestration settings, the machine-level defaults for new tasks (main model, effort, access mode and language, as set out in [CW-U10](CW-U10.md)), the voice-input provider choice ([CW-U11](CW-U11.md)) and the Worktrees page that sets the machine's worktree root.

@@ -1,6 +1,6 @@
 # CW-C11: Description-first generated title contract
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies · **Phase:** 3+ · **Size:** M
+**Status:** Implemented: a generated editable title and commit and PR drafts come from a short ACP engine session on the cheapest allowed model of the least-used connection ([maintenance and controls](../maintenance-and-controls.md)); no paid generation verified · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Description-first generated title contract.

@@ -1,6 +1,6 @@
 # CW-A01: Android app shell and Now summary in React Native
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: an Android app exists as the shared interface in a phone shell (Tauri 2, not React Native; owner decision of 2026-11-17); debug APK built on the development machine, not verified on a device or emulator · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Build the Android app shell in React Native with the New Architecture enabled. It contains the Now screen (decisions that need the owner, results ready to review, running work), a task list, project navigation and an away summary of changes since the last open. The layout follows the mobile concept that Gate M selects ([mobile approval](../design/mobile-approval.md); not recorded at audit time). The React Native choice remains provisional until CW-F02 reports.

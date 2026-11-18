@@ -1,6 +1,6 @@
 # CW-I04c: TypeScript language server integration
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Not implemented; no language server integration exists · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Apply the same language-server integration to a pinned TypeScript language server and a TypeScript fixture project. Reuse the supervisor and document synchronization from CW-I04b, and add detection of the project configuration (tsconfig).

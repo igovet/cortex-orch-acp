@@ -1,0 +1,36 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "types": [
+      "vite/client",
+      "node"
+    ],
+    "paths": {
+      "solid-js": ["./node_modules/solid-js/types/index.d.ts"],
+      "solid-js/*": ["./node_modules/solid-js/*"],
+      "@cortex/workspace-contract": [
+        "../../packages/workspace-contract/index.ts"
+      ],
+      "@cortex/workspace-domain": [
+        "../../packages/workspace-domain/src/index.ts"
+      ],
+      "@cortex/workspace-domain/*": [
+        "../../packages/workspace-domain/src/*"
+      ]
+    }
+  },
+  "include": [
+    "src",
+    "test",
+    "vite.config.ts"
+  ]
+}

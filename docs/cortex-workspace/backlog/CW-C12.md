@@ -1,6 +1,6 @@
 # CW-C12: Durable worker message capture and delivery
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: a message to a worker is captured durably and shows pending, delivered, withdrawn or not delivered ([local task execution](../local-task-execution.md)); no-paid checks only · **Phase:** 3+ · **Size:** L
 
 ## Goal
 

@@ -1,6 +1,6 @@
 # CW-F01: Pin toolchain versions and stand up the real Ubuntu Tauri 2 + SolidJS + TypeScript shell
 
-**Status:** planned; a narrow subset is built by CW-S01 and CW-S09 and is not closed by them · **Phase:** 3+ · **Size:** M
+**Status:** Implemented: pinned Rust toolchain, Tauri 2 shell with SolidJS and TypeScript, and a `.deb` build in a container ([platforms](../platforms.md)); not verified on a real Ubuntu session or GPU · **Phase:** 3+ · **Size:** M
 
 ## Goal
 

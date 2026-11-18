@@ -139,7 +139,10 @@ fn same_branch_reasons(record: &Value) -> (String, String) {
 /// planned or delegated, and nothing in the task asked to write, run or edit (no
 /// write or command request and no engine edit, delete, move or execute permission).
 /// Any of those keeps the unrecorded-changes wording instead.
-fn answered_without_changes(db: &rusqlite::Connection, task: &str) -> cortex_core::CoreResult<bool> {
+fn answered_without_changes(
+    db: &rusqlite::Connection,
+    task: &str,
+) -> cortex_core::CoreResult<bool> {
     let runtime: Option<String> = db
         .query_row(
             "SELECT e.runtime_task_id FROM workspace_tasks t JOIN workspace_executions e
@@ -164,6 +167,109 @@ fn answered_without_changes(db: &rusqlite::Connection, task: &str) -> cortex_cor
         [&runtime],
         |r| r.get(0),
     )?)
+}
+/// Recorded file writes of one task checked at once (`same_branch`).
+const FILE_CHECKS: usize = 8;
+/// Where one recorded file write stands for a same-branch commit.
+enum Landing {
+    /// The target branch holds it, or it landed in the target's history.
+    Landed,
+    /// The working folder holds exactly the recorded content, uncommitted.
+    Pending,
+    /// It changed again, is staged differently, changed mode or cannot be located.
+    Unknown,
+    /// The inspection deadline passed first.
+    Deadline,
+}
+/// One recorded write: its path, the content digest it recorded and when.
+struct Recorded<'a> {
+    name: &'a str,
+    wanted: Option<&'a str>,
+    at: Option<i64>,
+}
+async fn landing(
+    git: &mut Git,
+    path: &Path,
+    target: &str,
+    base: Option<&str>,
+    file: Recorded<'_>,
+    deadline: tokio::time::Instant,
+) -> Result<Landing> {
+    let Recorded { name, wanted, at } = file;
+    if tokio::time::Instant::now() >= deadline {
+        return Ok(Landing::Deadline);
+    }
+    if blob(git, path, target, name).await?.as_deref() == wanted {
+        return Ok(Landing::Landed);
+    }
+    let history = base
+        .map(|base| format!("{base}..{target}"))
+        .unwrap_or_else(|| target.into());
+    let log = git
+        .out(
+            path,
+            &[
+                "log",
+                "-n",
+                "128",
+                "--format=%H %ct",
+                &history,
+                "--",
+                &format!(":(literal){name}"),
+            ],
+        )
+        .await?;
+    for line in log.lines() {
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(Landing::Deadline);
+        }
+        let Some((reference, when)) = line.split_once(' ') else {
+            continue;
+        };
+        if base.is_none() && at.is_none_or(|at| when.parse::<i64>().unwrap_or(0) < at) {
+            continue;
+        }
+        if blob(git, path, reference, name).await?.as_deref() == wanted {
+            return Ok(Landing::Landed);
+        }
+    }
+    // Descriptor-relative no-follow reading is shared with the editor path.
+    let observed =
+        super::task_facts::safe_bytes(path, name, 2_000_000).map(|v| files::revision(&v));
+    let staged = git
+        .out(
+            path,
+            &[
+                "diff",
+                "--cached",
+                "--name-only",
+                "--",
+                &format!(":(literal){name}"),
+            ],
+        )
+        .await?;
+    let mode = git
+        .out(
+            path,
+            &[
+                "diff",
+                "--summary",
+                "HEAD",
+                "--",
+                &format!(":(literal){name}"),
+            ],
+        )
+        .await?;
+    Ok(
+        if observed.ok().as_deref() != wanted
+            || (!staged.trim().is_empty() && blob(git, path, "", name).await?.as_deref() != wanted)
+            || mode.contains("mode change")
+        {
+            Landing::Unknown
+        } else {
+            Landing::Pending
+        },
+    )
 }
 async fn same_branch(
     root: &Path,
@@ -243,7 +349,10 @@ async fn same_branch(
     if content.is_empty() {
         // An answer-only result changed nothing: there is nothing to commit, which is
         // not the same as changes nobody recorded. Present only when it applies.
-        if store.read(|db| answered_without_changes(db, task)).map_err(context::core)? {
+        if store
+            .read(|db| answered_without_changes(db, task))
+            .map_err(context::core)?
+        {
             facts["noChanges"] = json!(true);
             facts["reason"] = json!("This task answered without changing any files, so there is nothing to commit. Close the task when you are done with it.");
         } else {
@@ -269,92 +378,40 @@ async fn same_branch(
         }
     }
     facts["otherUncommitted"] = json!(dirty.iter().any(|n| !content.contains_key(n)));
-    let mut pending = Vec::new();
-    let mut unknown = Vec::new();
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
-    for (name, (wanted, at)) in &content {
-        if tokio::time::Instant::now() >= deadline {
-            return Ok(());
-        }
-        if blob(git, path, target, name).await?.as_ref() == wanted.as_ref() {
-            continue;
-        }
-        let history = record["baseRevision"]
-            .as_str()
-            .map(|base| format!("{base}..{target}"))
-            .unwrap_or_else(|| target.into());
-        let log = git
-            .out(
-                path,
-                &[
-                    "log",
-                    "-n",
-                    "128",
-                    "--format=%H %ct",
-                    &history,
-                    "--",
-                    &format!(":(literal){name}"),
-                ],
-            )
-            .await?;
-        let mut landed = false;
-        for line in log.lines() {
-            if tokio::time::Instant::now() >= deadline {
+    // An unchanged checkout reuses its last complete answer (`landing_signal`).
+    let probe = (path.to_path_buf(), task.to_owned(), target.to_owned());
+    let inputs = json!({"base":record["baseRevision"],"dirty":dirty,
+        "content":content.iter().map(|(k, (w, at))| json!([k, w, at])).collect::<Vec<_>>()});
+    let names: Vec<String> = content.keys().cloned().collect();
+    let signal = tokio::task::spawn_blocking(move || {
+        landing_signal(&probe.0, &probe.1, &probe.2, &inputs, &names)
+    })
+    .await
+    .ok()
+    .flatten();
+    let reused = signal.as_ref().and_then(|signal| {
+        let recent = LANDINGS.lock().ok()?;
+        let (seen, outcome, at) = recent.get(&(path.to_path_buf(), task.to_owned()))?;
+        (seen == signal && at.elapsed() < super::task_facts::RECENT).then(|| outcome.clone())
+    });
+    let (pending, unknown) = match reused {
+        Some(outcome) => outcome,
+        None => {
+            let at = std::time::Instant::now();
+            let Some(outcome) = landings(path, record, target, git, &content).await? else {
                 return Ok(());
-            }
-            let Some((reference, when)) = line.split_once(' ') else {
-                continue;
             };
-            if record["baseRevision"].as_str().is_none()
-                && at.is_none_or(|at| when.parse::<i64>().unwrap_or(0) < at)
-            {
-                continue;
+            if let (Some(signal), Ok(mut recent)) = (signal, LANDINGS.lock()) {
+                // Bounded: an answer older than its reuse window is forgotten.
+                recent.retain(|_, (_, _, seen)| seen.elapsed() < super::task_facts::RECENT);
+                recent.insert(
+                    (path.to_path_buf(), task.to_owned()),
+                    (signal, outcome.clone(), at),
+                );
             }
-            if blob(git, path, reference, name).await?.as_ref() == wanted.as_ref() {
-                landed = true;
-                break;
-            }
+            outcome
         }
-        if landed {
-            continue;
-        }
-        // Descriptor-relative no-follow reading is shared with the editor path.
-        let observed =
-            super::task_facts::safe_bytes(path, name, 2_000_000).map(|v| files::revision(&v));
-        let staged = git
-            .out(
-                path,
-                &[
-                    "diff",
-                    "--cached",
-                    "--name-only",
-                    "--",
-                    &format!(":(literal){name}"),
-                ],
-            )
-            .await?;
-        let mode = git
-            .out(
-                path,
-                &[
-                    "diff",
-                    "--summary",
-                    "HEAD",
-                    "--",
-                    &format!(":(literal){name}"),
-                ],
-            )
-            .await?;
-        if observed.ok().as_ref() != wanted.as_ref()
-            || (!staged.trim().is_empty()
-                && blob(git, path, "", name).await?.as_ref() != wanted.as_ref())
-            || mode.contains("mode change")
-        {
-            unknown.push(name.clone());
-        } else {
-            pending.push(name.clone());
-        }
-    }
+    };
     facts["otherUncommitted"] = json!(dirty
         .iter()
         .any(|p| !pending.contains(p) && !unknown.contains(p)));
@@ -367,4 +424,122 @@ async fn same_branch(
         json!("Task files changed again or their recorded content cannot be located. Finish in Git and use Done outside the app, or close as is.")
     };
     Ok(())
+}
+/// Pending and unknown recorded paths of one same-branch task.
+type Landings = (Vec<String>, Vec<String>);
+/// Recent complete `landings` per (checkout, task): the signal taken before each, the
+/// outcome and when.
+type Recent =
+    std::collections::HashMap<(std::path::PathBuf, String), (String, Landings, std::time::Instant)>;
+static LANDINGS: std::sync::LazyLock<std::sync::Mutex<Recent>> =
+    std::sync::LazyLock::new(Default::default);
+/// Everything `landings` depends on, cheaply: every ref and HEAD (target history and
+/// blobs), the index (staged content), the recorded writes, the dirty paths and the
+/// identity, size and change times of each recorded file. None, so never reused, when
+/// a recorded file changed in the last two seconds or Git cannot answer.
+fn landing_signal(
+    path: &Path,
+    task: &str,
+    target: &str,
+    inputs: &Value,
+    names: &[String],
+) -> Option<String> {
+    use sha2::Digest;
+    use std::os::unix::fs::MetadataExt;
+    let refs = super::task_facts::signal_git(
+        path,
+        &["for-each-ref", "--format=%(refname)%00%(objectname)"],
+    )?;
+    let head = super::task_facts::signal_git(path, &["rev-parse", "HEAD"])?;
+    let index = super::task_facts::signal_git(path, &["ls-files", "--stage", "-z"])?;
+    let mut h = sha2::Sha256::new();
+    for part in [
+        task.as_bytes(),
+        target.as_bytes(),
+        &refs,
+        &head,
+        &index,
+        inputs.to_string().as_bytes(),
+    ] {
+        h.update((part.len() as u64).to_be_bytes());
+        h.update(part);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    for name in names {
+        h.update(name.as_bytes());
+        match std::fs::symlink_metadata(path.join(name)) {
+            Ok(m) => {
+                if m.mtime() >= now - 2 || m.ctime() >= now - 2 {
+                    return None;
+                }
+                for v in [m.dev(), m.ino(), m.mode() as u64, m.size()] {
+                    h.update(v.to_be_bytes());
+                }
+                for v in [m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec()] {
+                    h.update(v.to_be_bytes());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => h.update(b"missing"),
+            Err(_) => return None,
+        }
+    }
+    Some(format!("{:x}", h.finalize()))
+}
+/// Where each recorded write of a same-branch task stands. None when the inspection
+/// deadline passed first: that answer is never reused.
+async fn landings(
+    path: &Path,
+    record: &Value,
+    target: &str,
+    git: &mut Git,
+    content: &BTreeMap<String, (Option<String>, Option<i64>)>,
+) -> Result<Option<Landings>> {
+    let mut pending = Vec::new();
+    let mut unknown = Vec::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4);
+    // Each file's checks are independent Git reads: a few files run at once and their
+    // outcomes apply in path order, as one pass would. A deadline or an error at any
+    // file leaves the facts as set above (pending and unknown are only written below).
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(FILE_CHECKS));
+    let base = record["baseRevision"].as_str().map(str::to_owned);
+    let mut checks = tokio::task::JoinSet::new();
+    for (index, (name, (wanted, at))) in content.iter().enumerate() {
+        let (gate, mut git, path, target) = (
+            gate.clone(),
+            git.clone(),
+            path.to_path_buf(),
+            target.to_owned(),
+        );
+        let (base, name, wanted, at) = (base.clone(), name.clone(), wanted.clone(), *at);
+        checks.spawn(async move {
+            let _slot = gate.acquire_owned().await;
+            let file = Recorded {
+                name: &name,
+                wanted: wanted.as_deref(),
+                at,
+            };
+            (
+                index,
+                landing(&mut git, &path, &target, base.as_deref(), file, deadline).await,
+            )
+        });
+    }
+    let mut outcomes: Vec<Option<Landing>> = (0..content.len()).map(|_| None).collect();
+    while let Some(joined) = checks.join_next().await {
+        let (index, outcome) =
+            joined.map_err(|_| refuse("git_failed", "A Git inspection did not finish."))?;
+        outcomes[index] = Some(outcome?);
+    }
+    for (name, outcome) in content.keys().zip(outcomes) {
+        match outcome {
+            Some(Landing::Landed) => {}
+            Some(Landing::Pending) => pending.push(name.clone()),
+            Some(Landing::Unknown) => unknown.push(name.clone()),
+            Some(Landing::Deadline) | None => return Ok(None),
+        }
+    }
+    Ok(Some((pending, unknown)))
 }

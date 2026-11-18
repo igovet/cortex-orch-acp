@@ -1,6 +1,6 @@
 # CW-Q02b: Phone fault and race rows
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Not implemented; mobile, gated by Gate M · **Phase:** 3+ · **Size:** M
 
 Split from [CW-Q02](CW-Q02.md) for the phone and the device rows. This is a mobile qualification item and is gated by Gate M. The desktop rows are in [CW-Q02a](CW-Q02a.md).
 

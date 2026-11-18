@@ -68,6 +68,24 @@ pub trait GatewayCore: Send + Sync + 'static {
         request_id: Value,
     ) -> FutureResult<'a, Value>;
 }
+/// A short corrective pointer for a named authority refusal. It never names
+/// another task, a path outside the project or a credential.
+pub fn refusal_hint(code: &str) -> &'static str {
+    match code {
+        "tool_not_offered" => "This tool is not offered to this channel's role and stage. Use only the tools listed by tools/list.",
+        "channel_authority_refused" | "channel_identity_changed" | "invalid_channel" | "session_mismatch" =>
+            "This channel no longer holds authority (revoked, paused, replaced or finished). End the turn; the runtime resumes current work on a new channel.",
+        "writing_worker_required" | "worker_required" | "readonly_delete_refused" =>
+            "This role or stage holds no write authority for this action. Report the need in the result or use the advertised request route.",
+        "write_denied" => "The owner protected this path from writes. Choose another path or report the blocker; never work around it.",
+        "private_or_invalid_path" => "Use a project-relative path without '..', empty components or private runtime storage (.git, .cortex).",
+        "outside_cwd_denied" => "This working directory is not available in the current access mode.",
+        "deletion_not_confirmed" | "outside_action_not_confirmed" | "skill_link_replace_not_confirmed" =>
+            "The owner did not confirm this action, so nothing happened. Do not retry it to obtain consent; continue without it or report the blocker.",
+        "writing_scope_required" => "This action requires an assignment with a non-empty declared work area.",
+        _ => "This action is refused under the runtime's authority rules; do not retry it unchanged.",
+    }
+}
 pub struct Gateway {
     core: Arc<dyn GatewayCore>,
     credentials: Credentials,
@@ -102,8 +120,19 @@ impl Gateway {
             .await;
         Some(match r {
             Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+            Err(Error::Refused(code)) => {
+                // A named refusal keeps the authority code and adds its stable reason.
+                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32001,
+                    "message":format!("authority_refused: {code}"),
+                    "data":{"code":code,"retryable":false,"hint":refusal_hint(code)}}})
+            }
+            Err(Error::Invalid) => {
+                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"invalid_arguments",
+                    "data":{"code":"invalid_arguments","retryable":false,
+                        "hint":"The arguments do not match this tool's advertised inputSchema. Read the tool's live schema (tools_discover with its name) and send only its exact properties within their bounds."}}})
+            }
             Err(e) => {
-                json!({"jsonrpc":"2.0","id":id,"error":{"code":match e{Error::Invalid=>-32602,Error::Protocol=>-32601,_=>-32001},"message":e.to_string()}})
+                json!({"jsonrpc":"2.0","id":id,"error":{"code":match e{Error::Protocol=>-32601,_=>-32001},"message":e.to_string()}})
             }
         })
     }
@@ -156,7 +185,7 @@ impl Gateway {
         let tool = tools
             .iter()
             .find(|t| t["name"] == name)
-            .ok_or(Error::Forbidden)?;
+            .ok_or(Error::Refused("tool_not_offered"))?;
         let args = p.get("arguments").cloned().unwrap_or(json!({}));
         schema::validate(&tool["inputSchema"], &args)?;
         self.core

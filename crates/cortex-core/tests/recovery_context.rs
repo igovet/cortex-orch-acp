@@ -4,7 +4,6 @@ use cortex_core::{
     lifecycle::{self, TaskMachine},
     ownership,
     recovery_context::*,
-    CoreError,
 };
 use serde_json::json;
 use support::*;
@@ -166,15 +165,30 @@ fn goal_followups_and_max_plan_stay_under_the_ceiling_without_repeating_the_goal
     .unwrap();
     let v = s.read(|db| snapshot(db, "t")).unwrap();
     let text = v.to_string();
-    assert!(text.chars().count() < MAX_CHARACTERS, "{}", text.chars().count());
+    assert!(
+        text.chars().count() < MAX_CHARACTERS,
+        "{}",
+        text.chars().count()
+    );
     assert_eq!(text.matches(&goal).count(), 1, "the goal is carried once");
     assert!(text.contains("\"same_as\":\"original_goal\""));
-    assert!(!text.contains(&"f".repeat(TEXT_PROBE)), "follow-ups are bounded");
+    assert!(
+        !text.contains(&"f".repeat(TEXT_PROBE)),
+        "follow-ups are bounded"
+    );
     // Omitted constraints are listed and readable by id; none is silently lost.
-    let notice = v["clipping"].as_array().unwrap().iter().find(|n| n["section"] == "constraints").unwrap();
+    let notice = v["clipping"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["section"] == "constraints")
+        .unwrap();
     let omitted = notice["omitted"].as_i64().unwrap() as usize;
     assert!(omitted > 0);
-    assert!(notice["how_to_read"].as_str().unwrap().contains("<event_id>:constraint"));
+    assert!(notice["how_to_read"]
+        .as_str()
+        .unwrap()
+        .contains("<event_id>:constraint"));
     let ids = notice["omitted_event_ids"].as_array().unwrap().len();
     assert_eq!(ids, omitted);
     assert_eq!(notice["index_complete"], true);
@@ -318,4 +332,136 @@ fn follow_up_appears_once_across_internal_and_acp_sessions() {
     let v = s.read(|db| snapshot(db, "t")).unwrap();
     assert_eq!(v["retained_user_messages"].as_array().unwrap().len(), 2);
     assert_eq!(v.to_string().matches("Follow-up μ").count(), 2);
+}
+/// Clipping shortens prose, never identifiers: at every representation tier each
+/// node's report id, verdict and report-structure marker stay exact, even when
+/// alphabetically earlier result fields (checks, findings) are long.
+#[test]
+fn clipping_keeps_every_report_ref_exact() {
+    let p = Project::new();
+    let s = p.open();
+    TaskMachine::new(&s).create("t", "Goal", "owner").unwrap();
+    seed_nodes(&s, 64, &"o".repeat(8000), 64, "x");
+    s.write(|db| {
+        let ids: Vec<String> = db
+            .prepare("SELECT node_id FROM runtime_nodes WHERE task_id='t'")?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        for (n, id) in ids.iter().enumerate() {
+            let result = json!({"checks":[{"name":"c".repeat(3000),"outcome":"not_run","blocker":"b".repeat(3000)}],
+                "findings":["f".repeat(3000)],"report_ref":format!("r_{n:012x}"),"verdict":"APPROVE",
+                "report_structure":{"status":"REPORT_STRUCTURE_INCOMPLETE","missing":["## Changes"]},"summary":"s".repeat(3000)});
+            db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id='t' AND node_id=?", (result.to_string(), id))?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let v = s.read(|db| snapshot(db, "t")).unwrap();
+    assert!(v.to_string().chars().count() < MAX_CHARACTERS);
+    let nodes = v["current_nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 64);
+    assert!(v["clipping"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|n| n["section"] == "current_nodes" && n["reduced_detail_level"].as_i64() > Some(0)));
+    for n in 0..64 {
+        let node = nodes
+            .iter()
+            .find(|x| x["report_ref"] == format!("r_{n:012x}"))
+            .unwrap_or_else(|| panic!("r_{n:012x} lost"));
+        assert_eq!(node["verdict"], "APPROVE");
+        assert_eq!(node["report_structure"], "REPORT_STRUCTURE_INCOMPLETE");
+    }
+}
+/// Owner messages to a working task are the capsule's constraints, with their paths.
+#[test]
+fn owner_steering_messages_are_constraints() {
+    let p = Project::new();
+    let s = p.open();
+    TaskMachine::new(&s).create("t", "Goal", "owner").unwrap();
+    s.write(|db| {
+        lifecycle::event_tx(db, "t", "USER_STEERING",
+            json!({"text":"Keep the API stable. deny-write: src/api.rs","deny_write":["src/api.rs"],"delivery":"boundary","request":"m1"}))?;
+        Ok(())
+    })
+    .unwrap();
+    let v = s.read(|db| snapshot(db, "t")).unwrap();
+    let constraints = v["constraints"].as_array().unwrap();
+    assert_eq!(constraints.len(), 1);
+    assert_eq!(constraints[0]["type"], "owner_steering");
+    assert_eq!(
+        constraints[0]["payload"]["text"],
+        "Keep the API stable. deny-write: src/api.rs"
+    );
+    assert_eq!(
+        constraints[0]["payload"]["deny_write"],
+        json!(["src/api.rs"])
+    );
+    assert_eq!(v["owner_write_denials"]["paths"], json!(["src/api.rs"]));
+}
+/// The brief lists every predecessor report id with role, title, size and pages, for
+/// a dependent node and for the consultation (its packet's reports), and the owner's
+/// constraints and acceptance commands.
+#[test]
+fn brief_lists_predecessor_reports_constraints_and_acceptance() {
+    use cortex_core::assignment_brief::{extras, predecessor_reports};
+    let p = Project::new();
+    let s = p.open();
+    TaskMachine::new(&s).create("t", "Goal", "owner").unwrap();
+    s.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1,plan_json=? WHERE task_id='t'",
+            [json!({"tasks":[],"verification":[["cargo","test"]]}).to_string()])?;
+        for (id, bytes) in [("r_aaaaaaaaaaaa", 9001), ("r_bbbbbbbbbbbb", 10)] {
+            db.execute("INSERT INTO reports(id,task_id,kind,filename,created_at) VALUES (?,'t','report',?,'0')", (id, format!("{id}.md")))?;
+            db.execute("INSERT INTO editions(report_id,title,summary,author,updated_at,digest,size_bytes) VALUES (?,'Explorer findings','S','x','0','d',?)", (id, bytes))?;
+        }
+        db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'scan','worker-explorer','Scan','[]','[\"src\"]','execution','completed','a1',?)",
+            [json!({"report_ref":"r_aaaaaaaaaaaa"}).to_string()])?;
+        db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'build','worker-backend-dev','Build','[\"scan\"]','[\"src\"]','execution','running','a2',NULL)", [])?;
+        db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'_consultation','worker-senior-consultant','Consult','[]','[\".\"]','execution','running','a3',NULL)", [])?;
+        lifecycle::event_tx(db, "t", "CONSULTATION_REQUIRED", json!({"revision":1,"node":"_consultation",
+            "dependency_reports":[{"report_id":"r_bbbbbbbbbbbb","availability":"recorded"}]}))?;
+        lifecycle::event_tx(db, "t", "USER_STEERING", json!({"text":"Keep it small.","delivery":"boundary","request":"m"}))?;
+        Ok(())
+    })
+    .unwrap();
+    let reports = s.read(|db| predecessor_reports(db, "t", "build")).unwrap();
+    assert_eq!(
+        reports,
+        vec![
+            json!({"report_id":"r_aaaaaaaaaaaa","node":"scan","role":"explorer",
+        "title":"Explorer findings","size_bytes":9001,"pages_at_most":3})
+        ]
+    );
+    let consult = s
+        .read(|db| predecessor_reports(db, "t", "_consultation"))
+        .unwrap();
+    assert_eq!(consult[0]["report_id"], "r_bbbbbbbbbbbb");
+    assert_eq!(consult[0]["pages_at_most"], 1);
+    let brief = s
+        .read(|db| extras(db, "t", "build", "worker-backend-dev", "execution", "ru"))
+        .unwrap();
+    assert_eq!(
+        brief["acceptance"]["verification_commands"],
+        json!([["cargo", "test"]])
+    );
+    assert_eq!(
+        brief["constraints"]["owner_messages"][0]["text"],
+        "Keep it small."
+    );
+    assert_eq!(brief["report"]["template"], "implementation");
+    assert_eq!(brief["user_question_language"], "ru");
+    assert_eq!(
+        brief["predecessor_reports"][0]["report_id"],
+        "r_aaaaaaaaaaaa"
+    );
+    let review = s
+        .read(|db| extras(db, "t", "build", "worker-code-reviewer", "review", "en"))
+        .unwrap();
+    assert!(
+        review.get("predecessor_reports").is_none(),
+        "a review reads its review_packet"
+    );
+    assert_eq!(review["report"]["sections"][0]["heading"], "## Verdict");
 }

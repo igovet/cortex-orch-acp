@@ -45,8 +45,19 @@ impl Node {
     }
 }
 
-pub const DEFAULT_ROLES: [&str; 8] =
-    ["push button", "button", "toggle button", "link", "page tab", "menu item", "radio button", "check box"];
+/// The task composer's group: Start, Stop and Resume are its action button and nowhere else.
+pub const TASK_COMPOSER: &str = "Task composer";
+
+pub const DEFAULT_ROLES: [&str; 8] = [
+    "push button",
+    "button",
+    "toggle button",
+    "link",
+    "page tab",
+    "menu item",
+    "radio button",
+    "check box",
+];
 
 pub struct Input {
     pub backend: String,
@@ -71,21 +82,56 @@ impl Input {
             let bus = Bus::session()?;
             wait("Mutter remote input bus ready", || {
                 Ok(bus
-                    .call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner",
-                          Some(Arg::Str("org.gnome.Mutter.RemoteDesktop".into())), 1000)
+                    .call(
+                        "org.freedesktop.DBus",
+                        "/org/freedesktop/DBus",
+                        "org.freedesktop.DBus",
+                        "NameHasOwner",
+                        Some(Arg::Str("org.gnome.Mutter.RemoteDesktop".into())),
+                        1000,
+                    )
                     .and_then(|v| v.child_bool(0))
                     .unwrap_or(false))
             })?;
             let session = bus
-                .call("org.gnome.Mutter.RemoteDesktop", "/org/gnome/Mutter/RemoteDesktop", "org.gnome.Mutter.RemoteDesktop", "CreateSession", None, 5000)?
+                .call(
+                    "org.gnome.Mutter.RemoteDesktop",
+                    "/org/gnome/Mutter/RemoteDesktop",
+                    "org.gnome.Mutter.RemoteDesktop",
+                    "CreateSession",
+                    None,
+                    5000,
+                )?
                 .child_string(0)?;
             let xml = bus
-                .call("org.gnome.Mutter.RemoteDesktop", &session, "org.freedesktop.DBus.Introspectable", "Introspect", None, 5000)?
+                .call(
+                    "org.gnome.Mutter.RemoteDesktop",
+                    &session,
+                    "org.freedesktop.DBus.Introspectable",
+                    "Introspect",
+                    None,
+                    5000,
+                )?
                 .child_string(0)?;
-            for method in ["Start", "NotifyPointerMotionRelative", "NotifyPointerButton", "NotifyKeyboardKeysym"] {
-                require(xml.contains(&format!("<method name=\"{method}\"")), "Mutter RemoteDesktop session lacks a required method")?;
+            for method in [
+                "Start",
+                "NotifyPointerMotionRelative",
+                "NotifyPointerButton",
+                "NotifyKeyboardKeysym",
+            ] {
+                require(
+                    xml.contains(&format!("<method name=\"{method}\"")),
+                    "Mutter RemoteDesktop session lacks a required method",
+                )?;
             }
-            bus.call("org.gnome.Mutter.RemoteDesktop", &session, "org.gnome.Mutter.RemoteDesktop.Session", "Start", None, 5000)?;
+            bus.call(
+                "org.gnome.Mutter.RemoteDesktop",
+                &session,
+                "org.gnome.Mutter.RemoteDesktop.Session",
+                "Start",
+                None,
+                5000,
+            )?;
             *input.remote.borrow_mut() = session;
             input.bus = Some(bus);
             // Create both virtual devices before GTK starts.
@@ -97,7 +143,14 @@ impl Input {
 
     fn notify(&self, method: &str, arg: Arg) -> Res<()> {
         let bus = self.bus.as_ref().ok_or("no Mutter session")?;
-        bus.call("org.gnome.Mutter.RemoteDesktop", &self.remote.borrow(), "org.gnome.Mutter.RemoteDesktop.Session", method, Some(arg), 5000)?;
+        bus.call(
+            "org.gnome.Mutter.RemoteDesktop",
+            &self.remote.borrow(),
+            "org.gnome.Mutter.RemoteDesktop.Session",
+            method,
+            Some(arg),
+            5000,
+        )?;
         Ok(())
     }
 
@@ -105,18 +158,33 @@ impl Input {
         let mut c = Command::new("xdotool");
         c.args(args).env("LC_ALL", "C.UTF-8");
         let done = capture(&mut c, std::time::Duration::from_secs(30))?;
-        require(done.code == 0, &format!("xdotool {} failed", args.first().unwrap_or(&"")))
+        require(
+            done.code == 0,
+            &format!("xdotool {} failed", args.first().unwrap_or(&"")),
+        )
     }
 
     pub fn move_to(&self, x: f64, y: f64) -> Res<()> {
-        require(0.0 <= x && x < WIDTH as f64 && 0.0 <= y && y < HEIGHT as f64, "target outside screen")?;
+        require(
+            0.0 <= x && x < WIDTH as f64 && 0.0 <= y && y < HEIGHT as f64,
+            "target outside screen",
+        )?;
         if self.backend == "x11" {
-            Self::xdotool(&["mousemove", "--sync", &(x as i64).to_string(), &(y as i64).to_string()])?;
+            Self::xdotool(&[
+                "mousemove",
+                "--sync",
+                &(x as i64).to_string(),
+                &(y as i64).to_string(),
+            ])?;
         } else {
             if self.position.get().is_none() || !self.down.get() {
-                self.notify("NotifyPointerMotionRelative", Arg::Doubles(10000.0, 10000.0))?;
+                self.notify(
+                    "NotifyPointerMotionRelative",
+                    Arg::Doubles(10000.0, 10000.0),
+                )?;
                 sleep_ms(30);
-                self.position.set(Some(((WIDTH - 1) as f64, (HEIGHT - 1) as f64)));
+                self.position
+                    .set(Some(((WIDTH - 1) as f64, (HEIGHT - 1) as f64)));
             }
             let (px, py) = self.position.get().unwrap();
             self.notify("NotifyPointerMotionRelative", Arg::Doubles(x - px, y - py))?;
@@ -128,7 +196,12 @@ impl Input {
     /// A relative pointer movement, for a page that reports where the pointer really is (Wayland has no absolute query).
     pub fn nudge(&self, dx: f64, dy: f64) -> Res<()> {
         if self.backend == "x11" {
-            return Self::xdotool(&["mousemove_relative", "--", &(dx.round() as i64).to_string(), &(dy.round() as i64).to_string()]);
+            return Self::xdotool(&[
+                "mousemove_relative",
+                "--",
+                &(dx.round() as i64).to_string(),
+                &(dy.round() as i64).to_string(),
+            ]);
         }
         self.notify("NotifyPointerMotionRelative", Arg::Doubles(dx, dy))
     }
@@ -194,7 +267,13 @@ impl Input {
             return Self::xdotool(&["type", "--clearmodifiers", "--delay", "3", "--", text]);
         }
         for ch in text.chars() {
-            let sym = if ch == '\n' { 0xff0d } else if (ch as u32) <= 0xff { ch as u32 } else { 0x0100_0000 | ch as u32 };
+            let sym = if ch == '\n' {
+                0xff0d
+            } else if (ch as u32) <= 0xff {
+                ch as u32
+            } else {
+                0x0100_0000 | ch as u32
+            };
             self.notify("NotifyKeyboardKeysym", Arg::UintBool(sym, true))?;
             self.notify("NotifyKeyboardKeysym", Arg::UintBool(sym, false))?;
         }
@@ -227,7 +306,9 @@ impl Input {
                 .map_err(|e| e.to_string())?;
             use std::io::Write;
             let mut stdin = child.stdin.take().unwrap();
-            stdin.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|e| e.to_string())?;
             drop(stdin);
             sleep_ms(400);
             child
@@ -269,10 +350,22 @@ impl Input {
                     return Ok(());
                 }
                 if st[1] {
-                    let coord = if self.backend == "x11" { ffi::COORD_SCREEN } else { ffi::COORD_WINDOW };
+                    let coord = if self.backend == "x11" {
+                        ffi::COORD_SCREEN
+                    } else {
+                        ffi::COORD_WINDOW
+                    };
                     let interfaces = node.interfaces()?;
-                    let (x, y, w, h) = if interfaces.iter().any(|i| i == "Component") { node.extents(coord)? } else { (0, 0, 0, 0) };
-                    let text = if interfaces.iter().any(|i| i == "Text") { node.text().unwrap_or_default() } else { String::new() };
+                    let (x, y, w, h) = if interfaces.iter().any(|i| i == "Component") {
+                        node.extents(coord)?
+                    } else {
+                        (0, 0, 0, 0)
+                    };
+                    let text = if interfaces.iter().any(|i| i == "Text") {
+                        node.text().unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
                     found.push(Node {
                         role: node.role_name()?,
                         name: node.name()?,
@@ -307,9 +400,18 @@ impl Input {
             }
         }
         if check_errors {
-            require(!found.iter().any(|n| n.role == "alert" && (!n.name.is_empty() || !n.text.is_empty())), "visible error alert")?;
             require(
-                !found.iter().any(|n| n.both().contains("This task changed on the machine. Refresh it before trying again.")),
+                !found
+                    .iter()
+                    .any(|n| n.role == "alert" && (!n.name.is_empty() || !n.text.is_empty())),
+                "visible error alert",
+            )?;
+            require(
+                !found.iter().any(|n| {
+                    n.both().contains(
+                        "This task changed on the machine. Refresh it before trying again.",
+                    )
+                }),
                 "visible stale-action error",
             )?;
         }
@@ -322,11 +424,63 @@ impl Input {
 
     pub fn find(&self, name: &str, roles: &[&str], contains: bool) -> Res<Option<Node>> {
         Ok(self.nodes()?.into_iter().find(|n| {
-            (if contains { n.name.contains(name) } else { n.name == name })
-                && (roles.is_empty() || roles.contains(&n.role.as_str()))
+            (if contains {
+                n.name.contains(name)
+            } else {
+                n.name == name
+            }) && (roles.is_empty() || roles.contains(&n.role.as_str()))
                 && n.w > 0
                 && n.h > 0
         }))
+    }
+
+    /// The button named exactly `name` inside the region named `region` (by geometry: the flat node list keeps no
+    /// parents), and only if no other showing button anywhere has that name, so a stale match elsewhere never counts.
+    pub fn find_in(&self, region: &str, name: &str) -> Res<Option<Node>> {
+        let nodes = self.nodes()?;
+        let Some(area) = nodes
+            .iter()
+            .find(|n| n.name == region && n.w > 0 && n.h > 0)
+        else {
+            return Ok(None);
+        };
+        let buttons: Vec<&Node> = nodes
+            .iter()
+            .filter(|n| {
+                n.name == name && DEFAULT_ROLES.contains(&n.role.as_str()) && n.w > 0 && n.h > 0
+            })
+            .collect();
+        let inside = |n: &Node| {
+            n.x >= area.x
+                && n.y >= area.y
+                && n.x + n.w <= area.x + area.w
+                && n.y + n.h <= area.y + area.h
+        };
+        Ok(match buttons.as_slice() {
+            [only] if inside(only) => Some((*only).clone()),
+            _ => None,
+        })
+    }
+
+    pub fn has_in(&self, region: &str, name: &str) -> Res<bool> {
+        Ok(self.find_in(region, name)?.is_some())
+    }
+
+    /// Whether a showing button named exactly `name` exists anywhere.
+    pub fn any_button(&self, name: &str) -> Res<bool> {
+        Ok(self.nodes()?.iter().any(|n| {
+            n.name == name && DEFAULT_ROLES.contains(&n.role.as_str()) && n.w > 0 && n.h > 0
+        }))
+    }
+
+    pub fn click_in(&self, region: &str, name: &str) -> Res<()> {
+        let node = wait_with(&format!("enabled control {name} in {region}"), 30, || {
+            Ok(self.find_in(region, name)?.filter(|n| n.enabled))
+        })?;
+        self.click_at(
+            node.x as f64 + node.w as f64 / 2.0,
+            node.y as f64 + node.h as f64 / 2.0,
+        )
     }
 
     pub fn has(&self, name: &str, roles: &[&str]) -> Res<bool> {
@@ -338,16 +492,25 @@ impl Input {
     }
 
     pub fn click(&self, name: &str, roles: &[&str], contains: bool) -> Res<()> {
-        let roles: &[&str] = if roles.is_empty() { &DEFAULT_ROLES } else { roles };
+        let roles: &[&str] = if roles.is_empty() {
+            &DEFAULT_ROLES
+        } else {
+            roles
+        };
         let node = wait_with(&format!("enabled control {name}"), 30, || {
             Ok(self.find(name, roles, contains)?.filter(|n| n.enabled))
         })?;
-        self.click_at(node.x as f64 + node.w as f64 / 2.0, node.y as f64 + node.h as f64 / 2.0)
+        self.click_at(
+            node.x as f64 + node.w as f64 / 2.0,
+            node.y as f64 + node.h as f64 / 2.0,
+        )
     }
 
     pub fn fill(&self, name: &str, text: &str) -> Res<()> {
         self.click(name, &["entry", "text", "combo box"], false)?;
-        wait(&format!("field focus {name}"), || Ok(self.nodes()?.iter().any(|n| n.name == name && n.focused)))?;
+        wait(&format!("field focus {name}"), || {
+            Ok(self.nodes()?.iter().any(|n| n.name == name && n.focused))
+        })?;
         self.key("ctrl+a")?;
         self.type_text(text)
     }
@@ -355,8 +518,13 @@ impl Input {
     /// Repeated geometry/text changes of a hovered stationary control are a regression;
     /// paint-only flicker is not observable through accessibility.
     pub fn stable(&self, name: &str) -> Res<()> {
-        let node = wait_with(&format!("stable {name}"), 30, || self.find(name, &[], false))?;
-        self.move_to(node.x as f64 + node.w as f64 / 2.0, node.y as f64 + node.h as f64 / 2.0)?;
+        let node = wait_with(&format!("stable {name}"), 30, || {
+            self.find(name, &[], false)
+        })?;
+        self.move_to(
+            node.x as f64 + node.w as f64 / 2.0,
+            node.y as f64 + node.h as f64 / 2.0,
+        )?;
         let tuple = |q: &Node| arr(vec![s(&q.name), n(q.x), n(q.y), n(q.w), n(q.h)]);
         let key = |n: &Node| (n.name.clone(), n.x, n.y, n.w, n.h);
         let expected = tuple(&node);
@@ -364,10 +532,22 @@ impl Input {
         let notices: Vec<Value> = self
             .nodes_checked(false)?
             .iter()
-            .filter(|n| n.role == "status" || n.role == "alert" || n.both().contains("Updating confirmed state"))
+            .filter(|n| {
+                n.role == "status"
+                    || n.role == "alert"
+                    || n.both().contains("Updating confirmed state")
+            })
             .map(Node::json)
             .collect();
-        emit_row("stability_baseline", vec![("backend", s(&self.backend)), ("expected", expected.clone()), ("notices", arr(notices)), ("monotonic_ns", n(started))]);
+        emit_row(
+            "stability_baseline",
+            vec![
+                ("backend", s(&self.backend)),
+                ("expected", expected.clone()),
+                ("notices", arr(notices)),
+                ("monotonic_ns", n(started)),
+            ],
+        );
         for sample in 0..8 {
             sleep_ms(150);
             let current = self.find(name, &[], false)?;
@@ -375,17 +555,34 @@ impl Input {
             let actual = current.as_ref().map(tuple).unwrap_or(Value::Null);
             emit_row(
                 "stability_sample",
-                vec![("backend", s(&self.backend)), ("expected", expected.clone()), ("actual", actual.clone()), ("monotonic_ns", n(observed)), ("elapsed_ns", n(observed - started)), ("sample", n(sample))],
+                vec![
+                    ("backend", s(&self.backend)),
+                    ("expected", expected.clone()),
+                    ("actual", actual.clone()),
+                    ("monotonic_ns", n(observed)),
+                    ("elapsed_ns", n(observed - started)),
+                    ("sample", n(sample)),
+                ],
             );
             if current.as_ref().map(key) != Some(key(&node)) {
                 let nearby: Vec<Value> = self
                     .nodes_checked(false)?
                     .iter()
-                    .filter(|n| ["link", "frame", "alert", "status", "push button", "button"].contains(&n.role.as_str()))
+                    .filter(|n| {
+                        ["link", "frame", "alert", "status", "push button", "button"]
+                            .contains(&n.role.as_str())
+                    })
                     .map(Node::json)
                     .collect();
-                emit_row("stability_failure_context", vec![("monotonic_ns", n(mono_ns())), ("nodes", arr(nearby))]);
-                return Err(format!("blink/shift: {name}: expected={}, actual={}", line(&expected), line(&actual)));
+                emit_row(
+                    "stability_failure_context",
+                    vec![("monotonic_ns", n(mono_ns())), ("nodes", arr(nearby))],
+                );
+                return Err(format!(
+                    "blink/shift: {name}: expected={}, actual={}",
+                    line(&expected),
+                    line(&actual)
+                ));
             }
         }
         Ok(())

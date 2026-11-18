@@ -26,12 +26,19 @@ use crate::json::{Res, Value};
 use std::path::PathBuf;
 use std::process::Command;
 
-pub const COMMANDS: &[&str] = &["check-rendered", "check-rendered-inside", "rendered-scrollbar", "rendered-image", "journey-series"];
+pub const COMMANDS: &[&str] = &[
+    "check-rendered",
+    "check-rendered-inside",
+    "rendered-scrollbar",
+    "rendered-image",
+    "journey-series",
+];
 
 pub const BUILDER: &str = "cortex-workspace-builder:ubuntu26.04-rust1.99.1-node24.14.1";
 pub const IMAGE: &str = "cortex-workspace-rendered:ubuntu26.04";
 pub const PROBE: &str = include_str!("probe.c");
-pub const WEBKIT_HOST: &str = include_str!("../../../../packages/workspace-ui/test/rendered/webkit-host.c");
+pub const WEBKIT_HOST: &str =
+    include_str!("../../../../packages/workspace-ui/test/rendered/webkit-host.c");
 /// Where the image keeps the pieces it compiled at build time.
 pub const PREBUILT: &str = "/opt/cortex-render";
 pub const AUDIT: &str = include_str!("audit.js");
@@ -65,7 +72,12 @@ pub fn image(tag: &str) -> Res<()> {
         &stage.join("DEBIAN/control"),
         "Package: cortex-render-python-shim\nVersion: 1\nArchitecture: all\nMaintainer: Cortex\nSection: misc\nPriority: optional\nProvides: python3 (= 3.14.0), python3-minimal (= 3.14.0), python3-gi (= 3.56.0)\nDescription: rendered image shim, no files; the checks never run an interpreter\n",
     )?;
-    run_ok(&["dpkg-deb", "--build", &stage.to_string_lossy(), &context.join("shim.deb").to_string_lossy()])?;
+    run_ok(&[
+        "dpkg-deb",
+        "--build",
+        &stage.to_string_lossy(),
+        &context.join("shim.deb").to_string_lossy(),
+    ])?;
     write(&context.join("probe.c"), PROBE)?;
     write(&context.join("webkit-host.c"), WEBKIT_HOST)?;
     let dockerfile = format!(
@@ -79,18 +91,31 @@ pub fn image(tag: &str) -> Res<()> {
          COPY --from=compile /usr/local/bin/node /usr/local/bin/node\nCOPY --from=compile /out/ /opt/cortex-render/\nENTRYPOINT []\n"
     );
     write(&context.join("Dockerfile"), &dockerfile)?;
-    run_ok(&["docker", "build", "--quiet", "--tag", tag, &context.to_string_lossy()]).map(|_| ())
+    run_ok(&[
+        "docker",
+        "build",
+        "--quiet",
+        "--tag",
+        tag,
+        &context.to_string_lossy(),
+    ])
+    .map(|_| ())
 }
 
 fn flag_path(cli: &Cli, name: &str) -> Res<PathBuf> {
-    cli.path(name).ok_or_else(|| format!("--{name} is required"))
+    cli.path(name)
+        .ok_or_else(|| format!("--{name} is required"))
 }
 
 /// Host side: a disposable no-network container, read-only sources, the exact built artifacts. The harness is this very binary,
 /// copied in, so the container needs no interpreter.
 fn host(cli: &Cli) -> Res<i32> {
-    let artifacts = flag_path(cli, "artifacts")?.canonicalize().map_err(|e| format!("artifacts: {e}"))?;
-    let root = crate::installed::gate::find_root(cli)?.canonicalize().map_err(|e| e.to_string())?;
+    let artifacts = flag_path(cli, "artifacts")?
+        .canonicalize()
+        .map_err(|e| format!("artifacts: {e}"))?;
+    let root = crate::installed::gate::find_root(cli)?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
     let tag = cli.flag("image").unwrap_or(IMAGE).to_string();
     if cli.flag("build-image") != Some("no") {
         image(&tag)?;
@@ -101,19 +126,54 @@ fn host(cli: &Cli) -> Res<i32> {
     chmod(&tmp.0.join("cortex-xtask"), 0o755)?;
     let uid = unsafe { libc::getuid() };
     let gid = unsafe { libc::getgid() };
-    let mut argv: Vec<String> = ["docker", "run", "--rm", "--network=none", "--user", &format!("{uid}:{gid}"), "--shm-size=512m", "--cap-drop=ALL", "--security-opt=seccomp=unconfined", "--security-opt=apparmor=unconfined", "--security-opt=systempaths=unconfined"]
-        .iter()
-        .map(|x| x.to_string())
-        .collect();
-    for (source, target) in [(&artifacts, "/artifacts"), (&root, "/checkout"), (&tmp.0, "/harness")] {
-        argv.extend(["--mount".into(), format!("type=bind,source={},target={target},readonly", source.display())]);
+    let mut argv: Vec<String> = [
+        "docker",
+        "run",
+        "--rm",
+        "--network=none",
+        "--user",
+        &format!("{uid}:{gid}"),
+        "--shm-size=512m",
+        "--cap-drop=ALL",
+        "--security-opt=seccomp=unconfined",
+        "--security-opt=apparmor=unconfined",
+        "--security-opt=systempaths=unconfined",
+    ]
+    .iter()
+    .map(|x| x.to_string())
+    .collect();
+    for (source, target) in [
+        (&artifacts, "/artifacts"),
+        (&root, "/checkout"),
+        (&tmp.0, "/harness"),
+    ] {
+        argv.extend([
+            "--mount".into(),
+            format!(
+                "type=bind,source={},target={target},readonly",
+                source.display()
+            ),
+        ]);
     }
-    argv.extend(["--env".into(), "HOME=/tmp".into(), tag, "/harness/cortex-xtask".into(), "check-rendered-inside".into(), "--artifacts".into(), "/artifacts".into(), "--checkout".into(), "/checkout".into()]);
+    argv.extend([
+        "--env".into(),
+        "HOME=/tmp".into(),
+        tag,
+        "/harness/cortex-xtask".into(),
+        "check-rendered-inside".into(),
+        "--artifacts".into(),
+        "/artifacts".into(),
+        "--checkout".into(),
+        "/checkout".into(),
+    ]);
     if let Some(only) = cli.flag("only") {
         argv.extend(["--only".into(), only.into()]);
     }
     let display = cli.flag("display").unwrap_or("x11");
-    require(matches!(display, "x11" | "wayland"), "--display is x11 or wayland")?;
+    require(
+        matches!(display, "x11" | "wayland"),
+        "--display is x11 or wayland",
+    )?;
     if display == "wayland" || cli.flag("journey-wayland").is_some() {
         argv.extend(["--journey-wayland".into(), "yes".into()]);
     }
@@ -135,7 +195,8 @@ pub fn pretty_block(value: &Value, indent: usize) -> String {
 }
 
 fn dump(value: &Value, indent: Option<usize>, depth: usize) -> String {
-    let nl = |level: usize| indent.map_or(String::new(), |i| format!("\n{}", " ".repeat(i * level)));
+    let nl =
+        |level: usize| indent.map_or(String::new(), |i| format!("\n{}", " ".repeat(i * level)));
     match value {
         Value::Null => "null".into(),
         Value::Bool(v) => v.to_string(),
@@ -144,13 +205,36 @@ fn dump(value: &Value, indent: Option<usize>, depth: usize) -> String {
         Value::Arr(items) if items.is_empty() => "[]".into(),
         Value::Arr(items) => {
             let sep = if indent.is_some() { "," } else { ", " };
-            format!("[{}{}{}]", nl(depth + 1), items.iter().map(|v| dump(v, indent, depth + 1)).collect::<Vec<_>>().join(&format!("{sep}{}", nl(depth + 1))), nl(depth))
+            format!(
+                "[{}{}{}]",
+                nl(depth + 1),
+                items
+                    .iter()
+                    .map(|v| dump(v, indent, depth + 1))
+                    .collect::<Vec<_>>()
+                    .join(&format!("{sep}{}", nl(depth + 1))),
+                nl(depth)
+            )
         }
         Value::Obj(pairs) if pairs.is_empty() => "{}".into(),
         Value::Obj(pairs) => {
             let sep = if indent.is_some() { "," } else { ", " };
-            let body: Vec<String> = pairs.iter().map(|(k, v)| format!("{}: {}", crate::json::quote(k, false), dump(v, indent, depth + 1))).collect();
-            format!("{{{}{}{}}}", nl(depth + 1), body.join(&format!("{sep}{}", nl(depth + 1))), nl(depth))
+            let body: Vec<String> = pairs
+                .iter()
+                .map(|(k, v)| {
+                    format!(
+                        "{}: {}",
+                        crate::json::quote(k, false),
+                        dump(v, indent, depth + 1)
+                    )
+                })
+                .collect();
+            format!(
+                "{{{}{}{}}}",
+                nl(depth + 1),
+                body.join(&format!("{sep}{}", nl(depth + 1))),
+                nl(depth)
+            )
         }
     }
 }

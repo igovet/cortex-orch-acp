@@ -53,7 +53,13 @@ fn each_channel_has_exactly_one_store_directory_and_database() {
         assert_eq!(key.directory(), p.0.join(directory));
         drop(Store::open(key, OpenMode::Initialize).unwrap());
         // Reopening, including through a second key, never adds another database.
-        drop(Store::open(ProjectKey::new(&p.0, channel).unwrap(), OpenMode::Initialize).unwrap());
+        drop(
+            Store::open(
+                ProjectKey::new(&p.0, channel).unwrap(),
+                OpenMode::Initialize,
+            )
+            .unwrap(),
+        );
         assert_eq!(
             databases(&p.0),
             vec![PathBuf::from(directory).join("cortex.sqlite3")]
@@ -100,15 +106,27 @@ fn the_dev_store_never_reads_imports_or_migrates_release_or_legacy_storage() {
         .iter()
         .map(|d| {
             let f = d.join("cortex.sqlite3");
-            (fs::read(&f).unwrap(), fs::metadata(&f).unwrap().modified().unwrap())
+            (
+                fs::read(&f).unwrap(),
+                fs::metadata(&f).unwrap().modified().unwrap(),
+            )
         })
         .collect();
-    drop(Store::open(ProjectKey::new(&p.0, StoreChannel::Dev).unwrap(), OpenMode::Initialize).unwrap());
+    drop(
+        Store::open(
+            ProjectKey::new(&p.0, StoreChannel::Dev).unwrap(),
+            OpenMode::Initialize,
+        )
+        .unwrap(),
+    );
     let after: Vec<_> = [&release, &legacy]
         .iter()
         .map(|d| {
             let f = d.join("cortex.sqlite3");
-            (fs::read(&f).unwrap(), fs::metadata(&f).unwrap().modified().unwrap())
+            (
+                fs::read(&f).unwrap(),
+                fs::metadata(&f).unwrap().modified().unwrap(),
+            )
         })
         .collect();
     assert_eq!(before, after);
@@ -139,7 +157,13 @@ fn each_channel_store_stays_out_of_git_status_without_touching_project_ignore_fi
         let p = Project::new();
         git(&p.0, &["init", "-q"]);
         let exclude = fs::read(p.0.join(".git/info/exclude")).ok();
-        drop(Store::open(ProjectKey::new(&p.0, channel).unwrap(), OpenMode::Initialize).unwrap());
+        drop(
+            Store::open(
+                ProjectKey::new(&p.0, channel).unwrap(),
+                OpenMode::Initialize,
+            )
+            .unwrap(),
+        );
         let ignore = p.0.join(directory).join(".gitignore");
         assert_eq!(fs::read(&ignore).unwrap(), b"*\n");
         let status = Command::new("git")
@@ -155,11 +179,23 @@ fn each_channel_store_stays_out_of_git_status_without_touching_project_ignore_fi
         assert_eq!(fs::read(p.0.join(".git/info/exclude")).ok(), exclude);
         // A reopen never rewrites it, whatever it holds.
         fs::write(&ignore, b"owner\n").unwrap();
-        drop(Store::open(ProjectKey::new(&p.0, channel).unwrap(), OpenMode::Initialize).unwrap());
+        drop(
+            Store::open(
+                ProjectKey::new(&p.0, channel).unwrap(),
+                OpenMode::Initialize,
+            )
+            .unwrap(),
+        );
         assert_eq!(fs::read(&ignore).unwrap(), b"owner\n");
         // Read-only opens never create it.
         fs::remove_file(&ignore).unwrap();
-        drop(Store::open(ProjectKey::new(&p.0, channel).unwrap(), OpenMode::RuntimeValidate).unwrap());
+        drop(
+            Store::open(
+                ProjectKey::new(&p.0, channel).unwrap(),
+                OpenMode::RuntimeValidate,
+            )
+            .unwrap(),
+        );
         assert!(!ignore.exists());
     }
 }

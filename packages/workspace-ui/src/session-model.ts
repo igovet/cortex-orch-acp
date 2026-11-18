@@ -1,5 +1,5 @@
-import { readableCheckReason, ACCESS_MODES, effortLabel, emptySession, isOpen, LANGUAGES, machineDefaults } from "@cortex/workspace-domain";
-import type { Check, Decision, Message, SessionOptions, TaskSession, TaskSettings, Worker, WorkerStatus } from "@cortex/workspace-domain";
+import { readableCheckReason, ACCESS_MODES, effortLabel, emptySession, engineLabel, isOpen, LANGUAGES, machineDefaults } from "@cortex/workspace-domain";
+import type { Check, Decision, EngineKey, Machine, Message, SessionOptions, TaskSession, TaskSettings, Worker, WorkerRoute, WorkerStatus } from "@cortex/workspace-domain";
 import { clock, interruptedTurn, plainChoice, readyLabel, readyStep, sameBranch, type TaskView, type WorkspaceIndex } from "./selectors";
 
 /** Read models for the task session. Every count on the screen comes from these lists; nothing here changes state. */
@@ -28,6 +28,18 @@ export const isFinished = (w: Worker) => FINISHED.includes(w.status);
 export function workerCounts(workers: Worker[]) {
   const count = (status: WorkerStatus) => workers.filter(w => w.status === status).length;
   return { active: workers.filter(w => ACTIVE.includes(w.status)).length, done: count("completed"), cancelled: count("cancelled"), failed: count("failed") };
+}
+/**
+ * Where an owner message to the coordinator is, from the runtime's facts: taken from the queue by the service, recorded
+ * and waiting for the coordinator's next step, or delivered (the engine answered the prompt that carried it).
+ */
+export function messageDelivery(m: Pick<Message, "delivery" | "deliveredAt" | "failure">, paused: boolean): string {
+  switch (m.delivery) {
+    case "sending": return "Taken from the queue for delivery";
+    case "delivered": return m.deliveredAt !== null ? `Delivered to the coordinator ${clock(m.deliveredAt)}` : "Delivered to the coordinator";
+    case "failed": return m.failure ?? "Not delivered";
+    default: return paused ? "Received, kept for when you resume" : "Received, waiting for the coordinator's next step";
+  }
 }
 /** The one outcome line for a settled set of workers, shown in the task header and the right-hand panel. */
 export function workersOutcome(workers: Worker[], active: number): string {
@@ -77,6 +89,9 @@ export const stoppedAt = (m: SessionModel) => {
 /** Whether work is going on right now: the task runs or a worker still does. A task that waits for an answer with nothing
  *  running is waiting for the owner, and says so wherever its state shows, never "Working". */
 export const workingNow = (m: SessionModel) => m.running.length > 0 || m.view.task.status === "working";
+/** The Conversation's live line, which speaks for the coordinator alone: while workers run it waits for them, and a worker's own
+ *  step (its command, edit or read) is read on that worker's page, never here. */
+export const coordinatorLine = (m: SessionModel) => m.running.length === 0 ? "Working…" : m.running.length === 1 ? `Waiting for ${m.running[0].role}…` : `Waiting for ${m.running.length} workers…`;
 
 export type Chip = { icon: string; tone: string; spin?: boolean; text: string; wide?: string; next?: string };
 /** The current state and the next step, for the title band. */
@@ -107,7 +122,7 @@ export function phases(m: SessionModel): Phase[] {
   if (closedAs === "external") return [{ label: "Done outside the app", state: "done" }];
   if (result && !closedAs && (conflict !== "none" || ["review", "ready_to_merge", "done"].includes(status))) {
     const finished = sameBranch(m.view.task, m.view.target) ? "Finished" : "Merged";
-    const held = acceptance ? `Accepted v${acceptance.version}` : `Result v${result.version}`;
+    const held = acceptance ? `${acceptance.automatic ? "Automatically accepted" : "Accepted"} v${acceptance.version}` : `Result v${result.version}`;
     const end: Phase[] = status === "review" ? [{ label: `Result v${result.version}`, state: "now" }]
       : work === "merged" ? [{ label: held, state: "done" }, { label: m.view.task.integration?.method === "commit" ? "Committed" : finished, state: "done" }]
       : [{ label: conflict === "resolving" ? "Resolving conflict" : held, state: "now" }, { label: finished, state: "todo" }];
@@ -134,11 +149,18 @@ export function phases(m: SessionModel): Phase[] {
 export const tokens = (n: number) => n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
 export const contextOf = (c: { used: number; window: number } | null) => c === null ? null : { percent: Math.round(c.used / c.window * 100), text: `${tokens(c.used)} of ${tokens(c.window)}` };
 export const contextLine = (c: { used: number; window: number } | null) => { const v = contextOf(c); return v ? `${v.percent}%, ${v.text}` : null; };
-export const routeLabel = (route: { model: string; effort: string } | null, options: SessionOptions) => {
+/** A recorded route in the session's words. A route that names its engine reads "Engine · Model", the model named as that
+ *  engine's catalogue on the machine names it, so two workers on different engines never read alike. */
+export const routeLabel = (route: WorkerRoute | null, options: SessionOptions, machines: readonly Pick<Machine, "config">[] = []) => {
   if (!route) return null;
-  const model = options.models.find(m => m.id === route.model)?.label ?? plainChoice(route.model), effort = options.efforts.find(e => e.id === route.effort)?.label ?? effortLabel(route.effort);
-  return [model, effort].filter(Boolean).join(", ") || null;
+  const engine = route.engine as EngineKey | undefined;
+  const catalogued = engine ? machines.map(m => m.config?.catalogue?.[engine]?.models.find(x => x.id === route.model)?.label).find(Boolean) : undefined;
+  const model = route.modelLabel || catalogued || options.models.find(m => m.id === route.model)?.label || plainChoice(route.model), effort = options.efforts.find(e => e.id === route.effort)?.label ?? effortLabel(route.effort);
+  return [engine ? `${engineLabel(engine)} · ${model}` : model, effort].filter(Boolean).join(", ") || null;
 };
+/** A worker's own model as its engine session was configured, or why none is shown yet. Never the coordinator's route. */
+export const workerModel = (w: Pick<Worker, "route" | "status">, label: (route: WorkerRoute | null) => string | null) =>
+  label(w.route) ?? (w.status === "pending" || w.status === "not_started" ? "Chosen when it starts" : "Not confirmed");
 export const modeLabel = (id: string) => ACCESS_MODES.find(m => m.id === id)?.label ?? id;
 export const languageLabel = (id: string) => LANGUAGES.find(l => l.id === id)?.label ?? id;
 /** A machine with no way to resume ends the run on Stop, and the button says so. */
@@ -173,7 +195,7 @@ export function checkWhy(check: Check) {
 }
 /** The task's result, or while there is none the checks of this version's workers: the one list the Inspector counts. A worker of an
  *  earlier version (before Request changes or a replan) reported on files that are gone, so its checks are not counted as current. */
-export const checksOf = (m: SessionModel): Check[] => m.view.task.result?.checks ?? m.workers.filter(w => !w.superseded).flatMap(w => w.result?.checks ?? []);
+export const checksOf = (m: SessionModel): Check[] => m.view.task.result?.checks ?? m.workers.filter(w => !w.superseded).reverse().flatMap(w => w.result?.checks ?? []);
 export const editedFiles = (w: Worker) => {
   const items = w.activity.filter(a => a.kind === "edit");
   return { files: new Set(items.map(a => a.code)).size, add: items.reduce((n, a) => n + (a.diff?.add ?? 0), 0), del: items.reduce((n, a) => n + (a.diff?.del ?? 0), 0) };
@@ -204,7 +226,7 @@ export function closeConsequences(m: SessionModel) {
   if (m.open.length) lines.push({ icon: "question", text: `${count(m.open.length, "open question")} will be withdrawn` });
   if (m.queue.length || pending) lines.push({ icon: "queue", text: `${[m.queue.length ? count(m.queue.length, "queued message") : "", pending ? count(pending, "pending worker message") : ""].filter(Boolean).join(" and ")} will not be applied` });
   const t = m.view.task;
-  if (checkedResult(m)) lines.push({ icon: "check-circle", text: `Result v${t.result!.version}${t.acceptance ? ", accepted by you," : ""} stays on record with its checks` });
+  if (checkedResult(m)) lines.push({ icon: "check-circle", text: `Result v${t.result!.version}${t.acceptance ? t.acceptance.automatic ? ", accepted automatically," : ", accepted by you," : ""} stays on record with its checks` });
   else lines.push({ icon: "eye", text: "Review and verification did not finish, so the result is marked not verified" });
   const c = m.session.changes, where = m.view.project.hasGit === false ? "project folder" : m.view.task.checkout.kind === "worktree" ? "worktree" : "project folder";
   lines.push({ icon: "file", text: c ? `Changes stay in the ${where}: ${count(c.files, "file")}, +${c.add} −${c.del}` : `Changes stay in the ${where}` });

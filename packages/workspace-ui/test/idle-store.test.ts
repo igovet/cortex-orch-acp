@@ -1,6 +1,6 @@
 import { createRoot } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createRealPort, FACTS_POLL_MS, FACTS_POLL_MAX_MS, type ProjectLocator } from "../src/port/real";
+import { createRealPort, FOCUS_STALE_MS, GIT_VISIBLE_REFRESH_MS, MACHINE_POLL_MS, type ProjectLocator } from "../src/port/real";
 import { createWorkspaceStore, PUSH_GAP_MS } from "../src/store";
 import { capabilitiesWire, scriptedPort, scriptedTransport, snapshot, wireTask } from "./support";
 
@@ -70,30 +70,62 @@ describe("the machine poll", () => {
   };
   const productReads = (s: ReturnType<typeof machine>) => s.calls.filter(c => c.operation === "machine.call" && (c.message as { op: string }).op === "product.facts").length;
 
-  it("reads nothing while the window is hidden", async () => {
+  const repoReads = (s: ReturnType<typeof machine>) => s.calls.filter(c => c.operation === "machine.call" && (c.message as { op: string }).op === "repo.snapshot").length;
+
+  it("reads nothing while the window is hidden, even with a Git screen on view", async () => {
     Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
     const s = machine();
-    const stop = (await opened(s)).subscribe(() => {});
-    await settled(FACTS_POLL_MAX_MS * 3);
+    const port = await opened(s);
+    const stop = port.subscribe(() => {});
+    const release = port.interest!("p", "git");
+    await settled(GIT_VISIBLE_REFRESH_MS * 10);
     expect(productReads(s)).toBe(0);
+    expect(repoReads(s)).toBe(0);
     expect(vi.getTimerCount()).toBe(0);
-    stop();
+    release(); stop();
   });
 
-  it("waits longer each time a read finds nothing new", async () => {
+  it("reads no project on a timer while no screen shows it, nor its facts while one does", async () => {
     const s = machine();
-    const stop = (await opened(s)).subscribe(() => {});
-    await settled(FACTS_POLL_MS - 1);
+    const port = await opened(s);
+    const stop = port.subscribe(() => {});
+    await settled(MACHINE_POLL_MS * 3);
     expect(productReads(s)).toBe(0);
+    expect(repoReads(s)).toBe(0);
+    // A board or task page on view: its facts arrive on open and with its events, never on a timer.
+    const release = port.interest!("p", "facts");
+    await settled(MACHINE_POLL_MS * 3);
+    expect(productReads(s)).toBe(0);
+    expect(repoReads(s)).toBe(0);
+    release(); stop();
+  });
+
+  it("refreshes a Git screen on view every interval while the window is focused, and on return after a while", async () => {
+    const s = machine();
+    const port = await opened(s);
+    const stop = port.subscribe(() => {});
+    const release = port.interest!("p", "git");
+    await settled(GIT_VISIBLE_REFRESH_MS - 1);
+    expect(repoReads(s)).toBe(0);
     await settled(1);
-    expect(productReads(s)).toBe(1);
-    // The first read was news; the second finds nothing and doubles the wait.
-    await settled(FACTS_POLL_MS);
-    expect(productReads(s)).toBe(2);
-    await settled(FACTS_POLL_MS);
-    expect(productReads(s)).toBe(2);
-    await settled(FACTS_POLL_MS);
-    expect(productReads(s)).toBe(3);
+    expect(repoReads(s)).toBe(1);
+    await settled(GIT_VISIBLE_REFRESH_MS);
+    expect(repoReads(s)).toBe(2);
+    // Another window has the focus: nothing is read until this one is back.
+    window.dispatchEvent(new Event("blur"));
+    await settled(GIT_VISIBLE_REFRESH_MS * 5);
+    expect(repoReads(s)).toBe(2);
+    window.dispatchEvent(new Event("focus"));
+    await settled();
+    expect(repoReads(s)).toBe(3);
+    // Back again at once: what was just read is not read again.
+    window.dispatchEvent(new Event("blur")); window.dispatchEvent(new Event("focus"));
+    await settled(FOCUS_STALE_MS - 1);
+    expect(repoReads(s)).toBe(3);
+    // The Git screen closes: its periodic refresh stops.
+    release();
+    await settled(GIT_VISIBLE_REFRESH_MS * 5);
+    expect(repoReads(s)).toBe(3);
     stop();
   });
 

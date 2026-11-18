@@ -1,0 +1,18 @@
+/* Settings > Remote access. The QR code keeps its own light plate in both themes, so a camera reads it on a dark screen. */
+.ra-pair { padding: 0; }
+.ra-pairbox { display: flex; gap: 16px; align-items: flex-start; padding: 14px; min-width: 0; }
+.ra-qr { flex: none; width: 168px; height: 168px; border-radius: 6px; background: #ffffff; }
+.ra-pairinfo { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ra-row { gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.ra-ask { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border: 1px solid var(--warn-line, var(--line)); border-radius: 10px; background: var(--warn-tint, var(--bg-input)); min-width: 0; }
+.ra-ask > .row { gap: 8px; min-width: 0; }
+.ra-at { margin-left: auto; flex: none; }
+.ra-fpr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.ra-fpr > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--r-ctl); background: var(--bg-canvas); }
+.ra-fpr code { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ra-url { max-width: 260px; min-width: 0; }
+.ra-issue { padding: 0 14px 10px; }
+@container page (max-width: 560px) {
+  .ra-pairbox { flex-direction: column; align-items: center; }
+  .ra-fpr { grid-template-columns: minmax(0, 1fr); }
+}

@@ -888,8 +888,14 @@ fn a_reviewer_is_routed_off_the_reviewed_model_when_another_is_available() {
             .model()
             .to_owned()
     };
-    assert_eq!(route(json!([{"engine":"claude-agent-acp","model":"sonnet"}])), "sol");
-    assert_eq!(route(json!([{"engine":"codex-acp","model":"sol"}])), "sonnet");
+    assert_eq!(
+        route(json!([{"engine":"claude-agent-acp","model":"sonnet"}])),
+        "sol"
+    );
+    assert_eq!(
+        route(json!([{"engine":"codex-acp","model":"sol"}])),
+        "sonnet"
+    );
     // Every model was used by the reviewed work: no other model exists, and routing
     // still proceeds (the runtime records the independence warning).
     let all = route(json!([
@@ -1538,4 +1544,92 @@ fn flagship_is_never_an_ordinary_automatic_fallback_table() {
             assert_eq!(code(selected), "no_available_route");
         }
     }
+}
+/// The incident shape: two authors on the two models the owner prefers for review.
+/// The reviewer is still one of those models (never a model not preferred for
+/// review), chosen off the dominant author, at review effort; a single author is
+/// avoided outright; exhausted quota falls back in the documented order; a rerun
+/// raises effort and prefers a model no earlier review used.
+#[test]
+fn a_reviewer_stays_on_review_preferred_models_and_independence_chooses_among_them() {
+    let f = Fixture::new();
+    let mut r = f.parity();
+    for (engine, model) in [("codex-acp", "sol"), ("claude-agent-acp", "sonnet")] {
+        r["models"][engine]["policy"][model]["preferred_for"] = json!(["review"]);
+    }
+    f.write("config/cortex/routing.json", &r);
+    f.used("cn_fixture", 10.0);
+    f.used("cn_claude", 10.0);
+    let choose = |node: Value| {
+        f.load()
+            .unwrap()
+            .choose(
+                "worker-code-reviewer",
+                &node,
+                &Default::default(),
+                false,
+                None,
+            )
+            .unwrap()
+    };
+    let authors = json!([{"engine":"claude-agent-acp","model":"sonnet","node":"trace","changes":3},
+                         {"engine":"codex-acp","model":"sol","node":"ops","changes":5}]);
+    let s = choose(json!({"work_kind":"review","avoid_routes":authors}));
+    // Formerly: both review models excluded, the light non-review model chosen.
+    assert_eq!(s.model(), "sonnet");
+    assert_eq!(
+        s.decision["review_route"]["rule"],
+        "different_from_dominant_author"
+    );
+    assert_eq!(s.decision["review_route"]["dominant_author"]["node"], "ops");
+    assert_eq!(s.parameters["thought_level"], "high");
+    // Equal shares: the first author in plan order dominates.
+    let even = json!([{"engine":"claude-agent-acp","model":"sonnet","node":"a","changes":2},
+                      {"engine":"codex-acp","model":"sol","node":"b","changes":2}]);
+    assert_eq!(
+        choose(json!({"work_kind":"review","avoid_routes":even})).model(),
+        "sol"
+    );
+    // A single author is avoided outright; high-complexity work is reviewed at xhigh.
+    let single = json!([{"engine":"codex-acp","model":"sol","node":"b","changes":4}]);
+    let s = choose(json!({"work_kind":"review","complexity":"high","avoid_routes":single}));
+    assert_eq!(
+        (s.model(), s.decision["review_route"]["rule"].as_str()),
+        ("sonnet", Some("different_from_all_authors"))
+    );
+    assert_eq!(s.parameters["thought_level"], "xhigh");
+    // A rerun raises effort one step and prefers a model no earlier review used.
+    let s = choose(
+        json!({"work_kind":"review","review_rerun":1,"previous_reviewers":[{"engine":"claude-agent-acp","model":"sonnet"}]}),
+    );
+    assert_eq!(s.model(), "sol");
+    assert_eq!(s.parameters["thought_level"], "xhigh");
+    assert_eq!(
+        s.decision["review_route"]["avoided_previous_reviewer"],
+        true
+    );
+    // The other review model's quota is exhausted: the author's own review model
+    // reviews in a fresh session rather than a model not preferred for review.
+    f.used("cn_fixture", 100.0);
+    let s = choose(
+        json!({"work_kind":"review","avoid_routes":[{"engine":"claude-agent-acp","model":"sonnet","node":"a","changes":1}]}),
+    );
+    assert_eq!(
+        (s.model(), s.decision["review_route"]["rule"].as_str()),
+        ("sonnet", Some("same_model_fresh_session"))
+    );
+    // No review model is usable at all (here: neither is enabled): only then another model reviews.
+    f.used("cn_fixture", 10.0);
+    let mut off = r.clone();
+    off["enabled"]["codex-acp"] = json!(["luna", "astra"]);
+    off["enabled"]["claude-agent-acp"] = json!(["opus"]);
+    f.write("config/cortex/routing.json", &off);
+    let s = choose(
+        json!({"work_kind":"review","avoid_routes":[{"engine":"claude-agent-acp","model":"sonnet","node":"a","changes":1}]}),
+    );
+    assert_eq!(
+        s.decision["review_route"]["rule"],
+        "no_review_preferred_model"
+    );
+    assert!(!["sonnet", "sol"].contains(&s.model()), "{}", s.model());
 }

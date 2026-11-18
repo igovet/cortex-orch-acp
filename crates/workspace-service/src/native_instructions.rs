@@ -1,5 +1,5 @@
 //! Canonical portable instructions embedded at build time; no Python at session time.
-//! Regenerate/check with scripts/generate_native_instructions.py.
+//! Regenerate/check with `scripts/cortex-xtask.sh check-generated` (crates/cortex-xtask).
 use cortex_core::{CoreError, CoreResult};
 use cortex_engine::{environment::EngineKind, schema};
 use serde::Deserialize;
@@ -37,6 +37,7 @@ fn profile(name: &str) -> CoreResult<&'static Profile> {
 pub(crate) fn supports(stage: Option<&str>, name: &str) -> bool {
     match name {
         "read_skill"
+        | "read_batch"
         | "ask_question"
         | "user_question_request"
         | "answer_submit"
@@ -53,12 +54,20 @@ pub(crate) fn supports(stage: Option<&str>, name: &str) -> bool {
                 || crate::native_access::supports(name)
                 || crate::native_sources::supports(name)
                 || crate::native_project::supports(name)
+                || crate::native_project_ops::supports(name)
+                || crate::native_context_tools::supports(name)
                 || crate::native_commands::supports(name)
         }
     }
 }
 pub(crate) fn read_skill(name: &str, skill: &str) -> CoreResult<&'static str> {
     let p = profile(name)?;
+    // The role's own id is advertised in its read_skill enum: serve its own body.
+    if skill == name {
+        return Some(p.body.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .ok_or(CoreError::Refused("native_skill_unavailable"));
+    }
     if !p.skills.iter().any(|id| id == skill) {
         return Err(CoreError::Refused("native_skill_unavailable"));
     }
@@ -68,6 +77,16 @@ pub(crate) fn read_skill(name: &str, skill: &str) -> CoreResult<&'static str> {
         .map(String::as_str)
         .filter(|s| !s.trim().is_empty())
         .ok_or(CoreError::Refused("native_skill_unavailable"))
+}
+/// Whether `skill` is a Cortex shared/reference id or a profile id of any role.
+pub(crate) fn is_bundled(skill: &str) -> bool {
+    bundle().skills.contains_key(skill) || bundle().profiles.contains_key(skill)
+}
+/// Cortex skill ids readable by this profile, for precise refusals.
+pub(crate) fn skill_ids(name: &str) -> Vec<&'static str> {
+    profile(name)
+        .map(|p| p.skills.iter().map(String::as_str).collect())
+        .unwrap_or_default()
 }
 /// The role/stage comes from Core's authenticated channel, not an engine request.
 /// Only the tools actually served on that channel appear in the Codex supplement.
@@ -140,6 +159,60 @@ mod tests {
         assert!(read_skill("worker-ux-designer", "design-colors").is_ok());
         assert!(read_skill("worker-senior-consultant", "tool-discipline-worker").is_err());
         assert!(read_skill("worker-explorer", "skill-authoring").is_err());
+    }
+    /// Every tool any catalogue advertises has a handler, and every Cortex tool
+    /// name the shipped profiles and skills mention is one a role is served.
+    #[test]
+    fn advertised_tools_are_handled_and_instructions_name_only_served_tools() {
+        let snapshot: Value =
+            serde_json::from_str(include_str!("../../cortex-engine/schema/tools.json")).unwrap();
+        // Every catalogued tool, read_batch included, has a handler: no exception.
+        let mut served = std::collections::BTreeSet::new();
+        for key in snapshot["catalogues"].as_object().unwrap().keys() {
+            let p: Vec<_> = key.split('|').collect();
+            let stage = if p[2].is_empty() { None } else { Some(p[2]) };
+            for tool in schema::catalogue(p[0], (!p[1].is_empty()).then_some(p[1]), stage).unwrap()
+            {
+                let name = tool["name"].as_str().unwrap().to_owned();
+                // result_submit is served only to execution and review stages.
+                let handled = supports(stage.or(Some("execution")), &name);
+                assert!(handled, "{key} advertises {name} without a handler");
+                served.insert(name);
+            }
+        }
+        // Names that were Cortex tools once and are no longer served to any role.
+        let retired = ["read_diagnostics"];
+        let names = regex::Regex::new(r"\b[a-z]+(?:_[a-z]+)+\b").unwrap();
+        let mut texts: Vec<(String, &str)> = bundle()
+            .profiles
+            .iter()
+            .map(|(n, p)| (format!("profile {n}"), p.body.as_str()))
+            .collect();
+        texts.extend(
+            bundle()
+                .skills
+                .iter()
+                .map(|(n, s)| (format!("skill {n}"), s.as_str())),
+        );
+        for (source, text) in texts {
+            for found in names.find_iter(text) {
+                assert!(
+                    !retired.contains(&found.as_str()),
+                    "{source} names retired tool {}",
+                    found.as_str()
+                );
+            }
+        }
+        for name in [
+            "task_get_context",
+            "read_capsule",
+            "project_skill_link",
+            "check_preflight",
+            "read_batch",
+        ] {
+            assert!(served.contains(name), "{name}");
+        }
+        assert!(!served.iter().any(|n| retired.contains(&n.as_str())));
     }
     #[test]
     fn cheat_sheet_matches_served_tools_and_only_codex_receives_it() {

@@ -89,7 +89,82 @@ remain visible and retry automatically without clearing the board.
 A stream event, refresh or owner input marks a task's conversation for reread
 without discarding it: the board update that precedes the details read keeps the
 rows last confirmed, so a running task's page never empties and redraws between
-the two. Only the details read replaces those rows.
+the two.
+
+Conversations are read per task, outside the details read and its watermark
+fence. A conversation belongs to its execution, not to a board version, so a
+moving watermark never discards it. Formerly every task's complete history had
+to be read in one details read that no stream event could overtake. Under a
+running task, or after a service restart left recovered runs working, that read
+was overtaken every time, and the conversation never appeared. The page showed
+the task description and the Working line only. Now each task's read is
+published as soon as it finishes: never-read conversations first, then the most
+recently active. Only a conversation whose task is on view (its page, or its
+board preview) is read in the background; another is read when it is opened. A
+window with no screen declaring what it shows (a headless store) reads every
+conversation.
+
+After its first complete read a conversation is only continued, never reread.
+Each history page names a forward cursor (`tailCursor`, see the
+[protocol](protocol.md#native-desktop-read-api)), and the task's stream events
+(each written row moves the task's version) start a read of the rows written
+after it. One read per project is in flight; events that arrive during it
+start the next one right after it ends, no sooner than 120 ms after the previous
+one began. New rows are appended to the rows held: a row already held (the same
+row identity) is never added twice, and a read whose held rows were replaced by
+a complete read meanwhile is dropped. Streamed chunks of one message join the
+message already on screen, which keeps its identity, so its text grows in place;
+a tool call's later update merges into its existing step. The forward cursor is
+plain data (session binding, position and a check of the row at that position),
+so it survives a service restart: the next read continues from it. When the
+service refuses it, because the session's rows at or before the position were
+removed or written again (`history_reset`), or the execution is bound to another
+session (`invalid_cursor`), the window reads the whole conversation once and
+replaces the held rows. Display rows are only appended (context compaction does
+not rewrite them), so this happens only after retention removes a session or the
+store is replaced. A service without forward cursors keeps the former behavior:
+the whole conversation is reread after a short pause. Owner sends still reconcile
+by request identity or text against the conversation (see `sends.ts`); question
+cards and their answered state come from the task's decisions, not its history.
+A conversation that is no longer on view keeps its rows and forward cursor and
+continues from them when it is opened again.
+
+A conversation read afresh (opened for the first time in this window, another
+execution, or after `history_reset`) starts at its end. The window reads it
+backwards with `history.earlier` (see the
+[protocol](protocol.md#native-desktop-read-api)): at most four pages, stopping
+once 150 rows are held or the first row is reached. The newest page's
+`tailCursor` continues it forward exactly as after a complete read. A 22,000-row
+conversation therefore shows its latest part after two requests instead of 220.
+While earlier rows remain, the top of the Conversation reads "Earlier conversation
+is not shown." with **Show earlier**. Scrolling up to within one screen of the top
+does the same. An earlier read is at most three pages or 150 rows, shows
+"Loading earlier…", and puts its rows before the ones held, which keep their
+identities and their place on screen. One such read runs per conversation. A
+failed read says so with **Retry** and is not repeated by scrolling. A refused
+position (`history_reset`) has the conversation read afresh. Nothing derived from
+a conversation read only in part speaks for the part not read. Its first message
+or turn of steps may have begun before the rows held, so it is left out until
+they are read; a cut message or a "Worked …" line counting only part of a turn is
+never shown. A settled question asked before the first held row is not placed at
+the top of the held rows, while an open one always shows. An answer given before
+that row is not matched against the held owner messages, so a later message of
+the same words still shows. An owner message sent before it is not appended at
+the end as if just said. A send in progress is matched only against lines after
+the one that was last when it was sent. Rows read above the screen are not
+counted as new by the follow pill and do not pull the feed to the end. A service
+that refuses `history.earlier` (`invalid_request` or `unsupported_operation`)
+is read from the beginning as before. Other readers (the ACP host, the Paseo
+tools, the wire-1 `history.page` query and a window without `native.query`)
+read forward as before.
+The display is the same in every execution state (running, paused, recovering,
+waiting or ended) and does not need a live engine session: the service serves it
+from the retained store rows. Until the first read finishes, the conversation
+says it is loading. A read that fails, or a page with no answer within a minute,
+shows its reason on that task with **Retry now**. Earlier confirmed rows stay
+shown, and the read is retried automatically after 3 s, doubling up to 30 s. A
+conversation failure is not a project read issue. The Working line comes from
+the task's runtime state and running workers, never from missing history.
 Queue status belongs to the service: incomplete window data never means the
 queue paused. Missing-task warnings on both the board and sprint summary require a persistent project read issue.
 The membership fence survives a rejected first board, not only an outstanding
@@ -123,6 +198,36 @@ arrives during a coherent presentation read is queued and installed by version
 after that read, preserving cached Git and owner overlays. Neither a read nor a
 patch grants process, review or completion authority.
 
+### Reads follow what is on screen
+
+A window polls no project. A screen on view holds interest in what it shows: a
+board, sprint or task page in its project's facts, a Git, worktrees or Code
+page, a task's Changes or Code tab and the merge dialog in that project's Git
+data too. Opening such a screen reads it once; its events, the owner's own
+actions and a return to the window after a while read it again; a Git screen on
+view and focused is also refreshed every 30 s, because files change outside the
+app without any event, and its **Refresh Git status** control reads it at once.
+Worker rows are read only for the task on view. A project no screen shows is
+never read in the background: its board, sidebar row, badges, Inbox and question
+notifications follow its runtime events. Nothing is read while the window is
+hidden; coming back reads only what is on view and older than 10 s.
+
+Questions and results read by a details read are kept even when a newer
+snapshot supersedes that read: they are at least as new as the snapshot they
+were read for. A running task moves the snapshot all the time, so discarding
+them left an answered question showing **Needs you** on the board, in the
+sidebar and in the Inbox for as long as the task kept working. A recorded
+answer also marks its questions answered at once in the window, so the reread
+that follows the answer shows the task working.
+
+The service's sprint loop is driven the same way: it looks at a project when it
+starts or activates, when an owner or loop change of a sprint or task record
+could move a sprint on, and on that project's runtime task events while one of
+its sprints is in motion (a queue running, planning, or a result waiting for an
+automatic settle), with a 30 s safety tick only for such a project. A project
+with no sprint in motion costs nothing between changes. Engine limits are
+refreshed only when a settings read asks for them.
+
 ## Local desktop slice (built)
 
 The adapter appends each public invalidation in the same SQLite transaction as the private write that caused it. Connection-local TEMP triggers on the adapter's source tables call one append helper on each supported Store connection, so a failed append rolls back the state change, including in autocommit. No persistent trigger requires independent or older SQLite writers to load Workspace code or retain its optional tables. Those external writes are outside the notification guarantee; the hooks are not a security boundary. Normal writable initialization removes the legacy persistent hooks in its schema transaction; non-initializing inspection never repairs the durable schema. Public project sequences are allocated only from the adapter's own outbox state, never from runtime event or transcript identities. Reconnecting clients receive a snapshot and then events after the cursor. A gap, a wrong project or a backwards version resynchronizes the client.
@@ -130,3 +235,36 @@ The adapter appends each public invalidation in the same SQLite transaction as t
 A task start is recorded as prepared, claimed, dispatched or unknown before the prompt pipeline runs. A restart after dispatch leaves the execution unknown and never replays the prompt. Answers to a single question or a complete batch are all-or-nothing. Only the winning request runs the existing continuation; if that handoff fails, the answer reports `answer_continuation_unconfirmed` rather than success.
 
 The service owns the ACP child. Closing a client detaches its subscription and leaves the child running; explicit stop cancels the owned controller, closes the child's input, waits a bounded grace period and then kills only its own child. A restarted service creates fresh controllers and snapshots without replaying any start or prompt. Test evidence and its limits are recorded in [verification](../project/verification.md).
+
+## Attachment files
+
+Owner attachment bodies live once each in `<state>/attachments/<sha256>` (directory
+0700, files 0600, named by the SHA-256 of the decoded bytes), beside the private
+product state. A body is written to a private temporary file, synced, renamed and the
+directory synced; an existing body of the same digest is kept and its time renewed.
+The product state, every command and every reply hold only references
+`{name, mimeType, size, sha256}`. A reference is accepted only when its body is
+saved with that size; a read checks the body against its digest.
+
+A product file saved by an earlier version with inline bodies is converted when it
+is first loaded: the bodies are written first, then, only if the machine lock is free
+at that moment, the file is re-read under the lock, converted and atomically
+replaced. A crash between the two steps leaves the inline file, which the next load
+converts again; a body that does not decode is left inline as it was. Converting is
+idempotent, and a load that cannot write a body keeps the inline value it read. An
+earlier service version reading a converted file does not fail to load it: its
+replies list the references, its window shows each file as a name it cannot open,
+its planning prompts leave those files out, and re-sending a saved file from it asks
+to choose the file again. Its sprint note and patch actions refuse with
+`invalid_attachments` on a sprint that has saved files, because they check every
+saved file of the sprint as inline bytes.
+
+Bodies are removed only under the machine lock, after a save that dropped a
+reference (a message, comment or sprint removed or edited, an older copy given up),
+after a sprint is deleted, on cleanup, and at most once an hour after an upload. A
+removal pass reads every project's product state and keeps any body one of them
+references; an unreadable product state stops the pass before anything is deleted.
+A body no saved record references yet, such as a file attached to a draft that was
+not sent, is kept for 24 hours after its upload or last renewal. A task's creation
+and message files are also kept by Core in its own private store, so removing a
+product-state body never touches what a task already received.

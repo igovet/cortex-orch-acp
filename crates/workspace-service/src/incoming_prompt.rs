@@ -518,7 +518,11 @@ mod tests {
         .unwrap();
         for b in &capture.blocks {
             assert_eq!(
-                (b.availability.as_str(), b.reason.as_deref(), b.body.is_none()),
+                (
+                    b.availability.as_str(),
+                    b.reason.as_deref(),
+                    b.body.is_none()
+                ),
                 ("inaccessible", Some("private_path"), true)
             );
         }

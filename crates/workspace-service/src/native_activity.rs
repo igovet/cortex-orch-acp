@@ -1,7 +1,7 @@
 //! Display-only native ACP activity. Never tool authority or engine context.
 use cortex_core::{channels::Credential, store::executor::StoreExecutor, CoreError, CoreResult};
-use serde_json::{json, Value};
 use rusqlite::OptionalExtension;
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 fn clipped(s: &str, limit: usize) -> String {
@@ -20,15 +20,41 @@ const PATHS: [&str; 4] = ["file_path", "filePath", "path", "absolutePath"];
 const QUERIES: [&str; 3] = ["query", "pattern", "q"];
 const REFS: [&str; 5] = ["report_id", "report_ref", "draft_id", "source_ref", "skill"];
 const EDIT_TEXT: [&str; 7] = [
-    "old_string", "oldString", "oldText", "new_string", "newString", "newText", "content",
+    "old_string",
+    "oldString",
+    "oldText",
+    "new_string",
+    "newString",
+    "newText",
+    "content",
 ];
 /// Report, draft and result bodies are private: never an edit diff in display history.
-const PRIVATE: [&str; 4] = ["create_draft", "draft_write", "write_report", "result_submit"];
+const PRIVATE: [&str; 4] = [
+    "create_draft",
+    "draft_write",
+    "write_report",
+    "result_submit",
+];
 const EDITS: [&str; 7] = [
-    "project_edit", "project_write", "outside_write", "edit", "write", "multiedit", "apply_patch",
+    "project_edit",
+    "project_write",
+    "outside_write",
+    "edit",
+    "write",
+    "multiedit",
+    "apply_patch",
 ];
 const KINDS: [&str; 10] = [
-    "read", "edit", "delete", "move", "search", "execute", "think", "fetch", "switch_mode", "other",
+    "read",
+    "edit",
+    "delete",
+    "move",
+    "search",
+    "execute",
+    "think",
+    "fetch",
+    "switch_mode",
+    "other",
 ];
 fn operation(title: &str) -> String {
     let name = title.rsplit("__").next().unwrap_or("");
@@ -38,11 +64,17 @@ fn operation(title: &str) -> String {
 /// for a non-private edit, its replacement text. Every other key is dropped.
 fn arguments(raw: &Value, edit: bool) -> Value {
     let mut out = json!({});
-    let Some(raw) = raw.as_object() else { return out };
+    let Some(raw) = raw.as_object() else {
+        return out;
+    };
     let strings = |v: &Value| {
         v.as_array()
             .filter(|a| a.len() <= 256 && a.iter().all(Value::is_string))
-            .map(|a| a.iter().map(|s| json!(redacted(s.as_str().unwrap_or(""), 4000))).collect::<Vec<_>>())
+            .map(|a| {
+                a.iter()
+                    .map(|s| json!(redacted(s.as_str().unwrap_or(""), 4000)))
+                    .collect::<Vec<_>>()
+            })
     };
     for (key, value) in raw {
         let key = key.as_str();
@@ -57,15 +89,20 @@ fn arguments(raw: &Value, edit: bool) -> Value {
             value.as_str().map(|s| json!(redacted(s, 16_000)))
         } else if edit && key == "edits" {
             value.as_array().map(|a| {
-                json!(a.iter().take(64).filter_map(Value::as_object).map(|e| {
-                    let mut one = json!({});
-                    for k in ["old_string", "new_string"] {
-                        if let Some(s) = e.get(k).and_then(Value::as_str) {
-                            one[k] = json!(redacted(s, 16_000));
+                json!(a
+                    .iter()
+                    .take(64)
+                    .filter_map(Value::as_object)
+                    .map(|e| {
+                        let mut one = json!({});
+                        for k in ["old_string", "new_string"] {
+                            if let Some(s) = e.get(k).and_then(Value::as_str) {
+                                one[k] = json!(redacted(s, 16_000));
+                            }
                         }
-                    }
-                    one
-                }).collect::<Vec<_>>())
+                        one
+                    })
+                    .collect::<Vec<_>>())
             })
         } else {
             None
@@ -87,9 +124,11 @@ fn input(raw: &Value, edit: bool) -> Option<Value> {
         }
         None => raw,
     };
-    let out = if let (Some(server), Some(tool), true) =
-        (raw["server"].as_str(), raw["tool"].as_str(), raw["arguments"].is_object())
-    {
+    let out = if let (Some(server), Some(tool), true) = (
+        raw["server"].as_str(),
+        raw["tool"].as_str(),
+        raw["arguments"].is_object(),
+    ) {
         json!({"server":clipped(server, 256),"tool":clipped(tool, 256),"arguments":arguments(&raw["arguments"], edit)})
     } else if raw["input"].is_object() {
         json!({"input":arguments(&raw["input"], edit)})
@@ -97,14 +136,18 @@ fn input(raw: &Value, edit: bool) -> Option<Value> {
         arguments(raw, edit)
     };
     let empty = out.as_object().is_some_and(|m| m.is_empty())
-        || out.get("input").is_some_and(|v| v.as_object().is_some_and(|m| m.is_empty()));
+        || out
+            .get("input")
+            .is_some_and(|v| v.as_object().is_some_and(|m| m.is_empty()));
     (!empty).then_some(out)
 }
 /// A code fence an engine wraps an error text in (claude-agent-acp sends
 /// "```\n…\n```"), removed so the text reads as written.
 fn unfenced(text: &str) -> &str {
     let t = text.trim();
-    let Some(rest) = t.strip_prefix("```") else { return t };
+    let Some(rest) = t.strip_prefix("```") else {
+        return t;
+    };
     let body = rest.split_once('\n').map_or("", |(_, b)| b);
     body.trim_end().strip_suffix("```").unwrap_or(body).trim()
 }
@@ -122,9 +165,23 @@ fn failure(update: &Value, cortex: bool) -> Option<String> {
         return None;
     }
     let mut texts: Vec<&str> = Vec::new();
-    for blocks in [&update["content"], &raw["content"], &raw["result"]["content"]] {
-        for b in blocks.as_array().map(Vec::as_slice).unwrap_or(&[]).iter().take(16) {
-            texts.extend([&b["content"]["text"], &b["text"]].iter().filter_map(|v| v.as_str()));
+    for blocks in [
+        &update["content"],
+        &raw["content"],
+        &raw["result"]["content"],
+    ] {
+        for b in blocks
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .take(16)
+        {
+            texts.extend(
+                [&b["content"]["text"], &b["text"]]
+                    .iter()
+                    .filter_map(|v| v.as_str()),
+            );
         }
     }
     texts.extend(
@@ -132,14 +189,20 @@ fn failure(update: &Value, cortex: bool) -> Option<String> {
             .iter()
             .filter_map(|v| v.as_str()),
     );
-    let structured = [&raw["structuredContent"], &raw["result"]["structuredContent"]]
-        .into_iter()
-        .find_map(|v| v["message"].as_str().map(str::to_owned));
+    let structured = [
+        &raw["structuredContent"],
+        &raw["result"]["structuredContent"],
+    ]
+    .into_iter()
+    .find_map(|v| v["message"].as_str().map(str::to_owned));
     let message = structured
         .or_else(|| {
             texts.iter().find_map(|t| {
                 let v: Value = serde_json::from_str(unfenced(t)).ok()?;
-                v["message"].as_str().filter(|m| !m.trim().is_empty()).map(str::to_owned)
+                v["message"]
+                    .as_str()
+                    .filter(|m| !m.trim().is_empty())
+                    .map(str::to_owned)
             })
         })
         .or_else(|| {
@@ -167,7 +230,8 @@ fn selected(update: &Value, safe: &mut Value, prior: &Value) {
     let private = title.is_none() || PRIVATE.contains(&operation.as_str());
     let edit = !private && (kind == Some("edit") || EDITS.contains(&operation.as_str()));
     if !private {
-        let cortex = title.is_some_and(|t| t.contains("mcp__cortex__") || t.contains("mcp.cortex."));
+        let cortex =
+            title.is_some_and(|t| t.contains("mcp__cortex__") || t.contains("mcp.cortex."));
         if let Some(reason) = failure(update, cortex) {
             safe["failure"] = json!(reason);
         }
@@ -234,16 +298,15 @@ fn display(
     }
     let update = &params["update"];
     Ok(match update["sessionUpdate"].as_str() {
-        Some("agent_message_chunk") if update["content"]["type"] == "text" => update["content"]
-            ["text"]
-            .as_str()
-            .map(|s| {
+        Some("agent_message_chunk") if update["content"]["type"] == "text" => {
+            update["content"]["text"].as_str().map(|s| {
                 let id = update["messageId"]
                     .as_str()
                     .filter(|id| !id.is_empty() && id.len() <= 256)
                     .map(str::to_owned);
                 Display::Message(clipped(s, 16_000), id)
-            }),
+            })
+        }
         Some(kind @ ("tool_call" | "tool_call_update")) => {
             let Some(call) = update["toolCallId"]
                 .as_str()
@@ -274,15 +337,29 @@ fn display(
 }
 /// The title and kind this task's display history retained for an untitled
 /// update's call, read only when the update carries something to select.
-fn prior_call(db: &rusqlite::Connection, task: &str, attempt: &str, update: &Value) -> CoreResult<Value> {
-    let selectable = ["rawInput", "content", "rawOutput"].iter().any(|k| !update[*k].is_null());
-    let call = update["toolCallId"].as_str().filter(|s| !s.is_empty() && s.len() <= 512);
-    let (true, Some(call), None) = (update["sessionUpdate"] == "tool_call_update" && selectable, call, update.get("title")) else {
+fn prior_call(
+    db: &rusqlite::Connection,
+    task: &str,
+    attempt: &str,
+    update: &Value,
+) -> CoreResult<Value> {
+    let selectable = ["rawInput", "content", "rawOutput"]
+        .iter()
+        .any(|k| !update[*k].is_null());
+    let call = update["toolCallId"]
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= 512);
+    let (true, Some(call), None) = (
+        update["sessionUpdate"] == "tool_call_update" && selectable,
+        call,
+        update.get("title"),
+    ) else {
         return Ok(json!({}));
     };
     // The call's announcement (`tool_call`) carries its title and kind. It is recent, so each
     // session's history is read backwards along its (session, seq) index and stops there.
-    let sessions = db.prepare("SELECT session_id FROM acp_host_sessions WHERE task_id=? LIMIT 3")?
+    let sessions = db
+        .prepare("SELECT session_id FROM acp_host_sessions WHERE task_id=? LIMIT 3")?
         .query_map([task], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     let id = format!("{attempt}:{call}");
@@ -297,7 +374,9 @@ fn prior_call(db: &rusqlite::Connection, task: &str, attempt: &str, update: &Val
             break;
         }
     }
-    let v: Value = found.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({}));
+    let v: Value = found
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(json!({}));
     Ok(json!({"title":v["title"],"kind":v["kind"]}))
 }
 pub(crate) async fn record(
@@ -323,15 +402,9 @@ pub(crate) async fn record(
         let (task,attempt,role) = &rows[0];
         let prior = prior_call(db, task, attempt, &params["update"])?;
         let Some(item) = display(&params,&engine_session,attempt,role,&prior)? else { return Ok(()); };
-        if role == "orchestrator" && matches!(item, Display::Message(..)) {
-            let waiting: bool = db.query_row("SELECT
-                coalesce((SELECT max(id) FROM runtime_events WHERE task_id=? AND type='USER_QUESTION_REQUESTED'
-                    AND json_extract(payload_json,'$.channel_id')=?),0) >
-                coalesce((SELECT max(id) FROM runtime_events WHERE task_id=? AND type='COORDINATOR_ANSWER_CLAIMED'
-                    AND json_extract(payload_json,'$.channel_id')=?),0)",
-                (task,&credential.channel_id,task,&credential.channel_id),|r|r.get(0))?;
-            if waiting { return Ok(()); }
-        }
+        // Every chunk the engine emits is recorded in every display session (the
+        // Workspace `cortex-native` and the incoming ACP `cortex-rust-acp`), also
+        // after the coordinator's question commit: a message is never cut short.
         let sessions = db.prepare("SELECT s.session_id FROM acp_host_sessions s
             WHERE s.task_id=? AND (s.client_info=? OR json_extract(s.client_info,'$.name')='cortex-rust-acp')")?
             .query_map((task,r#"{"name":"cortex-native"}"#),|r|r.get::<_,String>(0))?
@@ -448,7 +521,15 @@ mod tests {
         ]
     }
     fn displayed_after(update: Value, prior: &Value) -> Value {
-        match display(&json!({"sessionId":"s","update":update}), "s", "xa_1", "orchestrator", prior).unwrap() {
+        match display(
+            &json!({"sessionId":"s","update":update}),
+            "s",
+            "xa_1",
+            "orchestrator",
+            prior,
+        )
+        .unwrap()
+        {
             Some(Display::Update(v)) => v,
             _ => panic!("not an update"),
         }
@@ -461,8 +542,17 @@ mod tests {
     fn retained(updates: Vec<Value>) -> Vec<Value> {
         let mut rows: Vec<Value> = Vec::new();
         for u in updates {
-            let first = rows.iter().find(|r| r["toolCallId"] == format!("xa_1:{}", u["toolCallId"].as_str().unwrap()) && r["title"].is_string());
-            let prior = if u.get("title").is_none() { first.map(|r| json!({"title":r["title"],"kind":r["kind"]})).unwrap_or(json!({})) } else { json!({}) };
+            let first = rows.iter().find(|r| {
+                r["toolCallId"] == format!("xa_1:{}", u["toolCallId"].as_str().unwrap())
+                    && r["title"].is_string()
+            });
+            let prior = if u.get("title").is_none() {
+                first
+                    .map(|r| json!({"title":r["title"],"kind":r["kind"]}))
+                    .unwrap_or(json!({}))
+            } else {
+                json!({})
+            };
             rows.push(displayed_after(u, &prior));
         }
         rows
@@ -474,20 +564,40 @@ mod tests {
         let all = serde_json::to_string(&rows).unwrap();
         assert!(!all.contains("PRIVATE"), "{all}");
         // The write's text arrives in an untitled update; the retained title says it is a project write.
-        assert_eq!(rows[1]["rawInput"], json!({"path":"ARCHITECTURE.md","content":"# Architecture\n\nModules."}));
-        let reason = "No plan was recorded (plan_invalid). Correct the proposal and submit it again.";
-        assert_eq!(rows[5]["failure"], reason, "claude-agent-acp fences the refusal JSON");
-        assert_eq!(rows[11]["failure"], reason, "codex-acp reports it as rawOutput");
-        assert!(rows[7].get("failure").is_none() && rows[7].get("rawInput").map_or(true, |r| r.get("content").is_none()));
-        assert!(rows[9].get("failure").is_none(), "an engine tool's own output is not a refusal");
+        assert_eq!(
+            rows[1]["rawInput"],
+            json!({"path":"ARCHITECTURE.md","content":"# Architecture\n\nModules."})
+        );
+        let reason =
+            "No plan was recorded (plan_invalid). Correct the proposal and submit it again.";
+        assert_eq!(
+            rows[5]["failure"], reason,
+            "claude-agent-acp fences the refusal JSON"
+        );
+        assert_eq!(
+            rows[11]["failure"], reason,
+            "codex-acp reports it as rawOutput"
+        );
+        assert!(
+            rows[7].get("failure").is_none()
+                && rows[7]
+                    .get("rawInput")
+                    .map_or(true, |r| r.get("content").is_none())
+        );
+        assert!(
+            rows[9].get("failure").is_none(),
+            "an engine tool's own output is not a refusal"
+        );
         // Without the retained title the same update stays private.
         let blind = displayed(split_calls()[1].clone());
         assert_eq!(blind["rawInput"], json!({"path":"ARCHITECTURE.md"}));
         assert!(displayed(split_calls()[5].clone()).get("failure").is_none());
         // A refusal text is bounded.
-        let long = displayed_after(json!({"sessionUpdate":"tool_call_update","toolCallId":"x","status":"failed",
+        let long = displayed_after(
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"x","status":"failed",
             "content":[{"type":"content","content":{"type":"text","text":json!({"message":"m".repeat(5000)}).to_string()}}]}),
-            &json!({"title":"orchestrator: mcp__cortex__plan_submit"}));
+            &json!({"title":"orchestrator: mcp__cortex__plan_submit"}),
+        );
         assert!(long["failure"].as_str().unwrap().chars().count() < 1100);
     }
 
@@ -498,19 +608,55 @@ mod tests {
             CREATE TABLE host_updates(session_id TEXT, seq INTEGER, update_json TEXT, created_at TEXT);
             INSERT INTO acp_host_sessions VALUES ('s','task'),('other','elsewhere');").unwrap();
         for (session, seq, row) in [
-            ("other", 0, json!({"toolCallId":"xa_1:c","sessionUpdate":"tool_call","title":"worker-x: mcp__cortex__draft_write","kind":"edit"})),
-            ("s", 1, json!({"toolCallId":"xa_1:c","sessionUpdate":"tool_call_update"})),
-            ("s", 2, json!({"toolCallId":"xa_1:c","sessionUpdate":"tool_call","title":"worker-x: mcp__cortex__project_write","kind":"other"})),
-            ("s", 3, json!({"toolCallId":"xa_1:c","sessionUpdate":"tool_call_update","title":"later"})),
+            (
+                "other",
+                0,
+                json!({"toolCallId":"xa_1:c","sessionUpdate":"tool_call","title":"worker-x: mcp__cortex__draft_write","kind":"edit"}),
+            ),
+            (
+                "s",
+                1,
+                json!({"toolCallId":"xa_1:c","sessionUpdate":"tool_call_update"}),
+            ),
+            (
+                "s",
+                2,
+                json!({"toolCallId":"xa_1:c","sessionUpdate":"tool_call","title":"worker-x: mcp__cortex__project_write","kind":"other"}),
+            ),
+            (
+                "s",
+                3,
+                json!({"toolCallId":"xa_1:c","sessionUpdate":"tool_call_update","title":"later"}),
+            ),
         ] {
-            db.execute("INSERT INTO host_updates VALUES (?,?,?,'now')", (session, seq, row.to_string())).unwrap();
+            db.execute(
+                "INSERT INTO host_updates VALUES (?,?,?,'now')",
+                (session, seq, row.to_string()),
+            )
+            .unwrap();
         }
-        let untitled = json!({"sessionUpdate":"tool_call_update","toolCallId":"c","rawInput":{"path":"a"}});
-        assert_eq!(prior_call(&db, "task", "xa_1", &untitled).unwrap(), json!({"title":"worker-x: mcp__cortex__project_write","kind":"other"}));
+        let untitled =
+            json!({"sessionUpdate":"tool_call_update","toolCallId":"c","rawInput":{"path":"a"}});
+        assert_eq!(
+            prior_call(&db, "task", "xa_1", &untitled).unwrap(),
+            json!({"title":"worker-x: mcp__cortex__project_write","kind":"other"})
+        );
         // Nothing to select, a titled update or another attempt: no lookup.
-        assert_eq!(prior_call(&db, "task", "xa_1", &json!({"sessionUpdate":"tool_call_update","toolCallId":"c","status":"completed"})).unwrap(), json!({}));
+        assert_eq!(
+            prior_call(
+                &db,
+                "task",
+                "xa_1",
+                &json!({"sessionUpdate":"tool_call_update","toolCallId":"c","status":"completed"})
+            )
+            .unwrap(),
+            json!({})
+        );
         assert_eq!(prior_call(&db, "task", "xa_1", &json!({"sessionUpdate":"tool_call_update","toolCallId":"c","title":"t","rawInput":{}})).unwrap(), json!({}));
-        assert_eq!(prior_call(&db, "task", "xa_2", &untitled).unwrap(), json!({"title":null,"kind":null}));
+        assert_eq!(
+            prior_call(&db, "task", "xa_2", &untitled).unwrap(),
+            json!({"title":null,"kind":null})
+        );
     }
 
     #[test]
@@ -523,23 +669,55 @@ mod tests {
         assert_eq!(rows[0]["kind"], "other");
         assert_eq!(rows[0]["rawInput"], json!({"path":"src/app.ts"}));
         assert!(rows[1].get("rawInput").is_none() && rows[1].get("content").is_none());
-        assert_eq!(rows[2]["rawInput"], json!({"skill":"orchestrator-protocol"}));
-        assert!(rows[3].get("rawInput").is_none(), "a plan body is not a row target");
-        assert_eq!(rows[4]["rawInput"], json!({"path":"src/a.ts","edits":[{"old_string":"let a = 1;","new_string":"let a = 2;"}]}));
-        assert_eq!(rows[5]["rawInput"], json!({"path":"notes.md","content":"hello\nworld"}));
-        assert_eq!(rows[6]["rawInput"], json!({"argv":["git","status","--short"]}));
-        assert!(rows[7]["rawInput"]["command"].as_str().unwrap().starts_with("curl -H 'Authorization: "));
+        assert_eq!(
+            rows[2]["rawInput"],
+            json!({"skill":"orchestrator-protocol"})
+        );
+        assert!(
+            rows[3].get("rawInput").is_none(),
+            "a plan body is not a row target"
+        );
+        assert_eq!(
+            rows[4]["rawInput"],
+            json!({"path":"src/a.ts","edits":[{"old_string":"let a = 1;","new_string":"let a = 2;"}]})
+        );
+        assert_eq!(
+            rows[5]["rawInput"],
+            json!({"path":"notes.md","content":"hello\nworld"})
+        );
+        assert_eq!(
+            rows[6]["rawInput"],
+            json!({"argv":["git","status","--short"]})
+        );
+        assert!(rows[7]["rawInput"]["command"]
+            .as_str()
+            .unwrap()
+            .starts_with("curl -H 'Authorization: "));
         assert_eq!(rows[8]["rawInput"]["old_string"], "old line");
-        assert_eq!(rows[8]["locations"], json!([{"path":"/p/src/b.ts","line":3}]));
-        assert_eq!(rows[8]["content"], json!([{"type":"diff","path":"/p/src/b.ts","oldText":"old line","newText":"new line"}]));
+        assert_eq!(
+            rows[8]["locations"],
+            json!([{"path":"/p/src/b.ts","line":3}])
+        );
+        assert_eq!(
+            rows[8]["content"],
+            json!([{"type":"diff","path":"/p/src/b.ts","oldText":"old line","newText":"new line"}])
+        );
         assert_eq!(rows[9]["rawInput"], json!({"pattern":"TODO","path":"src"}));
-        assert_eq!(rows[10]["rawInput"], json!({"server":"cortex","tool":"project_read","arguments":{"path":"src/c.ts"}}));
+        assert_eq!(
+            rows[10]["rawInput"],
+            json!({"server":"cortex","tool":"project_read","arguments":{"path":"src/c.ts"}})
+        );
         assert_eq!(rows[11]["rawInput"], json!({"draft_id":"d_1"}));
         assert!(rows[12].get("content").is_none() && rows[12].get("rawInput").is_none());
         // Bounds hold for every selected text.
-        let long = displayed(json!({"sessionUpdate":"tool_call","toolCallId":"big","title":"Write a.txt","kind":"edit",
-            "rawInput":{"file_path":"a.txt","content":"x".repeat(40_000)}}));
-        assert!(long["rawInput"]["content"].as_str().unwrap().ends_with("[Content clipped]"));
+        let long = displayed(
+            json!({"sessionUpdate":"tool_call","toolCallId":"big","title":"Write a.txt","kind":"edit",
+            "rawInput":{"file_path":"a.txt","content":"x".repeat(40_000)}}),
+        );
+        assert!(long["rawInput"]["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("[Content clipped]"));
         assert!(long.to_string().len() < 17_000);
     }
 
@@ -547,17 +725,34 @@ mod tests {
     /// rows that name their file, skill, command or edit.
     #[test]
     fn retained_activity_projects_paths_skills_commands_and_diffs() {
-        use cortex_core::{lifecycle::TaskMachine, projections::ProjectionReader, OpenMode, ProjectKey, Store, StoreChannel};
+        use cortex_core::{
+            lifecycle::TaskMachine, projections::ProjectionReader, OpenMode, ProjectKey, Store,
+            StoreChannel,
+        };
         use std::os::unix::fs::DirBuilderExt;
-        use workspace_protocol::{core::{CoreQuery, Page}, read::QueryReply};
-        let dir = std::env::temp_dir().join(format!("cortex-native-activity-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        use workspace_protocol::{
+            core::{CoreQuery, Page},
+            read::QueryReply,
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "cortex-native-activity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
         let key = ProjectKey::new(&dir, StoreChannel::Dev).unwrap();
         let store = Store::open(key.clone(), OpenMode::Initialize).unwrap();
-        TaskMachine::new(&store).create("runtime", "goal", "owner").unwrap();
+        TaskMachine::new(&store)
+            .create("runtime", "goal", "owner")
+            .unwrap();
         let root = dir.to_str().unwrap().to_owned();
-        let rows: Vec<String> = retained(engine_calls().into_iter().chain(split_calls()).collect()).iter().map(Value::to_string).collect();
+        let rows: Vec<String> = retained(engine_calls().into_iter().chain(split_calls()).collect())
+            .iter()
+            .map(Value::to_string)
+            .collect();
         store.write(move |db| {
             db.execute("INSERT INTO workspace_projects VALUES ('p',?,'owner','2026-11-17T00:00:00Z',1)", [&root])?;
             db.execute("INSERT INTO acp_host_sessions VALUES ('session',?,'runtime','{\"name\":\"cortex-native\"}','{}','[]','2026-11-17T00:00:00Z',NULL)", [&root])?;
@@ -568,18 +763,55 @@ mod tests {
             }
             Ok(())
         }).unwrap();
-        let reader = ProjectionReader::new(Store::open(key, OpenMode::LiveReadOnly).unwrap(), "p".into(), "owner".into()).unwrap();
-        let QueryReply::History(page) = reader.query(CoreQuery::History(Page { target: "task".into(), cursor: None, limit: 100 })).unwrap().data else { panic!() };
+        let reader = ProjectionReader::new(
+            Store::open(key, OpenMode::LiveReadOnly).unwrap(),
+            "p".into(),
+            "owner".into(),
+        )
+        .unwrap();
+        let QueryReply::History(page) = reader
+            .query(CoreQuery::History(Page {
+                target: "task".into(),
+                cursor: None,
+                limit: 100,
+            }))
+            .unwrap()
+            .data
+        else {
+            panic!()
+        };
         let _ = std::fs::remove_dir_all(&dir);
-        let steps: Vec<Value> = page.items.iter().filter_map(|r| r.text.as_deref()?.strip_prefix("Workspace step: ").map(|s| serde_json::from_str(s).unwrap())).collect();
-        let call = |id: &str| steps.iter().rev().find(|s| s["callId"] == format!("xa_1:{id}")).cloned().unwrap_or_else(|| panic!("{id}: {steps:?}"));
+        let steps: Vec<Value> = page
+            .items
+            .iter()
+            .filter_map(|r| {
+                r.text
+                    .as_deref()?
+                    .strip_prefix("Workspace step: ")
+                    .map(|s| serde_json::from_str(s).unwrap())
+            })
+            .collect();
+        let call = |id: &str| {
+            steps
+                .iter()
+                .rev()
+                .find(|s| s["callId"] == format!("xa_1:{id}"))
+                .cloned()
+                .unwrap_or_else(|| panic!("{id}: {steps:?}"))
+        };
         let all = serde_json::to_string(&page).unwrap();
         assert!(!all.contains("PRIVATE"), "{all}");
         assert_eq!(call("read")["path"], "src/app.ts");
         assert_eq!(call("read")["status"], "completed");
         assert_eq!(call("skill")["ref"], "orchestrator-protocol");
         assert_eq!(call("edit")["path"], "src/a.ts");
-        assert_eq!((call("edit")["oldText"].as_str(), call("edit")["newText"].as_str()), (Some("let a = 1;"), Some("let a = 2;")));
+        assert_eq!(
+            (
+                call("edit")["oldText"].as_str(),
+                call("edit")["newText"].as_str()
+            ),
+            (Some("let a = 1;"), Some("let a = 2;"))
+        );
         assert_eq!(call("write")["newText"], "hello\nworld");
         assert_eq!(call("cmd")["command"], "git status --short");
         assert_eq!(call("native-edit")["path"], "/p/src/b.ts");
@@ -588,8 +820,15 @@ mod tests {
         assert_eq!(call("codex-read")["path"], "src/c.ts");
         assert!(call("report").get("newText").is_none());
         // The engine shapes that split a call: the write's text and both refusals read back.
-        assert_eq!((call("claude-write")["path"].as_str(), call("claude-write")["newText"].as_str()), (Some("ARCHITECTURE.md"), Some("# Architecture\n\nModules.")));
-        let reason = "No plan was recorded (plan_invalid). Correct the proposal and submit it again.";
+        assert_eq!(
+            (
+                call("claude-write")["path"].as_str(),
+                call("claude-write")["newText"].as_str()
+            ),
+            (Some("ARCHITECTURE.md"), Some("# Architecture\n\nModules."))
+        );
+        let reason =
+            "No plan was recorded (plan_invalid). Correct the proposal and submit it again.";
         assert_eq!(call("claude-plan")["failure"], reason);
         assert_eq!(call("claude-plan")["status"], "failed");
         assert_eq!(call("codex-plan")["failure"], reason);

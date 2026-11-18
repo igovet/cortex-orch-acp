@@ -14,19 +14,45 @@ use std::time::{Duration, Instant};
 fn depends_names(archive: &Path) -> Res<(String, Vec<String>)> {
     let fields = run_ok(&["dpkg-deb", "-f", &archive.to_string_lossy(), "Depends"])?.stdout;
     let re = regex::Regex::new(r"^[a-z0-9.+-]+").unwrap();
-    let names = fields.split(',').map(|p| re.find(p.trim()).map(|m| m.as_str().to_string()).ok_or_else(|| "unparsable Depends".to_string())).collect::<Res<Vec<_>>>()?;
+    let names = fields
+        .split(',')
+        .map(|p| {
+            re.find(p.trim())
+                .map(|m| m.as_str().to_string())
+                .ok_or_else(|| "unparsable Depends".to_string())
+        })
+        .collect::<Res<Vec<_>>>()?;
     Ok((fields, names))
 }
 
 pub fn host(cli: &Cli) -> Res<()> {
-    let archive = cli.path("archive").ok_or("--archive is required")?.canonicalize().map_err(|e| e.to_string())?;
-    let package = run_ok(&["dpkg-deb", "-f", &archive.to_string_lossy(), "Package"])?.stdout.trim().to_string();
-    require(package == "cortex-workspace-dev" || package == "cortex-workspace", "unexpected package")?;
+    let archive = cli
+        .path("archive")
+        .ok_or("--archive is required")?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    let package = run_ok(&["dpkg-deb", "-f", &archive.to_string_lossy(), "Package"])?
+        .stdout
+        .trim()
+        .to_string();
+    require(
+        package == "cortex-workspace-dev" || package == "cortex-workspace",
+        "unexpected package",
+    )?;
     let (fields, names) = depends_names(&archive)?;
-    require(!regex::Regex::new(r"\b(nodejs|npm)\b").unwrap().is_match(&fields), "archive depends on a system Node")?;
+    require(
+        !regex::Regex::new(r"\b(nodejs|npm)\b")
+            .unwrap()
+            .is_match(&fields),
+        "archive depends on a system Node",
+    )?;
     let context = crate::proc::TempDir::new("cortex-offline-install-")?;
     std::fs::copy(&archive, context.0.join("application.deb")).map_err(|e| e.to_string())?;
-    std::fs::copy(std::env::current_exe().map_err(|e| e.to_string())?, context.0.join("cortex-xtask")).map_err(|e| e.to_string())?;
+    std::fs::copy(
+        std::env::current_exe().map_err(|e| e.to_string())?,
+        context.0.join("cortex-xtask"),
+    )
+    .map_err(|e| e.to_string())?;
     chmod(&context.0.join("cortex-xtask"), 0o755)?;
     write(
         &context.0.join("Dockerfile"),
@@ -36,12 +62,47 @@ pub fn host(cli: &Cli) -> Res<()> {
         ),
     )?;
     let tag = format!("cortex-offline-engines:{}", &sha_file(&archive)?[..16]);
-    run(&["docker", "build", "-q", "-t", &tag, &context.0.to_string_lossy()], Duration::from_secs(1800))?;
+    run(
+        &[
+            "docker",
+            "build",
+            "-q",
+            "-t",
+            &tag,
+            &context.0.to_string_lossy(),
+        ],
+        Duration::from_secs(1800),
+    )?;
     let command = format!(
         "dpkg -i /application.deb >/dev/null && useradd --create-home smoke && runuser -u smoke -- env HOME=/home/smoke PATH=/usr/bin:/bin /check check-bundled-engines-session {package}"
     );
-    run_inherit(&["docker", "run", "--rm", "--network", "none", "--entrypoint", "sh", &tag, "-c", &command], Duration::from_secs(600))?;
-    println!("{}", line(&obj(vec![("archive_bytes", n(std::fs::metadata(&archive).map_err(|e| e.to_string())?.len() as i64)), ("package", s(package))])));
+    run_inherit(
+        &[
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--entrypoint",
+            "sh",
+            &tag,
+            "-c",
+            &command,
+        ],
+        Duration::from_secs(600),
+    )?;
+    println!(
+        "{}",
+        line(&obj(vec![
+            (
+                "archive_bytes",
+                n(std::fs::metadata(&archive)
+                    .map_err(|e| e.to_string())?
+                    .len() as i64)
+            ),
+            ("package", s(package))
+        ]))
+    );
     Ok(())
 }
 
@@ -60,7 +121,20 @@ fn acp_initialize(argv: &[String], cwd: &Path) -> Res<()> {
         ("jsonrpc", s("2.0")),
         ("id", n(1)),
         ("method", s("initialize")),
-        ("params", obj(vec![("protocolVersion", n(1)), ("clientCapabilities", obj(vec![])), ("clientInfo", obj(vec![("name", s("cortex-offline-install-check")), ("version", s("1.0.6"))]))])),
+        (
+            "params",
+            obj(vec![
+                ("protocolVersion", n(1)),
+                ("clientCapabilities", obj(vec![])),
+                (
+                    "clientInfo",
+                    obj(vec![
+                        ("name", s("cortex-offline-install-check")),
+                        ("version", s("1.0.6")),
+                    ]),
+                ),
+            ]),
+        ),
     ]));
     writeln!(stdin, "{request}").map_err(|e| e.to_string())?;
     let stdout = child.stdout.take().unwrap();
@@ -80,14 +154,33 @@ fn acp_initialize(argv: &[String], cwd: &Path) -> Res<()> {
     let _ = child.kill();
     let _ = child.wait();
     let reply = reply.map_err(|_| "adapter did not answer initialize".to_string())?;
-    require(reply.get("error").is_none() && reply.get("result").and_then(|r| r.get("protocolVersion")).and_then(Value::as_i64) == Some(1), "adapter initialize refused")
+    require(
+        reply.get("error").is_none()
+            && reply
+                .get("result")
+                .and_then(|r| r.get("protocolVersion"))
+                .and_then(Value::as_i64)
+                == Some(1),
+        "adapter initialize refused",
+    )
 }
 
 fn direct_service(package: &str, home: &Path) -> Res<Child> {
-    let unit = read_to_string(&Path::new("/usr/lib/systemd/user").join(format!("{package}.service")))?;
-    let exec = unit.lines().find_map(|l| l.strip_prefix("ExecStart=")).ok_or("unit has no ExecStart")?.replace("%h", &home.to_string_lossy());
+    let unit =
+        read_to_string(&Path::new("/usr/lib/systemd/user").join(format!("{package}.service")))?;
+    let exec = unit
+        .lines()
+        .find_map(|l| l.strip_prefix("ExecStart="))
+        .ok_or("unit has no ExecStart")?
+        .replace("%h", &home.to_string_lossy());
     let argv: Vec<&str> = exec.split_whitespace().collect();
-    Command::new(argv[0]).args(&argv[1..]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| e.to_string())
+    Command::new(argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())
 }
 
 fn stop(child: &mut Child, socket: &Path) {
@@ -103,16 +196,29 @@ fn stop(child: &mut Child, socket: &Path) {
 pub fn session(package: &str) -> Res<()> {
     let home = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME unset")?);
     let tree = Path::new("/usr/lib").join(package).join("engines");
-    require(crate::proc::which("node").is_none() && crate::proc::which("npm").is_none(), "a system Node or npm is on PATH")?;
+    require(
+        crate::proc::which("node").is_none() && crate::proc::which("npm").is_none(),
+        "a system Node or npm is on PATH",
+    )?;
     let manifest = parse(&read_to_string(&tree.join("bundle-manifest.json"))?)?;
-    let files = manifest.get("files").and_then(Value::as_obj).ok_or("bundle manifest has no files")?.to_vec();
+    let files = manifest
+        .get("files")
+        .and_then(Value::as_obj)
+        .ok_or("bundle manifest has no files")?
+        .to_vec();
     let verify = |label: &str| -> Res<()> {
         for (relative, expected) in &files {
             let path = tree.join(relative);
             let meta = std::fs::metadata(&path).map_err(|e| format!("{relative}: {e}"))?;
             let c = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
-            require(meta.uid() == 0 && unsafe { libc::access(c.as_ptr(), libc::W_OK) } != 0, &format!("{label}: bundle file is not root-owned and read-only: {relative}"))?;
-            require(Some(sha_file(&path)?.as_str()) == expected.as_str(), &format!("{label}: bundle file changed: {relative}"))?;
+            require(
+                meta.uid() == 0 && unsafe { libc::access(c.as_ptr(), libc::W_OK) } != 0,
+                &format!("{label}: bundle file is not root-owned and read-only: {relative}"),
+            )?;
+            require(
+                Some(sha_file(&path)?.as_str()) == expected.as_str(),
+                &format!("{label}: bundle file changed: {relative}"),
+            )?;
         }
         Ok(())
     };
@@ -131,7 +237,9 @@ pub fn session(package: &str) -> Res<()> {
     discovery::write_markers(&home)?;
     let mut svc = direct_service(package, &home)?;
     let probe = (|| -> Res<Vec<(String, String)>> {
-        wait_with("service socket", 25, || Ok(rpc(&socket, "service.status", obj(vec![])).ok().map(|_| ())))?;
+        wait_with("service socket", 25, || {
+            Ok(rpc(&socket, "service.status", obj(vec![])).ok().map(|_| ()))
+        })?;
         discovery::recheck_without_real_login(&socket, &config, package)
     })();
     stop(&mut svc, &socket);
@@ -139,25 +247,74 @@ pub fn session(package: &str) -> Res<()> {
     emit(
         "native_engine_discovery",
         vec![
-            ("engines", arr(probe.iter().map(|(e, c)| obj(vec![("engine", s(e)), ("answer", s(c))])).collect())),
+            (
+                "engines",
+                arr(probe
+                    .iter()
+                    .map(|(e, c)| obj(vec![("engine", s(e)), ("answer", s(c))]))
+                    .collect()),
+            ),
             ("real_account_authentication", s("unverified")),
             ("model_refresh", s("not_run")),
         ],
     );
-    let required: Vec<String> = manifest.get("required").and_then(Value::as_arr).ok_or("manifest without required list")?.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
-    let find = |suffix: &str| -> Res<String> { required.iter().find(|r| r.ends_with(suffix)).cloned().ok_or_else(|| format!("manifest lists no {suffix}")) };
+    let required: Vec<String> = manifest
+        .get("required")
+        .and_then(Value::as_arr)
+        .ok_or("manifest without required list")?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    let find = |suffix: &str| -> Res<String> {
+        required
+            .iter()
+            .find(|r| r.ends_with(suffix))
+            .cloned()
+            .ok_or_else(|| format!("manifest lists no {suffix}"))
+    };
     let node = tree.join("node/bin/node");
     for (engine, adapter, native) in [
-        ("codex-acp", find("@agentclientprotocol/codex-acp/dist/index.js")?, find("/bin/codex")?),
-        ("claude-agent-acp", find("@agentclientprotocol/claude-agent-acp/dist/index.js")?, find("/claude")?),
+        (
+            "codex-acp",
+            find("@agentclientprotocol/codex-acp/dist/index.js")?,
+            find("/bin/codex")?,
+        ),
+        (
+            "claude-agent-acp",
+            find("@agentclientprotocol/claude-agent-acp/dist/index.js")?,
+            find("/claude")?,
+        ),
     ] {
-        let launch = vec![node.to_string_lossy().into_owned(), tree.join(&adapter).to_string_lossy().into_owned()];
+        let launch = vec![
+            node.to_string_lossy().into_owned(),
+            tree.join(&adapter).to_string_lossy().into_owned(),
+        ];
         acp_initialize(&launch, &workspace)?;
-        emit("adapter_initialize", vec![("engine", s(engine)), ("initialize", s("passed")), ("prompts_sent", n(0)), ("bundled_node", b(true))]);
-        let version = capture(Command::new(tree.join(&native)).arg("--version"), Duration::from_secs(20))?;
-        require(version.code == 0, &format!("{engine}: native --version failed"))?;
+        emit(
+            "adapter_initialize",
+            vec![
+                ("engine", s(engine)),
+                ("initialize", s("passed")),
+                ("prompts_sent", n(0)),
+                ("bundled_node", b(true)),
+            ],
+        );
+        let version = capture(
+            Command::new(tree.join(&native)).arg("--version"),
+            Duration::from_secs(20),
+        )?;
+        require(
+            version.code == 0,
+            &format!("{engine}: native --version failed"),
+        )?;
     }
     verify("after")?;
-    emit("root_owned_bundle_unchanged", vec![("network", s("none")), ("native_version_checks", s("passed"))]);
+    emit(
+        "root_owned_bundle_unchanged",
+        vec![
+            ("network", s("none")),
+            ("native_version_checks", s("passed")),
+        ],
+    );
     Ok(())
 }

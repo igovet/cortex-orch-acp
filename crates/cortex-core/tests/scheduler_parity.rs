@@ -563,11 +563,21 @@ fn retry_needs_exact_absence_and_refuses_ambiguous_mutation_or_published_result(
         retry(&s).unwrap_err().code(),
         "lost_worker_action_outcome_unknown"
     );
-    s.write(|db|{db.execute("UPDATE runtime_requests SET result_json='{\"complete\":true}'",[])?;Ok(())}).unwrap();
+    s.write(|db| {
+        db.execute(
+            "UPDATE runtime_requests SET result_json='{\"complete\":true}'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
     // A finished draft write, as document tools recorded it before `complete` was added, is a
     // known outcome; a pending one is not.
     s.write(|db|{db.execute("INSERT INTO runtime_requests VALUES ('t','draft','c','draft_write','digest','{\"status\":\"pending\"}')",[])?;Ok(())}).unwrap();
-    assert_eq!(retry(&s).unwrap_err().code(), "lost_worker_action_outcome_unknown");
+    assert_eq!(
+        retry(&s).unwrap_err().code(),
+        "lost_worker_action_outcome_unknown"
+    );
     s.write(|db|{db.execute("UPDATE runtime_requests SET result_json='{\"status\":\"complete\",\"result\":{\"outcome\":\"written\"}}' WHERE request_key='draft'",[])?;
         db.execute("INSERT INTO task_events(task_id,event_type,assignment_ref,dedup_key,payload_json,origin,created_at)
             VALUES ('t','worker_result','xa','r','{}','runtime','now')",[])?;Ok(())}).unwrap();
@@ -595,7 +605,9 @@ fn conservative_wildcards_do_not_justify_parallel_writers() {
 #[test]
 fn finished_deleted_or_settled_work_holds_no_files_for_other_tasks() {
     let (_p, s, o) = setup();
-    TaskMachine::new(&s).create("u", "crashed", "owner").unwrap();
+    TaskMachine::new(&s)
+        .create("u", "crashed", "owner")
+        .unwrap();
     s.write(|db| {
         db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='u'", [])?;
         node(db, "u", "formatAll", "worker-backend-dev", &["src/format.js", "test/counter.test.js"], &[])?;
@@ -611,12 +623,28 @@ fn finished_deleted_or_settled_work_holds_no_files_for_other_tasks() {
     let held = conflict(&s).expect("held by the unfinished task");
     assert_eq!(held["holder_task"], "u");
     assert_eq!(held["node"], "reset");
-    assert!(held["paths"][0].as_str().unwrap().ends_with("/test/counter.test.js"), "{held}");
-    assert!(claim_ready(&s, "t", &o, "coord", &Allow).unwrap().is_empty());
+    assert!(
+        held["paths"][0]
+            .as_str()
+            .unwrap()
+            .ends_with("/test/counter.test.js"),
+        "{held}"
+    );
+    assert!(claim_ready(&s, "t", &o, "coord", &Allow)
+        .unwrap()
+        .is_empty());
     // A task being deleted holds nothing.
-    s.write(|db| { db.execute("INSERT INTO pending_deletions VALUES ('u')", [])?; Ok(()) }).unwrap();
+    s.write(|db| {
+        db.execute("INSERT INTO pending_deletions VALUES ('u')", [])?;
+        Ok(())
+    })
+    .unwrap();
     assert!(conflict(&s).is_none());
-    s.write(|db| { db.execute("DELETE FROM pending_deletions", [])?; Ok(()) }).unwrap();
+    s.write(|db| {
+        db.execute("DELETE FROM pending_deletions", [])?;
+        Ok(())
+    })
+    .unwrap();
     assert!(conflict(&s).is_some());
     // A settled attempt holds nothing, with or without its (older builds') reservation row.
     s.write(|db| {
@@ -626,7 +654,11 @@ fn finished_deleted_or_settled_work_holds_no_files_for_other_tasks() {
     })
     .unwrap();
     assert!(conflict(&s).is_none());
-    s.write(|db| { db.execute("DELETE FROM capacity_reservations", [])?; Ok(()) }).unwrap();
+    s.write(|db| {
+        db.execute("DELETE FROM capacity_reservations", [])?;
+        Ok(())
+    })
+    .unwrap();
     assert!(conflict(&s).is_none());
     s.write(|db| {
         db.execute("UPDATE delegation_provisioning SET status='ambiguous' WHERE attempt_id='ux'", [])?;
@@ -636,7 +668,17 @@ fn finished_deleted_or_settled_work_holds_no_files_for_other_tasks() {
     .unwrap();
     assert!(conflict(&s).is_some());
     // A cancelled task holds nothing, even with its old rows still unsettled.
-    s.write(|db| { db.execute("UPDATE runtime_tasks SET state='CANCELLED' WHERE task_id='u'", [])?; Ok(()) }).unwrap();
+    s.write(|db| {
+        db.execute(
+            "UPDATE runtime_tasks SET state='CANCELLED' WHERE task_id='u'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
     assert!(conflict(&s).is_none());
-    assert_eq!(names(&s, &claim_ready(&s, "t", &o, "coord", &Allow).unwrap()), ["reset"]);
+    assert_eq!(
+        names(&s, &claim_ready(&s, "t", &o, "coord", &Allow).unwrap()),
+        ["reset"]
+    );
 }

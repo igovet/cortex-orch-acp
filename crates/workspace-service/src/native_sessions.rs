@@ -199,6 +199,37 @@ async fn note_withheld(
     }
     Ok(())
 }
+/// The engine's own display name for the model a session runs on, read from the model option the
+/// engine advertised (the same list `session/new` returned). An alias entry such as the Claude
+/// adapter's `default` is named "Default (recommended)" and describes the concrete model it
+/// resolves to ("Opus 5.5"): that reads "Default (Opus 5.5)". None when the engine names nothing
+/// better than the id.
+pub(crate) fn model_label(options: &Value, model: &str) -> Option<String> {
+    fn find<'a>(list: &'a Value, model: &str) -> Option<&'a Value> {
+        list.as_array()?.iter().find_map(|o| {
+            if o["value"] == model {
+                Some(o)
+            } else {
+                find(&o["options"], model)
+            }
+        })
+    }
+    let option = options
+        .as_array()?
+        .iter()
+        .find(|o| o["id"] == "model" || o["category"] == "model")?;
+    let entry = find(&option["options"], model)?;
+    let name = entry["name"].as_str().map(str::trim).filter(|n| !n.is_empty() && *n != model)?;
+    let description = entry["description"]
+        .as_str()
+        .map(str::trim)
+        .filter(|d| !d.is_empty() && d.chars().count() <= 40 && !d.contains('\n') && *d != name);
+    let alias = name.to_ascii_lowercase().starts_with("default");
+    Some(match description {
+        Some(d) if alias => format!("Default ({d})"),
+        _ => name.to_owned(),
+    })
+}
 fn engine_error(_: CoreError) -> Error {
     Error::Forbidden
 }
@@ -248,6 +279,10 @@ pub struct NativeHost {
     pub(super) commands: crate::native_commands::Running,
 }
 impl NativeHost {
+    /// The trusted owner-client decision transport for native permission cards.
+    pub fn bind_permissions(&self, provider: Arc<dyn ClientPermissions>) {
+        *self.permissions.write().unwrap() = Some(provider);
+    }
     /// Construct and finally drop outside a reactor: StoreExecutor joins its lanes.
     /// The owner fence is acquired before initialization, with no fallback on refusal.
     pub fn open(key: ProjectKey) -> CoreResult<Self> {
@@ -296,6 +331,17 @@ impl NativeHost {
         })?.blocking_recv().map_err(|_| CoreError::Refused("session_host_closed"))??;
         if legacy_active && !recover {
             return Err(CoreError::Refused("legacy_runtime_tasks_active"));
+        }
+        // No engine request outlives the process that held it: an owner decision
+        // still open from an earlier run is withdrawn, never answered into the void.
+        // A shared (ACP) store may have another live process; its decisions stay.
+        if !shared {
+            executor
+                .write(|db| {
+                    cortex_core::permission_decisions::withdraw_all_open_tx(db, "service_restarted")
+                })?
+                .blocking_recv()
+                .map_err(|_| CoreError::Refused("session_host_closed"))??;
         }
         Ok(Self {
             mcp,
@@ -627,7 +673,13 @@ impl NativeHost {
                     servers.extend(external.iter().map(|a| a.entry()));
                     servers
                 };
-                let s = e.start_session(&self.root, servers, route.deadline).await?;
+                // Every Claude session starts without native shell/edit/subagent
+                // tools, bypass, hooks, plugins, skills or other MCP configuration.
+                let meta = (engine_kind == cortex_engine::environment::EngineKind::Claude)
+                    .then(crate::native_engine_policy::claude_session_meta);
+                let s = e
+                    .start_session_with_meta(&self.root, servers, meta, route.deadline)
+                    .await?;
                 phase = "configure";
                 e.configure(&s, "model", &route.model, route.deadline)
                     .await?;
@@ -636,27 +688,16 @@ impl NativeHost {
                 }
                 phase = "access_mode";
                 let c = credential.clone();
-                let (access,worker) = receive(self.executor.read(move |db| {
+                let (access,read_only) = receive(self.executor.read(move |db| {
                     let i = channels::authenticate(db,&c.channel_id,c.secret(),false)?;
-                    Ok((cortex_core::access::current(db,&i.task)?,i.role=="worker"))
+                    Ok((cortex_core::access::current(db,&i.task)?,crate::native_engine_policy::read_only(&i)))
                 }).map_err(engine_error)?).await.map_err(engine_error)?;
-                let floor = match engine_kind {
-                    cortex_engine::environment::EngineKind::Codex => "agent",
-                    cortex_engine::environment::EngineKind::Claude => "default",
-                    cortex_engine::environment::EngineKind::OpenCode => "cortex",
-                };
-                let options = s.config_options();
-                let candidates: &[&str] = match engine_kind {
-                    cortex_engine::environment::EngineKind::Codex => &["agent-full-access","agent"],
-                    cortex_engine::environment::EngineKind::Claude => &["bypassPermissions","acceptEdits","default"],
-                    _ => &["cortex"],
-                };
-                let mode = if worker && access=="auto" {
-                    candidates.iter().copied().find(|candidate| options.as_array().is_some_and(|a|
-                        a.iter().any(|o|o["id"]=="mode" && o["options"].as_array().is_some_and(|values|
-                            values.iter().any(|v|v["value"]==*candidate)))))
-                        .ok_or(Error::Forbidden)?
-                } else { floor };
+                // The engine mode depends on the channel's capability, never on the
+                // access mode: no session runs in a mode that skips the engine's
+                // permission requests, and a read-only channel without a read-only
+                // or asking mode does not start.
+                let mode = crate::native_engine_policy::native_mode(
+                    engine_kind, read_only, &s.config_options())?;
                 e.configure(&s,"mode",mode,route.deadline).await?;
                 phase = "bind_session";
                 let c = credential.clone();
@@ -679,10 +720,26 @@ impl NativeHost {
                 phase = "access_mode";
                 let c = credential.clone();
                 let selected = mode.to_owned();
+                // The engine and model this session runs on, as the engine confirmed them in
+                // `configure` (each reply must echo the exact value). The desktop shows a
+                // worker's route from this record only, so shown and used cannot differ.
+                let model_label = model_label(&s.config_options(), &route.model);
+                let mut configured = json!({"channel_id":c.channel_id,"session":s.id(),
+                    "engine":match engine_kind {
+                        cortex_engine::environment::EngineKind::Codex => "codex-acp",
+                        cortex_engine::environment::EngineKind::Claude => "claude-agent-acp",
+                        cortex_engine::environment::EngineKind::OpenCode => "opencode",
+                    },
+                    "model":route.model,
+                    "parameters":route.parameters.iter().filter(|(k,_)|k.as_str()!="mode").collect::<std::collections::BTreeMap<_,_>>()});
+                // The engine's name for the model (an alias such as `default` reads with the
+                // model it resolves to); absent when the engine names nothing better than the id.
+                if let Some(label) = model_label { configured["model_label"] = json!(label); }
                 receive(self.executor.write(move |db| {
                     let i = channels::authenticate(db,&c.channel_id,c.secret(),false)?;
                     lifecycle::event_tx(db,&i.task,"NATIVE_ACCESS_MODE_CONFIRMED",
                         json!({"channel_id":c.channel_id,"mode":selected,"access":access,"session":i.session}))?;
+                    lifecycle::event_tx(db,&i.task,"NATIVE_SESSION_CONFIGURED",configured)?;
                     Ok(())
                 }).map_err(engine_error)?).await.map_err(engine_error)?;
                 let c = credential.clone();
@@ -747,7 +804,12 @@ impl NativeHost {
             let failure = StartFailure {
                 attempt,
                 phase,
-                error: error.to_string(),
+                // A refusal with a stable code (`restricted_mode_unavailable`, ...)
+                // records that code; it is static and secret-free.
+                error: match &error {
+                    Error::Refused(code) => (*code).to_owned(),
+                    other => other.to_string(),
+                },
                 role: identity.role.clone(),
                 engine: engine_kind.name(),
                 blocker: (!retry).then_some(blocker),
@@ -778,7 +840,19 @@ impl NativeHost {
             broker,
             external,
             session,
-            instructions: format!("{instructions}\n\n{}", route.instructions),
+            instructions: format!(
+                "{instructions}{}\n\n{}",
+                // Only roles served project_read see the project's own skills.
+                crate::native_skills::project_files(
+                    &identity.role,
+                    identity.profile.as_deref(),
+                    identity.stage.as_deref()
+                )
+                .then(|| crate::native_skills::section(&self.root))
+                .flatten()
+                .unwrap_or_default(),
+                route.instructions
+            ),
             engine_kind,
             policy,
             delivered_attachments: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -884,12 +958,17 @@ impl SessionDriver {
         blocks.extend(attachments);
         let c = self.credential.clone();
         let transmitted = delivery.clone();
+        let (bundle, brief) = (self.instructions.clone(), text.to_owned());
         receive(self.executor.write(move|db|{
             let i=channels::authenticate(db,&c.channel_id,c.secret(),true)?;
             let session=format!("native:{}:{}",i.attempt,i.session.as_deref().unwrap());
             db.execute("UPDATE capsule_deliveries SET state='continuation_observed',updated_at=?
                 WHERE engine_session_ref=? AND state='delivery_confirmed'",(cortex_core::now(),&session))?;
             db.execute("UPDATE capsule_deliveries SET state='transmitted',updated_at=? WHERE id=? AND state='built'",(cortex_core::now(),&transmitted))?;
+            // What this prompt gave the engine stays verifiable afterwards (digests only).
+            let tools=cortex_engine::schema::catalogue(&i.role,i.profile.as_deref(),i.stage.as_deref()).unwrap_or_default();
+            let catalogue=crate::native_project::digest(&serde_json::to_vec(&tools)?);
+            cortex_core::recovery_context::record_delivery_tx(db,&c,&transmitted,&bundle,&capsule,&brief,&catalogue)?;
             Ok(())
         })?).await?;
         let pending = self.engine.prompt_content(&self.session, blocks);
@@ -1280,12 +1359,15 @@ impl PermissionPolicy for CorePolicy {
                     i.profile.as_deref().unwrap_or(""),
                     i.stage.as_deref().unwrap_or(""),
                 );
-            // claude-agent-acp asks for every tool in its `default` floor; the
-            // runtime answers those itself. Other engines keep the client route.
-            let claude = self.engine == cortex_engine::environment::EngineKind::Claude;
-            let protected = |p: &std::path::Path| {
-                crate::native_command_sandbox::policy::protected_target(&self.root, p)
-            };
+            // claude-agent-acp (`default`) asks for every tool it does not run itself and
+            // codex-acp (`read-only`/`workspace-write`) asks to leave its sandbox; the
+            // runtime answers both itself. OpenCode keeps the client route.
+            let answers = self.engine != cortex_engine::environment::EngineKind::OpenCode;
+            let class =
+                |p: &std::path::Path| crate::native_engine_policy::path_class(&self.root, p);
+            let home = std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|h| h.is_absolute());
             let mcp_servers = self.mcp_servers.lock().unwrap().clone();
             let verdict = permission::classify(
                 request,
@@ -1296,42 +1378,86 @@ impl PermissionPolicy for CorePolicy {
                         i.profile.as_deref(),
                         Some("worker-senior-consultant" | "senior-consultant")
                     ),
-                    runtime_answers_native: claude,
+                    runtime_answers_native: answers,
                     root: &self.root,
+                    home: home.as_deref(),
                     mcp_servers: &mcp_servers,
-                    protected: &protected,
+                    class: &class,
                 },
             );
             let refuse = || match permission::reject_option(request) {
-                Some(option) if claude => PermissionDecision::Selected(option),
+                Some(option) if answers => PermissionDecision::Selected(option),
                 _ => PermissionDecision::Cancelled,
             };
+            // Who decided: the owner on a card, the access mode for an allowance,
+            // the runtime for a policy refusal or a card nobody could answer.
+            let mut decider = "runtime".to_owned();
+            let mut owner_outcome: Option<(&str, String, Value)> = None;
             let decision = match verdict.action {
-                Action::Allow => permission::allow_option(request)
-                    .map(PermissionDecision::Selected)
-                    .unwrap_or_else(refuse),
+                Action::Allow => {
+                    decider = format!("mode:{access}");
+                    permission::allow_option(request)
+                        .map(PermissionDecision::Selected)
+                        .unwrap_or_else(refuse)
+                }
                 Action::Refuse => refuse(),
                 Action::Cancel => PermissionDecision::Cancelled,
-                Action::Ask { deletion, fallback } => match (&self.permissions, incoming) {
-                    (Some(provider), Some(incoming)) if deletion => {
-                        match provider
-                            .decide(&incoming, &permission::deletion_card(request))
-                            .await?
-                        {
-                            PermissionDecision::Selected(option)
-                                if permission::offered_allow(request, &option) =>
-                            {
-                                PermissionDecision::Selected(option)
+                Action::Ask { fallback, .. } => {
+                    // The card names role, operation, path and reason and offers only
+                    // Allow once / Deny: on the incoming ACP client, or as an owner
+                    // decision of a Workspace task. The engine's request waits for it.
+                    let who = i.profile.clone().unwrap_or_else(|| i.role.clone());
+                    let card = permission::owner_card(request, &who, verdict.rule);
+                    let details = crate::native_owner_decisions::details(
+                        request,
+                        &who,
+                        verdict.rule,
+                        &access,
+                    );
+                    let request_ref = format!(
+                        "{}#{}",
+                        request["toolCall"]["toolCallId"].as_str().unwrap_or(""),
+                        request_id
+                    );
+                    let provider = self.permissions.clone();
+                    match crate::native_owner_decisions::ask(
+                        &self.executor,
+                        &self.credential,
+                        provider,
+                        incoming,
+                        &request_ref,
+                        &card,
+                        details,
+                    )
+                    .await
+                    .map_err(engine_error)?
+                    {
+                        crate::native_owner_decisions::Owner::Allowed => {
+                            decider = "owner".to_owned();
+                            owner_outcome = Some(("allow_once", request_ref, card.clone()));
+                            permission::allow_option(&card)
+                                .map(PermissionDecision::Selected)
+                                .unwrap_or_else(refuse)
+                        }
+                        crate::native_owner_decisions::Owner::Denied => {
+                            decider = "owner".to_owned();
+                            owner_outcome = Some(("reject_once", request_ref, card.clone()));
+                            refuse()
+                        }
+                        crate::native_owner_decisions::Owner::Withdrawn(reason) => {
+                            decider = format!("withdrawn:{reason}");
+                            owner_outcome = Some(("cancelled", request_ref, card.clone()));
+                            PermissionDecision::Cancelled
+                        }
+                        crate::native_owner_decisions::Owner::Unavailable => {
+                            decider = "no_owner_client".to_owned();
+                            match fallback {
+                                Fallback::Refuse => refuse(),
+                                Fallback::Cancel => PermissionDecision::Cancelled,
                             }
-                            _ => refuse(),
                         }
                     }
-                    (Some(provider), Some(incoming)) => provider.decide(&incoming, request).await?,
-                    _ => match fallback {
-                        Fallback::Refuse => refuse(),
-                        Fallback::Cancel => PermissionDecision::Cancelled,
-                    },
-                },
+                }
             };
             let rule = verdict.rule;
 
@@ -1351,7 +1477,12 @@ impl PermissionPolicy for CorePolicy {
                 if i.session.as_deref()!=Some(expected_session.as_str()) {return Err(CoreError::Refused("session_mismatch"));}
                 if cortex_core::access::current(db,&i.task)?!=access {return Err(CoreError::Refused("access_mode_changed"));}
                 lifecycle::event_tx(db,&i.task,if cancelled {"NATIVE_PERMISSION_CANCELLED"}else{"NATIVE_PERMISSION_DECIDED"},
-                    json!({"channel_id":c.channel_id,"outcome":outcome,"turn_generation":generation,"rule":rule}))?;
+                    json!({"channel_id":c.channel_id,"outcome":outcome,"turn_generation":generation,"rule":rule,"decider":decider}))?;
+                // An owner-decided request also leaves its permission receipt.
+                if let Some((host_outcome,reference,card))=&owner_outcome {
+                    cortex_core::permission_decisions::receipt_tx(db,&i.task,&i.attempt,reference,
+                        card["toolCall"]["title"].as_str().unwrap_or(""),host_outcome)?;
+                }
                 Ok(())
             }).map_err(engine_error)?).await.map_err(engine_error)?;
             Ok(decision)
@@ -1363,6 +1494,7 @@ impl GatewayCore for CorePolicy {
         matches!(
             name,
             "read_skill"
+                | "read_batch"
                 | "ask_question"
                 | "user_question_request"
                 | "answer_submit"
@@ -1378,6 +1510,8 @@ impl GatewayCore for CorePolicy {
             || crate::native_access::supports(name)
             || crate::native_sources::supports(name)
             || crate::native_project::supports(name)
+            || crate::native_project_ops::supports(name)
+            || crate::native_context_tools::supports(name)
             || crate::native_commands::supports(name)
     }
     fn supports_channel(&self, channel: &Channel, name: &str) -> bool {
@@ -1403,14 +1537,240 @@ impl GatewayCore for CorePolicy {
         arguments: Value,
         _request_id: Value,
     ) -> FutureResult<'a, Value> {
+        // Enforcement is unchanged; a non-authority failure after channel
+        // authentication is reported as a structured, correctable tool error.
         Box::pin(async move {
-            self.authenticate(credentials).await?;
-            if !self.supports(name) || !self.supports_channel(channel, name) {
+            let result = self.call(credentials, channel, name, arguments).await;
+            // result_submit keeps its own classification (native_results::correctable):
+            // its other refusals stay named refusals, never a retryable tool error.
+            if name == "result_submit" {
+                result
+            } else {
+                crate::native_tool_errors::finish(result)
+            }
+        })
+    }
+}
+impl CorePolicy {
+    /// Channel authentication that keeps the precise refusal code.
+    async fn identity(&self, ready: bool) -> cortex_engine::Result<Identity> {
+        let c = self.credential.clone();
+        receive(
+            self.executor
+                .read(move |db| channels::authenticate(db, &c.channel_id, c.secret(), ready))
+                .map_err(tool_error)?,
+        )
+        .await
+        .map_err(tool_error)
+    }
+    /// `read_batch`: up to eight allowlisted evidence reads, preflighted together,
+    /// then executed one at a time through the same handler a direct call uses,
+    /// with channel authority rechecked between items.
+    async fn batch(
+        &self,
+        credentials: &Credentials,
+        channel: &Channel,
+        arguments: Value,
+    ) -> cortex_engine::Result<Value> {
+        use crate::native_tool_errors::{item_error, reply_at};
+        let offered = cortex_engine::schema::catalogue(
+            &channel.role,
+            channel.profile.as_deref(),
+            channel.stage.as_deref(),
+        )?
+        .into_iter()
+        .filter(|t| {
+            let n = t["name"].as_str().unwrap_or("");
+            self.supports(n) && self.supports_channel(channel, n)
+        })
+        .collect::<Vec<_>>();
+        if let Err((code, field)) = crate::native_batch::preflight(&offered, &arguments) {
+            return Ok(reply_at(code, &field));
+        }
+        let calls = arguments["calls"].as_array().cloned().unwrap_or_default();
+        let started = std::time::Instant::now();
+        let (mut results, mut executed) = (Vec::new(), 0usize);
+        for call in calls {
+            let (id, tool) = (
+                call["id"].clone(),
+                call["tool"].as_str().unwrap_or("").to_owned(),
+            );
+            if started.elapsed() >= crate::native_batch::ADMISSION {
+                results.push(json!({"id":id,"tool":tool,"status":"not_run","reason":"batch_budget_exhausted"}));
+                continue;
+            }
+            // Authority loss is not an item failure: it withholds every body.
+            let i = self.identity(true).await?;
+            if !same(&i, channel) {
+                return Err(Error::Refused("channel_identity_changed"));
+            }
+            executed += 1;
+            let member = self.call(credentials, channel, &tool, call["arguments"].clone());
+            let reply = crate::native_tool_errors::finish(member.await)?;
+            let i = self.identity(true).await?;
+            if !same(&i, channel) {
+                return Err(Error::Refused("channel_identity_changed"));
+            }
+            let mut item = json!({"id":id,"tool":tool});
+            if reply["isError"] == true {
+                item["status"] = json!("error");
+                item["error"] = item_error(&reply);
+            } else if reply["content"]
+                .as_array()
+                .is_some_and(|c| c.iter().any(|b| b["type"] != "text"))
+            {
+                item["status"] = json!("error");
+                item["error"] = crate::native_tool_errors::reply("batch_multimodal_unsupported")
+                    ["structuredContent"]
+                    .clone();
+            } else {
+                let data = reply["structuredContent"].clone();
+                let bytes = serde_json::to_vec(&data).unwrap_or_default();
+                let size = bytes.len();
+                if size <= crate::native_batch::ITEM_BYTES {
+                    item["status"] = json!("ok");
+                    item["result"] = data;
+                } else if tool == "read_large_output" {
+                    item["status"] = json!("error");
+                    item["error"] = crate::native_tool_errors::reply("batch_result_limit")
+                        ["structuredContent"]
+                        .clone();
+                } else {
+                    let c = self.credential.clone();
+                    let expected = channel.clone();
+                    let deferred = receive(
+                        self.executor
+                            .publication(move |store| {
+                                let i = store.read(|db| {
+                                    channels::authenticate(db, &c.channel_id, c.secret(), true)
+                                })?;
+                                if !same(&i, &expected) {
+                                    return Err(CoreError::Refused("channel_identity_changed"));
+                                }
+                                crate::native_commands::defer_json_over(
+                                    store,
+                                    &i,
+                                    data,
+                                    crate::native_batch::ITEM_BYTES,
+                                )
+                            })
+                            .map_err(tool_error)?,
+                    )
+                    .await
+                    .map_err(tool_error)?;
+                    item["status"] = json!("deferred");
+                    item["large_output_id"] = deferred["large_output_id"].clone();
+                    item["byte_count"] = deferred["byte_count"].clone();
+                    item["result_sha256"] = json!(crate::native_project::digest(&bytes));
+                }
+            }
+            results.push(item);
+        }
+        // A deferred item ran and is retained under its large_output_id: a normal outcome.
+        // Only an item error or an item that did not run makes the MCP result an error.
+        let complete = results
+            .iter()
+            .all(|r| r["status"] == "ok" || r["status"] == "deferred");
+        let returned = results.iter().filter(|r| r["status"] == "ok").count();
+        let deferred = results.iter().filter(|r| r["status"] == "deferred").count();
+        let value = json!({"outcome":if complete {"complete"} else {"incomplete"},"results":results,
+            "executed_count":executed,"returned_count":returned,"deferred_count":deferred});
+        if serde_json::to_vec(&value)
+            .map(|b| b.len())
+            .unwrap_or(usize::MAX)
+            > crate::native_batch::RESULT_BYTES
+        {
+            return Ok(crate::native_tool_errors::reply("result_too_large"));
+        }
+        Ok(
+            json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value,"isError":!complete}),
+        )
+    }
+    /// Boxed so a read_batch member can re-enter the same dispatch.
+    fn call<'a>(
+        &'a self,
+        credentials: &'a Credentials,
+        channel: &'a Channel,
+        name: &'a str,
+        arguments: Value,
+    ) -> FutureResult<'a, Value> {
+        Box::pin(self.dispatch_call(credentials, channel, name, arguments))
+    }
+    async fn dispatch_call(
+        &self,
+        credentials: &Credentials,
+        channel: &Channel,
+        name: &str,
+        arguments: Value,
+    ) -> cortex_engine::Result<Value> {
+        {
+            if credentials.project != self.root
+                || credentials.channel_id != self.credential.channel_id
+                || credentials.secret() != self.credential.secret()
+            {
                 return Err(Error::Forbidden);
+            }
+            self.identity(false).await?;
+            if !self.supports(name) || !self.supports_channel(channel, name) {
+                return Err(Error::Refused("tool_not_offered"));
+            }
+            if name == "read_batch" {
+                return self.batch(credentials, channel, arguments).await;
             }
             let c = self.credential.clone();
             let expected = channel.clone();
             let name = name.to_owned();
+            if crate::native_project_ops::supports(&name) {
+                let i = self.identity(true).await?;
+                if !same(&i, &expected) {
+                    return Err(Error::Refused("channel_identity_changed"));
+                }
+                return crate::native_tool_errors::outcome(
+                    crate::native_project_ops::execute(
+                        self.executor.clone(),
+                        self.credential.clone(),
+                        self.root.clone(),
+                        self.permissions.clone(),
+                        &name,
+                        arguments,
+                    )
+                    .await,
+                );
+            }
+            if name == "check_preflight" {
+                let i = self.identity(true).await?;
+                if !same(&i, &expected) {
+                    return Err(Error::Refused("channel_identity_changed"));
+                }
+                return crate::native_tool_errors::outcome(
+                    crate::native_context_tools::preflight(self.root.clone(), &arguments)
+                        .await
+                        .map(crate::native_sources::reply),
+                );
+            }
+            if crate::native_context_tools::supports(&name) {
+                let result = receive(
+                    self.executor
+                        .publication(move |store| {
+                            let i = store.read(|db| {
+                                channels::authenticate(db, &c.channel_id, c.secret(), true)
+                            })?;
+                            if !same(&i, &expected) {
+                                return Err(CoreError::Refused("channel_identity_changed"));
+                            }
+                            if name == "task_get_context" {
+                                crate::native_context_tools::task_context(store, &i, &c.channel_id)
+                            } else {
+                                crate::native_context_tools::capsule(store, &i, &arguments)
+                            }
+                        })
+                        .map_err(tool_error)?,
+                )
+                .await;
+                return crate::native_tool_errors::outcome(
+                    result.map(crate::native_sources::reply),
+                );
+            }
             if crate::native_commands::supports(&name) {
                 return crate::native_commands::execute(
                     self.executor.clone(),
@@ -1423,7 +1783,7 @@ impl GatewayCore for CorePolicy {
                     arguments,
                 )
                 .await
-                .map_err(engine_error);
+                .map_err(tool_error);
             }
             if crate::native_project::supports(&name) || crate::native_sources::supports(&name) {
                 let result = receive(
@@ -1441,12 +1801,14 @@ impl GatewayCore for CorePolicy {
                                 crate::native_sources::execute(store, &i, &name, &arguments)
                             }
                         })
-                        .map_err(engine_error)?,
+                        .map_err(tool_error)?,
                 )
                 .await;
+                // Project and source failures were already tool errors; they now
+                // carry the structured code, field and corrective hint.
                 return Ok(match result {
-                    Ok(v) => v,
-                    Err(e) => json!({"content":[{"type":"text","text":e.code()}],"isError":true}),
+                    Ok(v) => crate::native_tool_errors::enrich(v),
+                    Err(e) => crate::native_tool_errors::reply(e.code()),
                 });
             }
             if crate::native_access::supports(&name) {
@@ -1461,7 +1823,7 @@ impl GatewayCore for CorePolicy {
                     arguments,
                 )
                 .await
-                .map_err(engine_error);
+                .map_err(tool_error);
             }
             if crate::native_documents::supports(&name) {
                 let value = receive(
@@ -1475,18 +1837,21 @@ impl GatewayCore for CorePolicy {
                             }
                             crate::native_documents::execute(store, &c, &i, &name, &arguments)
                         })
-                        .map_err(engine_error)?,
+                        .map_err(tool_error)?,
                 )
                 .await
-                .map_err(engine_error)?;
+                .map_err(tool_error)?;
                 return Ok(json!({"content":[{"type":"text","text":value.to_string()}],
                     "structuredContent":value,"isError":false}));
             }
             if name == "list_route_options" {
                 if channel.role != "coordinator" {
-                    return Err(Error::Forbidden);
+                    return Err(Error::Refused("tool_refused"));
                 }
-                let routes = self.routes.clone().ok_or(Error::Forbidden)?;
+                let routes = self
+                    .routes
+                    .clone()
+                    .ok_or(Error::Refused("route_options_unavailable"))?;
                 let root = self.root.clone();
                 let value = receive(
                     self.executor
@@ -1501,10 +1866,10 @@ impl GatewayCore for CorePolicy {
                             let evidence = cortex_core::routing::evidence(db, &i.task, &root)?;
                             routes.menu(&root, &evidence)
                         })
-                        .map_err(engine_error)?,
+                        .map_err(tool_error)?,
                 )
                 .await
-                .map_err(engine_error)?;
+                .map_err(tool_error)?;
                 return Ok(
                     json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value,"isError":false}),
                 );
@@ -1527,33 +1892,41 @@ impl GatewayCore for CorePolicy {
                                 .iter()
                                 .find(|t| t["name"] == "read_skill")
                                 .ok_or(CoreError::Refused("tool_refused"))?;
-                            cortex_engine::schema::validate(&tool["inputSchema"], &arguments)
-                                .map_err(engine_error_to_core)?;
-                            let skill = arguments["skill"]
-                                .as_str()
-                                .ok_or(CoreError::Refused("invalid_skill"))?;
-                            let body = crate::native_instructions::read_skill(
-                                i.profile.as_deref().unwrap_or("orchestrator"),
-                                skill,
-                            )?;
-                            Ok(json!({"skill":skill,"body":body}))
+                            let valid =
+                                cortex_engine::schema::validate(&tool["inputSchema"], &arguments)
+                                    .is_ok()
+                                    && arguments["skill"].is_string();
+                            let profile = i.profile.unwrap_or_else(|| "orchestrator".into());
+                            let project = crate::native_skills::project_files(
+                                &i.role,
+                                Some(profile.as_str()).filter(|_| i.role == "worker"),
+                                i.stage.as_deref(),
+                            );
+                            Ok((valid, profile, project, arguments))
                         })
-                        .map_err(engine_error)?,
+                        .map_err(tool_error)?,
                 )
                 .await
-                .map_err(engine_error)?;
-                return Ok(json!({"content":[{"type":"text","text":value.to_string()}],
-                    "structuredContent":value,"isError":false}));
+                .map_err(tool_error)?;
+                // Channel authority is settled above; a skill that cannot be read is a
+                // precise, correctable tool error, never a bare authority refusal.
+                let (valid, profile, project, arguments) = value;
+                let skill = arguments["skill"].as_str().unwrap_or("");
+                return Ok(if valid {
+                    crate::native_skills::read(&self.root, &profile, skill, project)
+                } else {
+                    crate::native_skills::invalid(skill, &profile, project)
+                });
             }
             if name == "verification_submit" {
-                let i = self.check(true).await?;
+                let i = self.identity(true).await?;
                 let task = i.task;
                 let actor = c.channel_id.clone();
                 let key = arguments["request_key"]
                     .as_str()
                     .ok_or(Error::Invalid)?
                     .to_owned();
-                let replay=receive(self.executor.read(move|db|Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?)",(&task,&actor,&key),|r|r.get::<_,bool>(0))?)).map_err(engine_error)?).await.map_err(engine_error)?;
+                let replay=receive(self.executor.read(move|db|Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?)",(&task,&actor,&key),|r|r.get::<_,bool>(0))?)).map_err(tool_error)?).await.map_err(tool_error)?;
                 if !replay {
                     if let Err(error) = crate::native_effects::verification_preflight(
                         self.root.clone(),
@@ -1566,9 +1939,9 @@ impl GatewayCore for CorePolicy {
                 }
             }
             if name == "plan_submit" {
-                let i = self.check(true).await?;
+                let i = self.identity(true).await?;
                 if !same(&i, &expected) {
-                    return Err(Error::Forbidden);
+                    return Err(Error::Refused("channel_identity_changed"));
                 }
                 let task = i.task;
                 let actor = c.channel_id.clone();
@@ -1578,7 +1951,7 @@ impl GatewayCore for CorePolicy {
                     .to_owned();
                 let replay=receive(self.executor.read(move|db|Ok(db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?)",
-                    (&task,&actor,&key),|r|r.get::<_,bool>(0))?)).map_err(engine_error)?).await.map_err(engine_error)?;
+                    (&task,&actor,&key),|r|r.get::<_,bool>(0))?)).map_err(tool_error)?).await.map_err(tool_error)?;
                 if !replay {
                     if let Err(error) =
                         crate::native_effects::plan_preflight(self.root.clone(), &arguments["plan"])
@@ -1596,7 +1969,7 @@ impl GatewayCore for CorePolicy {
                 {
                     crate::native_effects::observe(self.root.clone())
                         .await
-                        .map_err(engine_error)?
+                        .map_err(tool_error)?
                 } else {
                     EvidenceSnapshot::default()
                 };
@@ -1627,28 +2000,46 @@ impl GatewayCore for CorePolicy {
                             // Every refusal of an authenticated worker's result is retained
                             // by its code alone, so the owner can see why no result exists.
                             if let Err(error) = &submitted {
-                                let _ = crate::native_results::record_refusal(store, &c, &i, error.code());
+                                let _ = crate::native_results::record_refusal(
+                                    store,
+                                    &c,
+                                    &i,
+                                    error.code(),
+                                );
                             }
-                            Ok(submitted)
+                            // A structural refusal names exactly the missing report sections.
+                            let missing = match &submitted {
+                                Err(error)
+                                    if error.code()
+                                        == cortex_core::assignment_brief::SECTIONS_MISSING =>
+                                {
+                                    Some(crate::native_results::missing_sections(
+                                        store, &i, &arguments,
+                                    ))
+                                }
+                                _ => None,
+                            };
+                            Ok((submitted, missing))
                         })
-                        .map_err(engine_error)?,
+                        .map_err(tool_error)?,
                 )
                 .await
-                .map_err(engine_error)?;
+                .map_err(tool_error)?;
+                let (outcome, missing) = outcome;
                 return match outcome {
                     Ok(value) => Ok(json!({"content":[{"type":"text","text":value.to_string()}],
                         "structuredContent":value,"isError":false})),
                     // A correctable content refusal goes back to the worker with its code
                     // and correction, so it can submit again in the same turn.
-                    Err(error) if crate::native_results::correctable(error.code()) => {
-                        Ok(crate::native_results::refusal_reply(error.code()))
-                    }
-                    Err(error) => Err(engine_error(error)),
+                    Err(error) if crate::native_results::correctable(error.code()) => Ok(
+                        crate::native_results::refusal_reply_with(error.code(), missing),
+                    ),
+                    Err(error) => Err(tool_error(error)),
                 };
             }
             let routing = self.routes.clone();
             let root = self.root.clone();
-            let synthesis = name == "synthesis_submit";
+            let synthesis = matches!(name.as_str(), "synthesis_submit" | "answer_submit");
             let value = receive(
                 self.executor
                     .write(move |db| {
@@ -1693,6 +2084,11 @@ impl GatewayCore for CorePolicy {
                                 } else {
                                     vec![arguments.clone()]
                                 };
+                                // A batch member's optional short label (its tab title).
+                                let topics = forms
+                                    .iter()
+                                    .map(|f| f["topic"].as_str().map(str::to_owned))
+                                    .collect::<Vec<_>>();
                                 let forms = forms
                                     .into_iter()
                                     .map(|f| waits::QuestionForm {
@@ -1705,28 +2101,32 @@ impl GatewayCore for CorePolicy {
                                             .collect(),
                                     })
                                     .collect::<Vec<_>>();
-                                waits::request_tx_bound(db, &i.task, &c.channel_id, key, &forms)
+                                waits::request_tx_bound_topics(db, &i.task, &c.channel_id, key, &forms, &topics)
                             }
                             "verification_submit" if i.role=="coordinator" => lifecycle::reconciliation::submit_verification_tx(db,&i.task,&c.channel_id,key,&arguments),
                             "replan_request" | "scope_request" | "escalation_request" => lifecycle::domain::propose_replan_tx(db,&i.task,&c.channel_id,key,&name,&arguments),
                             "answer_submit" if i.role == "coordinator" => {
-                                lifecycle::reconciliation::submit_answer_tx(db,&i.task,&c.channel_id,key,&arguments)
+                                gap_reply(db, &i.task, lifecycle::reconciliation::submit_answer_tx(db,&i.task,&c.channel_id,key,&arguments))
                             }
                             _ => Err(CoreError::Refused("tool_refused")),
                         }
                     })
-                    .map_err(engine_error)?,
+                    .map_err(tool_error)?,
             )
             .await
-            .map_err(engine_error)?;
+            .map_err(tool_error)?;
             if synthesis {
                 return Ok(value);
             }
             Ok(
                 json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value,"isError":false}),
             )
-        })
+        }
     }
+}
+/// A Core failure inside an authenticated tool call keeps its precise code.
+fn tool_error(error: CoreError) -> Error {
+    Error::Refused(error.code())
 }
 /// A plan or verification the runtime refuses before recording anything is a correctable
 /// content error, not an authority failure: the coordinator gets the exact code and submits
@@ -1757,9 +2157,20 @@ fn synthesis_reply(
     task: &str,
     arguments: &Value,
 ) -> CoreResult<Value> {
-    let (value, is_error) = match lifecycle::reconciliation::submit_synthesis_tx(
-        db, task, arguments,
-    ) {
+    gap_reply(
+        db,
+        task,
+        lifecycle::reconciliation::submit_synthesis_tx(db, task, arguments),
+    )
+}
+/// `synthesis_submit` and `answer_submit` share their disclosure refusals; both
+/// are refused before any mutation and return the current gap names.
+fn gap_reply(
+    db: &rusqlite::Transaction<'_>,
+    task: &str,
+    submitted: CoreResult<Value>,
+) -> CoreResult<Value> {
+    let (value, is_error) = match submitted {
         Ok(value) => (value, false),
         Err(CoreError::Refused("synthesis_gaps_undisclosed")) => {
             let names = lifecycle::reconciliation::gaps(db, task)?
@@ -1770,7 +2181,7 @@ fn synthesis_reply(
                     "code":"synthesis_gaps_undisclosed",
                     "recorded":false,
                     "required_not_verified":names,
-                    "message":"No synthesis was recorded. List each current unresolved check in not_verified using its exact name and a concrete blocker; names from an older revision do not close current gaps. Correct the proposal and submit again."
+                    "message":"Nothing was recorded. List each current unresolved check in not_verified using its exact name and a concrete blocker; names from an older revision do not close current gaps. Correct the proposal and submit again."
                 }),
                 true,
             )
@@ -1779,7 +2190,7 @@ fn synthesis_reply(
             json!({
                 "code":"synthesis_disclosure_in_text",
                 "recorded":false,
-                "message":"No synthesis was recorded. Put verification-gap disclosures only in not_verified and remove the duplicate disclosure section from text, then submit the corrected proposal."
+                "message":"Nothing was recorded. Put verification-gap disclosures only in not_verified and remove the duplicate disclosure section from text, then submit the corrected proposal."
             }),
             true,
         ),

@@ -153,7 +153,8 @@ describe("browser tabs", () => {
     await mount(HOME);
     await open(INBOX);
     await newTab();
-    expect($<HTMLButtonElement>('button[aria-label="Back"]')!.classList.contains("ws-hide")).toBe(true);
+    expect($<HTMLButtonElement>('button[aria-label="Back"]')!.classList.contains("tb-nav-off")).toBe(true);
+    expect($<HTMLButtonElement>('button[aria-label="Back"]')!.disabled).toBe(true);
     await open(NEW);
     $<HTMLButtonElement>('button[aria-label="Back"]')!.click(); await flush(); await flush();
     expect(where()).toBe(HOME);

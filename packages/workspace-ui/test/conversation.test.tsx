@@ -68,27 +68,42 @@ it("delivers by the visible choice only: Ctrl+Enter does not queue, and Enter fo
   await settle();
   expect(sent(p).map(c => c.mode)).toEqual(["send_now"]);
   p.receipt(); await settle();
-  all<HTMLButtonElement>(".mc-delivery button").find(b => b.textContent === "Queue")!.click(); await settle();
-  expect(all(".mc-delivery button").map(b => [b.textContent, b.getAttribute("aria-pressed")])).toEqual([["Send now", "false"], ["Queue", "true"]]);
+  all<HTMLButtonElement>(".mc-delivery button").find(b => b.getAttribute("aria-label") === "Queue")!.click(); await settle();
+  expect(all(".mc-delivery button").map(b => [b.getAttribute("aria-label"), b.getAttribute("aria-pressed")])).toEqual([["Queue", "true"]]);
+  // An empty field's button is Stop; with text it is the plane, named by the delivery chosen.
+  expect(named("Queue message")).toBeUndefined();
+  const field = typeMessage("Then add the test");
+  await settle();
   expect(named("Queue message")).toBeTruthy();
-  typeMessage("Then add the test").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+  field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
   await settle();
   expect(sent(p).map(c => c.mode)).toEqual(["send_now", "queue"]);
 });
 
-it("keeps Attach and Voice first and ends with the paper plane, which never turns into Stop", async () => {
-  await mount(world(live));
+it("keeps Attach and Voice first and ends with one action button: Stop while the field is empty, the plane once it has text", async () => {
+  const p = await mount(world(live));
   const bar = $(".dock .c-bar")!;
   const buttons = [...bar.querySelectorAll<HTMLButtonElement>("button")];
   expect(buttons.slice(0, 2).map(b => b.getAttribute("aria-label"))).toEqual(["Attach files", "Voice input"]);
-  const plane = buttons.at(-1)!;
-  expect(plane.classList.contains("mc-send")).toBe(true);
-  expect(plane.querySelector(".i-send")).not.toBeNull();
-  expect(plane.getAttribute("aria-label")).toBe("Send message now");
-  // An empty draft disables the plane with its reason; Stop stays a task action in the title band.
-  expect(plane.getAttribute("aria-disabled")).toBe("true");
-  expect(plane.dataset.why).toBe("Write a message first");
-  expect(all(".dock button").some(b => /Stop/.test(b.textContent ?? ""))).toBe(false);
+  const last = () => [...$(".dock .c-bar")!.querySelectorAll<HTMLButtonElement>("button")].at(-1)!;
+  expect(last().classList.contains("mc-send")).toBe(true);
+  expect(last().getAttribute("aria-label")).toBe("Stop");
+  expect(last().querySelector(".i-stop")).not.toBeNull();
+  expect(last().getAttribute("aria-disabled")).toBeNull();
+  expect($(".dock .mc-effect")?.textContent).toMatch(/^Stop pauses the task/);
+  // The composer is one named group; its action button is the only Stop on the page, and there is no second one beside the plane.
+  expect($('.dock [role="group"][aria-label="Task composer"]')).not.toBeNull();
+  const field = typeMessage("Lock the row"); await settle();
+  expect(last().getAttribute("aria-label")).toBe("Send message now");
+  expect(last().querySelector(".i-send")).not.toBeNull();
+  expect(all(".dock button").some(b => b.getAttribute("aria-label") === "Stop" || /^Stop$/.test(b.textContent?.trim() ?? ""))).toBe(false);
+  // Enter with an empty field never stops: clear it, press Enter, nothing is sent.
+  field.value = ""; field.dispatchEvent(new Event("input", { bubbles: true })); await settle();
+  expect(last().getAttribute("aria-label")).toBe("Stop");
+  field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })); await settle();
+  expect(p.commands.filter(c => c.payload.type === "stop_task")).toEqual([]);
+  last().click(); await settle();
+  expect(p.commands.map(c => c.payload.type)).toContain("stop_task");
 });
 
 it("reads progress in words with details one activation away, and names no product", async () => {
@@ -96,4 +111,54 @@ it("reads progress in words with details one activation away, and names no produ
   expect($(".phases")).toBeNull();
   expect(all('nav[aria-label="Task details"] a').map(a => a.textContent?.trim().split(/\s/)[0])).toEqual(["Work", "Changes", "Code", "Terminal"]);
   expect(document.body.textContent).not.toMatch(/cortex/i);
+});
+
+// The composer is the one place that controls the run: its action button is Start, Stop or Resume while the field is empty.
+const action = () => [...$('[aria-label="Task composer"] .c-bar')!.querySelectorAll<HTMLButtonElement>("button")].at(-1)!;
+const band = () => all<HTMLElement>(".tb-actions button, .tb-actions a").map(b => (b.getAttribute("aria-label") ?? "") + " " + (b.textContent ?? ""));
+
+it("has no state chip, Start, Stop or Resume in the title band; the task menu keeps Stop", async () => {
+  await mount(world(live));
+  expect($(".tb-actions .tb-state, .tb-actions .chip")).toBeNull();
+  expect(band().some(t => /\b(Stop|Resume|Start)\b/.test(t))).toBe(false);
+  named("Task actions")!.click(); await settle();
+  expect(all('[role="menuitem"], .mi').some(e => e.textContent?.trim().startsWith("Stop"))).toBe(true);
+});
+
+it("stops from the task menu with a draft in the field, and keeps the draft", async () => {
+  const p = await mount(world(live));
+  typeMessage("Half written"); await settle();
+  expect(action().getAttribute("aria-label")).toBe("Send message now");
+  named("Task actions")!.click(); await settle();
+  all<HTMLElement>('[role="menuitem"], .mi').find(e => e.textContent?.trim().startsWith("Stop"))!.click(); await settle();
+  expect(p.commands.map(c => c.payload.type)).toContain("stop_task");
+  expect($<HTMLTextAreaElement>('.dock [aria-label="Message"]')!.value).toBe("Half written");
+});
+
+it("resumes a paused task from the empty composer, and sends and resumes once it has text", async () => {
+  const p = await mount(world({ status: "paused", process: "stopped", executionId: "e" }));
+  expect(action().getAttribute("aria-label")).toBe("Resume");
+  expect($(".dock .mc-effect")?.textContent).toMatch(/^Resume continues the task/);
+  typeMessage("Carry on"); await settle();
+  expect(action().getAttribute("aria-label")).toBe("Send and resume");
+  typeMessage(""); await settle();
+  action().click(); await settle();
+  expect(p.commands.map(c => c.payload.type)).toEqual(["continue_task"]);
+});
+
+it("starts a draft from the composer", async () => {
+  const p = await mount(world({ status: "draft", process: "stopped", executionId: null }));
+  expect(action().getAttribute("aria-label")).toBe("Start");
+  expect(action().getAttribute("aria-disabled")).toBeNull();
+  expect(band().some(t => /\bStart\b/.test(t))).toBe(false);
+  action().click(); await settle();
+  expect(p.commands.map(c => c.payload.type)).toEqual(["start_task"]);
+});
+
+it("offers no Stop where nothing runs: a question waits, or the task is in review", async () => {
+  await mount(world({ status: "needs_you", process: "live", executionId: "e" }, [question()]));
+  expect(all("button").some(b => b.getAttribute("aria-label") === "Stop")).toBe(false);
+  dispose?.(); document.body.innerHTML = "";
+  await mount(world({ status: "review", result, workspaceDigest: "d" }));
+  expect(action().getAttribute("aria-label")).toBe("Send and reopen");
 });

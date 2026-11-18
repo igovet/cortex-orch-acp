@@ -32,7 +32,8 @@ function subline(v: TaskView, outcome: Outcome, blocker: string | null) {
 }
 export function archiveRow(index: WorkspaceIndex, v: TaskView): ArchiveRow {
   const retention = v.machine.retentionDays, archivedAt = v.task.archive?.at ?? index.now;
-  const left = Math.ceil(retention - (index.now - archivedAt) / DAY), outcome = outcomeOf(v);
+  // A task archived after this view's clock last moved has not lost any day yet: never more days than the retention.
+  const left = Math.ceil(retention - Math.max(0, index.now - archivedAt) / DAY), outcome = outcomeOf(v);
   const stated = v.task.purgeBlocker;
   const live = v.task.unexpectedChanges || v.task.process !== "stopped" || left <= 0 ? purgeBlocker(index.state, v.task) : null;
   const blocker = stated ?? live;
@@ -53,9 +54,8 @@ export function archiveView(index: WorkspaceIndex, filter: ArchiveFilter) {
   const fits = (v: TaskView) => (!filter.machine || v.machine.id === filter.machine) && (!filter.project || v.project.id === filter.project) && (!filter.text.trim() || v.task.title.toLowerCase().includes(filter.text.trim().toLowerCase()));
   const all = index.archive.map(v => archiveRow(index, v));
   const rows = all.filter(r => fits(r.view) && (!filter.outcome || r.outcome === filter.outcome)).sort((a, b) => a.left - b.left);
-  const waiting = index.views.filter(v => v.task.archiveQuestion && !v.task.archive && fits(v));
   return {
-    total: all.length, soonTotal: all.filter(r => r.group === "soon").length, waiting, rows,
+    total: all.length, soonTotal: all.filter(r => r.group === "soon").length, rows,
     soon: rows.filter(r => r.group === "soon"), later: rows.filter(r => r.group === "later"), blocked: rows.filter(r => r.group === "blocked"),
   };
 }

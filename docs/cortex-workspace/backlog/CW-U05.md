@@ -1,6 +1,6 @@
 # CW-U05: Sprint planning and execution UI
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: sprint planning and execution with manual and automatic run mode; automatic acceptance follows the sprint's current run mode ([screens](../SCREENS.md)); no-paid checks only · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Sprint planning and execution UI.

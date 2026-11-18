@@ -1,6 +1,6 @@
 # CW-U13: Task Workers tab: worker list, live and finished worker views
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: workers listed in a pinned bar above the composer, with live and finished worker views and full activity history ([screens](../SCREENS.md)); no-paid checks only · **Phase:** 3+ · **Size:** L
 
 ## Goal
 

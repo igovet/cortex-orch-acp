@@ -30,7 +30,11 @@ pub(super) fn crc32(data: &[u8]) -> u32 {
     for &byte in data {
         c ^= byte as u32;
         for _ in 0..8 {
-            c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
+            c = if c & 1 != 0 {
+                0xedb8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
         }
     }
     !c
@@ -62,7 +66,11 @@ pub(super) fn png_fixture() -> Vec<u8> {
     ihdr.extend(h.to_be_bytes());
     ihdr.extend([8, 2, 0, 0, 0]);
     let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
-    for (kind, data) in [(&b"IHDR"[..], ihdr), (&b"IDAT"[..], z), (&b"IEND"[..], Vec::new())] {
+    for (kind, data) in [
+        (&b"IHDR"[..], ihdr),
+        (&b"IDAT"[..], z),
+        (&b"IEND"[..], Vec::new()),
+    ] {
         png.extend((data.len() as u32).to_be_bytes());
         let mut body = kind.to_vec();
         body.extend(&data);
@@ -77,7 +85,9 @@ pub(super) fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
-        let v = (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
+        let v = (chunk[0] as u32) << 16
+            | (*chunk.get(1).unwrap_or(&0) as u32) << 8
+            | *chunk.get(2).unwrap_or(&0) as u32;
         for i in 0..4 {
             if i <= chunk.len() {
                 out.push(ALPHABET[(v >> (18 - 6 * i) & 63) as usize] as char);
@@ -91,20 +101,40 @@ pub(super) fn base64(bytes: &[u8]) -> String {
 
 /// Whether one prompt block carries `body` as an attachment: an embedded text resource, or the service's framed text form.
 fn block_carries(block: &Value, body: &str) -> bool {
-    let resource = block.get("resource").and_then(|r| r.get("text")).and_then(Value::as_str);
-    let framed = block.get("text").and_then(Value::as_str).is_some_and(|t| t.contains(&format!("\n{body}\n")));
+    let resource = block
+        .get("resource")
+        .and_then(|r| r.get("text"))
+        .and_then(Value::as_str);
+    let framed = block
+        .get("text")
+        .and_then(Value::as_str)
+        .is_some_and(|t| t.contains(&format!("\n{body}\n")));
     resource == Some(body) || framed
 }
 
 /// The first recorded prompt that carries the exact PNG as an image block, and which of `bodies` that same prompt carries. Each
 /// log line is `{"session": .., "prompt": [blocks]}`; an unreadable line is named, never skipped.
 pub(super) fn delivered(log: &str, png: &str, bodies: &[&str]) -> Res<Option<(usize, Vec<bool>)>> {
-    for (index, line) in log.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
+    for (index, line) in log
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+    {
         let entry = parse(line).map_err(|e| format!("prompt_log_line_{index}_unreadable:{e}"))?;
         let blocks = entry.get("prompt").and_then(Value::as_arr).unwrap_or(&[]);
-        let image = blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("image") && b.get("mimeType").and_then(Value::as_str) == Some("image/png") && b.get("data").and_then(Value::as_str) == Some(png));
+        let image = blocks.iter().any(|b| {
+            b.get("type").and_then(Value::as_str) == Some("image")
+                && b.get("mimeType").and_then(Value::as_str) == Some("image/png")
+                && b.get("data").and_then(Value::as_str) == Some(png)
+        });
         if image {
-            return Ok(Some((index, bodies.iter().map(|body| blocks.iter().any(|b| block_carries(b, body))).collect())));
+            return Ok(Some((
+                index,
+                bodies
+                    .iter()
+                    .map(|body| blocks.iter().any(|b| block_carries(b, body)))
+                    .collect(),
+            )));
         }
     }
     Ok(None)
@@ -113,7 +143,12 @@ pub(super) fn delivered(log: &str, png: &str, bodies: &[&str]) -> Res<Option<(us
 /// Runs a reader with its standard output in `into`, bounded; the exit code.
 fn read_into(command: &mut Command, into: &Path, seconds: u64) -> Res<i32> {
     let sink = std::fs::File::create(into).map_err(|e| e.to_string())?;
-    let mut child = command.stdin(Stdio::null()).stdout(sink).stderr(Stdio::null()).spawn().map_err(|e| e.to_string())?;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(sink)
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
     let end = Instant::now() + Duration::from_secs(seconds);
     loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
@@ -140,7 +175,12 @@ impl J {
 
     fn chip_names(&mut self) -> Res<Vec<String>> {
         let state = self.composer()?;
-        Ok(at(&state, "chips").and_then(Value::as_arr).unwrap_or(&[]).iter().map(|c| text(c, "name").to_string()).collect())
+        Ok(at(&state, "chips")
+            .and_then(Value::as_arr)
+            .unwrap_or(&[])
+            .iter()
+            .map(|c| text(c, "name").to_string())
+            .collect())
     }
 
     /// Waits until the composer shows a chip `wanted` accepts and is no longer reading; the composer's state either way.
@@ -149,7 +189,10 @@ impl J {
         let mut last = Value::Null;
         while Instant::now() < end {
             if let Ok(state) = self.composer() {
-                let found = at(&state, "chips").and_then(Value::as_arr).is_some_and(|c| c.iter().any(&wanted)) && !flag(&state, "busy");
+                let found = at(&state, "chips")
+                    .and_then(Value::as_arr)
+                    .is_some_and(|c| c.iter().any(&wanted))
+                    && !flag(&state, "busy");
                 last = state;
                 if found {
                     return (true, last);
@@ -218,13 +261,24 @@ impl J {
         if self.st.wayland {
             self.key("super+Right")?;
             let half = MONITOR.0 / 2;
-            self.wait("attachment_app_tiled_right", 15, |j| Ok(j.native_width()? == half))?;
+            self.wait("attachment_app_tiled_right", 15, |j| {
+                Ok(j.native_width()? == half)
+            })?;
             sleep_ms(400);
         }
         let log = std::fs::File::create(fixtures.join("drag.log")).map_err(|e| e.to_string())?;
         let log2 = log.try_clone().map_err(|e| e.to_string())?;
         let me = std::env::current_exe().map_err(|e| e.to_string())?;
-        let drag = Command::new(me).arg("installed-drag-source").arg(&fixture).arg(&ready).arg(backend).stdin(Stdio::null()).stdout(log).stderr(log2).spawn().map_err(|e| e.to_string())?;
+        let drag = Command::new(me)
+            .arg("installed-drag-source")
+            .arg(&fixture)
+            .arg(&ready)
+            .arg(backend)
+            .stdin(Stdio::null())
+            .stdout(log)
+            .stderr(log2)
+            .spawn()
+            .map_err(|e| e.to_string())?;
         self.drag_from(drag, &fixture, &ready)
     }
 
@@ -237,7 +291,11 @@ impl J {
                 ((MONITOR.0 / 4) as f64, (MONITOR.1 / 2) as f64)
             } else {
                 let found = xdotool(&["search", "--name", &format!("^{SOURCE_TITLE}$")])?;
-                let wid = found.lines().last().ok_or("drag_source_window_missing")?.to_string();
+                let wid = found
+                    .lines()
+                    .last()
+                    .ok_or("drag_source_window_missing")?
+                    .to_string();
                 let g = geometry(&wid)?;
                 ((g[0] + g[2] / 2) as f64, (g[1] + g[3] / 2) as f64)
             };
@@ -261,12 +319,23 @@ impl J {
             input.button(false)?;
             Ok((sx, sy, tx, ty))
         })();
-        let (shown, state) = if outcome.is_ok() { self.wait_chip(15, |c| text(c, "name") == DROP_NAME) } else { (false, Value::Null) };
+        let (shown, state) = if outcome.is_ok() {
+            self.wait_chip(15, |c| text(c, "name") == DROP_NAME)
+        } else {
+            (false, Value::Null)
+        };
         end_child(drag);
-        let markers: Vec<Value> = ["began", "requested", "ended"].iter().map(|m| b(ready.with_extension(m).exists())).collect();
+        let markers: Vec<Value> = ["began", "requested", "ended"]
+            .iter()
+            .map(|m| b(ready.with_extension(m).exists()))
+            .collect();
         let (sx, sy, tx, ty) = outcome?;
         // Real focus back on the composer, by the pointer, for what follows.
-        self.st.input.as_ref().ok_or("no pointer")?.click_at(tx, ty)?;
+        self.st
+            .input
+            .as_ref()
+            .ok_or("no pointer")?
+            .click_at(tx, ty)?;
         sleep_ms(300);
         let untouched = text(&state, "value") == TITLE;
         let detail = vec![
@@ -274,7 +343,13 @@ impl J {
             ("target", arr_i(&[tx as i64, ty as i64])),
             ("drag_began_requested_ended", arr(markers)),
             ("text_unchanged", b(untouched)),
-            ("fixture", s(fixture.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())),
+            (
+                "fixture",
+                s(fixture
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()),
+            ),
             ("composer", state),
         ];
         self.check("attachment_os_file_drop", shown && untouched, detail);
@@ -288,9 +363,29 @@ impl J {
         let before = self.chip_names()?.len();
         let owner = if self.st.wayland {
             let source = std::fs::File::open(&image).map_err(|e| e.to_string())?;
-            Command::new("wl-copy").args(["--foreground", "--type", "image/png"]).stdin(source).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| format!("wl-copy: {e}"))?
+            Command::new("wl-copy")
+                .args(["--foreground", "--type", "image/png"])
+                .stdin(source)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("wl-copy: {e}"))?
         } else {
-            Command::new("xclip").args(["-quiet", "-selection", "clipboard", "-target", "image/png", "-in"]).arg(&image).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map_err(|e| format!("xclip: {e}"))?
+            Command::new("xclip")
+                .args([
+                    "-quiet",
+                    "-selection",
+                    "clipboard",
+                    "-target",
+                    "image/png",
+                    "-in",
+                ])
+                .arg(&image)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("xclip: {e}"))?
         };
         self.keep.push(owner);
         let back = fixtures.join("clipboard-readback.png");
@@ -307,17 +402,36 @@ impl J {
                 c.args(["-selection", "clipboard", "-target", "image/png", "-out"]);
                 c
             };
-            matched = read_into(&mut reader, &back, 5)? == 0 && std::fs::read(&back).map_err(|e| e.to_string())? == png;
+            matched = read_into(&mut reader, &back, 5)? == 0
+                && std::fs::read(&back).map_err(|e| e.to_string())? == png;
         }
         require(matched, "clipboard_image_readback_mismatch")?;
         let focused = self.yes("return document.activeElement?.getAttribute('aria-label') === 'Describe the task' ? 'yes' : '';")?;
         require(focused, "composer_not_focused_for_paste")?;
         self.key("ctrl+v")?;
-        let (shown, state) = self.wait_chip(15, |c| flag(c, "image") && text(c, "name").ends_with(".png"));
+        let (shown, state) = self.wait_chip(15, |c| {
+            flag(c, "image") && text(c, "name").ends_with(".png")
+        });
         self.release_clipboards();
         let added = count(&state, "chips") > before;
         let untouched = text(&state, "value") == TITLE;
-        self.check("attachment_clipboard_image", shown && added && untouched, vec![("clipboard_owner", s(if self.st.wayland { "wl-copy image/png" } else { "xclip image/png" })), ("readback_bytes", n(png.len() as i64)), ("text_unchanged", b(untouched)), ("composer", state)]);
+        self.check(
+            "attachment_clipboard_image",
+            shown && added && untouched,
+            vec![
+                (
+                    "clipboard_owner",
+                    s(if self.st.wayland {
+                        "wl-copy image/png"
+                    } else {
+                        "xclip image/png"
+                    }),
+                ),
+                ("readback_bytes", n(png.len() as i64)),
+                ("text_unchanged", b(untouched)),
+                ("composer", state),
+            ],
+        );
         Ok(shown && added && untouched)
     }
 
@@ -329,11 +443,26 @@ impl J {
         let origin = self.page_origin()?;
         let (cx, cy) = self.page_centre(".create .composer [aria-label=\"Attach files\"]")?;
         let (px, py) = self.screen_point(origin, cx, cy)?;
-        self.st.input.as_ref().ok_or("no pointer")?.click_at(px, py)?;
+        self.st
+            .input
+            .as_ref()
+            .ok_or("no pointer")?
+            .click_at(px, py)?;
         let group = self.group();
-        let chooser = wait_with("attachment_file_chooser", 15, || Ok(super::a11y::tree(group).into_iter().find(|n| n.role == "file chooser").map(|n| n.name))).ok();
+        let chooser = wait_with("attachment_file_chooser", 15, || {
+            Ok(super::a11y::tree(group)
+                .into_iter()
+                .find(|n| n.role == "file chooser")
+                .map(|n| n.name))
+        })
+        .ok();
         let Some(name) = chooser else {
-            let roles: Vec<Value> = super::a11y::tree(group).into_iter().filter(|n| matches!(n.role.as_str(), "dialog" | "frame" | "window" | "alert")).map(|n| s(format!("{}:{}", n.role, n.name))).take(12).collect();
+            let roles: Vec<Value> = super::a11y::tree(group)
+                .into_iter()
+                .filter(|n| matches!(n.role.as_str(), "dialog" | "frame" | "window" | "alert"))
+                .map(|n| s(format!("{}:{}", n.role, n.name)))
+                .take(12)
+                .collect();
             self.fail("attachment_file_picker", vec![("reason", s("no file chooser appeared in the owned app's accessibility tree after a real pointer press on an enabled Attach files")), ("toplevels", arr(roles))]);
             return Ok(false);
         };
@@ -344,9 +473,23 @@ impl J {
         sleep_ms(400);
         self.key("Return")?;
         let (shown, state) = self.wait_chip(15, |c| text(c, "name") == PICK_NAME);
-        let closed = wait_secs("attachment_file_chooser_closed", 10, || Ok(!super::a11y::tree(group).iter().any(|n| n.role == "file chooser"))).is_ok();
+        let closed = wait_secs("attachment_file_chooser_closed", 10, || {
+            Ok(!super::a11y::tree(group)
+                .iter()
+                .any(|n| n.role == "file chooser"))
+        })
+        .is_ok();
         let untouched = text(&state, "value") == TITLE;
-        self.check("attachment_file_picker", shown && closed && untouched, vec![("chooser", s(name)), ("chooser_closed", b(closed)), ("text_unchanged", b(untouched)), ("composer", state)]);
+        self.check(
+            "attachment_file_picker",
+            shown && closed && untouched,
+            vec![
+                ("chooser", s(name)),
+                ("chooser_closed", b(closed)),
+                ("text_unchanged", b(untouched)),
+                ("composer", state),
+            ],
+        );
         Ok(shown && closed && untouched)
     }
 
@@ -371,14 +514,26 @@ impl J {
         let words = self.q("return JSON.stringify([...document.querySelectorAll('.create [aria-label=\"Attach files\"]')].map(b => { const id = b.getAttribute('aria-describedby'); const why = (id ? document.getElementById(id)?.textContent.trim() : '') || b.dataset.why || ''; return {disabled: b.getAttribute('aria-disabled') === 'true' || b.disabled, words: why}; }));")?;
         let controls = words.as_arr().unwrap_or(&[]).to_vec();
         let offered = controls.iter().any(|c| !flag(c, "disabled"));
-        let unavailable = !controls.is_empty() && controls.iter().all(|c| flag(c, "disabled") && text(c, "words").to_lowercase().contains("not available"));
+        let unavailable = !controls.is_empty()
+            && controls.iter().all(|c| {
+                flag(c, "disabled") && text(c, "words").to_lowercase().contains("not available")
+            });
         if unavailable {
             let page = text(&controls[0], "words").to_string();
             self.not_applicable("native_attachments", "the host reports attachments unavailable: the file picker, drag-and-drop and clipboard paste shapes cannot be exercised", s(page));
             return self.close_window();
         }
         if !offered {
-            self.fail("native_attachments", vec![("reason", s("no usable attachment control was found on the task form")), ("controls", arr(controls))]);
+            self.fail(
+                "native_attachments",
+                vec![
+                    (
+                        "reason",
+                        s("no usable attachment control was found on the task form"),
+                    ),
+                    ("controls", arr(controls)),
+                ],
+            );
             return self.close_window();
         }
         self.fill("Describe the task", TITLE)?;
@@ -389,27 +544,54 @@ impl J {
         let names = self.chip_names()?;
         // Whatever the composer holds is what Start must deliver: a picked file that attached counts even if its step failed.
         let picked = names.iter().any(|n| n == PICK_NAME);
-        let image_name = names.iter().find(|n| n.ends_with(".png")).cloned().unwrap_or_default();
-        let mut expected: Vec<(String, Vec<u8>)> = vec![(DROP_NAME.into(), DROP_BODY.as_bytes().to_vec()), (image_name.clone(), png.clone())];
+        let image_name = names
+            .iter()
+            .find(|n| n.ends_with(".png"))
+            .cloned()
+            .unwrap_or_default();
+        let mut expected: Vec<(String, Vec<u8>)> = vec![
+            (DROP_NAME.into(), DROP_BODY.as_bytes().to_vec()),
+            (image_name.clone(), png.clone()),
+        ];
         if picked {
             expected.push((PICK_NAME.into(), PICK_BODY.as_bytes().to_vec()));
         }
-        let all_attached = expected.iter().all(|(name, _)| !name.is_empty() && names.contains(name)) && names.len() == expected.len();
-        require(all_attached, &format!("attachments_not_all_attached:{}", names.join(",")))?;
+        let all_attached = expected
+            .iter()
+            .all(|(name, _)| !name.is_empty() && names.contains(name))
+            && names.len() == expected.len();
+        require(
+            all_attached,
+            &format!("attachments_not_all_attached:{}", names.join(",")),
+        )?;
         self.click("Save draft")?;
         self.wait_text("attachments_draft_saved", 15, TITLE)?;
         self.open_task("attachments_task_link", TITLE)?;
         // The saved draft reads its files back from the service, each one openable.
-        let wanted: Vec<String> = expected.iter().map(|(name, _)| format!("Open {name}")).collect();
+        let wanted: Vec<String> = expected
+            .iter()
+            .map(|(name, _)| format!("Open {name}"))
+            .collect();
         let list = crate::json::quote(&wanted.join("\n"), true);
         let read_back = self.wait_js("attachments_draft_read_back", 20, &format!("const want = {list}.split('\\n'); const have = [...document.querySelectorAll('.ws-att-open')].map(b => b.getAttribute('aria-label')); return want.every(w => have.includes(w)) ? 'yes' : '';")).is_ok();
         let shown = self.q("return JSON.stringify([...document.querySelectorAll('.ws-att button')].map(b => b.getAttribute('aria-label')));")?;
-        self.check("attachments_saved_with_draft", read_back, vec![("expected", arr(wanted.iter().map(s).collect())), ("shown", shown)]);
+        self.check(
+            "attachments_saved_with_draft",
+            read_back,
+            vec![
+                ("expected", arr(wanted.iter().map(s).collect())),
+                ("shown", shown),
+            ],
+        );
         require(read_back, "attachments_draft_read_back")?;
-        self.click("Start")?;
+        self.click_task("Start")?;
         let log = project.join("prompt-log.jsonl");
         let png64 = base64(&png);
-        let bodies: Vec<&str> = if picked { vec![DROP_BODY, PICK_BODY] } else { vec![DROP_BODY] };
+        let bodies: Vec<&str> = if picked {
+            vec![DROP_BODY, PICK_BODY]
+        } else {
+            vec![DROP_BODY]
+        };
         let mut found = None;
         let end = Instant::now() + Duration::from_secs(60);
         while Instant::now() < end {
@@ -424,32 +606,103 @@ impl J {
         }
         // The peer's recorder appends to the project folder and treats a failed write as fatal; the reviewer that follows works
         // read-only there, so recording stops once the coordinator's prompt is in hand.
-        std::fs::remove_file(project.join("record-prompts")).map_err(|e| format!("record-prompts: {e}"))?;
-        let prompts = std::fs::read_to_string(&log).map(|t| t.lines().filter(|l| !l.trim().is_empty()).count()).unwrap_or(0);
+        std::fs::remove_file(project.join("record-prompts"))
+            .map_err(|e| format!("record-prompts: {e}"))?;
+        let prompts = std::fs::read_to_string(&log)
+            .map(|t| t.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0);
         let texts_ok = found.as_ref().is_some_and(|(_, t)| t.iter().all(|x| *x));
         let detail = vec![
             ("prompts_recorded", n(prompts as i64)),
-            ("image_block_prompt", found.as_ref().map_or(Value::Null, |(i, _)| n(*i as i64))),
-            ("text_files_in_same_prompt", found.as_ref().map_or(Value::Null, |(_, t)| arr(t.iter().map(|x| b(*x)).collect()))),
+            (
+                "image_block_prompt",
+                found.as_ref().map_or(Value::Null, |(i, _)| n(*i as i64)),
+            ),
+            (
+                "text_files_in_same_prompt",
+                found
+                    .as_ref()
+                    .map_or(Value::Null, |(_, t)| arr(t.iter().map(|x| b(*x)).collect())),
+            ),
         ];
         self.check("attachments_delivered_to_engine", texts_ok, detail);
         // The store retains each file by name and digest; no event carries the bytes.
         let db = self.channel.store_db(&project);
         let rows = crate::installed::native::query(&db, "SELECT name||'|'||sha256||'|'||size_bytes FROM source_blocks WHERE availability='stored' ORDER BY block_index")?;
         let retained: Vec<&str> = rows.lines().collect();
-        let all_retained = expected.iter().all(|(name, bytes)| retained.contains(&format!("{name}|{}|{}", sha_bytes(bytes), bytes.len()).as_str()));
-        let leak = self.store_count(&project, &format!("SELECT count(*) FROM runtime_events WHERE instr(payload_json, '{}') > 0", &png64[..32]))?;
-        self.check("attachments_retained_in_store", all_retained && leak == 0, vec![("stored_rows", arr(retained.iter().map(|r| s(r.split('|').next().unwrap_or(""))).collect())), ("expected", n(expected.len() as i64)), ("events_with_file_bytes", n(leak))]);
-        let state = self.wait("attachments_task_completed", 120, |j| Ok(j.task_state(&project)?.as_deref() == Some("COMPLETED"))).map(|_| "COMPLETED".to_string()).unwrap_or_else(|_| self.task_state(&project).ok().flatten().unwrap_or_default());
+        let all_retained = expected.iter().all(|(name, bytes)| {
+            retained.contains(&format!("{name}|{}|{}", sha_bytes(bytes), bytes.len()).as_str())
+        });
+        let leak = self.store_count(
+            &project,
+            &format!(
+                "SELECT count(*) FROM runtime_events WHERE instr(payload_json, '{}') > 0",
+                &png64[..32]
+            ),
+        )?;
+        self.check(
+            "attachments_retained_in_store",
+            all_retained && leak == 0,
+            vec![
+                (
+                    "stored_rows",
+                    arr(retained
+                        .iter()
+                        .map(|r| s(r.split('|').next().unwrap_or("")))
+                        .collect()),
+                ),
+                ("expected", n(expected.len() as i64)),
+                ("events_with_file_bytes", n(leak)),
+            ],
+        );
+        let state = self
+            .wait("attachments_task_completed", 120, |j| {
+                Ok(j.task_state(&project)?.as_deref() == Some("COMPLETED"))
+            })
+            .map(|_| "COMPLETED".to_string())
+            .unwrap_or_else(|_| self.task_state(&project).ok().flatten().unwrap_or_default());
         if state != "COMPLETED" {
             // Event types, retry classes and request operations only, never payloads: where the task stopped.
             let events = crate::installed::native::query(&db, "SELECT type||coalesce(' '||json_extract(payload_json,'$.failure_class'),'') FROM runtime_events ORDER BY rowid").unwrap_or_else(|e| e);
-            let requests = crate::installed::native::query(&db, "SELECT operation FROM runtime_requests ORDER BY rowid").unwrap_or_else(|e| e);
-            self.note("attachments_task_trail", vec![("events", arr(events.lines().map(s).collect())), ("requests", arr(requests.lines().map(s).collect()))]);
+            let requests = crate::installed::native::query(
+                &db,
+                "SELECT operation FROM runtime_requests ORDER BY rowid",
+            )
+            .unwrap_or_else(|e| e);
+            self.note(
+                "attachments_task_trail",
+                vec![
+                    ("events", arr(events.lines().map(s).collect())),
+                    ("requests", arr(requests.lines().map(s).collect())),
+                ],
+            );
         }
-        self.check("attachments_task_completed", state == "COMPLETED", vec![("state", s(state.clone()))]);
-        let ok = dropped && pasted && picker && texts_ok && all_retained && leak == 0 && state == "COMPLETED";
-        self.check("native_attachments", ok, vec![("drop", b(dropped)), ("clipboard_image", b(pasted)), ("file_picker", b(picker)), ("draft_read_back", b(read_back)), ("delivered", b(texts_ok)), ("retained", b(all_retained)), ("completed", b(state == "COMPLETED")), ("image_name", s(image_name))]);
+        self.check(
+            "attachments_task_completed",
+            state == "COMPLETED",
+            vec![("state", s(state.clone()))],
+        );
+        let ok = dropped
+            && pasted
+            && picker
+            && texts_ok
+            && all_retained
+            && leak == 0
+            && state == "COMPLETED";
+        self.check(
+            "native_attachments",
+            ok,
+            vec![
+                ("drop", b(dropped)),
+                ("clipboard_image", b(pasted)),
+                ("file_picker", b(picker)),
+                ("draft_read_back", b(read_back)),
+                ("delivered", b(texts_ok)),
+                ("retained", b(all_retained)),
+                ("completed", b(state == "COMPLETED")),
+                ("image_name", s(image_name)),
+            ],
+        );
         self.close_window()
     }
 }
@@ -482,16 +735,25 @@ mod tests {
     #[test]
     fn delivery_needs_the_exact_image_and_reports_each_text_file() {
         let log = concat!(
-            r#"{"session":"a","prompt":[{"type":"text","text":"title only"}]}"#, "\n",
-            r#"{"session":"b","prompt":[{"type":"text","text":"Task"},{"type":"image","mimeType":"image/png","data":"QUJD"},{"type":"resource","resource":{"uri":"cortex:attachment/x","mimeType":"text/plain","text":"drop body"}},{"type":"text","text":"[attachment: p.txt]\npick body\n[end of attachment]"}]}"#, "\n",
+            r#"{"session":"a","prompt":[{"type":"text","text":"title only"}]}"#,
+            "\n",
+            r#"{"session":"b","prompt":[{"type":"text","text":"Task"},{"type":"image","mimeType":"image/png","data":"QUJD"},{"type":"resource","resource":{"uri":"cortex:attachment/x","mimeType":"text/plain","text":"drop body"}},{"type":"text","text":"[attachment: p.txt]\npick body\n[end of attachment]"}]}"#,
+            "\n",
         );
-        assert_eq!(delivered(log, "QUJD", &["drop body", "pick body", "absent"]).unwrap(), Some((1, vec![true, true, false])));
+        assert_eq!(
+            delivered(log, "QUJD", &["drop body", "pick body", "absent"]).unwrap(),
+            Some((1, vec![true, true, false]))
+        );
         assert_eq!(delivered(log, "QUJE", &["drop body"]).unwrap(), None);
-        let wrong_type = r#"{"session":"b","prompt":[{"type":"image","mimeType":"image/jpeg","data":"QUJD"}]}"#;
+        let wrong_type =
+            r#"{"session":"b","prompt":[{"type":"image","mimeType":"image/jpeg","data":"QUJD"}]}"#;
         assert_eq!(delivered(wrong_type, "QUJD", &[]).unwrap(), None);
         // A body that only appears inside another word is not an attachment.
         let loose = r#"{"session":"b","prompt":[{"type":"image","mimeType":"image/png","data":"QUJD"},{"type":"text","text":"xx drop body yy"}]}"#;
-        assert_eq!(delivered(loose, "QUJD", &["drop body"]).unwrap(), Some((0, vec![false])));
+        assert_eq!(
+            delivered(loose, "QUJD", &["drop body"]).unwrap(),
+            Some((0, vec![false]))
+        );
         assert!(delivered("{not json\n", "QUJD", &[]).is_err());
     }
 }

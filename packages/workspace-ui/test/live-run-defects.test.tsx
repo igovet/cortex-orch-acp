@@ -164,8 +164,10 @@ it("says why the runtime refused a plan, in words, on the failed row", async () 
 it("counts a stopped worker as cancelled on the team line, as the header does", async () => {
   const cancelled = writer([], { id: "w", role: "backend-dev", status: "cancelled", result: null });
   await mount(world([{ id: "workers", kind: "workers", title: "Workers", workerIds: ["w"] }], { status: "needs_you" }, [cancelled]));
-  const team = [...document.querySelectorAll<HTMLButtonElement>(".timeline button.fold")].find(b => b.textContent?.startsWith("Workers:"))!;
+  // The team line stands in the bar pinned above the composer, not in the feed.
+  const team = document.querySelector<HTMLButtonElement>(".task-panel .dock .ws-team-all")!;
   expect(team.textContent).toBe("Workers: 0 finished, 1 cancelled");
+  expect(document.querySelector(".timeline .ws-team")).toBeNull();
   expect(document.querySelector(".taskbar")!.textContent).toContain("0 finished, 1 cancelled");
 });
 
@@ -197,7 +199,7 @@ it("brings the owner's new message into view above the composer even after scrol
   observers.forEach(cb => cb()); await new Promise(r => setTimeout(r, 40)); await settle();
   expect(top).toBe(1600);
   // The owner scrolls up to read the result, then sends a request for changes from its dialog.
-  top = 300; box.dispatchEvent(new Event("scroll")); await settle();
+  box.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 })); top = 300; box.dispatchEvent(new Event("scroll")); await settle();
   expect(document.querySelector(".timeline-pill, .ws-pill")).not.toBeNull();
   const next = structuredClone(state);
   Object.assign(next.tasks[0], { status: "working", process: "live", result: null });

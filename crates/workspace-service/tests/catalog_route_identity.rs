@@ -274,3 +274,38 @@ fn an_unreadable_connection_catalog_degrades_only_that_connection() {
     );
     assert_eq!(fs::read(f.path(CLAUDE)).unwrap(), raw);
 }
+
+/// A saved routing file and coordinator default that still name the retired `default` alias load
+/// without error, never list or bind it, and a route decision never selects it.
+#[test]
+fn a_saved_config_naming_the_default_alias_loads_and_never_selects_it() {
+    let f = Fixture::new();
+    f.write(
+        "config/cortex/routing.json",
+        &json!({"model_policy_version":2,
+            "enabled":{"codex-acp":["gpt-6.1-sol"],"claude-agent-acp":["default","claude-sonnet-5"]},
+            "models":{"codex-acp":{"auto":["gpt-6.1-sol"],"tiers":{"gpt-6.1-sol":["standard"]}},
+                "claude-agent-acp":{"auto":["default","claude-sonnet-5"],
+                    "tiers":{"default":["deep"],"claude-sonnet-5":["standard","deep"]}}}}),
+    );
+    f.write(
+        "config/cortex/defaults.json",
+        &json!({"defaults":{"coordinator":{"engine":"claude-agent-acp","model":"default",
+            "parameters":{"thought_level":"medium"}}}}),
+    );
+    let reader = f.reader();
+    let view = reader
+        .settings_with_catalog_readers(&json!({"surfaces":{},"workspace":{}}), 1800000000.0, None)
+        .unwrap()
+        .view;
+    assert_eq!(models(&view, "claude-agent-acp"), [CLAUDE_ROUTE]);
+    let defaults = reader.user_defaults_management_observation().unwrap();
+    assert_ne!(defaults["result"]["coordinator_resolution"]["state"], "bound");
+    let resolver = RouteResolver::load(
+        &f.0.join("project"),
+        &f.0.join("project/.cortex-dev"),
+        f.environment(),
+    )
+    .unwrap();
+    assert!(resolver.coordinator().is_err());
+}

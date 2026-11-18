@@ -1,6 +1,6 @@
 # CW-H04: Crash/EOF/owned-child reconciliation with no prompt replay
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: after a crash or EOF the service reconciles owned children without replaying prompts ([consistency and recovery](../consistency-and-recovery.md)); no-paid checks only; a host SIGKILL is not recorded · **Phase:** 3+ · **Size:** L
 
 ## Goal
 

@@ -51,7 +51,8 @@ impl Sandbox {
             writes,
             protected,
             network,
-            std::env::vars_os().collect(),
+            // The owner's tool search path replaces the session manager's PATH.
+            crate::tool_path::environment(),
         )
     }
 
@@ -87,7 +88,8 @@ impl Sandbox {
             writes,
             protected,
             true,
-            std::env::vars_os().collect(),
+            // In the per-command supervisor this is the PATH the service resolved for it.
+            crate::tool_path::environment(),
             before_write,
         )
     }
@@ -612,7 +614,25 @@ pub(crate) fn command_path(
             paths.push(p);
         }
     }
-    paths.extend(std::env::split_paths(&inherited));
+    // The owner's entries are validated again here: a project can never add a search
+    // directory of its own beyond the fixed tool directories above (its folder and
+    // its private `.cortex` state are refused), and neither can a world-writable,
+    // non-sticky or missing directory. The sandbox's read-only root mount already
+    // shows every remaining directory, so nothing extra is bound for them.
+    let real_root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
+    let mut kept = 0;
+    for p in std::env::split_paths(&inherited) {
+        match crate::tool_path::valid(&p, &[]) {
+            Ok(real) if !real.starts_with(&real_root) && !p.starts_with(root) => {
+                paths.push(p);
+                kept += 1;
+            }
+            _ => {}
+        }
+    }
+    if kept == 0 {
+        paths.extend(["/usr/local/bin", "/usr/bin", "/bin"].map(PathBuf::from));
+    }
     std::env::join_paths(paths).ok()
 }
 
@@ -1002,6 +1022,93 @@ mod tests {
         );
         assert!(root.join("cache/verification-output").is_file());
         assert!(f.0.join("relocated-cache/metadata").is_file());
+    }
+    /// A worker command (Guarded and Development views) runs a program found only in a
+    /// directory the owner's login shell adds, through a version-manager style link,
+    /// while a search entry inside the project is never honoured.
+    #[test]
+    fn worker_commands_find_programs_on_the_owners_shell_path() {
+        let s = crate::tool_path::tests::Scratch::new("worker");
+        let lib = s.dir("home/.nvm/versions/node/v24.1.0/lib");
+        let bin = s.dir("home/.nvm/versions/node/v24.1.0/bin");
+        fs::write(lib.join("tool.js"), "#!/bin/sh\necho fixture-node-tool\n").unwrap();
+        fs::set_permissions(lib.join("tool.js"), fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink("../lib/tool.js", bin.join("cortex-fixture-node")).unwrap();
+        let shell = crate::tool_path::tests::login_shell(
+            &s,
+            &format!("echo noisy banner\nexport PATH={}:$PATH\n", bin.display()),
+        );
+        let home = s.0.join("home");
+        let detected = crate::tool_path::detect(
+            &shell,
+            &home,
+            std::ffi::OsStr::new("/usr/local/bin:/usr/bin:/bin"),
+            &[],
+            Duration::from_secs(5),
+        );
+        assert_eq!(detected.source, crate::tool_path::Source::Shell);
+        assert!(
+            detected.directories.contains(&bin),
+            "{:?}",
+            detected.directories
+        );
+        let root = s.dir("project");
+        let planted = s.dir("project/tools");
+        fs::write(
+            planted.join("cortex-project-tool"),
+            "#!/bin/sh\necho planted\n",
+        )
+        .unwrap();
+        fs::set_permissions(
+            planted.join("cortex-project-tool"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let mut entries = vec![planted.clone()];
+        entries.extend(detected.directories.clone());
+        let mut environment = BTreeMap::new();
+        environment.insert("HOME".into(), home.into_os_string());
+        environment.insert("PATH".into(), std::env::join_paths(entries).unwrap());
+        let path = command_path(&root, &environment).unwrap();
+        assert!(!std::env::split_paths(&path).any(|p| p == planted));
+        if !capability() {
+            eprintln!(
+                "skipped sandbox launch: bubblewrap cannot create user namespaces on this host"
+            );
+            return;
+        }
+        for profile in [Profile::Guarded, Profile::Development] {
+            let sandbox = Sandbox::with_environment(
+                &root,
+                profile,
+                &[root.clone()],
+                &[],
+                false,
+                environment.clone(),
+            )
+            .unwrap();
+            let out = sandbox
+                .command(&["cortex-fixture-node".into()])
+                .unwrap()
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{profile:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&out.stdout), "fixture-node-tool\n");
+            run(&sandbox, "! command -v cortex-project-tool", &[]);
+        }
+        // The verifier's read-only view runs it too, and cannot write the tool directory.
+        let sandbox =
+            Sandbox::with_environment(&root, Profile::ReadOnly, &[], &[], false, environment)
+                .unwrap();
+        run(
+            &sandbox,
+            r#"test "$(cortex-fixture-node)" = fixture-node-tool; ! touch "$1/injected""#,
+            &[&bin],
+        );
     }
     #[test]
     fn failed_setup_never_executes_payload() {

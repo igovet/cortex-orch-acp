@@ -24,7 +24,12 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_PASEO: &str = "/opt/Paseo/resources/bin/paseo";
 const DEFAULT_GUI: &str = "/opt/Paseo/Paseo";
-const DAEMON_LAUNCHES: [&[&str]; 4] = [&["start"], &["onboard"], &["daemon", "start"], &["daemon", "run"]];
+const DAEMON_LAUNCHES: [&[&str]; 4] = [
+    &["start"],
+    &["onboard"],
+    &["daemon", "start"],
+    &["daemon", "run"],
+];
 const ENGINE_ACCOUNT_DIRS: [&str; 2] = [".codex", ".claude"];
 /// Tests only: an alternate mountinfo file to inspect.
 pub const MOUNTINFO_OVERRIDE: &str = "CORTEX_PASEO_DEV_MOUNTINFO";
@@ -37,7 +42,9 @@ const USAGE: &str = "usage: paseo-dev [--paseo ABS_PATH] [--home ABS_PATH] [--in
 type Res<T> = Result<T, String>;
 
 fn user_home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/nonexistent"))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/nonexistent"))
 }
 
 /// Python `Path.resolve(strict=False)`: follow existing links, keep a lexical tail for what does not exist.
@@ -89,7 +96,11 @@ fn checkout_root() -> PathBuf {
 /// Paseo installation it may have been started from.
 pub fn isolated_environment(home: &Path, checkout_runtime: bool) -> BTreeMap<OsString, OsString> {
     let mut env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
-    for key in ["CORTEX_DEV_WIRE_TRACE", "CORTEX_DEV_TRACE_HOME", "CORTEX_PASEO_SOURCE_ROOT"] {
+    for key in [
+        "CORTEX_DEV_WIRE_TRACE",
+        "CORTEX_DEV_TRACE_HOME",
+        "CORTEX_PASEO_SOURCE_ROOT",
+    ] {
         env.remove(OsString::from(key).as_os_str());
     }
     env.retain(|key, _| !key.to_string_lossy().starts_with("PASEO_"));
@@ -111,7 +122,9 @@ fn installs_git_plugin(words: &[String]) -> bool {
     }
     match words[2..].iter().find(|w| !w.starts_with('-')) {
         Some(source) => {
-            let expanded = source.strip_prefix("~/").map_or_else(|| PathBuf::from(source), |rest| user_home().join(rest));
+            let expanded = source
+                .strip_prefix("~/")
+                .map_or_else(|| PathBuf::from(source), |rest| user_home().join(rest));
             !expanded.is_dir()
         }
         None => false,
@@ -121,8 +134,13 @@ fn installs_git_plugin(words: &[String]) -> bool {
 // ----------------------------------------------------------------- sandbox
 
 fn mountinfo() -> Vec<Vec<String>> {
-    let path = std::env::var(MOUNTINFO_OVERRIDE).ok().filter(|p| !p.is_empty()).unwrap_or_else(|| "/proc/self/mountinfo".into());
-    let Ok(bytes) = fs::read(path) else { return Vec::new() };
+    let path = std::env::var(MOUNTINFO_OVERRIDE)
+        .ok()
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| "/proc/self/mountinfo".into());
+    let Ok(bytes) = fs::read(path) else {
+        return Vec::new();
+    };
     String::from_utf8_lossy(&bytes)
         .lines()
         .map(|line| line.split(' ').map(String::from).collect::<Vec<_>>())
@@ -132,16 +150,25 @@ fn mountinfo() -> Vec<Vec<String>> {
 
 /// A Cortex sandbox's scratch root mounted over /var/tmp (`/cortex-command-…/var-tmp`), if this process runs in one.
 fn cortex_sandbox_var_tmp() -> Option<String> {
-    let roots: Vec<String> = mountinfo().into_iter().filter(|f| f[4] == "/var/tmp").map(|f| f[3].replace("\\040", " ")).collect();
+    let roots: Vec<String> = mountinfo()
+        .into_iter()
+        .filter(|f| f[4] == "/var/tmp")
+        .map(|f| f[3].replace("\\040", " "))
+        .collect();
     let last = roots.last()?;
-    let pattern = regex::Regex::new(r"/cortex-(?:command|engine)-[^/]+/(?:tmp/)?var-tmp(?://deleted)?$").ok()?;
+    let pattern =
+        regex::Regex::new(r"/cortex-(?:command|engine)-[^/]+/(?:tmp/)?var-tmp(?://deleted)?$")
+            .ok()?;
     pattern.is_match(last).then(|| last.clone())
 }
 
 /// A native engine account directory whose effective mount is read-only.
 fn read_only_engine_account() -> Option<String> {
     let home = user_home();
-    let targets: Vec<String> = ENGINE_ACCOUNT_DIRS.iter().map(|n| home.join(n).display().to_string()).collect();
+    let targets: Vec<String> = ENGINE_ACCOUNT_DIRS
+        .iter()
+        .map(|n| home.join(n).display().to_string())
+        .collect();
     let mut effective: BTreeMap<String, bool> = BTreeMap::new();
     for fields in mountinfo() {
         let point = fields[4].replace("\\040", " ");
@@ -149,7 +176,9 @@ fn read_only_engine_account() -> Option<String> {
             effective.insert(point, fields[5].split(',').any(|o| o == "ro"));
         }
     }
-    targets.into_iter().find(|t| effective.get(t).copied().unwrap_or(false))
+    targets
+        .into_iter()
+        .find(|t| effective.get(t).copied().unwrap_or(false))
 }
 
 fn refused_inside_cortex_sandbox(label: &str) -> bool {
@@ -182,7 +211,13 @@ struct Cli {
 }
 
 fn parse_cli(argv: &[String]) -> Res<Cli> {
-    let mut cli = Cli { paseo: DEFAULT_PASEO.into(), home: user_home().join(".paseo-dev").display().to_string(), check: false, installed_runtime: false, command: Vec::new() };
+    let mut cli = Cli {
+        paseo: DEFAULT_PASEO.into(),
+        home: user_home().join(".paseo-dev").display().to_string(),
+        check: false,
+        installed_runtime: false,
+        command: Vec::new(),
+    };
     let mut i = 0;
     while i < argv.len() {
         let arg = argv[i].as_str();
@@ -193,10 +228,16 @@ fn parse_cli(argv: &[String]) -> Res<Cli> {
             }
             "--check" => cli.check = true,
             "--installed-runtime" => cli.installed_runtime = true,
-            "--wire-trace" => return Err("--wire-trace was removed with the Python runtime; it has no native replacement".into()),
+            "--wire-trace" => return Err(
+                "--wire-trace was removed with the Python runtime; it has no native replacement"
+                    .into(),
+            ),
             "--paseo" | "--home" => {
                 i += 1;
-                let value = argv.get(i).ok_or_else(|| format!("{arg} needs a value"))?.clone();
+                let value = argv
+                    .get(i)
+                    .ok_or_else(|| format!("{arg} needs a value"))?
+                    .clone();
                 if arg == "--paseo" {
                     cli.paseo = value;
                 } else {
@@ -252,7 +293,9 @@ fn run_cli(argv: &[String]) -> i32 {
     if command.first().is_some_and(|c| c == "--") {
         command.remove(0);
     }
-    if command.iter().any(|c| c == "--home" || c.starts_with("--home=") || c == "--host" || c.starts_with("--host=")) {
+    if command.iter().any(|c| {
+        c == "--home" || c.starts_with("--home=") || c == "--host" || c.starts_with("--host=")
+    }) {
         eprintln!("{label}: command may not override --home or select --host");
         return 2;
     }
@@ -261,7 +304,8 @@ fn run_cli(argv: &[String]) -> i32 {
             eprintln!("{label}: --check accepts no Paseo command");
             return 2;
         }
-        let report = serde_json::json!({"paseo": paseo, "home": home, "production_home": production});
+        let report =
+            serde_json::json!({"paseo": paseo, "home": home, "production_home": production});
         println!("{report}");
         return 0;
     }
@@ -269,7 +313,10 @@ fn run_cli(argv: &[String]) -> i32 {
         eprintln!("{label}: provide a Paseo command after --");
         return 2;
     }
-    let first = command.iter().position(|c| !c.starts_with('-')).unwrap_or(command.len());
+    let first = command
+        .iter()
+        .position(|c| !c.starts_with('-'))
+        .unwrap_or(command.len());
     let words = &command[first..];
     if installs_git_plugin(words) && !cli.installed_runtime {
         eprintln!(
@@ -278,8 +325,13 @@ fn run_cli(argv: &[String]) -> i32 {
         );
         return 2;
     }
-    if DAEMON_LAUNCHES.iter().any(|launch| words.len() >= launch.len() && words[..launch.len()].iter().map(String::as_str).eq(launch.iter().copied()))
-        && refused_inside_cortex_sandbox(label)
+    if DAEMON_LAUNCHES.iter().any(|launch| {
+        words.len() >= launch.len()
+            && words[..launch.len()]
+                .iter()
+                .map(String::as_str)
+                .eq(launch.iter().copied())
+    }) && refused_inside_cortex_sandbox(label)
     {
         return 2;
     }
@@ -287,8 +339,17 @@ fn run_cli(argv: &[String]) -> i32 {
     // A wrapper invoked from an active Paseo agent must not target that agent;
     // the isolated home is explicit in both --home and the environment.
     env.insert("PASEO_HOME".into(), home.clone().into());
-    match Command::new(&paseo).arg("--home").arg(&home).args(&command).env_clear().envs(&env).status() {
-        Ok(status) => status.code().unwrap_or(128 + std::os::unix::process::ExitStatusExt::signal(&status).unwrap_or(0)),
+    match Command::new(&paseo)
+        .arg("--home")
+        .arg(&home)
+        .args(&command)
+        .env_clear()
+        .envs(&env)
+        .status()
+    {
+        Ok(status) => status
+            .code()
+            .unwrap_or(128 + std::os::unix::process::ExitStatusExt::signal(&status).unwrap_or(0)),
         Err(error) => {
             eprintln!("{label}: cannot start {}: {error}", paseo.display());
             1
@@ -332,13 +393,27 @@ fn terminate_group(child: &mut Child, timeout: Duration) {
 }
 
 fn which(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH")?.to_str()?.split(':').map(|d| Path::new(d).join(name)).find(|p| is_executable_file(p))
+    std::env::var_os("PATH")?
+        .to_str()?
+        .split(':')
+        .map(|d| Path::new(d).join(name))
+        .find(|p| is_executable_file(p))
 }
 
 fn start_xvfb() -> Res<(Child, String)> {
-    let xvfb = which("Xvfb").ok_or("--xvfb requires Xvfb with -displayfd support; install Xvfb or run without --xvfb")?;
+    let xvfb = which("Xvfb").ok_or(
+        "--xvfb requires Xvfb with -displayfd support; install Xvfb or run without --xvfb",
+    )?;
     let mut child = Command::new(xvfb)
-        .args(["-displayfd", "1", "-screen", "0", "1440x900x24", "-nolisten", "tcp"])
+        .args([
+            "-displayfd",
+            "1",
+            "-screen",
+            "0",
+            "1440x900x24",
+            "-nolisten",
+            "tcp",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -424,15 +499,28 @@ fn parse_gui(argv: &[String]) -> Res<Gui> {
             "--xvfb" => gui.xvfb = true,
             "--installed-runtime" => gui.installed_runtime = true,
             "--paseo" | "--home" | "--user-data-dir" | "--port" => {
-                let value = it.next().ok_or_else(|| format!("{arg} needs a value"))?.clone();
+                let value = it
+                    .next()
+                    .ok_or_else(|| format!("{arg} needs a value"))?
+                    .clone();
                 match arg.as_str() {
                     "--paseo" => gui.paseo = value,
                     "--home" => gui.home = value,
                     "--user-data-dir" => gui.user_data_dir = value,
-                    _ => gui.port = Some(value.parse().map_err(|_| format!("--port must be an integer (got {value})"))?),
+                    _ => {
+                        gui.port = Some(
+                            value
+                                .parse()
+                                .map_err(|_| format!("--port must be an integer (got {value})"))?,
+                        )
+                    }
                 }
             }
-            other => return Err(format!("unrecognized option {other}\n  {INSTALLED_RUNTIME_HELP}")),
+            other => {
+                return Err(format!(
+                    "unrecognized option {other}\n  {INSTALLED_RUNTIME_HELP}"
+                ))
+            }
         }
     }
     Ok(gui)
@@ -468,7 +556,10 @@ fn run_gui(argv: &[String]) -> i32 {
     }
     let paseo = PathBuf::from(&gui.paseo);
     if !paseo.is_absolute() || !is_executable_file(&paseo) {
-        eprintln!("{label}: --paseo must name an executable absolute path (got {})", gui.paseo);
+        eprintln!(
+            "{label}: --paseo must name an executable absolute path (got {})",
+            gui.paseo
+        );
         return 2;
     }
     let requested = match gui.port {
@@ -496,7 +587,10 @@ fn run_gui(argv: &[String]) -> i32 {
             return 2;
         }
     };
-    let mut flags = vec!["--remote-debugging-address=127.0.0.1".to_string(), format!("--remote-debugging-port={port}")];
+    let mut flags = vec![
+        "--remote-debugging-address=127.0.0.1".to_string(),
+        format!("--remote-debugging-port={port}"),
+    ];
     if gui.xvfb {
         flags.push("--ozone-platform=x11".into());
     }
@@ -505,7 +599,10 @@ fn run_gui(argv: &[String]) -> i32 {
     }
     let mut env = isolated_environment(&home, !gui.installed_runtime);
     env.insert("PASEO_HOME".into(), home.clone().into());
-    env.insert("PASEO_ELECTRON_USER_DATA_DIR".into(), user_data_dir.clone().into());
+    env.insert(
+        "PASEO_ELECTRON_USER_DATA_DIR".into(),
+        user_data_dir.clone().into(),
+    );
     env.insert("PASEO_ELECTRON_FLAGS".into(), flags.join(" ").into());
     // ELECTRON_RUN_AS_NODE would interfere with isolation.
     env.remove(OsString::from("ELECTRON_RUN_AS_NODE").as_os_str());
@@ -533,7 +630,10 @@ fn run_gui(argv: &[String]) -> i32 {
     // SAFETY: the handler only stores into an atomic.
     let (previous_term, previous_int) = unsafe {
         let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
-        (libc::signal(libc::SIGTERM, handler), libc::signal(libc::SIGINT, handler))
+        (
+            libc::signal(libc::SIGTERM, handler),
+            libc::signal(libc::SIGINT, handler),
+        )
     };
     let mut command = Command::new(&paseo);
     command.env_clear().envs(&env);
@@ -588,14 +688,21 @@ fn run_gui(argv: &[String]) -> i32 {
 }
 
 pub fn run(argv: &[String]) -> (String, i32) {
-    if matches!(argv.first().map(String::as_str), Some("route-preflight" | "binding")) {
+    if matches!(
+        argv.first().map(String::as_str),
+        Some("route-preflight" | "binding")
+    ) {
         eprintln!("cortex_paseo_dev: `{}` was removed with the Python runtime it read; it has no native replacement", argv[0]);
         return (String::new(), 2);
     }
     if matches!(argv.first().map(String::as_str), Some("-h" | "--help")) {
         return (format!("{USAGE}\n"), 0);
     }
-    let code = if argv.first().map(String::as_str) == Some("gui") { run_gui(&argv[1..]) } else { run_cli(argv) };
+    let code = if argv.first().map(String::as_str) == Some("gui") {
+        run_gui(&argv[1..])
+    } else {
+        run_cli(argv)
+    };
     (String::new(), code)
 }
 
@@ -627,17 +734,56 @@ mod tests {
         let paseo = dir.join("paseo");
         fs::write(&paseo, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&paseo, fs::Permissions::from_mode(0o755)).unwrap();
-        let (paseo_arg, home_arg) = (paseo.display().to_string(), dir.join("home").display().to_string());
-        for forbidden in [&["--home", "/x"][..], &["--home=/x"], &["--host", "h"], &["--host=h"]] {
+        let (paseo_arg, home_arg) = (
+            paseo.display().to_string(),
+            dir.join("home").display().to_string(),
+        );
+        for forbidden in [
+            &["--home", "/x"][..],
+            &["--home=/x"],
+            &["--host", "h"],
+            &["--host=h"],
+        ] {
             let mut given = vec!["--paseo", &paseo_arg, "--home", &home_arg, "--"];
             given.push("status");
             given.extend(forbidden);
             assert_eq!(run(&args(&given)).1, 2, "{forbidden:?}");
         }
-        assert_eq!(run(&args(&["--paseo", &paseo_arg, "--home", &home_arg, "--check", "--", "status"])).1, 2);
-        assert_eq!(run(&args(&["--paseo", &paseo_arg, "--home", &home_arg, "--", "status"])).1, 0);
-        assert_eq!(run(&args(&["--paseo", &paseo_arg, "--home", &home_arg, "--", "plugin", "update"])).1, 2);
-        assert_eq!(run(&args(&["--paseo", &paseo_arg, "--home", &home_arg, "--installed-runtime", "--", "plugin", "update"])).1, 0);
+        assert_eq!(
+            run(&args(&[
+                "--paseo", &paseo_arg, "--home", &home_arg, "--check", "--", "status"
+            ]))
+            .1,
+            2
+        );
+        assert_eq!(
+            run(&args(&[
+                "--paseo", &paseo_arg, "--home", &home_arg, "--", "status"
+            ]))
+            .1,
+            0
+        );
+        assert_eq!(
+            run(&args(&[
+                "--paseo", &paseo_arg, "--home", &home_arg, "--", "plugin", "update"
+            ]))
+            .1,
+            2
+        );
+        assert_eq!(
+            run(&args(&[
+                "--paseo",
+                &paseo_arg,
+                "--home",
+                &home_arg,
+                "--installed-runtime",
+                "--",
+                "plugin",
+                "update"
+            ]))
+            .1,
+            0
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -646,10 +792,16 @@ mod tests {
         std::env::set_var("PASEO_HOME", "/prod");
         std::env::set_var("PASEO_AGENT_ID", "agent");
         let env = isolated_environment(Path::new("/h"), true);
-        assert!(!env.keys().any(|k| k.to_string_lossy().starts_with("PASEO_")));
-        assert_eq!(env[OsString::from("XDG_CONFIG_HOME").as_os_str()], OsString::from("/h/cortex-xdg/config"));
+        assert!(!env
+            .keys()
+            .any(|k| k.to_string_lossy().starts_with("PASEO_")));
+        assert_eq!(
+            env[OsString::from("XDG_CONFIG_HOME").as_os_str()],
+            OsString::from("/h/cortex-xdg/config")
+        );
         assert!(env.contains_key(OsString::from("CORTEX_PASEO_SOURCE_ROOT").as_os_str()));
-        assert!(!isolated_environment(Path::new("/h"), false).contains_key(OsString::from("CORTEX_PASEO_SOURCE_ROOT").as_os_str()));
+        assert!(!isolated_environment(Path::new("/h"), false)
+            .contains_key(OsString::from("CORTEX_PASEO_SOURCE_ROOT").as_os_str()));
     }
 
     #[test]
@@ -662,7 +814,11 @@ mod tests {
     #[test]
     fn plugin_installs_are_classified() {
         assert!(installs_git_plugin(&args(&["plugin", "update"])));
-        assert!(installs_git_plugin(&args(&["plugin", "install", "github:x/y"])));
+        assert!(installs_git_plugin(&args(&[
+            "plugin",
+            "install",
+            "github:x/y"
+        ])));
         assert!(!installs_git_plugin(&args(&["plugin", "install", "/"])));
         assert!(!installs_git_plugin(&args(&["plugin", "ls"])));
     }

@@ -2,7 +2,7 @@ import { render } from "solid-js/web";
 import { emptyWorkspace, LOCAL_MACHINE_ID, type PlanItem, type TaskOverlay } from "@cortex/workspace-domain";
 import type { Task as WireTask } from "@cortex/workspace-contract";
 import logo from "../../../apps/cortex-workspace-desktop/public/cortex-256.png";
-import { Workspace } from "../src";
+import { Workspace, mountPhone } from "../src";
 import { createRealPort } from "../src/port/real";
 import type { TerminalPort } from "../src/terminal-client";
 import { capabilitiesWire, projection, scriptedPort, scriptedTransport, snapshot, wireTask } from "./support";
@@ -169,9 +169,11 @@ if (query.get("world") === "review") {
     ...pieces(81, "Готово: поля ввода в формах создания и сообщений теперь растут вместе с текстом. Поле становится выше, когда вы печатаете или вставляете длинный текст, и снова уменьшается, когда текст удаляют."),
   ], activityCursor: null, messages: [] });
   history.replaceState(null, "", (query.get("route") ?? "/m/<M>/t/c-ask").replaceAll("<M>", LOCAL_MACHINE_ID));
-  render(() => <Workspace port={port.port} chrome={chrome} />, document.getElementById("root")!);
+  // `phone`: the same pages in the phone shell, for rendered checks at phone sizes.
+  const phone = query.has("phone") ? { kind: "phone" as const, machine: () => ({ name: "Workstation", state: "connected" as const, path: "direct" as const, lastConnectedAt: null }), openMachines() {}, openSettings() {}, retry() {}, attach() {} } : undefined;
+  render(() => <Workspace port={port.port} chrome={phone ? undefined : chrome} shell={phone} />, document.getElementById("root")!);
   const sprintState = query.get("sprint");
-  const world = query.get("world") === "pages" ? pagesWorld(sprintState === "running" || sprintState === "closed" ? sprintState : "planning") : scroll ? longConversation(conversationWorld()) : conversationWorld();
+  const world = query.get("world") === "pages" ? pagesWorld(sprintState === "running" || sprintState === "closed" ? sprintState : "planning") : scroll ? longConversation(conversationWorld()) : query.has("stopq") ? stopQuestion(conversationWorld()) : conversationWorld();
   setTimeout(() => port.emit(projection("1", world)), 0);
   // `scroll` only: one streamed update, as a working task sends them, for the scroll gate to send while it scrolls.
   let version = 1;
@@ -200,7 +202,29 @@ if (query.get("world") === "review") {
   const route = query.get("route") ?? "/m/<M>/p/p/git";
   history.replaceState(null, "", route.replaceAll("<M>", LOCAL_MACHINE_ID).replaceAll("<FILE>", encodeURIComponent(changed[0])));
   // `chrome` puts the desktop window's own controls in the title band, as the real window has them.
+  // `phoneapp`: the phone app whole (its own root around the workspace), on the same scripted service.
+  if (query.has("phoneapp")) {
+    const one = { id: "a", name: "Workstation", state: "connected" as const, path: "direct" as const, lastConnectedAt: null };
+    mountPhone(document.getElementById("root")!, { version: "1.0.6", deviceName: "Phone", state: async () => ({ active: "a", machines: [one] }), subscribe: () => () => undefined,
+      scan: async () => null, pairBegin: async () => ({ machineName: "", fingerprint: "" }), pairFinish: async () => ({ machineId: "a" }), pairCancel: async () => undefined,
+      select: async () => undefined, rename: async () => undefined, forget: async () => undefined, retry: async () => undefined, transport: () => s.transport });
+    // `menu`: the same app with its menu open, to compare the two heads.
+    if (query.has("menu")) setTimeout(() => document.querySelector<HTMLElement>("[aria-label=\"Menu\"]")?.click(), 1500);
+  } else
   render(() => <Workspace port={createRealPort({ transport: s.transport, actorId: "owner", registry: true })} terminal={terminal} chrome={startup || query.has("chrome") ? chrome : undefined} logo={startup ? <img src={logo} alt="" width="96" height="96" /> : undefined} />, document.getElementById("root")!);
+}
+// `stopq`: the waiting task's question is the runtime's stop question, in Russian, with a long consequence under each answer,
+// a Recommended mark and the targets it names (as the live run showed it breaking one word a line).
+function stopQuestion(s: ReturnType<typeof conversationWorld>) {
+  const session = s.sessions.find(x => x.taskId === "c-ask")!;
+  session.decisions = session.decisions.map(d => ({ ...d, from: "", workerId: null, headline: "Задача остановлена: файлы изменились после ревью.",
+    text: "Задача остановлена: файлы изменились после ревью.\n\nЧто произошло: Файлы проекта изменились после независимого ревью, поэтому проверенный результат больше не совпадает с проверяемыми файлами.\n\nЧто делать дальше?",
+    options: [
+      { label: "Продолжить: координатор решит, как действовать дальше", sub: "координатор заново отправит текущие файлы на ревью и проверку", optionId: "o-continue", recommended: true as const },
+      { label: "Завершить: закрыть задачу как есть, без подтверждения незавершённой работы", sub: "задача закрывается как есть: уже сделанные изменения остаются в проекте, незавершённая часть остаётся неподтверждённой", optionId: "o-finish" },
+    ],
+    targets: [{ kind: "report" as const, reportId: "r_0123456789ab", role: "code-reviewer" }, { kind: "task" as const, taskId: "c-work", title: "Fix token refresh race" }] }));
+  return s;
 }
 // The working task after a long day: 300 turns of replies with Markdown, folded tool steps and owner messages, and its
 // Backend Dev's feed of 1,500 notes and steps.

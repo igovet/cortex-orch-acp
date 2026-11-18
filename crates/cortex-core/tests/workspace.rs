@@ -568,9 +568,15 @@ fn b64(bytes: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for c in bytes.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        let n = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
         for i in 0..4 {
-            if i <= c.len() { out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char) } else { out.push('=') }
+            if i <= c.len() {
+                out.push(T[(n >> (18 - 6 * i) & 63) as usize] as char)
+            } else {
+                out.push('=')
+            }
         }
     }
     out
@@ -593,7 +599,10 @@ fn draft_attachments_are_retained_privately_with_the_started_task() {
     assert_eq!(decoded.blocks[1].body.as_deref(), Some(&b"read me"[..]));
     let mut c = command();
     c["payload"]["attachments"] = files;
-    let draft = create_draft(&s, "p", "owner", &c).unwrap().receipt["target"].as_str().unwrap().to_owned();
+    let draft = create_draft(&s, "p", "owner", &c).unwrap().receipt["target"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let started = start_native(&s, "p", "owner", &start_command(&draft, "start")).unwrap();
     let task = started["task"].as_str().unwrap().to_owned();
     s.read(|db| {
@@ -625,19 +634,36 @@ fn draft_attachments_are_retained_privately_with_the_started_task() {
 /// message's own admission; the replayed message does not retain them again.
 #[test]
 fn owner_prompt_files_are_one_source_revision_bound_to_the_request() {
-    use cortex_core::{input::capture_from_wire, workspace::{control, start_native}};
+    use cortex_core::{
+        input::capture_from_wire,
+        workspace::{control, start_native},
+    };
     let (_p, s) = setup();
-    let draft = create_draft(&s, "p", "owner", &command()).unwrap().receipt["target"].as_str().unwrap().to_owned();
+    let draft = create_draft(&s, "p", "owner", &command()).unwrap().receipt["target"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let started = start_native(&s, "p", "owner", &start_command(&draft, "start")).unwrap();
-    let (task, execution) = (started["task"].as_str().unwrap().to_owned(), started["receipt"]["target"].as_str().unwrap().to_owned());
-    let capture = capture_from_wire(&json!([{"name":"shot.png","mimeType":"image/png","data":b64(PNG)}])).unwrap();
+    let (task, execution) = (
+        started["task"].as_str().unwrap().to_owned(),
+        started["receipt"]["target"].as_str().unwrap().to_owned(),
+    );
+    let capture =
+        capture_from_wire(&json!([{"name":"shot.png","mimeType":"image/png","data":b64(PNG)}]))
+            .unwrap();
     let request = control::canonical_request(
         json!({"projectId":"p","executionId":execution,"requestId":"files","action":"prompt","text":"Look at this","attachments":[]}),
         Some(&capture),
     )
     .unwrap();
     // Core binds the exact files: a request without the capture is refused, not stored bare.
-    assert_eq!(control::admit_input(&s, "p", "owner", &request, None).err().unwrap().code(), "invalid_input_capture");
+    assert_eq!(
+        control::admit_input(&s, "p", "owner", &request, None)
+            .err()
+            .unwrap()
+            .code(),
+        "invalid_input_capture"
+    );
     control::admit_input(&s, "p", "owner", &request, Some(&capture)).unwrap();
     s.read(|db| {
         let (kind, sha): (String, String) = db.query_row(
@@ -657,7 +683,13 @@ fn owner_prompt_files_are_one_source_revision_bound_to_the_request() {
     let mut inline = json!({"projectId":"p","executionId":execution,"requestId":"inline","action":"prompt","text":"x",
         "attachments":[{"name":"a.txt","mimeType":"text/plain","data":"YQ=="}]});
     inline = control::canonical_request(inline, None).unwrap();
-    assert_eq!(control::admit_input(&s, "p", "owner", &inline, None).err().unwrap().code(), "native_attachments_unavailable");
+    assert_eq!(
+        control::admit_input(&s, "p", "owner", &inline, None)
+            .err()
+            .unwrap()
+            .code(),
+        "native_attachments_unavailable"
+    );
 }
 fn sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};

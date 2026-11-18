@@ -6,6 +6,8 @@ export type VoicePort = {
   read(sessionId: string): Promise<VoicePage>;
   stop(sessionId: string): Promise<VoicePage>;
   cancel(sessionId: string): Promise<VoicePage>;
+  /** What this recognizer is, in the words shown beside a recording. Absent for the desktop's local Russian dictation. */
+  badge?: string;
 };
 export const voiceReason = (code: string): string => ({
   voice_unavailable: "Local dictation is not installed. Reinstall the complete desktop package.",

@@ -1,6 +1,6 @@
 # CW-Q01b: Phone leg of the fake-ACP scenario
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Not implemented; mobile, gated by Gate M · **Phase:** 3+ · **Size:** M
 
 Split from [CW-Q01](CW-Q01.md) for the phone. This is a mobile qualification item and is gated by Gate M.
 

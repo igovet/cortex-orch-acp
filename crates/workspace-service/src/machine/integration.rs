@@ -4,8 +4,20 @@
 mod conflicts;
 mod effects;
 use super::{
-    context, git::Git, native::*, settings::Lock, task_facts_git, workers::truthy as truth,
+    context,
+    git::Git,
+    native::*,
+    settings::{self, Lock},
+    task_facts_git,
+    workers::truthy as truth,
 };
+/// Another owner action on a task whose integration is running.
+pub(super) const IN_PROGRESS: &str =
+    "This task is being merged or its pull request is being created. Wait for it to finish.";
+/// Another Git-changing owner action of the same project (a merge, pull request,
+/// same-branch commit or merge finish) while one runs.
+pub(super) const REPO_BUSY: &str =
+    "Another merge, pull request or commit in this project is still running. Try again when it finishes.";
 use cortex_core::OpenMode;
 use serde_json::Value;
 use std::path::Path;
@@ -42,10 +54,19 @@ pub async fn run(
             "Confirm this Git action first.",
         ));
     }
-    let lock = Lock::new(state, "machine.lock")?;
-    // Integrate reads the saved overlay, not the enriched product projection.
-    let mut product = super::native::product(state, project)?;
-    let tasks = product["tasks"].as_object().ok_or_else(malformed)?;
+    // One Git-changing owner action per repository, from admission to the recorded
+    // outcome: a second one is refused at once, never interleaved or queued.
+    let _repo = Lock::long(
+        state,
+        &super::git::repo_lock(root),
+        "integration_in_progress",
+        REPO_BUSY,
+    )?;
+    // Integrate reads the saved overlay, not the enriched product projection. The
+    // checks below run without the machine lock; the record they read is checked
+    // again under it before the durable intent.
+    let saved = super::native::product(state, project)?;
+    let tasks = saved["tasks"].as_object().ok_or_else(malformed)?;
     let record = match params["taskId"].as_str() {
         Some(task) => tasks.get(task).unwrap_or(&Value::Null),
         None if params["taskId"].is_null() => &Value::Null,
@@ -293,6 +314,14 @@ pub async fn run(
     }
     // The durable intent is committed before Git. Drop/cancellation leaves it
     // dispatched; neither a helper nor a retry may reinterpret that as failure.
+    // The machine lock is held only for this admission. Git, hooks and GitHub run
+    // after it is released; this task's other owner actions are refused meanwhile.
+    let lock = Lock::new(state, "machine.lock")?;
+    let mut product = super::native::product(state, project)?;
+    let claim = settings::claim(state, project, task, IN_PROGRESS, &lock)?;
+    if product["tasks"][task] != *record {
+        return Err(stale());
+    }
     let intent = match super::ledger::Intent::begin_locked(
         state,
         "product.integrate",
@@ -304,6 +333,7 @@ pub async fn run(
         super::ledger::Begin::Run(intent) => intent,
         super::ledger::Begin::Replay(reply) => return super::integration_squash::replay(reply),
     };
+    drop(lock);
     let plan = effects::Plan {
         root,
         project,
@@ -322,7 +352,8 @@ pub async fn run(
     let outcome = effects::apply(&plan, &mut product, git).await;
     // An overlay failure after Git is ambiguous, not safe to rerun.
     let reply = super::native::envelope(outcome);
-    intent.finish_locked(&reply, &lock)?;
+    intent.finish(state, &reply)?;
+    drop(claim);
     super::integration_squash::replay(reply)
 }
 

@@ -1,6 +1,6 @@
 # CW-U10: Task composer and session controls
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: model, effort, access mode, language, context and plan usage controls ([screens](../SCREENS.md)); no paid model run verified · **Phase:** 3+ · **Size:** L
 
 ## Goal
 

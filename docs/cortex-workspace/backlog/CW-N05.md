@@ -1,6 +1,6 @@
 # CW-N05: Self-hosted iroh relay with RelayMap configuration and access policy; n0 public relay disabled by default as an owner-gated fallback; forced-relay integration test (hole-punch disabled) verifying ciphertext-only visibility
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Partly implemented: a self-hosted relay stack exists in deploy/relay/ and the built code never uses an n0 public relay; not deployed or verified, no forced-relay test run · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Run the iroh relay as the self-hosted `iroh-relay` service on the owner's server ([ADR 0011](../adr/0011-self-hosted-relay-and-push-gateway.md)). The relay is a fallback used only when a direct connection fails, and it forwards ciphertext only. The n0 public relay is not the default. It may remain an explicitly disabled optional fallback that the owner enables only with a recorded decision. The relay is never hosted on Cloudflare Workers, because `iroh-relay` is a native Rust server (planning assumption to confirm). A forced-relay test proves ciphertext-only visibility.

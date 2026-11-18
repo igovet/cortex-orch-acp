@@ -1,6 +1,7 @@
-import { boardPhase, dependencyReady, descriptionLabel, isOpen, targetBranch } from "@cortex/workspace-domain";
+import { boardPhase, dependencyReady, descriptionLabel, isOpen, plainModel, targetBranch } from "@cortex/workspace-domain";
 import type { Check, CheckOutcome, EngineWeeklyUsage, Machine, Project, Sprint, Task, TaskStatus, Worker, WorkspaceState } from "@cortex/workspace-domain";
 import type { Scope } from "./router";
+import { share } from "./stable";
 
 /**
  * Read models for the screens. Every counter and empty state comes from these lists, so a badge and the list it
@@ -120,6 +121,8 @@ function statusFact(task: Task, ctx: { target: string; running: number; title: (
   // The runtime's own notice while the coordinator's engine has not opened: a retry, or giving up.
   if (task.warnings?.includes("engine_launch_failed")) return { text: task.issue ?? "The engine could not start", tone: "st-bad", icon: "alert" };
   if (task.warnings?.includes("engine_launch_retrying")) return { text: task.issue ?? "Starting the engine again", tone: "st-warn", icon: "hourglass" };
+  // A step queued behind another task's files waits for that task and starts on its own once they are released.
+  if (task.warnings?.includes("waiting_for_files") && task.status === "working") return { text: task.issue ?? "Waiting for another task to release files", tone: "st-warn", icon: "hourglass" };
   if (task.observedPhase === "recovery" && task.process === "live") return { text: interruptedTurn(task.issue) ? "Turn interrupted; waiting for your message" : "Stopped; waiting for your message", tone: "st-warn", icon: "pause" };
   if (task.observedPhase && task.observedPhase !== "not_started") return {text:task.observedPhase === "result" ? "Runtime result" : task.observedPhase === "waiting" ? "Waiting for you" : task.observedPhase[0].toUpperCase()+task.observedPhase.slice(1),tone:"st-idle"};
   if (task.conflict === "conflict") return { text: `Conflict with ${ctx.target}`, tone: "st-bad", icon: "alert" };
@@ -148,7 +151,7 @@ function statusFact(task: Task, ctx: { target: string; running: number; title: (
       if (task.integrationFacts?.alreadyInTarget) return { text: `Already in ${task.integrationFacts.targetBranch}`, tone: "st-idle", icon: "check" };
       if (!task.acceptance) return { text: `${task.resolvedBy === "you" ? "Resolved by you" : "Resolved automatically"}, review v${task.result?.version ?? 1}`, tone: "st-warn", icon: "eye" };
       if (task.integration?.method === "pr") return { text: "Pull request open, not merged", tone: "st-idle", icon: "merge" };
-      return { text: `Accepted v${task.acceptance.version}`, tone: "st-ok" };
+      return { text: `${task.acceptance.automatic ? "Automatically accepted" : "Accepted"} v${task.acceptance.version}`, tone: "st-ok" };
     case "done":
       if (task.integration?.method === "commit") return { text: `Committed to ${task.integration.targetBranch}`, tone: "st-idle", icon: "check" };
       if (task.closedAs === "external") return { text: "Done outside the app", tone: "st-idle", icon: "circle" };
@@ -159,7 +162,7 @@ function statusFact(task: Task, ctx: { target: string; running: number; title: (
 }
 
 /** A route the engines stopped offering has no label left. Its id is still not one. */
-export const plainChoice = (id: string) => /^xr_[0-9a-f]{6,}$/.test(id) ? "Model no longer offered" : id;
+export const plainChoice = (id: string) => /^xr_[0-9a-f]{6,}$/.test(id) ? "Model no longer offered" : plainModel(id);
 /** The version people talk about. The build hash stays on the diagnostics page. */
 export const plainVersion = (version: string) => version.split("+")[0];
 
@@ -202,7 +205,8 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
     // The task's own state and its workers come from separate reads. When the workers' read could not be refreshed, a worker
     // last seen running under a task that has since ended is not confirmed: it never shows as working or counts as running.
     const ended = ["review", "ready_to_merge", "done", "failed", "cancelled", "paused"].includes(task.status);
-    const phase = boardPhase(state, task.id), own = (workers.get(task.id) ?? []).map((w): Worker => ended && (w.status === "working" || w.status === "waiting_you") ? { ...w, status: "unknown", now: null, runningSince: null, stale: true } : w);
+    const phase = boardPhase(state, task.id), own = (workers.get(task.id) ?? []).map((w): Worker => ended && (w.status === "working" || w.status === "waiting_you") ? { ...w, status: "unknown", now: null, runningSince: null, stale: true } : w).reverse();
+    // The machine lists workers oldest first; every screen shows the newest one on top, so the order is turned once, here.
     const running = own.filter(w => w.status === "working").length, target = targetBranch(state, task);
     const unknown = phase === "unknown";
     const column = phase === "archive" ? "archive" : phase === "unknown" ? STATUS_COLUMN[task.status] : STATUS_COLUMN[phase];
@@ -232,6 +236,20 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
     }];
   }));
   return { now, state, views, byId: new Map(views.map(v => [v.id, v])), summaries, archive: views.filter(v => v.column === "archive") };
+}
+
+/**
+ * The index rebuilt for a new state, holding every task view and project summary that equals the last one as the last object.
+ * Every screen hangs off the index: a view rebuilt as a new object for an unrelated change would redraw each row built from
+ * it and drop whatever the owner had opened there. Only what really changed is new.
+ */
+export function stableIndex(prev: WorkspaceIndex | undefined, next: WorkspaceIndex): WorkspaceIndex {
+  if (!prev) return next;
+  const views = share(prev.views, next.views);
+  const byId = new Map(views.map(v => [v.id, v]));
+  const own = (list: TaskView[]) => list.map(v => byId.get(v.id) ?? v);
+  const summaries = new Map([...next.summaries].map(([id, s]) => [id, share(prev.summaries.get(id) as ProjectSummary, { ...s, views: own(s.views) })] as const));
+  return { ...next, views, byId, summaries, archive: share(prev.archive, own(next.archive)) };
 }
 
 /** Where a card's primary action lands: the screen that decision is made on, not just the task. */
@@ -316,7 +334,7 @@ export function cardFact(view: TaskView): Fact {
 /**
  * Inbox is Home's Needs you list for every connected machine, in the same order (attentionOf): what waits on an answer, a
  * permission or a conflict, with each sprint planning question beside them, then results to review, then accepted work to
- * finish, then unmerged work holding a task out of the Archive. Each task appears once; each row opens where that is decided.
+ * finish. Each task appears once; each row opens where that is decided.
  */
 export function inboxItems(index: WorkspaceIndex): Decision[] {
   const connected = (m: Machine) => m.connection === "connected";
@@ -330,12 +348,7 @@ export function inboxItems(index: WorkspaceIndex): Decision[] {
     const ask = open.length > 1 ? `${open.length} questions: ${first}` : first;
     return [{ key: `sprint:${sprint.id}`, kind: "Planning", icon: "layers", tone: "st-warn", ask, where: placed(summary.machine, `${summary.project.name} / ${sprintTitle(sprint)}`), view: null, project: summary.project, sprintId: sprint.id, at: open[0]?.at ?? null }];
   });
-  const archive = index.views.filter(v => v.task.archiveQuestion && connected(v.machine)).map((view): Decision => ({
-    key: `archive:${view.id}`, kind: "Unmerged work", icon: "archive", tone: "st-warn", ask: "Unmerged work is holding this task out of the Archive",
-    where: placed(view.machine, `${view.project.name} / ${view.task.title}`), view, project: view.project, sprintId: null, at: view.at,
-  }));
-  const listed = new Set(live.filter(v => v.column === "needs" || v.column === "review" || v.column === "merge").map(v => v.id));
-  return [...of("needs"), ...planning, ...of("review"), ...of("merge"), ...archive.filter(d => !listed.has(d.view!.id))];
+  return [...of("needs"), ...planning, ...of("review"), ...of("merge")];
 }
 
 export const inScope = (summary: ProjectSummary, scope: Scope) =>

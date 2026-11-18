@@ -110,8 +110,9 @@ impl Intent {
         settings::write_json(&path, &record)?;
         Ok(Begin::Run(Self { path, record }))
     }
+    /// Waits for the machine lock without giving up: the effect already happened.
     pub fn finish(self, state: &Path, reply: &Value) -> Result<()> {
-        let lock = Lock::new(state, "machine.lock")?;
+        let lock = Lock::wait(state, "machine.lock")?;
         self.finish_locked(reply, &lock)
     }
     pub(super) fn finish_locked(mut self, reply: &Value, _lock: &Lock) -> Result<()> {

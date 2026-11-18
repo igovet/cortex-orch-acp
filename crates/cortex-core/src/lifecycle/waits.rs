@@ -163,7 +163,29 @@ pub fn request_tx_bound(
     key: &str,
     forms: &[QuestionForm],
 ) -> CoreResult<Value> {
+    request_tx_bound_topics(db, task, channel, key, forms, &[])
+}
+/// `request_tx_bound` with each form's optional short `topic` label (1 to 24
+/// characters), kept with the question in the wait record and its question
+/// event, where the decision projection and batch question forms read it.
+pub fn request_tx_bound_topics(
+    db: &Transaction<'_>,
+    task: &str,
+    channel: &str,
+    key: &str,
+    forms: &[QuestionForm],
+    topics: &[Option<String>],
+) -> CoreResult<Value> {
     validate_forms(forms)?;
+    if topics.len() > forms.len()
+        || topics
+            .iter()
+            .flatten()
+            .any(|t| t.trim().is_empty() || t.chars().count() > 24)
+    {
+        return refuse("question_topic_invalid");
+    }
+    let topic = |i: usize| topics.get(i).cloned().flatten();
     let row:Option<(String,String,Option<String>,i64)>=db.query_row(
         "SELECT n.assignment_ref,p.attempt_id,p.engine_session_ref,c.owner_epoch FROM trusted_channels c
         JOIN delegation_provisioning p ON p.channel_id=c.channel_id AND p.task_id=c.task_id AND p.attempt_id=c.attempt_id
@@ -175,7 +197,11 @@ pub fn request_tx_bound(
         (task,channel,crate::now()),|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
     let (assignment, attempt, session, epoch) =
         row.ok_or(CoreError::Refused("stale_worker_authority"))?;
-    let payload = json!({"forms":forms.iter().map(|f|json!({"question":f.question,"options":f.options})).collect::<Vec<_>>()});
+    // A form without a topic keeps the exact payload (and replay digest) it had before.
+    let payload = json!({"forms":forms.iter().enumerate().map(|(i,f)|{
+        let mut v=json!({"question":f.question,"options":f.options});
+        if let Some(t)=topic(i) {v["topic"]=json!(t);}
+        v}).collect::<Vec<_>>()});
     request_tx(db, task, channel, key, "ask_question", &payload, || {
         check_mutation_tx(db, task, &assignment)?;
         let (state, revision) = domain::task_tx(db, task)?;
@@ -185,7 +211,11 @@ pub fn request_tx_bound(
             db.execute("INSERT INTO pending_questions(id,task_id,assignment_ref,dedup_key,text,options_json,status,created_at)
                 VALUES (?,?,?,?,?,?,'open',?)",
                 (&id,task,&assignment,format!("{channel}:{key}:{i}"),&f.question,json!(f.options).to_string(),crate::now()))?;
-            questions.push(json!({"question_id":id,"question":f.question,"options":f.options}));
+            let mut q = json!({"question_id":id,"question":f.question,"options":f.options});
+            if let Some(t) = topic(i) {
+                q["topic"] = json!(t);
+            }
+            questions.push(q);
         }
         let mut w = json!({"wait_id":format!("ww_{}",uuid::Uuid::new_v4().simple()),"task_id":task,
             "assignment_ref":assignment,"attempt_id":attempt,"channel_id":channel,"owner_epoch":epoch,
@@ -390,25 +420,26 @@ pub fn answer_tx(
         // A coordinator or worker question may legitimately offer "Stop" as an
         // option; its text is an ordinary answer and never cancels the task.
         let runtime_stop = saved["runtime_stop"] == true;
-        let force = runtime_stop && [
-            "/cortex-finish",
-            "закрыть как есть",
-            "завершить задачу",
-            "заверши задачу",
-            "закрыть задачу",
-            "закрой задачу",
-            "finish the task",
-            "close the task",
-            "close as is",
-            "finish now",
-            "стоп",
-            "остановить",
-            "остановить задачу",
-            "останови задачу",
-            "stop",
-            "stop the task",
-        ]
-        .contains(&normalized.as_str());
+        let force = runtime_stop
+            && [
+                "/cortex-finish",
+                "закрыть как есть",
+                "завершить задачу",
+                "заверши задачу",
+                "закрыть задачу",
+                "закрой задачу",
+                "finish the task",
+                "close the task",
+                "close as is",
+                "finish now",
+                "стоп",
+                "остановить",
+                "остановить задачу",
+                "останови задачу",
+                "stop",
+                "stop the task",
+            ]
+            .contains(&normalized.as_str());
         let stop_option = runtime_stop
             && [
                 "2",

@@ -160,6 +160,14 @@ describe("decision mapping", () => {
     expect(mapDecision(wireDecision({ status: "expired" })).withdrawn).toBe(true);
     expect(mapDecision(wireDecision({ status: "answered" })).answer).toEqual({ text: "Answered", at: null });
   });
+  it("names the worker role that asked, and no one for the coordinator's question", () => {
+    expect(mapDecision(wireDecision({ askedBy: "devops-engineer" })).from).toBe("devops-engineer");
+    expect(mapDecision(wireDecision()).from).toBe("");
+  });
+  it("keeps a batch member's topic label, and adds none when the asker gave none", () => {
+    expect(mapDecision(wireDecision({ topic: "Paid checks" })).topic).toBe("Paid checks");
+    expect("topic" in mapDecision(wireDecision())).toBe(false);
+  });
   it("never offers an answer to a decision it cannot place, or one the runtime does not allow", () => {
     expect(mapDecision(wireDecision({ status: "something_new" })).withdrawn).toBe(true);
     const suspended = mapDecision(wireDecision({ allowedOperations: [] }));
@@ -183,5 +191,16 @@ describe("project slice", () => {
     expect(slice.tasks).toHaveLength(1);
     expect(slice.tasks[0].result?.summary).toBe("Done the work");
     expect(slice.sessions[0].decisions).toHaveLength(1);
+  });
+});
+
+describe("permission decisions", () => {
+  it("keeps a native permission request's details and counts its task as needing the owner", () => {
+    const permission = { operation: "write", paths: ["/srv/a", 7], reason: "outside_project", reasonText: "it writes outside the project", access: "development", rule: "outside_write" };
+    const decision = wireDecision({ kind: "permission", prompt: "Owner decision: worker-backend-dev wants to write /srv/a", permission } as never);
+    expect(mapDecision(decision)).toMatchObject({ kind: "permission", permission: { operation: "write", paths: ["/srv/a"], reason: "outside_project", access: "development" } });
+    const slice = mapProjectSlice({id:"p",machineId:LOCAL_MACHINE_ID,name:"P",repository:"/p",openBranch:"",defaultBranch:""}, [wireTask()], [decision]);
+    expect(slice.tasks[0]).toMatchObject({ status: "needs_you", issue: "Owner decision: worker-backend-dev wants to write /srv/a", process: "live" });
+    expect(mapDecision(wireDecision()).kind).toBe("question");
   });
 });

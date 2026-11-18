@@ -11,6 +11,8 @@ const delta = (version = "2", from = "4", through = "5", base = "1"): NativeTask
     changes: [{ kind: "task", id: "task-1", baseVersion: base, newVersion: version,
       operation: { type: "upsert", data: { kind: "task_projection", data: wireTask({ version, description: "Updated", executionId: "execution", phase: "recovery", executionState: "recovering", runtimeState: "RECOVERING", waitReason: "turn_interrupted" }) } } }] }
 });
+const historyRow = (i: number, kind: string, text: string) => ({ historyId: `h${i}`, sequence: String(i + 1), revision: "1", kind, text, toolStatus: null,
+  recordedAt: `2026-11-17T14:52:${String(i).padStart(2, "0")}.000000+00:00`, availability: "available" });
 function fixture() {
   const s = scriptedTransport({
     "service.capabilities": () => ({ methods: ["native.query"] }),
@@ -224,21 +226,58 @@ describe("native read path", () => {
       expect(updates.some(u => u.kind === "project_state" && u.issue)).toBe(false);
     } finally { stop(); }
   });
-  it("still reports persistent conversation detail failures", async () => {
+  it("says on the task when its conversation could not be read, with the reason, and reads it again on Retry", async () => {
     const { s, p } = fixture();
     s.answers["service.capabilities"] = () => ({ methods: ["native.query", "native.board"] });
-    s.answers["native.board"] = () => ({ protocol: { major: 2, mapping: 2 }, projectId: "p", generation: "generation", version: "2", highWatermark: "3",
-      data: { type: "board", value: { items: [wireTask({ executionId: "execution" })], nextCursor: null, highWatermark: "3" } } });
-    s.answers["native.query"] = () => { throw new Error("storage_unavailable"); };
+    const board = { protocol: { major: 2, mapping: 2 }, projectId: "p", generation: "generation", version: "2", highWatermark: "3",
+      data: { type: "board", value: { items: [wireTask({ executionId: "execution", phase: "paused", executionState: "paused", runtimeState: "PAUSED" })], nextCursor: null, highWatermark: "3" } } };
+    s.answers["native.board"] = () => board;
+    let failing = true;
+    s.answers["native.query"] = () => {
+      if (failing) throw new Error("storage_unavailable");
+      return { ...board, data: { type: "history", value: { items: [historyRow(0, "assistant", "Kept from before the pause")], nextCursor: null, highWatermark: "1" } } };
+    };
+    let dispose!: () => void;
+    const store = createRoot(d => { dispose = d; return createWorkspaceStore(p); });
+    const session = () => store.state().sessions.find(x => x.taskId === "task-1");
+    try {
+      await vi.waitFor(() => expect(session()?.historyRead).toEqual({ state: "failed", reason: "storage_unavailable" }));
+      // The failure belongs to that task's conversation; the board and the project are not reported unreadable.
+      expect(store.state().projects.find(x => x.id === "p")?.issue).toBeNull();
+      failing = false;
+      store.retryHistory("task-1");
+      await vi.waitFor(() => expect(session()?.timeline.some(e => e.kind === "cortex" && e.text === "Kept from before the pause")).toBe(true));
+      expect(session()?.historyRead).toBeUndefined();
+    } finally { dispose(); }
+  });
+  it("shows the retained conversation of a task whose run continues after a service restart, while its board keeps moving", async () => {
+    const { s, p } = fixture();
+    s.answers["service.capabilities"] = () => ({ methods: ["native.query", "native.board"] });
+    // A fresh service generation: the run was recovered and works on, so the watermark moves throughout every read.
+    let high = 3, version = 1;
+    const running = (v: number) => wireTask({ version: String(v), executionId: "execution", phase: "execution", executionState: "running", runtimeState: "EXECUTING" });
+    s.answers["native.board"] = () => ({ protocol: { major: 2, mapping: 2 }, projectId: "p", generation: "restarted", version: "2", highWatermark: String(high),
+      data: { type: "board", value: { items: [running(version)], nextCursor: null, highWatermark: String(high) } } });
+    const rows = Array.from({ length: 3 }, (_, i) => historyRow(i, i === 1 ? "tool" : "assistant", i === 1 ? "Read src/login.ts" : `Said before the restart ${i}`));
+    s.answers["native.query"] = () => new Promise(resolve => setTimeout(() => resolve({ protocol: { major: 2, mapping: 2 }, projectId: "p", generation: "restarted", version: "2", highWatermark: String(high),
+      data: { type: "history", value: { items: rows, nextCursor: null, highWatermark: "3" } } }), 30));
     const updates: PortUpdate[] = [], stop = p.subscribe(u => updates.push(u));
+    const timeline = (u: PortUpdate) => u.kind === "enrichment" && u.update.scope === "project" ? u.update.slice.sessions.find(x => x.taskId === "task-1") : undefined;
+    const events = setInterval(() => {
+      const task = running(version + 1);
+      s.send({ type: "native_delta", projectId: "p", batch: { generation: "restarted", streamKey: { scope: "project", project_id: "p" }, fromSequence: String(high + 1), throughSequence: String(high + 1),
+        changes: [{ kind: "task", id: "task-1", baseVersion: String(version), newVersion: String(version + 1), operation: { type: "upsert", data: { kind: "task_projection", data: task } } }] } });
+      high++; version++;
+    }, 5);
     try {
       await p.query("capabilities.get", {});
-      for (let read = 0; read < 3; read++) {
-        await p.query("project.snapshot", {});
-        await new Promise(resolve => setTimeout(resolve, 10));
-      }
-      expect(updates.some(u => u.kind === "project_state" && u.issue?.startsWith("Task conversation details could not be read."))).toBe(true);
-    } finally { stop(); }
+      const first = await p.query("project.snapshot", {});
+      const opened = first[0]?.scope === "project" ? first[0].slice.sessions.find(x => x.taskId === "task-1") : undefined;
+      // Before the first read completes the page says it is loading, never an empty finished conversation.
+      expect(opened?.historyRead).toEqual({ state: "loading" });
+      await vi.waitFor(() => expect(updates.some(u => timeline(u)?.timeline.some(e => e.kind === "cortex" && e.text.includes("Said before the restart 0")))).toBe(true), { timeout: 2000 });
+      expect(updates.some(u => u.kind === "project_state" && u.issue)).toBe(false);
+    } finally { clearInterval(events); stop(); }
   });
   it("retains confirmed content and requests resnapshot on a gap, generation change or base conflict", async () => {
     for (const bad of [{...delta(),batch:{...delta().batch,changes:[{kind:"project" as const,id:"p",baseVersion:"0",newVersion:"1",operation:{type:"invalidate" as const}}]}}, delta("2", "5", "6"), { ...delta(), batch: { ...delta().batch, generation: "restarted" } }, delta("3", "4", "5", "2")]) {

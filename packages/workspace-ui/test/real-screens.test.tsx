@@ -6,7 +6,7 @@ import { capture, emptyWorkspace, LOCAL_MACHINE_ID, type EngineConnection, type 
 import { Workspace } from "../src";
 import { createRealPort } from "../src/port/real";
 import { SIDEBAR_DEFAULT, SIDEBAR_MIN } from "../src/prefs";
-import { capabilitiesWire, flush, scriptedTransport, snapshot, wireDecision, wireTask } from "./support";
+import { capabilitiesWire, flush, refOf, scriptedTransport, snapshot, wireDecision, wireTask } from "./support";
 
 /** The screens on the real port, with a machine that answers as the helper does, so what they show is what real data gives. */
 const OFFERED = ["capabilities.get", "project.snapshot", "tasks.create", "tasks.start", "decisions.list", "decisions.answer", "results.get", "executions.get", "history.page"];
@@ -393,8 +393,8 @@ describe("Git on real data", () => {
       return answer(message);
     };
     await open(s, `/m/${LOCAL_MACHINE_ID}/p/p/git`);
-    expect(button("Commit")).toBeDefined();
-    button("Commit")!.click();
+    expect(button("Commit", ".commit-box")).toBeDefined();
+    button("Commit", ".commit-box")!.click();
     await settled();
     const actions = s.calls.filter(c => c.operation === "machine.call" && (c.message as {op:string}).op === "git");
     expect(actions.map(c => (c.message as {params:{action:string}}).params.action)).toEqual(["commit"]);
@@ -459,7 +459,9 @@ describe("task session on real data", () => {
 
   it("names the state and the runtime phase, and marks only that phase as now", async () => {
     await open(machine(), TASK);
-    expect($(".tb-actions .chip")?.textContent).toContain("Working");
+    // The state reads in the strip and the inspector; the title band carries no state chip.
+    expect($(".tb-actions .chip, .tb-actions .tb-state")).toBeNull();
+    expect($(".inspector")?.textContent).toContain("Working");
     // Progress reads as the current runtime phase in words; no permanent phase strip and no invented percentage.
     expect($(".taskbar .td-progress")?.textContent).toBe("Executing");
     expect($(".phases")).toBeNull();
@@ -512,7 +514,7 @@ describe("task session on real data", () => {
     const workers = [worker({}), worker({ id: "w2", role: "code-reviewer", status: "completed", lane: "review", result: { summary: "No findings", checks: [] } })];
     await open(machine(undefined, workers), TASK);
     await openTeam();
-    expect(all(".wrow").map(r => r.textContent)).toEqual([expect.stringContaining("frontend-dev"), expect.stringContaining("code-reviewer")]);
+    expect(all(".wrow").map(r => r.textContent)).toEqual([expect.stringContaining("code-reviewer"), expect.stringContaining("frontend-dev")]);
     expect($(".inspector")?.textContent).toContain("1 active, 1 finished");
     dispose?.(); document.body.innerHTML = "";
     await open(machine(undefined, workers), `${TASK}/workers/w2`);
@@ -650,7 +652,9 @@ describe("task session on real data", () => {
 
   it("describes Stop as a resumable pause", async () => {
     await open(machine(), TASK);
-    expect(all(".tb-actions button").find(b => b.textContent?.includes("Stop"))?.textContent).toBe("Stop");
+    // Stop is the composer's action button while the field is empty, and nowhere in the title band.
+    expect(all(".tb-actions button").some(b => /Stop|Resume|Start/.test(b.textContent ?? ""))).toBe(false);
+    expect(all('[aria-label="Task composer"] button').at(-1)?.getAttribute("aria-label")).toBe("Stop");
   });
 
   it("offers no terminal it does not have", async () => {
@@ -663,11 +667,6 @@ describe("questions on real data", () => {
   const waiting = wireTask({ executionId: "e", phase: "waiting", runtimeState: "WAITING_USER", executionState: "waiting_user" });
   const batch = [wireDecision({ decisionId: "d1", questionId: "q1", batchId: "b", prompt: "Which file?", options: [{ optionId: "o1", label: "First" }] }), wireDecision({ decisionId: "d2", questionId: "q2", batchId: "b", prompt: "Which branch?", options: [{ optionId: "o2", label: "Second" }] })];
   const opt = (text: string) => all(".dc .opt").find(o => o.textContent?.includes(text))!;
-  /** Choosing only prepares an answer; the paper plane of the question on view sends it. */
-  const answerWith = async (text: string) => {
-    opt(text).click(); await settled();
-    $<HTMLButtonElement>('.dc-panel:not([aria-hidden="true"]) [aria-label="Send answer"]')!.click(); await settled();
-  };
 
   it("shows the exact pending question while paused without submitting an answer", async () => {
     const s = machine([wireTask({executionId:"e",phase:"paused",runtimeState:"PAUSED",executionState:"paused"})]);
@@ -678,36 +677,41 @@ describe("questions on real data", () => {
     expect(s.calls.filter(c=>c.operation==="decisions.answer")).toEqual([]);
   });
 
-  it("keeps a batch's answers until the last one, then sends them as one", async () => {
+  it("sends a batch's answers together with the form's one button, then reads it as answered", async () => {
     const s = machine([waiting]);
     s.answers["decisions.list"] = () => ({ items: batch, nextCursor: null, highWatermark: "4" });
     s.answers["decisions.answer"] = message => ({ requestId: (message as { requestId: string }).requestId, outcome: "recorded", target: "b", entityVersion: "3", recordedAt: "2026-11-05T00:00:00Z" });
     await open(s, TASK);
+    // No question has its own plane, and the answer form has no model or effort.
+    expect(all('.dc [aria-label="Send answer"]')).toEqual([]);
+    expect($(".dc .c-route")).toBeNull();
     opt("First").click();
     await settled();
-    // Choosing sends nothing and marks nothing answered.
-    expect(all('.dc-tab[aria-label$="answered"]')).toEqual([]);
-    $<HTMLButtonElement>('.dc-panel:not([aria-hidden="true"]) [aria-label="Send answer"]')!.click();
-    await settled();
+    // Choosing sends nothing.
     expect(s.calls.filter(c => c.operation === "decisions.answer")).toEqual([]);
-    expect(all('.dc-tab[aria-label$="answered"]').map(t => t.dataset.ask)).toEqual(["d1"]);
-    expect(all(".dc")).toHaveLength(1);
-    await answerWith("Second");
-    const [sent] = s.calls.filter(c => c.operation === "decisions.answer").map(c => c.message as { target: string; payload: { batchId: string; answers: { text: string }[] } });
+    expect(button("Send answers")!.getAttribute("aria-disabled")).toBe("true");
+    opt("Second").click(); await settled();
+    button("Send answers")!.click(); await settled();
+    const [sent, ...more] = s.calls.filter(c => c.operation === "decisions.answer").map(c => c.message as { target: string; payload: { batchId: string; answers: { text: string }[] } });
+    expect(more).toEqual([]);
     expect(sent.target).toBe("b");
     expect(sent.payload.answers.map(a => a.text)).toEqual(["First", "Second"]);
+    expect(all(".dc .qa-a").map(a => a.textContent)).toEqual(["First", "Second"]);
+    expect(button("Send answers")).toBeUndefined();
   });
 
-  it("reopens a batch the machine refused, so nothing reads as answered that was not", async () => {
+  it("keeps a batch the machine refused open with its answers, so nothing reads as answered that was not", async () => {
     const s = machine([waiting]);
     s.answers["decisions.list"] = () => ({ items: batch, nextCursor: null, highWatermark: "4" });
     s.answers["decisions.answer"] = message => ({ requestId: (message as { requestId: string }).requestId, outcome: "busy", target: "b", entityVersion: "2", recordedAt: "2026-11-05T00:00:00Z" });
     await open(s, TASK);
-    await answerWith("First");
-    await answerWith("Second");
+    opt("First").click(); opt("Second").click(); await settled();
+    button("Send answers")!.click(); await settled();
     expect($(".ws-receipt")?.textContent).toMatch(/still running/i);
-    expect(all(".dc-tab")).toHaveLength(2);
-    expect(all('.dc-tab[aria-label$="answered"]')).toEqual([]);
+    expect($('.dc [role="alert"]')?.textContent).toMatch(/still running/i);
+    expect(all(".dc .qa")).toEqual([]);
+    expect(all(".dc .opt").filter(o => o.getAttribute("aria-checked") === "true")).toHaveLength(2);
+    expect(button("Send answers")!.getAttribute("aria-disabled")).toBeNull();
   });
 });
 
@@ -735,7 +739,7 @@ describe("messages on real data", () => {
     button("Send answer")!.click();
     await settled();
     const sent = s.calls.find(c => c.operation === "decisions.answer")!.message as any;
-    expect(sent.payload.answers[0]).toMatchObject({text:"first line\nsecond line",attachments:[attachments[0],{name:"drop.txt",data:btoa("drop")}]});
+    expect(sent.payload.answers[0]).toMatchObject({text:"first line\nsecond line",attachments:[refOf(attachments[0]),refOf({name:"drop.txt",mimeType:"text/plain",data:btoa("drop")})]});
     expect(s.calls.filter(c => c.operation === "native.clipboard_image")).toHaveLength(1);
   });
 
@@ -767,13 +771,20 @@ describe("messages on real data", () => {
     expect($<HTMLTextAreaElement>('[aria-label="Message"]')?.value).toBe("With files");
     expect(document.querySelector(".dock .composer")?.textContent).toMatch(/pick.txt.*drop.txt.*paste.png/s);
     s.answers["executions.prompt"] = () => { throw new Error("fixture lost acknowledgement"); };
-    button("Send now", ".mc-delivery")!.click();
+    button("Queue", ".mc-delivery")!.click();
     button("Send message now")!.click();
     await settled();
+    // The message that did not arrive stays on its line in the conversation, files and all, and Edit takes it back.
+    expect($('.timeline [data-sent="failed"]')?.textContent).toMatch(/With files.*paste.png/s);
+    expect($('.timeline .ws-sent-meta [role="alert"]')?.textContent).toMatch(/^Not sent: /);
+    button("Edit", ".timeline .ws-sent-meta")!.click();
+    await settled();
+    expect($('.timeline [data-sent]')).toBeNull();
     expect($<HTMLTextAreaElement>('[aria-label="Message"]')?.value).toBe("With files");
     expect(document.querySelector(".dock .composer")?.textContent).toContain("paste.png");
-    const sent = s.calls.find(c => c.operation === "executions.prompt")!.message as {attachments:{name:string;data:string}[]};
-    expect(sent.attachments.map(a => [a.name,atob(a.data)])).toEqual([["pick.txt","picked"],["drop.txt","drop fixture"],["paste.png","png fixture"]]);
+    // The prompt names the uploaded files; their bytes are the ones picked, dropped and pasted.
+    const sent = s.calls.find(c => c.operation === "executions.prompt")!.message as {attachments:{name:string;sha256:string}[]};
+    expect(sent.attachments.map(a => [a.name,atob(s.bodies.get(a.sha256)!)])).toEqual([["pick.txt","picked"],["drop.txt","drop fixture"],["paste.png","png fixture"]]);
   });
 
   it("holds a queued message unsent, and Edit brings it back to the field", async () => {
@@ -823,9 +834,14 @@ describe("messages on real data", () => {
     await open(s, TASK);
     type("Message", "Mind the race");
     button("Send message now")!.click();
+    // It reads in the conversation from the press, before the machine has answered.
+    expect($('.timeline [data-sent="sending"]')?.textContent).toContain("Mind the race");
     await settled();
     expect(prompts(s)).toEqual(["Mind the race"]);
     expect($(".timeline")?.textContent).toContain("Mind the race");
+    // The conversation reread carries the runtime's own record of it, which reads once, in its place.
+    await vi.waitFor(() => expect($(".timeline [data-sent]")).toBeNull(), { timeout: 3000 });
+    expect(all(".timeline .mine").map(m => m.textContent?.trim())).toEqual(["Mind the race"]);
   });
 
   it("targets a worker safe point, never generic coordinator steering", async () => {

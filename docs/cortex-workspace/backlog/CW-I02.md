@@ -1,6 +1,6 @@
 # CW-I02: Human-mutation lease and writer quiescence
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Not implemented; no human or agent write lease exists · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Provide a runtime-coordinated lease that lets a human edit a path scope only after the runtime confirms that no model writer is active in that scope. The lease is released, expires, or is dropped when its device is revoked. The lease replaces visual pause controls with an enforced runtime state.

@@ -2,7 +2,6 @@
 //! Explicit host roots only; never seeds, repairs or launches a process.
 //! Setup display may nonblockingly probe an existing cooperative setup lock.
 mod catalog;
-pub mod usage_refresh;
 mod connections;
 mod defaults;
 pub(crate) mod management;
@@ -13,6 +12,7 @@ mod readers;
 mod routing;
 mod settings;
 mod setup;
+pub mod usage_refresh;
 mod workspace;
 use crate::native_routes::{read, RouteEnvironment};
 pub use connections::{parse_connections, route_fingerprint};
@@ -184,7 +184,9 @@ pub fn native_login_marker(engine: &str, directory: &Path) -> &'static str {
 pub fn adapter_version(engine: &str, version: &str) -> Value {
     let qualified = match engine {
         "codex-acp" => ["1.12.0", "1.13.0", "2.0.1", "2.1.1", "2.3.0", "2.6.0"].contains(&version),
-        "claude-agent-acp" => ["0.78.0", "0.87.0", "0.88.0", "0.97.0", "0.107.0"].contains(&version),
+        "claude-agent-acp" => {
+            ["0.78.0", "0.87.0", "0.88.0", "0.97.0", "0.107.0"].contains(&version)
+        }
         "opencode" => matches(r"^2\.[0-9]+\.[0-9]+$", version),
         _ => false,
     };
@@ -240,7 +242,10 @@ pub fn usage_windows(engine: &str, windows: &Value, now: f64) -> Value {
             if w["window_minutes"].as_u64().is_some_and(|n| n > 0) {
                 item["windowMinutes"] = w["window_minutes"].clone();
             }
-            if w["observed_at"].as_f64().is_some_and(|n| n.is_finite() && n > 0.0) {
+            if w["observed_at"]
+                .as_f64()
+                .is_some_and(|n| n.is_finite() && n > 0.0)
+            {
                 item["observedAt"] = w["observed_at"].clone();
             }
             result.push(item);

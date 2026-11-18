@@ -50,14 +50,24 @@ struct Args {
 }
 
 fn parse(argv: &[String]) -> Result<Args, String> {
-    let mut args = Args { authorize: false, approval_ref: None, adapter: None, model: None, output: None, plan: false };
+    let mut args = Args {
+        authorize: false,
+        approval_ref: None,
+        adapter: None,
+        model: None,
+        output: None,
+        plan: false,
+    };
     let mut it = argv.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--i-authorize-paid-call" => args.authorize = true,
             "--plan" => args.plan = true,
             "--approval-ref" | "--adapter" | "--model" | "--output" => {
-                let value = it.next().ok_or_else(|| format!("{arg} needs a value"))?.clone();
+                let value = it
+                    .next()
+                    .ok_or_else(|| format!("{arg} needs a value"))?
+                    .clone();
                 match arg.as_str() {
                     "--approval-ref" => args.approval_ref = Some(value),
                     "--adapter" => args.adapter = Some(PathBuf::from(value)),
@@ -87,14 +97,22 @@ pub fn run(engine: &str, argv: &[String]) -> (String, i32) {
         }
         return (text, 0);
     }
-    if !args.authorize || args.approval_ref.as_deref().is_none_or(|r| r.trim().is_empty()) {
+    if !args.authorize
+        || args
+            .approval_ref
+            .as_deref()
+            .is_none_or(|r| r.trim().is_empty())
+    {
         eprintln!(
             "{label}: refusing to run without both --i-authorize-paid-call and a non-empty --approval-ref; exiting before any \
              file read, workspace creation, process start or network activity. Use --plan to see the steps."
         );
         return (String::new(), 2);
     }
-    for (flag, present) in [("--adapter", args.adapter.is_some()), ("--output", args.output.is_some())] {
+    for (flag, present) in [
+        ("--adapter", args.adapter.is_some()),
+        ("--output", args.output.is_some()),
+    ] {
         if !present {
             eprintln!("{label}: {flag} is required once authorized.");
             return (String::new(), 2);
@@ -111,8 +129,12 @@ pub fn run(engine: &str, argv: &[String]) -> (String, i32) {
 
 fn workspace() -> Result<PathBuf, String> {
     let token = fs::read_to_string("/proc/sys/kernel/random/uuid").map_err(|e| e.to_string())?;
-    let path = Path::new("/var/tmp").join(format!("cortex-probe-{}", token.trim().replace('-', "")));
-    fs::DirBuilder::new().mode(0o700).create(&path).map_err(|e| format!("cannot create the workspace: {e}"))?;
+    let path =
+        Path::new("/var/tmp").join(format!("cortex-probe-{}", token.trim().replace('-', "")));
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&path)
+        .map_err(|e| format!("cannot create the workspace: {e}"))?;
     path.canonicalize().map_err(|e| e.to_string())
 }
 
@@ -123,17 +145,24 @@ fn authorized(engine: &str, args: &Args) -> Result<PathBuf, String> {
     if !adapter.is_absolute() || !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
         return Err("--adapter must be the absolute path of an executable file".into());
     }
-    let home = std::env::var("HOME").map_err(|_| "HOME is not set; the native account login lives there")?;
+    let home = std::env::var("HOME")
+        .map_err(|_| "HOME is not set; the native account login lives there")?;
     let work = workspace()?;
     let env: Vec<(String, String)> = vec![
-        ("PATH".into(), std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into())),
+        (
+            "PATH".into(),
+            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()),
+        ),
         ("HOME".into(), home),
         ("LANG".into(), "C.UTF-8".into()),
     ];
     let result = turn(adapter, &env, &work, args.model.as_deref());
     let _ = fs::remove_dir_all(&work);
     let (stop_reason, model) = result?;
-    let started_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let record = json!({
         "status": "ran", "engine": engine, "started_unix": started_at,
         "configuration": {"requested_model": model},
@@ -145,7 +174,12 @@ fn authorized(engine: &str, args: &Args) -> Result<PathBuf, String> {
     Ok(output.clone())
 }
 
-fn turn(adapter: &Path, env: &[(String, String)], work: &Path, model: Option<&str>) -> Result<(Option<String>, Option<String>), String> {
+fn turn(
+    adapter: &Path,
+    env: &[(String, String)],
+    work: &Path,
+    model: Option<&str>,
+) -> Result<(Option<String>, Option<String>), String> {
     let mut session = AgentSession::spawn(&[adapter.display().to_string()], env, work)?;
     let outcome = (|| {
         let wait = Duration::from_secs(30);
@@ -161,21 +195,37 @@ fn turn(adapter: &Path, env: &[(String, String)], work: &Path, model: Option<&st
                 break message;
             }
         };
-        let session_id = created["result"]["sessionId"].as_str().ok_or("session/new returned no session id")?.to_string();
+        let session_id = created["result"]["sessionId"]
+            .as_str()
+            .ok_or("session/new returned no session id")?
+            .to_string();
         if let Some(model) = model {
-            let options = created["result"]["configOptions"].as_array().cloned().unwrap_or_default();
+            let options = created["result"]["configOptions"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
             let offered = options.iter().any(|o| {
-                o["id"] == "model" && o["options"].as_array().into_iter().flatten().any(|v| v["value"] == model)
+                o["id"] == "model"
+                    && o["options"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|v| v["value"] == model)
             });
             if !offered {
-                return Err(format!("the session does not advertise model {model:?}; refusing before any prompt"));
+                return Err(format!(
+                    "the session does not advertise model {model:?}; refusing before any prompt"
+                ));
             }
             session.send(&json!({"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":session_id,"configId":"model","value":model}}))?;
             loop {
                 let message = session.recv(wait)?;
                 if message["id"] == json!(3) {
                     if message.get("error").is_some() {
-                        return Err("the adapter refused the model selection; refusing before any prompt".to_string());
+                        return Err(
+                            "the adapter refused the model selection; refusing before any prompt"
+                                .to_string(),
+                        );
                     }
                     break;
                 }
@@ -184,7 +234,9 @@ fn turn(adapter: &Path, env: &[(String, String)], work: &Path, model: Option<&st
         session.send(&json!({"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":session_id,"prompt":[{"type":"text","text":PROMPT}]}}))?;
         let deadline = Instant::now() + Duration::from_secs(TURN_SECONDS);
         loop {
-            let left = deadline.checked_duration_since(Instant::now()).ok_or("the turn did not finish within its bound")?;
+            let left = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or("the turn did not finish within its bound")?;
             let message = session.recv(left)?;
             if message["id"] == json!(4) && message.get("method").is_none() {
                 return Ok(message["result"]["stopReason"].as_str().map(String::from));
@@ -214,7 +266,12 @@ mod tests {
     #[test]
     fn refuses_without_both_authorization_flags() {
         for engine in ["codex", "claude"] {
-            for given in [&["--adapter", "/bin/true", "--output", "/tmp/x"][..], &["--i-authorize-paid-call"], &["--approval-ref", "ref"], &["--i-authorize-paid-call", "--approval-ref", "  "]] {
+            for given in [
+                &["--adapter", "/bin/true", "--output", "/tmp/x"][..],
+                &["--i-authorize-paid-call"],
+                &["--approval-ref", "ref"],
+                &["--i-authorize-paid-call", "--approval-ref", "  "],
+            ] {
                 assert_eq!(run(engine, &args(given)).1, 2, "{given:?}");
             }
         }
@@ -225,17 +282,38 @@ mod tests {
         let (text, code) = run("codex", &args(&["--plan"]));
         assert_eq!(code, 0);
         assert!(text.contains("nothing executed") && text.contains("codex-acp"));
-        assert!(run("claude", &args(&["--plan"])).0.contains("claude-agent-acp"));
+        assert!(run("claude", &args(&["--plan"]))
+            .0
+            .contains("claude-agent-acp"));
     }
 
     #[test]
     fn authorized_run_still_requires_adapter_and_output_before_anything_starts() {
-        assert_eq!(run("codex", &args(&["--i-authorize-paid-call", "--approval-ref", "owner-request-x"])).1, 2);
+        assert_eq!(
+            run(
+                "codex",
+                &args(&[
+                    "--i-authorize-paid-call",
+                    "--approval-ref",
+                    "owner-request-x"
+                ])
+            )
+            .1,
+            2
+        );
     }
 
     #[test]
     fn an_unusable_adapter_is_refused_before_a_workspace_exists() {
-        let given = args(&["--i-authorize-paid-call", "--approval-ref", "owner-request-x", "--adapter", "relative/adapter", "--output", "/tmp/never-written"]);
+        let given = args(&[
+            "--i-authorize-paid-call",
+            "--approval-ref",
+            "owner-request-x",
+            "--adapter",
+            "relative/adapter",
+            "--output",
+            "/tmp/never-written",
+        ]);
         assert_eq!(run("claude", &given).1, 1);
         assert!(!Path::new("/tmp/never-written").exists());
     }

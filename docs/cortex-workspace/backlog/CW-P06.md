@@ -1,6 +1,6 @@
 # CW-P06: Self-hosted compose stack for iroh-relay and push-gateway: compose file, environment template without secrets, TLS, health checks, deploy, upgrade and rollback runbook
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Partly implemented: the relay stack exists in deploy/relay/; there is no push gateway or stack; not deployed or verified · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Deliver one Docker Compose stack that runs the self-hosted `iroh-relay` and `push-gateway` services on the owner's server ([ADR 0011](../adr/0011-self-hosted-relay-and-push-gateway.md)). The stack is reproducible from the repository, holds no secret values, and has tested health checks and a tested rollback. Production deployment is an owner-approved operation and is not performed by this item.

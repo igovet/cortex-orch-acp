@@ -13,7 +13,7 @@ import { createRealPort } from "../src/port/real";
 import { sessionModel } from "../src/session-model";
 import { createSettingsState } from "../src/settings-state";
 import { createWorkspaceStore } from "../src/store";
-import { capabilitiesWire, draftTask, flush, scriptedPort, scriptedTransport, snapshot, wireDecision, wireTask } from "./support";
+import { capabilitiesWire, draftTask, flush, refOf, scriptedPort, scriptedTransport, snapshot, wireDecision, wireTask } from "./support";
 
 const OFFERED = ["capabilities.get", "project.snapshot", "tasks.create", "tasks.start", "decisions.list", "decisions.answer", "results.get", "executions.get", "history.page"];
 const png = { name: "clip.png", mimeType: "image/png", data: btoa("fixture png") };
@@ -90,6 +90,8 @@ function pick(form: ParentNode, files: File[]) {
   Object.defineProperty(input, "files", { configurable: true, value: files });
   input.dispatchEvent(new Event("change", { bubbles: true }));
 }
+/** A question's option button by its label (the button also shows its number). */
+const optionOf = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('button[role="radio"]')].find(b => b.querySelector(".t")?.textContent?.startsWith(label))!;
 const field = (label: string) => $<HTMLTextAreaElement>(`[aria-label="${label}"]`)!;
 const alertText = (scope: ParentNode = document) => scope.querySelector('[role="alert"]')?.textContent ?? "";
 
@@ -199,7 +201,10 @@ describe("the new task and new sprint forms", () => {
     button("Save draft").click();
     await settled();
     const sent = calls(s, "tasks.create")[0].message as { payload: { description: string; attachments: unknown[] } };
-    expect(sent.payload).toMatchObject({ description: "Fix the login", attachments: [png] });
+    expect(sent.payload).toMatchObject({ description: "Fix the login", attachments: [refOf(png)] });
+    // The bytes crossed once, when the image was pasted; the command names the saved file.
+    expect(JSON.stringify(sent)).not.toContain(png.data);
+    expect(machineCalls(s, "product.attachment").filter(c => c.action === "upload")).toEqual([{ action: "upload", files: [png] }]);
   });
 
   it("creates a sprint with real files and no filename line in its description", async () => {
@@ -213,7 +218,7 @@ describe("the new task and new sprint forms", () => {
     await settled();
     const created = machineCalls(s, "product.sprint").find(c => c.action === "create")!;
     expect(created.description).toBe("Plan the release");
-    expect(created.attachments).toEqual([{ name: "brief.png", mimeType: "image/png", data: btoa("bytes") }]);
+    expect(created.attachments).toEqual([refOf({ name: "brief.png", mimeType: "image/png", data: btoa("bytes") })]);
     expect(String(created.description)).not.toContain("Attached:");
   });
 });
@@ -259,6 +264,36 @@ describe("after sending", () => {
     expect(bare.classList.contains("ws-att-open")).toBe(false);
   });
 
+  it("a saved file is drawn from its reference alone and its bytes are read only when it is opened", async () => {
+    const saved = { name: "shot.png", mimeType: "image/png", data: btoa("saved screenshot") };
+    const ref = refOf(saved);
+    const s = machine({ product: { messages: [{ id: "m1", taskId: "task-1", workerId: null, text: "see this", mode: "queue", delivery: "recorded", at: 1, deliveredAt: null, failure: null, attachments: [ref] }] } });
+    s.bodies.set(ref.sha256, saved.data);
+    await open(s, TASK);
+    const chip = $<HTMLButtonElement>('.mine [aria-label="Open shot.png"]')!;
+    expect(chip).not.toBeNull();
+    // No thumbnail and no read: the board and the chip carry the name, type, size and digest only.
+    expect(chip.querySelector("img")).toBeNull();
+    expect(machineCalls(s, "product.attachment")).toEqual([]);
+    chip.click();
+    await settled();
+    expect(machineCalls(s, "product.attachment")).toEqual([{ action: "read", sha256: ref.sha256 }]);
+    expect($<HTMLImageElement>("dialog[open] img.ws-att-big")?.src).toBe(`data:image/png;base64,${saved.data}`);
+  });
+
+  it("a queued message saved as a reference is sent by reference, with no bytes on the wire", async () => {
+    const saved = { name: "q.png", mimeType: "image/png", data: btoa("queued bytes") };
+    const ref = refOf(saved);
+    const s = machine({ product: { messages: [{ id: "q1", taskId: "task-1", workerId: null, text: "queued", mode: "queue", delivery: "queued", at: 1, deliveredAt: null, failure: null, attachments: [ref] }] } });
+    await open(s, TASK);
+    button("Send now").click();
+    await settled();
+    const prompt = calls(s, "executions.prompt")[0]?.message;
+    expect(prompt).toMatchObject({ text: "queued", attachments: [ref] });
+    expect(JSON.stringify(prompt)).not.toContain(saved.data);
+    expect(machineCalls(s, "product.attachment")).toEqual([]);
+  });
+
   it("a queued message shows no files in its row, and Send now sends them and leaves them openable in the conversation", async () => {
     const s = machine();
     await open(s, TASK);
@@ -275,7 +310,7 @@ describe("after sending", () => {
     expect(machineCalls(s, "product.message").find(c => c.action === "add")?.message).toMatchObject({ delivery: "queued", attachments: [{ name: "clipboard.png" }] });
     button("Send now").click();
     await settled();
-    expect(calls(s, "executions.prompt")[0].message).toMatchObject({ text: "Сообщение в очереди с картинкой", attachments: [{ name: "clipboard.png", mimeType: "image/png", data: btoa("bytes") }] });
+    expect(calls(s, "executions.prompt")[0].message).toMatchObject({ text: "Сообщение в очереди с картинкой", attachments: [refOf({ name: "clipboard.png", mimeType: "image/png", data: btoa("bytes") })] });
     expect($(".queue")).toBeNull();
     const opener = $<HTMLButtonElement>('.mine [aria-label="Open clipboard.png"]')!;
     expect(opener).not.toBeNull();
@@ -314,6 +349,21 @@ describe("after sending", () => {
     expect(field("Message").value).toBe("");
   });
 
+  it("stops a working planner from the empty planning composer, and the field's text makes it the plane again", async () => {
+    const s = machine({ product: { sprints: [{ id: "sp", projectId: "p", description: "Plan", title: "S", planning: "planning", runMode: "manual", targetBranch: null, conversation: [], plan: null, materializedVersion: null, taskIds: [], queueState: "idle", pauseReason: null }] } });
+    await open(s, `/m/${LOCAL_MACHINE_ID}/p/p/s/sp/planning`);
+    const last = () => [...document.querySelector(".sp-conv .dock .c-bar")!.querySelectorAll("button")].at(-1)!;
+    expect(last().getAttribute("aria-label")).toBe("Stop");
+    fill("Message the planner", "Use this too");
+    await settled();
+    expect(last().getAttribute("aria-label")).toBe("Send to the planner");
+    fill("Message the planner", "");
+    await settled();
+    last().click();
+    await settled();
+    expect(machineCalls(s, "product.sprint").find(c => c.action === "patch")).toMatchObject({ patch: { planning: "cancelled" } });
+  });
+
   it("lists a sprint's files on its page, and they open", async () => {
     const s = machine({ product: { sprints: [{ id: "sp", projectId: "p", description: "Plan", attachments: [png], title: "S", planning: "planning", runMode: "manual", targetBranch: null, conversation: [], plan: null, materializedVersion: null, taskIds: [], queueState: "idle", pauseReason: null }] } });
     await open(s, `/m/${LOCAL_MACHINE_ID}/p/p/s/sp/planning`);
@@ -339,7 +389,96 @@ describe("every message form sends its files", () => {
     button("Send answer").click();
     await settled();
     const sent = calls(s, "decisions.answer")[0].message as { payload: { answers: unknown[] } };
-    expect(sent.payload.answers[0]).toMatchObject({ text: "Use the nightly\nand keep the logs", attachments: [{ name: "log.txt", mimeType: "text/plain", data: btoa("bytes") }] });
+    expect(sent.payload.answers[0]).toMatchObject({ text: "Use the nightly\nand keep the logs", attachments: [refOf({ name: "log.txt", mimeType: "text/plain", data: btoa("bytes") })] });
+  });
+
+  it("a chosen option, the owner's own words and the files go together as one answer", async () => {
+    const s = machine({ decisions: [wireDecision({ prompt: "Which build?", options: [{ optionId: "o", label: "Nightly" }, { optionId: "o2", label: "Stable" }] })] });
+    await open(s, TASK);
+    optionOf("Nightly").click();
+    fill("Your answer", "and keep the logs");
+    pick($(".dc-answer")!, [new File(["bytes"], "log.txt", { type: "text/plain" })]);
+    await settled();
+    // Writing does not clear the chosen option, and choosing does not clear the words.
+    expect(optionOf("Nightly").getAttribute("aria-checked")).toBe("true");
+    expect(field("Your answer").value).toBe("and keep the logs");
+    button("Send answer").click();
+    await settled();
+    const sent = calls(s, "decisions.answer")[0].message as { payload: { answers: unknown[] } };
+    expect(sent.payload.answers[0]).toMatchObject({ optionId: "o", text: "Nightly\n\nand keep the logs", attachments: [refOf({ name: "log.txt", mimeType: "text/plain", data: btoa("bytes") })] });
+    // The settled card reads the option, the words and the file.
+    expect($(".qa-a")?.textContent).toContain("Nightly");
+    expect($(".qa-a")?.textContent).toContain("and keep the logs");
+    expect($('.qa-a [aria-label="Open log.txt"]')).not.toBeNull();
+  });
+
+  it("an option alone still carries its files", async () => {
+    const s = machine({ decisions: [wireDecision({ prompt: "Which build?", options: [{ optionId: "o", label: "Nightly" }] })] });
+    await open(s, TASK);
+    optionOf("Nightly").click();
+    pick($(".dc-answer")!, [new File(["bytes"], "log.txt", { type: "text/plain" })]);
+    await settled();
+    button("Send answer").click();
+    await settled();
+    const sent = calls(s, "decisions.answer")[0].message as { payload: { answers: unknown[] } };
+    expect(sent.payload.answers[0]).toMatchObject({ optionId: "o", text: "Nightly", attachments: [{ name: "log.txt" }] });
+  });
+
+  it("each answer of a batch carries its own option, words and files", async () => {
+    const batch = { batchId: "b", kind: "question_batch" };
+    const s = machine({ decisions: [
+      wireDecision({ ...batch, decisionId: "d1", questionId: "q1", prompt: "Which build?", options: [{ optionId: "o1", label: "Nightly" }] }),
+      wireDecision({ ...batch, decisionId: "d2", questionId: "q2", prompt: "Which branch?", options: [{ optionId: "o2", label: "Main" }] }),
+    ] });
+    await open(s, TASK);
+    optionOf("Nightly").click();
+    fill("Your answer to question 1", "with logs");
+    pick(field("Your answer to question 1").closest(".dc-answer")!, [new File(["a"], "a.txt", { type: "text/plain" })]);
+    optionOf("Main").click();
+    pick(field("Your answer to question 2").closest(".dc-answer")!, [new File(["b"], "b.txt", { type: "text/plain" })]);
+    await settled();
+    button("Send answers").click();
+    await settled();
+    const sent = calls(s, "decisions.answer")[0].message as { payload: { answers: unknown[] } };
+    expect(sent.payload.answers).toMatchObject([
+      { decisionId: "d1", optionId: "o1", text: "Nightly\n\nwith logs", attachments: [{ name: "a.txt" }] },
+      { decisionId: "d2", optionId: "o2", text: "Main", attachments: [{ name: "b.txt" }] },
+    ]);
+  });
+
+  it("a question whose options act by themselves keeps an option and written words apart", async () => {
+    const s = machine({ decisions: [wireDecision({ prompt: "Stopped. Next?", optionsOnly: true, options: [{ optionId: "o", label: "Continue" }] })] });
+    await open(s, TASK);
+    optionOf("Continue").click();
+    fill("Your answer", "wait for me");
+    await settled();
+    expect(optionOf("Continue").getAttribute("aria-checked")).toBe("false");
+    optionOf("Continue").click();
+    await settled();
+    expect(field("Your answer").value).toBe("");
+  });
+
+  it("a settled answer shows its files after the history is read again", async () => {
+    const ref = refOf({ name: "shot.png", mimeType: "image/png", data: btoa("png") });
+    const s = machine({ decisions: [wireDecision({ prompt: "Which build?", status: "answered", allowedOperations: [], answerText: "Nightly\n\nsee the shot", answeredAt: "2026-11-09T00:00:00Z", answerAttachments: [ref] })] });
+    await open(s, TASK);
+    expect($(".qa-q")?.textContent).toContain("Which build?");
+    expect($(".qa-a")?.textContent).toContain("see the shot");
+    expect($('.qa-a [aria-label="Open shot.png"]')).not.toBeNull();
+  });
+
+  it("a planning answer keeps a chosen option, the owner's words and the files together", async () => {
+    const sprint = { id: "sp", projectId: "p", description: "Plan", title: "S", planning: "question", runMode: "manual", targetBranch: null, conversation: [{ kind: "question", text: "Which area first?", options: ["UI", "API"], at: 1 }], plan: null, materializedVersion: null, taskIds: [], queueState: "idle", pauseReason: null };
+    const s = machine({ product: { sprints: [sprint] } });
+    await open(s, `/m/${LOCAL_MACHINE_ID}/p/p/s/sp/planning`);
+    optionOf("API").click();
+    fill("Your answer", "start with auth");
+    pick($(".dc-answer")!, [new File(["a"], "api.png", { type: "image/png" })]);
+    await settled();
+    button("Send answer").click();
+    await settled();
+    const note = machineCalls(s, "product.sprint").find(c => c.action === "note");
+    expect(note).toMatchObject({ kind: "answer", text: "API\n\nstart with auth", attachments: [{ name: "api.png" }] });
   });
 
   it("a planning answer and a message to the planner carry their files", async () => {
@@ -352,13 +491,13 @@ describe("every message form sends its files", () => {
     button("Send answer").click();
     await settled();
     const notes = () => machineCalls(s, "product.sprint").filter(c => c.action === "note");
-    expect(notes()[0]).toMatchObject({ kind: "answer", text: "Start with the API", attachments: [{ name: "api.png", data: btoa("a") }] });
+    expect(notes()[0]).toMatchObject({ kind: "answer", text: "Start with the API", attachments: [{ name: "api.png", sha256: refOf({ name: "api.png", mimeType: "image/png", data: btoa("a") }).sha256 }] });
     fill("Message the planner", "And this");
     pick($(".dock")!, [new File(["b"], "more.txt", { type: "text/plain" })]);
     await settled();
     $<HTMLElement>('[aria-label="Send to the planner"]')!.click();
     await settled();
-    expect(notes().at(-1)).toMatchObject({ kind: "message", text: "And this", attachments: [{ name: "more.txt", data: btoa("b") }] });
+    expect(notes().at(-1)).toMatchObject({ kind: "message", text: "And this", attachments: [{ name: "more.txt", sha256: refOf({ name: "more.txt", mimeType: "text/plain", data: btoa("b") }).sha256 }] });
     expect($(".dock .composer .ws-att")).toBeNull();
   });
 
@@ -397,7 +536,7 @@ describe("dialogs and comments", () => {
       } as unknown as Ws;
       openDialog = setDialog;
       return <WsContext.Provider value={ws}><ReviewDialogs /><div id="diff"><Diff file={{ path: "a.ts", hunks: [{ header: "@@", lines: [{ kind: "add", old: null, new: 1, text: "x" }] }] } as never} layout="unified" taskId="t" comments={options.comments ?? []} /></div>
-        {options.composer ? <Composer model={() => sessionModel(store.index(), "t")!} onHeight={() => undefined} /> : null}</WsContext.Provider>;
+        {options.composer ? <Composer model={() => sessionModel(store.index(), "t")!} /> : null}</WsContext.Provider>;
     }, root);
     return { script, open: (d: WsDialog) => openDialog(d) };
   }

@@ -1,27 +1,34 @@
 import { plainChoice } from "./selectors";
 import { createEffect, createMemo, createSignal, createUniqueId, For, on, onCleanup, onMount, Show, useContext, type Accessor, type JSX } from "solid-js";
-import { FEATURES, type AttachmentInput, type Message, type TaskSettings, type WorkspaceCommand } from "@cortex/workspace-domain";
-import { attachmentFile, attachmentName, attachmentPreview, readAttachments, wireAttachments } from "./attachments";
-import { autoGrow, reportHeight } from "./autogrow";
+import { capabilityOf, FEATURES, type Attachment, type AttachmentInput, type AttachmentRef, type Message, type TaskSettings, type WorkspaceCommand } from "@cortex/workspace-domain";
+import { attachmentFile, attachmentName, attachmentPreview, attachmentRef, keepBytes, readAttachments, wireAttachments } from "./attachments";
+import { autoGrow } from "./autogrow";
 import { useWs } from "./ctx";
 import { createUnsent, onScreen, ScreenActive } from "./freshness";
 import { createLocalDictation } from "./voice";
 import { I, MenuItem, Pop } from "./kit";
 import { Action, Whole } from "./layout";
-import { duration, taskSettings, type ComposerMode, type SessionModel } from "./session-model";
+import { createSuggest, SUGGEST_HINT, SuggestList, type SlashCommand, type SuggestOptions } from "./suggest";
+import { duration, stopLabel, taskSettings, workingNow, type ComposerMode, type SessionModel } from "./session-model";
 
-/** Draft bytes stay in memory until an explicit send or queue action. */
+/** Attached files are uploaded once, as they are added; the draft holds their references until an explicit send or queue action. */
 export function createAttachments() {
   const ws = useWs();
   const [files, setFiles] = createSignal<AttachmentInput[]>([]);
   const [error, setError] = createSignal(""), [busy, setBusy] = createSignal(false);
   let pending = Promise.resolve(), reading = 0;
   const add = (items: AttachmentInput[]) => setFiles([...files(), ...items]);
+  // Bytes cross to the machine once, now; the draft keeps the references (and this window the bytes, for thumbnails).
+  const uploaded = async (list: Attachment[]) => {
+    const refs = await ws.store.uploadAttachments(list);
+    refs.forEach((r, i) => { const ref = attachmentRef(r); if (ref && list[i]) keepBytes(ref, list[i].data); });
+    return refs;
+  };
   const ingest = (items: File[]) => {
     if (!items.length) return;
     reading++; setBusy(true);
     pending = pending.then(async () => {
-      try { const added = await readAttachments(items, files()); add(added); setError(""); }
+      try { const added = await readAttachments(items, files()); add(await uploaded(added)); setError(""); }
       catch (e) { setError(e instanceof Error ? e.message : "This file could not be read."); }
     }).finally(() => { reading--; setBusy(reading > 0); });
   };
@@ -33,7 +40,7 @@ export function createAttachments() {
         const added = await (drop ? ws.store.takeDroppedFiles() : ws.store.readClipboardImage());
         if (how.refused) { if (added.length) setError(how.refused); return; }
         if (!added.length) { if (how.report) setError("The clipboard has no image to attach."); return; }
-        wireAttachments([...files(), ...added]); add(added); setError("");
+        wireAttachments([...files(), ...added]); add(await uploaded(added)); setError("");
       } catch (e) { setError(e instanceof Error ? e.message : "Clipboard is unavailable."); }
     }).finally(() => { reading--; setBusy(reading > 0); });
   };
@@ -84,16 +91,27 @@ function AttachChip(props: { file: AttachmentInput; onRemove?: (name: Attachment
     <Show when={preview()} fallback={<I n="file" s={12} />}>{src => <img class="ws-att-thumb" src={src()} alt="" />}</Show>
     <span class="trunc">{name()}</span>
   </>;
-  const openable = () => props.open ? attachmentFile(props.file) : null;
+  // A saved file opens by fetching its bytes then; its chip is drawn from its name and type alone.
+  const openable = () => props.open ? attachmentFile(props.file) ?? attachmentRef(props.file) : null;
+  const [opening, setOpening] = createSignal(false), [openError, setOpenError] = createSignal("");
+  const open = async (file: Attachment | AttachmentRef) => {
+    if (!("sha256" in file)) { ws.open({ kind: "attachment", file }); return; }
+    if (opening()) return;
+    setOpening(true); setOpenError("");
+    try { const read = await ws.store.readAttachment(file); keepBytes(file, read.data); ws.open({ kind: "attachment", file: read }); }
+    catch (e) { setOpenError(e instanceof Error ? e.message : "This file could not be opened."); }
+    finally { setOpening(false); }
+  };
   // A saved row that kept only the name says so when pressed, instead of looking like a file that opens.
   const nameOnly = () => <Show when={props.open} fallback={<span class="ws-att-face">{face()}</span>}>
     <button class="ws-att-face" aria-label={`${name()}, name only`} aria-disabled="true" data-why="Only the name of this file was kept, so it cannot be opened here.">{face()}</button>
   </Show>;
   return <span class="chip ws-att">
     <Show when={openable()} fallback={nameOnly()}>
-      {file => <button class="ws-att-face ws-att-open" aria-label={`Open ${name()}`} onClick={() => ws.open({ kind: "attachment", file: file() })}>{face()}</button>}
+      {file => <button class="ws-att-face ws-att-open" aria-label={`Open ${name()}`} aria-busy={opening() ? "true" : undefined} onClick={() => void open(file())}>{face()}</button>}
     </Show>
     <Show when={props.onRemove}><button class="ws-att-x" aria-label={`Remove ${name()}`} onClick={() => props.onRemove!(props.file)}><I n="x" s={12} /></button></Show>
+    <Show when={openError()}><span class="cap st-warn" role="alert">{openError()}</span></Show>
   </span>;
 }
 export const AttachChips = (props: { files: AttachmentInput[] | undefined; onRemove?: (name: AttachmentInput) => void; open?: boolean }) => <Show when={props.files?.length}>
@@ -228,14 +246,14 @@ export function MicBar(props: { mic: Dictation; onInsert: (text: string) => void
     try { const text = await props.mic.finish(); if (text) use?.(text); }
     finally { setFinishing(false); }
   };
-  const status = () => ({ starting: "Starting local dictation…", downloading: "Downloading Russian model: " + props.mic.progress() + "%", loading: "Loading local speech model…", recording: "Listening · Ctrl+D to stop", stopping: "Finishing transcription…", ready: "Ready to insert", error: "", cancelled: "" }[props.mic.phase()]);
+  const status = () => ({ starting: ws.shell?.kind === "phone" ? "Starting…" : "Starting local dictation…", downloading: "Downloading Russian model: " + props.mic.progress() + "%", loading: "Loading local speech model…", recording: ws.shell?.kind === "phone" ? "Listening" : "Listening · Ctrl+D to stop", stopping: "Finishing transcription…", ready: "Ready to insert", error: "", cancelled: "" }[props.mic.phase()]);
   return <>
     <Show when={props.mic.on()}>
       <div class="micbar" role="group" aria-label={ws.t("voiceLabel")}>
         <I n="mic" s={14} class="st-bad" /><span class="mic-time">{time(props.mic.seconds())}</span>
         <span class="cap muted" role="status">{status()}</span>
         <span class="mic-text" aria-live="polite">{props.mic.text()}</span>
-        <span class="cap faint">{ws.voice ? "On-device · Russian · not sent" : ws.t("voiceBadge")}</span>
+        <span class="cap faint">{ws.voice ? ws.voice.badge ?? "On-device · Russian · not sent" : ws.t("voiceBadge")}</span>
         <button class="btn btn-sm" onClick={() => props.mic.stop()}>Cancel</button>
         <button class="btn btn-line btn-sm" disabled={finishing() || !props.mic.text()} onClick={() => void finish(props.onInsert)}>Insert</button>
         <Show when={props.onInsertAndSend}><button class="btn btn-primary btn-sm" disabled={finishing() || !props.mic.text()} onClick={() => void finish(props.onInsertAndSend)}>Insert and send</button></Show>
@@ -265,12 +283,15 @@ export function MicButton(props: { mic: Dictation; disabled?: string; describedB
     aria-disabled={off() ? "true" : undefined} data-why={off()} aria-describedby={off() ? props.describedBy : undefined} onClick={toggle}><I n="mic" /></button>;
 }
 
-/** The paper plane: the one control that sends or saves a draft, named for what it really does. */
-export function SendButton(props: { label: string; why?: string; needs?: WorkspaceCommand["type"]; onClick: () => void; describedBy?: string }) {
+/**
+ * The composer's one action button. Usually the paper plane that sends or saves a draft; where a run is controlled from the
+ * composer and the field is empty, it is Start, Stop or Resume. It keeps one size and place whatever it is, named for what it does.
+ */
+export function SendButton(props: { label: string; why?: string; needs?: WorkspaceCommand["type"]; onClick: () => void; describedBy?: string; icon?: string }) {
   const ws = useWs();
   const gated = () => props.needs ? ws.gate(props.needs) : undefined;
   const why = () => gated() || props.why;
-  return <button type="button" class="ib mc-send c-send" aria-label={props.label} aria-disabled={why() ? "true" : undefined} data-why={why()} aria-describedby={!gated() && why() ? props.describedBy : undefined} onClick={() => { if (!why()) props.onClick(); }}><I n="send" /></button>;
+  return <button type="button" class="ib mc-send c-send" aria-label={props.label} aria-disabled={why() ? "true" : undefined} data-why={why()} aria-describedby={!gated() && why() ? props.describedBy : undefined} onClick={() => { if (!why()) props.onClick(); }}><I n={props.icon ?? "send"} class={props.icon === "loader" ? "spin" : undefined} /></button>;
 }
 
 export type MessageComposerProps = {
@@ -294,13 +315,20 @@ export type MessageComposerProps = {
   /** Controls before the plane, such as Cancel. */
   extra?: JSX.Element;
   /** The plane. Left out only where a confirmation outside the composer does the sending. */
-  send?: { label: string; why?: string; needs?: WorkspaceCommand["type"]; go: () => void; insertAndSend?: (text: string) => void };
+  send?: { label: string; why?: string; needs?: WorkspaceCommand["type"]; go: () => void; insertAndSend?: (text: string) => void;
+    /** The button runs the task or planning instead of sending (Start, Stop, Resume): its icon, it works while the field is
+     *  closed, and Enter never presses it. */
+    run?: { icon: string } };
+  /** The composer's group name, where tests and assistive technology find its action button. */
+  group?: string;
   /** Enter sends, Shift+Enter breaks the line; or, on a long description, Ctrl/Cmd+Enter sends. */
   sendKey?: "enter" | "mod-enter";
   onEscape?: () => void;
   autofocus?: boolean;
   inputRef?: (el: HTMLTextAreaElement) => void;
   inputId?: string;
+  /** `@` files and `/` commands or skills offered while writing; left out where this field has none. */
+  suggest?: SuggestOptions;
   class?: string;
   style?: JSX.CSSProperties;
 };
@@ -316,31 +344,39 @@ export function MessageComposer(props: MessageComposerProps) {
   const fieldId = props.inputId ?? createUniqueId();
   const said = () => off() ? fieldId : undefined;
   const append = (spoken: string) => props.onText(props.text.trim() ? `${props.text.trimEnd()} ${spoken}` : spoken);
-  const sendWhy = () => props.send ? (off() ?? props.send.why) : undefined;
+  const sendWhy = () => props.send ? (props.send.run ? props.send.why : off() ?? props.send.why) : undefined;
   const submit = () => { if (props.send && !sendWhy()) props.send.go(); };
+  let field: HTMLTextAreaElement | undefined;
+  const suggest = createSuggest({ options: () => off() ? undefined : props.suggest, text: () => props.text, setText: v => props.onText(v), field: () => field });
   const onKey = (e: KeyboardEvent) => {
+    // An open list takes the keys it uses, so Enter picks an option instead of sending.
+    if (suggest.key(e)) return;
     if (e.key === "Escape" && props.onEscape) { e.stopPropagation(); props.onEscape(); return; }
-    if (e.key !== "Enter" || e.isComposing || !props.send) return;
+    if (e.key !== "Enter" || e.isComposing || !props.send || props.send.run) return;
     if ((props.sendKey ?? "enter") === "enter" ? e.shiftKey : !(e.ctrlKey || e.metaKey)) return;
     e.preventDefault();
     submit();
   };
   const insertAndSend = () => props.send?.insertAndSend && !off() ? (spoken: string) => props.send!.insertAndSend!(props.text.trim() ? `${props.text.trimEnd()} ${spoken}` : spoken) : undefined;
-  return <div class={`composer mc${props.class ? ` ${props.class}` : ""}`} style={props.style} {...attachmentEvents(props.files, () => !off() && !props.attachOff)}>
+  return <div class={`composer mc${props.class ? ` ${props.class}` : ""}`} style={props.style} role={props.group ? "group" : undefined} aria-label={props.group} {...attachmentEvents(props.files, () => !off() && !props.attachOff)}>
     <Show when={props.effect}><div class="mc-effect">{props.effect}</div></Show>
     <AttachmentStatus a={props.files} />
     <MicBar mic={props.mic} onInsert={append} onInsertAndSend={insertAndSend()} />
     <AttachChips files={props.files.files()} onRemove={props.files.remove} />
     <textarea id={fieldId} aria-label={props.label} placeholder={off() ?? props.placeholder} disabled={!!off()} value={props.text}
-      onInput={e => props.onText(e.currentTarget.value)} onKeyDown={onKey}
-      ref={el => { autoGrow(el, () => props.text); props.inputRef?.(el); if (props.autofocus) queueMicrotask(() => el.focus()); }} />
+      onInput={e => { props.onText(e.currentTarget.value); suggest.onInput(); }} onKeyDown={onKey}
+      onKeyUp={e => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) suggest.onCaret(); }} onClick={() => suggest.onCaret()} onBlur={() => suggest.close()}
+      onCompositionStart={() => suggest.onCompositionStart()} onCompositionEnd={() => suggest.onCompositionEnd()}
+      aria-autocomplete={props.suggest ? "list" : undefined} aria-controls={suggest.activeId() ? suggest.listId : undefined} aria-activedescendant={suggest.activeId()}
+      ref={el => { field = el; autoGrow(el, () => props.text); props.inputRef?.(el); if (props.autofocus) queueMicrotask(() => el.focus()); }} />
+    <SuggestList s={suggest} field={() => field} />
     <CBar>
       <div class="mc-tools"><AttachButton a={props.files} disabled={off() ?? props.attachOff} describedBy={said()} /><MicButton mic={props.mic} disabled={off() ?? props.voiceOff} describedBy={said()} /></div>
       {props.route}
       <div class="c-end">
         {props.delivery}
         {props.extra}
-        <Show when={props.send}>{s => <SendButton label={s().label} why={sendWhy()} needs={s().needs} onClick={submit} describedBy={said()} />}</Show>
+        <Show when={props.send}>{s => <SendButton label={s().label} why={sendWhy()} needs={s().needs} onClick={submit} describedBy={s().run ? undefined : said()} icon={s().run?.icon} />}</Show>
       </div>
     </CBar>
   </div>;
@@ -385,19 +421,28 @@ const CLOSED_TEXT: Partial<Record<ComposerMode, string>> = {
 
 const STOPPING = "Available once every worker is confirmed as stopped";
 
-/** Send now or Queue: a visible choice beside the plane. Nothing else, no hidden key, changes how a message is delivered. */
+/**
+ * Queue, beside the plane: off, a message is sent now; on, it waits in the queue. This one visible control, and no hidden key,
+ * changes how a message is delivered. Its name is always Queue; a pointer resting on it reads what it does.
+ */
 function Delivery(props: { value: "send_now" | "queue"; onChange: (value: "send_now" | "queue") => void; off?: string }) {
-  const choice = (value: "send_now" | "queue", label: string) =>
-    <button type="button" aria-pressed={props.value === value ? "true" : "false"} aria-disabled={props.off ? "true" : undefined} data-why={props.off} onClick={() => { if (!props.off) props.onChange(value); }}>{label}</button>;
-  return <div class="seg mc-delivery" role="group" aria-label="Delivery">{choice("send_now", "Send now")}{choice("queue", "Queue")}</div>;
+  const queued = () => props.value === "queue";
+  const hintId = createUniqueId();
+  return <div class="mc-delivery" role="group" aria-label="Delivery">
+    <button type="button" class="ib" aria-label="Queue" aria-describedby={hintId} aria-pressed={queued() ? "true" : "false"} aria-disabled={props.off ? "true" : undefined} data-why={props.off}
+      onClick={() => { if (!props.off) props.onChange(queued() ? "send_now" : "queue"); }}><I n="queue" /></button>
+    <span id={hintId} class="mc-hint" role="tooltip">{queued() ? "Queue is on: messages wait until the coordinator is free" : "Queue messages instead of sending them now"}</span>
+  </div>;
 }
 
 /**
- * The task's message composer. It sends, queues or, on a result, requests changes; it never starts, resumes or stops the
- * task, which are task actions in the title band. While a question waits, it folds to one line so a general message is
- * never mistaken for an answer. The dock floats over the conversation; its margins and the gap to the queue stay transparent.
+ * The task's message composer, the one place that controls the run. Its action button follows the task and the field: a
+ * draft has Start; a running task with an empty field has Stop and a paused one Resume; as soon as the field holds text or
+ * files it is the paper plane (Send now or Queue, or Send and resume). It sends, queues or, on a result, requests changes;
+ * Stop, Resume and Start stay in the task's "…" menu too. While a question waits, it folds to one line so a general message is
+ * never mistaken for an answer. The dock stands below the conversation in the panel's column, never over it.
  */
-export function Composer(props: { model: Accessor<SessionModel>; onHeight: (px: number) => void; pill?: JSX.Element; folded?: boolean }) {
+export function Composer(props: { model: Accessor<SessionModel>; pill?: JSX.Element; team?: JSX.Element; folded?: boolean }) {
   const ws = useWs();
   const m = () => props.model();
   const id = () => m().view.id;
@@ -411,46 +456,103 @@ export function Composer(props: { model: Accessor<SessionModel>; onHeight: (px: 
   const [delivery, setDelivery] = createSignal<"send_now" | "queue">("send_now");
   const [opened, setOpened] = createSignal(false);
   const queueIds = createMemo(() => m().queue.map(q => q.id));
-  const showQueue = () => ["live", "paused", "stopping"].includes(mode()) && queueIds().length > 0;
+  const showQueue = () => ["live", "paused", "stopping"].includes(mode()) && queueIds().length + queueSending().length > 0;
+  // The message leaves the field as it is sent and reads at once where it went; a send that does not arrive keeps it there,
+  // with Retry and Edit, so its text and files are never lost.
   const done = () => { write(""); files.clear(); };
   const send = (value: string) => {
     if (!value.trim() || files.busy()) return;
+    const attachments = files.files();
     // A finished result has nobody to steer: a message sends it back and reopens the task.
-    if (mode() === "review") { ws.ok({ type: "request_changes", taskId: id(), text: value, attachments: files.files(), now: now() }, done); return; }
-    ws.ok({ type: "send_message", taskId: id(), text: value, mode: mode() === "live" ? delivery() : "send_now", resume: mode() === "paused", now: now(), attachments: files.files() }, done);
+    const command: WorkspaceCommand = mode() === "review" ? { type: "request_changes", taskId: id(), text: value, attachments, now: now() }
+      : { type: "send_message", taskId: id(), text: value, mode: mode() === "live" ? delivery() : "send_now", resume: mode() === "paused", now: now(), attachments };
+    done();
+    void ws.run(command);
   };
+  const queuePlace = () => ({ kind: "queue" as const, taskId: id() });
+  const queueSending = () => ws.store.sends.shown(queuePlace());
+  // A message taken back from a send that did not arrive returns to this field, beside whatever is written there now.
+  createEffect(() => {
+    const back = ws.store.sends.returned({ kind: "task", taskId: id() }) ?? ws.store.sends.returned(queuePlace());
+    if (!back) return;
+    ws.store.sends.take();
+    write(text().trim() ? `${text().trimEnd()}\n${back.text}` : back.text); files.add(back.attachments ?? []);
+    queueMicrotask(() => input?.focus());
+  });
   const readOnly = () => CLOSED_TEXT[mode()];
+  const empty = () => !text().trim() && files.files().length === 0;
+  // Something of this task runs now: its coordinator works or a worker does. A task waiting for the owner, or held after an
+  // interruption, runs nothing, so it has no Stop here.
+  const running = () => mode() === "live" && !props.folded && workingNow(m()) && m().view.task.status !== "needs_you" && m().view.task.observedPhase !== "recovery";
+  const resumable = () => ws.can(capabilityOf("continue_task"));
+  /** The run control the action button is with an empty field, or none: then it sends. */
+  const control = (): { label: string; icon: string; needs?: WorkspaceCommand["type"]; why?: string; go: () => void; effect: string } | null =>
+    mode() === "draft" ? { label: "Start", icon: "play", needs: "start_task", go: () => void ws.run({ type: "start_task", taskId: id(), now: now() }), effect: "Start runs this task." }
+    : mode() === "stopping" && empty() ? { label: "Stopping", icon: "loader", why: STOPPING, go: () => undefined, effect: "Stopping the task. Messages can be sent once the stop is confirmed." }
+    : running() && empty() ? { label: stopLabel(resumable()), icon: "stop", needs: "stop_task", go: () => ws.stopTask(id()),
+      effect: resumable() ? "Stop pauses the task and keeps everything; Resume continues it. Write a message to send it instead." : "End run stops this task. Write a message to send it instead." }
+    : mode() === "paused" && empty() ? { label: "Resume", icon: "play", needs: "continue_task", go: () => void ws.run({ type: "continue_task", taskId: id(), now: now() }), effect: "Resume continues the task. Write a message to send it and resume." }
+    : null;
   const plane = () => mode() === "review" ? { label: "Send and reopen", needs: "request_changes" as const }
     : mode() === "paused" ? { label: "Send and resume", needs: "send_message" as const }
     : delivery() === "queue" && mode() === "live" ? { label: "Queue message", needs: "send_message" as const }
     : { label: "Send message now", needs: "send_message" as const };
   const sendWhy = () => mode() === "stopping" ? STOPPING : files.busy() ? "Attachments are still loading" : text().trim() ? undefined : "Write a message first";
-  const effect = () => mode() === "review" ? "Sending requests changes and reopens this task. Acceptance of this result is cleared."
+  const effect = () => control()?.effect ?? (mode() === "review" ? "Sending requests changes and reopens this task. Acceptance of this result is cleared."
     : mode() === "paused" ? "Sending resumes the task."
-    : props.folded ? "To the coordinator, not an answer to the question." : undefined;
-  const placeholder = () => mode() === "paused" ? "Write a message. Sending resumes the task." : mode() === "stopping" ? "Sending returns once the stop is confirmed" : mode() === "review" ? "Ask about this result, or describe what to change…" : "Write a message…";
+    : props.folded ? "To the coordinator, not an answer to the question." : undefined);
+  const placeholder = () => mode() === "stopping" ? "Sending returns once the stop is confirmed" : SUGGEST_HINT;
+  // `/` runs what this screen already offers: the title band's Stop or Resume, the delivery choice, the task's areas and New task.
+  const commands = (): SlashCommand[] => {
+    const v = m().view, at = (tab: "workers" | "changes" | "code") => () => ws.go({ name: "task", machine: v.machine.id, task: id(), tab });
+    const demo = ws.store.mode === "demo";
+    return [
+      ...(mode() === "live" ? [{ name: "stop", label: `${stopLabel(ws.can(capabilityOf("continue_task")))} this task`, why: ws.gate("stop_task"), run: () => ws.stopTask(id()) },
+        { name: "queue", label: "Queue messages until the coordinator is free", why: ws.gate("send_message"), run: () => setDelivery("queue") },
+        { name: "now", label: "Send messages now", why: ws.gate("send_message"), run: () => setDelivery("send_now") }] : []),
+      ...(mode() === "paused" ? [{ name: "resume", label: "Resume this task", why: ws.gate("continue_task"), run: () => void ws.run({ type: "continue_task", taskId: id(), now: now() }) }] : []),
+      { name: "details", label: "Open Work details", run: at("workers") },
+      ...(demo || ws.can(capabilityOf("accept_result")) || ws.can(capabilityOf("request_changes")) ? [{ name: "changes", label: "Open Changes", run: at("changes") }] : []),
+      ...(demo || ws.can(capabilityOf("git_fetch")) || ws.can(FEATURES.editFiles) ? [{ name: "code", label: "Open Code", run: at("code") }] : []),
+      { name: "new", label: "New task in this project", run: () => ws.go({ name: "new", machine: v.machine.id, kind: "task", project: v.project.id }) },
+    ];
+  };
   // A draft in progress is never folded away.
   const folded = () => props.folded && !opened() && !text().trim() && files.files().length === 0;
   createEffect(() => { if (!props.folded) setOpened(false); });
-  let dock!: HTMLDivElement, input: HTMLTextAreaElement | undefined;
-  reportHeight(() => dock, px => props.onHeight(px));
+  let input: HTMLTextAreaElement | undefined;
   createEffect(() => { if (mode() !== "live" && mode() !== "paused") mic.stop(); });
-  return <div class="dock" ref={dock}>
+  return <div class="dock">
     {props.pill}
     <Show when={showQueue()}>
       <div class="queue" role="group" aria-label="Queued messages, not sent">
-        <div class="queue-h"><I n="queue" s={14} class="faint" />Queued {queueIds().length}, not sent yet<span class="warn">Saved on this machine · not sent</span></div>
+        <div class="queue-h"><I n="queue" s={14} class="faint" />Queued {queueIds().length + queueSending().length}, not sent yet<span class="warn">Saved on this machine · not sent</span></div>
         <For each={queueIds()}>{qid => <QueueRow message={() => m().queue.find(q => q.id === qid)!} ids={queueIds} mode={mode} onEdit={message => { write(text().trim() ? `${text().trimEnd()}\n${message.text}` : message.text); files.add(message.attachments ?? []); queueMicrotask(() => input?.focus()); }} />}</For>
+        {/* A message being queued stands at the end of the queue from the press until the machine's row takes its place. */}
+        <For each={queueSending().map(e => e.key)}>{key => <Show when={queueSending().find(e => e.key === key)}>{e => <div class="qrow" data-sent={e().state}>
+          <I n={e().state === "failed" ? "alert" : "loader"} s={14} class={e().state === "failed" ? "st-bad" : "spin ws-wait"} />
+          <Whole class="qrow-t" text={e().text} />
+          <span class="qrow-end">
+            <Show when={e().state === "failed"} fallback={<span class="cap faint" aria-live="polite">{e().state === "sent" ? "Queued" : "Queuing…"}</span>}>
+              <span class="cap st-bad" role="alert">Not queued: {e().reason}</span>
+              <Action kind="line" onClick={() => void ws.store.sends.retry(e().key)}>Retry</Action>
+              <Action kind="line" onClick={() => ws.store.sends.edit(e().key)}>Edit</Action>
+            </Show>
+          </span>
+        </div>}</Show>}</For>
       </div>
     </Show>
+    {props.team}
     <Show when={!folded()} fallback={<div class="mc-fold"><button type="button" class="btn btn-line" onClick={() => { setOpened(true); queueMicrotask(() => input?.focus()); }}><I n="message" />Send a separate message</button></div>}>
-      <MessageComposer label="Message" placeholder={placeholder()} text={text()} onText={write} files={files} mic={mic}
+      <MessageComposer group="Task composer" label="Message" placeholder={placeholder()} text={text()} onText={write} files={files} mic={mic}
+        suggest={{ projectId: m().view.project.id, taskId: id(), commands, skills: true }}
         effect={effect()} off={readOnly()} attachOff={mode() === "stopping" ? STOPPING : undefined} voiceOff={mode() === "stopping" ? STOPPING : undefined}
         inputRef={el => { input = el; }}
         route={<RouteBar id="task" up needs="set_task_settings" settings={taskSettings(m())} disabled={readOnly() || mode() === "stopping" ? "Unavailable for this task now" : undefined}
           onChange={settings => ws.run({ type: "set_task_settings", taskId: id(), settings: { ...taskSettings(m()), ...settings } })} />}
         delivery={<Show when={mode() === "live"}><Delivery value={delivery()} onChange={setDelivery} off={ws.gate("send_message")} /></Show>}
-        send={{ label: plane().label, needs: plane().needs, why: sendWhy(), go: () => send(text()), insertAndSend: mode() === "live" || mode() === "review" || mode() === "paused" ? send : undefined }} />
+        send={control() ? { label: control()!.label, needs: control()!.needs, why: control()!.why, go: control()!.go, run: { icon: control()!.icon } }
+          : { label: plane().label, needs: plane().needs, why: sendWhy(), go: () => send(text()), insertAndSend: mode() === "live" || mode() === "review" || mode() === "paused" ? send : undefined }} />
     </Show>
   </div>;
 }

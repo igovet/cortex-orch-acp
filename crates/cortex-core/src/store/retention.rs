@@ -118,9 +118,11 @@ fn quiet(db: &Connection, task: &str) -> CoreResult<()> {
     }
     for sql in [
         "SELECT EXISTS(SELECT 1 FROM capacity_reservations WHERE task_id=? AND state!='released')",
-        "SELECT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=? AND status='running')"
+        "SELECT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=? AND status='running')",
     ] {
-        if db.query_row(sql,[task],|r|r.get::<_,bool>(0))? {return refuse("active_execution");}
+        if db.query_row(sql, [task], |r| r.get::<_, bool>(0))? {
+            return refuse("active_execution");
+        }
     }
     // A process recorded without an end time is live only within the boot that
     // recorded it: no process survives a reboot. An unreadable boot identity keeps

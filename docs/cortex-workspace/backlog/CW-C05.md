@@ -1,6 +1,6 @@
 # CW-C05: Result/evidence completeness and digest-current projection
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: results expose evidence, checks and the exact revision ([local task execution](../local-task-execution.md)); no-paid checks only · **Phase:** 3+ · **Size:** L
 
 ## Goal
 

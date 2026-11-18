@@ -388,7 +388,11 @@ fn equal_length_trivial_replacement_of_a_failed_check_is_refused() {
     let (state, revised): (String, i64) = s
         .read(|db| {
             Ok((
-                db.query_row("SELECT state FROM runtime_tasks WHERE task_id='t'", [], |r| r.get(0))?,
+                db.query_row(
+                    "SELECT state FROM runtime_tasks WHERE task_id='t'",
+                    [],
+                    |r| r.get(0),
+                )?,
                 db.query_row(
                     "SELECT count(*) FROM runtime_events WHERE type='VERIFICATION_REVISED'",
                     [],
@@ -411,7 +415,10 @@ fn equal_length_nontrivial_replacement_records_the_dropped_failure() {
             "swap",
             &json!({"verification":[["cargo","check"]],"request_key":"swap"}),
         )?;
-        assert_eq!(dropped_failures_tx(db, "t")?, vec![json!(["cargo", "test"])]);
+        assert_eq!(
+            dropped_failures_tx(db, "t")?,
+            vec![json!(["cargo", "test"])]
+        );
         Ok(())
     })
     .unwrap();
@@ -444,7 +451,13 @@ fn any_replacement_of_a_failed_check_needs_the_owner_to_complete() {
                 &json!({"verification":[argv.clone()],"request_key":"swap"}),
             )
             .map(|_| ())
-            .or_else(|e| if e.code() == "verification_trivial_replacement" { Ok(()) } else { Err(e) })?;
+            .or_else(|e| {
+                if e.code() == "verification_trivial_replacement" {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })?;
             Ok(())
         })
         .unwrap();
@@ -476,11 +489,18 @@ fn any_replacement_of_a_failed_check_needs_the_owner_to_complete() {
                 &o,
                 "run",
                 &argv.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                &CommandObservation { complete: true, exit_code: Some(0), receipt_ref: "run".into() },
+                &CommandObservation {
+                    complete: true,
+                    exit_code: Some(0),
+                    receipt_ref: "run".into(),
+                },
                 &e,
             )?;
             record_verification_tx(db, "t", &["run".into()], &e)?;
-            db.execute("UPDATE runtime_tasks SET synthesis='Done' WHERE task_id='t'", [])?;
+            db.execute(
+                "UPDATE runtime_tasks SET synthesis='Done' WHERE task_id='t'",
+                [],
+            )?;
             Ok(())
         })
         .unwrap();

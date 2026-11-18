@@ -1,0 +1,25 @@
+{
+  "name": "cortex-workspace-android",
+  "private": true,
+  "version": "1.0.6",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "vite build",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.10.1",
+    "@tauri-apps/plugin-barcode-scanner": "2.4.4",
+    "solid-js": "1.9.18"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.10.1",
+    "@types/node": "24.19.2",
+    "typescript": "6.0.3",
+    "vite": "8.3.5",
+    "vite-plugin-solid": "2.11.15",
+    "vitest": "5.1.0"
+  }
+}

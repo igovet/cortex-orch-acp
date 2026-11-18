@@ -1,6 +1,5 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
 import { DAY, FEATURES, previewClear, type EngineId } from "@cortex/workspace-domain";
-import { UnmergedDialog } from "./archive";
 import { useWs } from "./ctx";
 import type { WsDialog } from "./dialogs";
 import { I, Modal } from "./kit";
@@ -134,7 +133,7 @@ function ClearOld(props: { onClose: () => void }) {
       <ul class="conseq">
         <li><I n="trash" s={14} /><span>Will be removed: {n()} task{n() === 1 ? "" : "s"}</span></li>
         <Show when={preview().guarded > 0}><li><I n="lock" s={14} /><span>Protected: {preview().guarded} with a live or unknown process</span></li></Show>
-        <Show when={preview().kept > 0}><li><I n="branch" s={14} /><span>Kept: {preview().kept} with unmerged work. Those go through the Archive question</span></li></Show>
+        <Show when={preview().kept > 0}><li><I n="branch" s={14} /><span>Kept: {preview().kept} with unmerged work. Those stay in Done</span></li></Show>
       </ul>
       <label class="ck"><input type="checkbox" disabled={ws.store.mode === "real"} checked={force()} onChange={e => setForce(e.currentTarget.checked)} /><span>Include stale protected tasks<span class="hint ws-block">Desktop always protects active and unknown executions. Stop or resolve them before deleting.</span></span></label>
     </div>
@@ -188,7 +187,6 @@ export function MachineDialogs() {
     <ProjectPicker open={open("add-project")} onClose={close} />
     <Modal open={open("add-connection")} onClose={close} label="Add a connection"><Show when={open("add-connection")}><AddConnection onClose={close} /></Show></Modal>
     <Modal open={open("clear-old")} onClose={close} label="Clear old tasks"><Show when={open("clear-old")}><ClearOld onClose={close} /></Show></Modal>
-    <Modal open={open("unmerged")} onClose={close} label="Unmerged work"><Show when={of("unmerged")} keyed>{d => <UnmergedDialog taskId={d.taskId} onClose={close} />}</Show></Modal>
     <Modal open={open("switch-profile")} onClose={close} label="Switch profile"><Show when={of("switch-profile")} keyed>{d => <SwitchProfile d={d} onClose={close} />}</Show></Modal>
     <Unsaved />
   </>;

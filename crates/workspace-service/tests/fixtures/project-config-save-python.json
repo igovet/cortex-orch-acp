@@ -17848,14 +17848,7 @@
           "mtime": 1000
         }
       ],
-      "expected": {
-        "codex-acp": {
-          "default": [
-            "low",
-            "high"
-          ]
-        }
-      }
+      "expected": {}
     }
   ]
 }

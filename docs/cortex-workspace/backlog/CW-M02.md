@@ -1,6 +1,6 @@
 # CW-M02: Mobile decisions/result/reconnect states, keyboard and large text
 
-**Status:** planned · **Phase:** 2 · **Size:** L
+**Status:** Partly done: the approved static mockups cover the phone states; keyboard, large-text and device observations are not recorded · **Phase:** 2 · **Size:** L
 
 ## Goal
 Mobile decisions/result/reconnect states, keyboard and large text.

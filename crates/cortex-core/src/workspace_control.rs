@@ -40,6 +40,7 @@ mod coordinator_card_tests {
                     goal: "g".into(),
                 };
                 let first = decisions_tx(db, &b)?[0].clone();
+                assert!(first.get("askedBy").is_none(), "{first}");
                 lifecycle::event_tx(
                     db,
                     "t",
@@ -71,9 +72,18 @@ mod coordinator_card_tests {
         std::fs::create_dir(&root).unwrap();
         let key = crate::ProjectKey::new(&root, crate::StoreChannel::Dev).unwrap();
         let store = Store::open(key, crate::OpenMode::Initialize).unwrap();
-        let owner = lifecycle::TaskMachine::new(&store).create("t", "g", "o").unwrap();
+        let owner = lifecycle::TaskMachine::new(&store)
+            .create("t", "g", "o")
+            .unwrap();
         lifecycle::TaskMachine::new(&store)
-            .transition("t", &owner, "plan", TaskState::Planning, None, &lifecycle::FoundationGuards)
+            .transition(
+                "t",
+                &owner,
+                "plan",
+                TaskState::Planning,
+                None,
+                &lifecycle::FoundationGuards,
+            )
             .unwrap();
         store
             .write(|db| {
@@ -121,10 +131,17 @@ mod coordinator_card_tests {
         for (task, settings, goal, ru) in [
             ("ru", Some("ru"), "Write the guide", true),
             ("en", Some("en"), "Напиши руководство", false),
-            ("auto", Some("auto"), "Изучи аватарку и опиши стиль канала", true),
+            (
+                "auto",
+                Some("auto"),
+                "Изучи аватарку и опиши стиль канала",
+                true,
+            ),
             ("none", None, "Describe the channel style", false),
         ] {
-            lifecycle::TaskMachine::new(&store).create(task, "g", "o").unwrap();
+            lifecycle::TaskMachine::new(&store)
+                .create(task, "g", "o")
+                .unwrap();
             store
                 .write(|db| {
                     lifecycle::event_tx(db, task, "NATIVE_START_ADMITTED", json!({"goal":goal}))?;
@@ -140,10 +157,12 @@ mod coordinator_card_tests {
                     )?;
                     assert!(!text.contains("native_session_start_failed"), "{text}");
                     if ru {
-                        assert_eq!(text, "Задача остановлена: не удалось запустить сессию воркера. Что делать дальше?");
+                        assert!(text.starts_with("Задача остановлена: не удалось запустить сессию воркера.\n\nЧто произошло: "), "{text}");
+                        assert!(text.contains("Что можно сделать:") && text.ends_with("Что делать дальше?"), "{text}");
                         assert_eq!(options, json!(domain::STOP_OPTIONS_RU).to_string());
                     } else {
-                        assert_eq!(text, "The task stopped: a worker session could not start. What should happen next?");
+                        assert!(text.starts_with("The task stopped: a worker session could not start.\n\nWhat happened: "), "{text}");
+                        assert!(text.contains("What you can do:") && text.ends_with("What should happen next?"), "{text}");
                         assert_eq!(options, json!(domain::STOP_OPTIONS_EN).to_string());
                     }
                     Ok(())
@@ -158,7 +177,14 @@ mod coordinator_card_tests {
                     [],
                     |r| r.get(0),
                 )?;
-                assert!(waits::answer_tx(db, "ru", &id, domain::STOP_OPTIONS_RU[1], "text", None)?);
+                assert!(waits::answer_tx(
+                    db,
+                    "ru",
+                    &id,
+                    domain::STOP_OPTIONS_RU[1],
+                    "text",
+                    None
+                )?);
                 assert_eq!(domain::task_tx(db, "ru")?.0, TaskState::Cancelled);
                 Ok(())
             })
@@ -186,6 +212,9 @@ mod coordinator_card_tests {
             waits::request_tx_bound(db,"t",&c.channel_id,"question",&[waits::QuestionForm{question:"Continue?".into(),options:vec!["Yes".into(),"No".into()]}])?;
             let mut b=Binding{task:"t".into(),draft:"d".into(),session:"s".into(),owner:owner.clone(),version:1,execution_version:1,goal:"g".into()};
             let first=decisions_tx(db,&b)?[0].clone();
+            // The worker's question is the owner's to answer in the task's Conversation, named by the role that asked.
+            assert_eq!(first["askedBy"],"backend-dev");
+            assert_eq!(first["status"],"pending");
             lifecycle::event_tx(db,"t","NATIVE_TURN_SETTLED",json!({"status":"completed"}))?;
             b.execution_version+=100;
             let second=decisions_tx(db,&b)?[0].clone();
@@ -197,11 +226,137 @@ mod coordinator_card_tests {
         }).unwrap();
         // The refused desktop answer commits the authority-loss cancellation separately,
         // so the question is not left pending but unanswerable.
-        let open = |store: &Store| store.read(|db| Ok(db.query_row("SELECT count(*) FROM pending_questions WHERE status='open'",[],|r|r.get::<_,i64>(0))?)).unwrap();
+        let open = |store: &Store| {
+            store
+                .read(|db| {
+                    Ok(db.query_row(
+                        "SELECT count(*) FROM pending_questions WHERE status='open'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )?)
+                })
+                .unwrap()
+        };
         assert_eq!(open(&store), 1);
-        assert_eq!(store.write(|db| waits::cancel_unauthorized_tx(db, "t")).unwrap(), 1);
+        assert_eq!(
+            store
+                .write(|db| waits::cancel_unauthorized_tx(db, "t"))
+                .unwrap(),
+            1
+        );
         assert_eq!(open(&store), 0);
-        assert_eq!(store.write(|db| waits::cancel_unauthorized_tx(db, "t")).unwrap(), 0);
+        assert_eq!(
+            store
+                .write(|db| waits::cancel_unauthorized_tx(db, "t"))
+                .unwrap(),
+            0
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// The runtime's stop question carries each answer's consequence, the recommended
+    /// answer and what the desktop can open; the question it replaced names its successor.
+    #[test]
+    fn a_runtime_stop_card_carries_consequences_targets_and_its_replacement() {
+        let root = std::env::temp_dir().join(format!("stop-card-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let store = Store::open(
+            crate::ProjectKey::new(&root, crate::StoreChannel::Dev).unwrap(),
+            crate::OpenMode::Initialize,
+        )
+        .unwrap();
+        let owner = lifecycle::TaskMachine::new(&store)
+            .create("t", "g", "o")
+            .unwrap();
+        store.write(|db|{
+            db.execute("UPDATE runtime_tasks SET state='REVIEWING',revision=1 WHERE task_id='t'",[])?;
+            db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'_review_1','worker-code-reviewer','Review','[]','[\"**\"]','review','completed','rv',?)",
+                [json!({"verdict":"BLOCK","summary":"Not traced.","report_ref":"r_0123456789ab"}).to_string()])?;
+            domain::stop_tx(db,"t","native_session_start_failed")?;
+            domain::stop_tx(db,"t","review_blocked")?;
+            let b=Binding{task:"t".into(),draft:"d".into(),session:"s".into(),owner:owner.clone(),version:1,execution_version:1,goal:"g".into()};
+            let cards=decisions_tx(db,&b)?;
+            assert_eq!(cards.len(),2);
+            assert_eq!(cards[0]["status"],"superseded");
+            assert_eq!(cards[0]["replacedBy"],cards[1]["decisionId"]);
+            let card=&cards[1];
+            assert_eq!(card["status"],"pending");
+            assert_eq!(card["runtimeStop"],true);
+            assert_eq!(card["options"][0]["action"],"continue");
+            assert_eq!(card["options"][0]["recommended"],true);
+            assert_eq!(card["options"][1]["action"],"finish");
+            assert!(card["options"][1]["detail"].as_str().unwrap().contains("findings stay unaddressed"));
+            assert_eq!(card["targets"],json!([{"kind":"report","reportId":"r_0123456789ab","role":"code-reviewer"}]));
+            assert_eq!(card["headline"],"The task stopped: the independent review blocked the result.");
+            // Its options act by themselves: an option answer takes no added words.
+            assert_eq!(card["optionsOnly"],true);
+            Ok(())
+        }).unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// An answered question reads the files that came with its own answer. An older
+    /// record that does not name its question is shown only when unambiguous.
+    #[test]
+    fn an_answered_question_reads_its_own_files_and_an_older_record_only_when_unambiguous() {
+        let root = std::env::temp_dir().join(format!("answer-files-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let store = Store::open(
+            crate::ProjectKey::new(&root, crate::StoreChannel::Dev).unwrap(),
+            crate::OpenMode::Initialize,
+        )
+        .unwrap();
+        let owner = lifecycle::TaskMachine::new(&store)
+            .create("t", "g", "o")
+            .unwrap();
+        lifecycle::TaskMachine::new(&store)
+            .transition(
+                "t",
+                &owner,
+                "plan",
+                TaskState::Planning,
+                None,
+                &lifecycle::FoundationGuards,
+            )
+            .unwrap();
+        store
+            .write(|db| {
+                let sha = "a".repeat(64);
+                let file = |name: &str, index: usize, uri: Value| {
+                    json!({"kind":"image","mime":"image/png","name":name,"uri":uri,"sha256":sha,"size_bytes":3,
+                        "availability":"stored","reason":null,"trust_label":"user_direct","source_ref":format!("r_0:{index}")})
+                };
+                let reference = |name: &str| json!([{"name":name,"mimeType":"image/png","size":3,"sha256":sha}]);
+                let ask = |key: &str| -> CoreResult<String> {
+                    Ok(lifecycle::skill_proposals::request(db, &root, "t", "c", key,
+                        &json!({"question":key,"options":["Yes","No"]}))?["question_id"].as_str().unwrap().to_owned())
+                };
+                // Named: the file belongs to the question its answer named.
+                let named = ask("named")?;
+                assert!(waits::answer_tx(db, "t", &named, "Yes", "text", None)?);
+                lifecycle::event_tx(db, "t", "USER_ANSWER_ATTACHMENTS",
+                    json!({"attachments":[file("a.png", 0, Value::Null)],"question_ids":[named]}))?;
+                // Older desktop record right after one lone question's answer: shown there.
+                let older = ask("older")?;
+                assert!(waits::answer_tx(db, "t", &older, "Yes", "text", None)?);
+                lifecycle::event_tx(db, "t", "USER_ANSWER_ATTACHMENTS",
+                    json!({"attachments":[file("b.png", 0, Value::Null)]}))?;
+                // Older record kept before its answer (a typed prompt's resource): never guessed.
+                let typed = ask("typed")?;
+                lifecycle::event_tx(db, "t", "USER_ANSWER_ATTACHMENTS",
+                    json!({"attachments":[file("c.png", 1, json!("file:///c.png"))]}))?;
+                assert!(waits::answer_tx(db, "t", &typed, "No", "text", None)?);
+                let b = Binding{task:"t".into(),draft:"d".into(),session:"s".into(),owner:owner.clone(),version:1,execution_version:1,goal:"g".into()};
+                let cards = decisions_tx(db, &b)?;
+                let of = |q: &str| cards.iter().find(|c| c["questionId"] == q).unwrap()["answerAttachments"].clone();
+                assert_eq!(of(&named), reference("a.png"));
+                assert_eq!(of(&older), reference("b.png"));
+                assert!(of(&typed).is_null(), "{cards:?}");
+                // An ordinary question's options take added words; nothing marks it options-only.
+                assert!(cards.iter().all(|c| c.get("optionsOnly").is_none()));
+                Ok(())
+            })
+            .unwrap();
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -238,7 +393,13 @@ pub fn binding(
 /// requiring the Rust host to own the task. Completed tasks the Python host ran
 /// are never adopted, but their questions must still be readable (never answerable:
 /// a terminal task offers no answer operation).
-fn read_binding(db: &Connection, root: &str, project: &str, actor: &str, execution: &str) -> CoreResult<Binding> {
+fn read_binding(
+    db: &Connection,
+    root: &str,
+    project: &str,
+    actor: &str,
+    execution: &str,
+) -> CoreResult<Binding> {
     binding_with(db, root, project, actor, execution, false)
 }
 fn binding_with(
@@ -402,7 +563,10 @@ pub fn canonical_request(
         return refuse("invalid_request");
     }
     if let Some(c) = capture.filter(|c| !c.blocks.is_empty()) {
-        if !matches!(request["action"].as_str(), Some("prompt" | "incoming_prompt")) {
+        if !matches!(
+            request["action"].as_str(),
+            Some("prompt" | "incoming_prompt")
+        ) {
             return refuse("native_attachments_unavailable");
         }
         request["capture"] = c.fingerprint();
@@ -429,7 +593,12 @@ pub fn admit_input(
     capture: Option<&crate::input::Capture>,
 ) -> CoreResult<Binding> {
     let capture = capture.filter(|c| !c.blocks.is_empty());
-    if capture.is_some() && !matches!(request["action"].as_str(), Some("prompt" | "incoming_prompt")) {
+    if capture.is_some()
+        && !matches!(
+            request["action"].as_str(),
+            Some("prompt" | "incoming_prompt")
+        )
+    {
         return refuse("native_attachments_unavailable");
     }
     // Fail closed if a caller did not bind the exact capture before replay.
@@ -447,7 +616,8 @@ pub fn admit_input(
         if matches!(action,"prompt"|"incoming_prompt") && domain::reopen_tx(db,&b.task)? {
             state = TaskState::Recovering;
         }
-        if state.terminal() && !matches!(action,"close_task"|"mark_resolved") { return refuse("task_not_resumable"); }
+        // A finished (not cancelled) task keeps its denials for a reopen; the owner may lift one.
+        if state.terminal() && !matches!(action,"close_task"|"mark_resolved") && !(action=="allow_write" && state!=TaskState::Cancelled) { return refuse("task_not_resumable"); }
         lifecycle::request_tx(db,&b.task,&b.owner.owner,key(request)?,"native_desktop_control",request,|| {
             match action {
                 "pause" | "stop" => {
@@ -480,6 +650,18 @@ pub fn admit_input(
                 "prompt" | "incoming_prompt" => {
                     let text=request["text"].as_str().filter(|s|!s.trim().is_empty()&&s.chars().count()<=32_000).ok_or(CoreError::Refused("invalid_message"))?;
                     if request.get("attachments").is_some_and(|a|a.as_array().is_none_or(|a|!a.is_empty())) {return refuse("native_attachments_unavailable");}
+                    // Parsed before anything is kept: a denial outside the project refuses whole.
+                    let denied=lifecycle::steering::parse_denials(text)?;
+                    let lifted=lifecycle::steering::parse_lifts(text)?;
+                    // One message never both denies and allows the same path.
+                    if lifted.iter().any(|p|denied.contains(p)) {return refuse("write_rule_conflict");}
+                    // A working task keeps its running work; the coordinator receives the
+                    // message at its next boundary. Waiting, held, paused or reopened tasks
+                    // keep the restart delivery.
+                    let boundary=lifecycle::steering::boundary_tx(db,&b.task,state)?;
+                    // A queued message the service takes is only ever a boundary message;
+                    // otherwise it stays in the owner's queue (nothing is recorded).
+                    if request["queued"]==true && !boundary {return refuse("queued_message_not_at_boundary");}
                     if state==TaskState::Paused {
                         if action!="incoming_prompt" {return refuse("task_paused");}
                         // A new owner message explicitly resumes the ACP chat. Resume
@@ -496,9 +678,13 @@ pub fn admit_input(
                         Some(c)=>Some(c.persist(store,db,&b.task,sessions.first().unwrap_or(&b.session),text)?),
                         None=>None,
                     };
-                    let mut steering=json!({"text":text,"request":key(request)?});
+                    let mut steering=json!({"text":text,"request":key(request)?,"deny_write":denied,
+                        "delivery":if boundary {lifecycle::steering::BOUNDARY} else {lifecycle::steering::RESTART}});
+                    if !lifted.is_empty() {steering["allow_write"]=json!(lifted);}
                     if let Some(a)=&attachments {steering["attachments"]=a.clone();}
                     lifecycle::event_tx(db,&b.task,"USER_STEERING",steering)?;
+                    // A restart applies the message now: the relaunched coordinator gets it.
+                    if !boundary {lifecycle::event_tx(db,&b.task,"STEERING_APPLIED",json!({"request":key(request)?,"state":state}))?;}
                     let attachments=attachments.map(|a|a.to_string());
                     let at=crate::now();
                     for session in std::iter::once(&b.session).chain(sessions.iter()) {
@@ -508,12 +694,17 @@ pub fn admit_input(
                         db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,attachments_json,created_at) VALUES (?,?,'user_message',?,?,?)",
                             (session,seq,text,&attachments,&at))?;
                     }
-                    domain::interrupt_tx(db,&b.task)?;
+                    if !boundary {domain::interrupt_tx(db,&b.task)?;}
                 },
                 "close_task" | "mark_resolved" => {
                     if request["confirmed"]!=true {return refuse("confirmation_required");}
                     if request.get("expectedVersion").is_some_and(|v|*v!=b.version.to_string()) {return refuse("stale_version");}
                     if state!=TaskState::Completed { domain::cancel_task_tx(db,&b.task,"owner_resolved_without_certification")?; }
+                },
+                // The owner removes one of their own write denials; running work is untouched.
+                "allow_write" => {
+                    let path=request["path"].as_str().ok_or(CoreError::Refused("write_denial_unknown"))?;
+                    lifecycle::steering::lift_tx(db,&b.task,path,key(request)?)?;
                 },
                 _ => return refuse("native_operation_unavailable"),
             }
@@ -542,8 +733,13 @@ pub fn finish(
             // the close is reported done. The unconfirmed process stays recorded and keeps
             // deletion refused until it is settled; nothing claims it exited.
             let state=domain::task_tx(db,&b.task)?.0;
-            if unsettled && !(closing && state.terminal()) {return refuse("native_shutdown_unconfirmed");}
-            if restart {domain::native_continue_tx(db,&b.task)?;}
+            // An owner message recorded for the coordinator's next boundary leaves the
+            // running work (and its live processes) alone: nothing restarts.
+            // Lifting a write denial likewise leaves running work alone.
+            let boundary=request["action"]=="allow_write" || matches!(request["action"].as_str(),Some("prompt"|"incoming_prompt"))
+                && lifecycle::steering::delivery(db,&b.task,key(request)?)?.as_deref()==Some(lifecycle::steering::BOUNDARY);
+            if unsettled && !(closing && state.terminal()) && !boundary {return refuse("native_shutdown_unconfirmed");}
+            if restart && !boundary {domain::native_continue_tx(db,&b.task)?;}
             if closing {
                 let mut resolved=json!({"certified":state==TaskState::Completed});
                 if unsettled {resolved["processes_unconfirmed"]=json!(true);}
@@ -556,11 +752,155 @@ pub fn finish(
         })
     })
 }
+/// A native engine permission request waiting for the owner (see
+/// `permission_decisions`): Allow once / Deny, with who asks, what, where and why.
+#[allow(clippy::too_many_arguments)]
+fn permission_item(
+    db: &Transaction<'_>,
+    b: &Binding,
+    requirement: i64,
+    state: TaskState,
+    id: &str,
+    text: &str,
+    status: &str,
+    created: &str,
+    answered: Option<String>,
+    answer: Option<String>,
+    assignment: Option<String>,
+) -> CoreResult<Value> {
+    use crate::permission_decisions as pd;
+    let (details, reason) = pd::details_tx(db, &b.task, id)?;
+    let version: i64 = db
+        .query_row(
+            "SELECT id FROM runtime_events WHERE task_id=? AND type='NATIVE_PERMISSION_DECISION_OPENED'
+             AND json_extract(payload_json,'$.question_id')=? ORDER BY id DESC LIMIT 1",
+            (&b.task, id),
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(b.execution_version);
+    let shown = match status {
+        "answered" => "answered",
+        "open" => "pending",
+        _ => "superseded",
+    };
+    let option = |label: &str| json!({"optionId":format!("wo_{}", &crate::digest(format!("{id}:{label}").as_bytes())[..40]),"label":label});
+    let asked_by: Option<String> = match &assignment {
+        Some(key) => db
+            .query_row(
+                "SELECT role_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=? AND role_id<>'orchestrator'",
+                (&b.task, key),
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|role| role.strip_prefix("worker-").unwrap_or(&role).to_owned()),
+        None => None,
+    }
+    .or_else(|| details["role"].as_str().map(|r| r.strip_prefix("worker-").unwrap_or(r).to_owned()));
+    let mut value = json!({"decisionId":format!("wd_{id}"),"questionId":id,"kind":"permission","batchId":null,
+        "executionId":Value::Null,"acpSessionId":b.session,"scope":assignment.unwrap_or("task".into()),"prompt":text,
+        "options":[option(pd::ALLOW),option(pd::DENY)],"version":version.to_string(),"ownerEpoch":b.owner.epoch.to_string(),
+        "requirementRevision":requirement.to_string(),"status":shown,
+        "allowedOperations":if shown=="pending"&&state!=TaskState::Paused{vec!["decisions.answer"]}else{vec![]},
+        "createdAt":created,"answeredAt":answered,"answerText":answer,
+        "permission":{"operation":details["operation"],"paths":details["paths"],"reason":details["reason"],
+            "reasonText":details["reason_text"],"access":details["access"],"rule":details["rule"]}});
+    if let Some(role) = asked_by {
+        value["askedBy"] = json!(role);
+    }
+    if shown == "superseded" {
+        value["headline"] = json!(pd::withdrawn_sentence(reason.as_deref(), status));
+    }
+    Ok(value)
+}
+/// The files attached to each answered question, as `{name, mimeType, size, sha256}`
+/// references, by question id. An answer names its question per file (`question_ids`).
+/// An older record without names is attributed only when that is unambiguous: its files
+/// came from the desktop (named, numbered from 0, no URI) and the answer recorded in the
+/// same moment just before them is one question's. Such an attribution is marked `true`
+/// so a batch member never receives it.
+fn answer_attachments_tx(
+    db: &Transaction<'_>,
+    task: &str,
+) -> CoreResult<std::collections::HashMap<String, (Vec<Value>, bool)>> {
+    let rows = db
+        .prepare(
+            "SELECT id,payload_json,created_at FROM runtime_events
+             WHERE task_id=? AND type='USER_ANSWER_ATTACHMENTS' ORDER BY id",
+        )?
+        .query_map([task], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let reference = |d: &Value| -> Option<Value> {
+        (d["availability"] == "stored").then_some(())?;
+        Some(
+            json!({"name":d["name"].as_str()?,"mimeType":d["mime"].as_str()?,
+            "size":d["size_bytes"].as_u64()?,"sha256":d["sha256"].as_str()?}),
+        )
+    };
+    let mut out: std::collections::HashMap<String, (Vec<Value>, bool)> = Default::default();
+    for (event, payload, at) in rows {
+        let payload: Value = serde_json::from_str(&payload)?;
+        let Some(files) = payload["attachments"].as_array() else {
+            continue;
+        };
+        let (owners, legacy): (Vec<Option<String>>, bool) = match payload["question_ids"].as_array()
+        {
+            Some(ids) if ids.len() == files.len() => (
+                ids.iter().map(|q| q.as_str().map(str::to_owned)).collect(),
+                false,
+            ),
+            Some(_) => continue,
+            None => {
+                let desktop = files.iter().enumerate().all(|(i, f)| {
+                    f["uri"].is_null()
+                        && f["name"].is_string()
+                        && f["source_ref"]
+                            .as_str()
+                            .and_then(|s| s.rsplit_once(':'))
+                            .is_some_and(|(_, n)| n == i.to_string())
+                });
+                let answered: Option<(String, String)> = db
+                    .query_row(
+                        "SELECT json_extract(payload_json,'$.question_id'),created_at FROM runtime_events
+                         WHERE task_id=? AND type='NATIVE_QUESTION_ANSWERED' AND id<? ORDER BY id DESC LIMIT 1",
+                        (task, event),
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                let same_moment = |a: &str| {
+                    let parse = |s: &str| chrono::DateTime::parse_from_rfc3339(s).ok();
+                    matches!((parse(a), parse(&at)), (Some(a), Some(b))
+                        if (b - a).num_milliseconds() >= 0 && (b - a).num_milliseconds() <= 2000)
+                };
+                match answered {
+                    Some((q, a)) if desktop && same_moment(&a) => {
+                        (vec![Some(q); files.len()], true)
+                    }
+                    _ => continue,
+                }
+            }
+        };
+        for (file, owner) in files.iter().zip(owners) {
+            if let (Some(q), Some(r)) = (owner, reference(file)) {
+                let entry = out.entry(q).or_insert_with(|| (Vec::new(), legacy));
+                entry.1 |= legacy;
+                entry.0.push(r);
+            }
+        }
+    }
+    Ok(out)
+}
 fn decisions_tx(db: &Transaction<'_>, b: &Binding) -> CoreResult<Vec<Value>> {
     let waits = waits::projection_tx(db, &b.task)?;
-    let rows=db.prepare("SELECT id,text,options_json,status,created_at,answered_at,answer_text,assignment_ref FROM pending_questions WHERE task_id=? ORDER BY rowid LIMIT 1001")?
+    let rows=db.prepare("SELECT id,text,options_json,status,created_at,answered_at,answer_text,assignment_ref,dedup_key FROM pending_questions WHERE task_id=? ORDER BY rowid LIMIT 1001")?
         .query_map([&b.task],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,String>(3)?,
-            r.get::<_,String>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,Option<String>>(7)?)))?
+            r.get::<_,String>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,Option<String>>(7)?,r.get::<_,String>(8)?)))?
         .collect::<Result<Vec<_>,_>>()?;
     if rows.len() > 1000 {
         return refuse("native_decision_history_limit");
@@ -573,8 +913,16 @@ fn decisions_tx(db: &Transaction<'_>, b: &Binding) -> CoreResult<Vec<Value>> {
     let state = domain::task_tx(db, &b.task)?.0;
     // A paused task keeps the coordinator question it was waiting on, shown but not
     // answerable until Resume; the question itself is not superseded by Pause.
-    let paused_saved = if state == TaskState::Paused { domain::pause_saved_tx(db, &b.task)? } else { None };
-    rows.into_iter().map(|(id,text,options,status,created,answered,answer,assignment)| {
+    let paused_saved = if state == TaskState::Paused {
+        domain::pause_saved_tx(db, &b.task)?
+    } else {
+        None
+    };
+    let attached = answer_attachments_tx(db, &b.task)?;
+    rows.into_iter().map(|(id,text,options,status,created,answered,answer,assignment,dedup)| {
+        if dedup.starts_with(crate::permission_decisions::DEDUP_PREFIX) {
+            return permission_item(db,b,requirement,state,&id,&text,&status,&created,answered,answer,assignment);
+        }
         let w=waits.iter().rev().find(|w|w["question_id"]==id||w["questions"].as_array().is_some_and(|qs|qs.iter().any(|q|q["question_id"]==id)));
         let resumable=match w {Some(w)=>waits::valid_tx(db,w)?,None=>false};
         let interrupted=w.is_some_and(|w| w["reason"]=="native_session_lost"
@@ -606,12 +954,63 @@ fn decisions_tx(db: &Transaction<'_>, b: &Binding) -> CoreResult<Vec<Value>> {
                 (&b.task,&id,&id),|r|r.get(0)).optional()?
         } else { None };
         let version=question_version.unwrap_or(b.execution_version).to_string();
+        // A worker's question is answered in the task's Conversation like the coordinator's, so it names the role that asked:
+        // its assignment is the worker's provisioning key. A coordinator question (no assignment) names none.
+        let asked_by: Option<String> = match &assignment {
+            Some(key) => db.query_row("SELECT role_id FROM delegation_provisioning WHERE task_id=? AND idempotency_key=? AND role_id<>'orchestrator'",
+                (&b.task,key),|r|r.get::<_,String>(0)).optional()?.map(|role| role.strip_prefix("worker-").unwrap_or(&role).to_owned()),
+            None => None,
+        };
         let mut value=json!({"decisionId":format!("wd_{id}"),"questionId":id,"kind":if batch.is_null(){"question"}else{"question_batch"},
             "batchId":batch,"executionId":Value::Null,"acpSessionId":b.session,"scope":assignment.unwrap_or("task".into()),"prompt":text,
             "options":options,"version":version,"ownerEpoch":b.owner.epoch.to_string(),"requirementRevision":requirement.to_string(),
             "status":status,"allowedOperations":if status=="pending"&&state!=TaskState::Paused&&!interrupted{vec!["decisions.answer"]}else{vec![]},
             "createdAt":created,"answeredAt":answered,"answerText":answer});
+        if let Some(role)=asked_by {value["askedBy"]=json!(role);}
+        // A batch member's optional short label, kept with the question it names.
+        let topic=w.unwrap_or(&saved_batch)["questions"].as_array().and_then(|q|q.iter()
+            .find(|q|q["question_id"]==json!(id))).and_then(|q|q["topic"].as_str()).map(str::to_owned);
+        if let Some(topic)=topic {value["topic"]=json!(topic);}
         if !batch.is_null() {value["questionIds"]=json!(w.unwrap_or(&saved_batch)["questions"].as_array().unwrap().iter().map(|q|q["question_id"].clone()).collect::<Vec<_>>());}
+        // The runtime's own stop question carries what it explained beside its complete
+        // text: each answer's consequence, the recommended answer and what the desktop
+        // can open (the blocking task, the review report, the denied path).
+        if w.is_none() {
+            let stop: Option<String> = db.query_row("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_QUESTION_REQUESTED'
+                AND json_extract(payload_json,'$.question_id')=? AND json_extract(payload_json,'$.runtime_stop')=1 ORDER BY id DESC LIMIT 1",
+                (&b.task,&id),|r|r.get(0)).optional()?;
+            if let Some(stop) = stop.map(|s| serde_json::from_str::<Value>(&s)).transpose()? {
+                value["runtimeStop"]=json!(true);
+                if let (Some(options),Some(details))=(value["options"].as_array_mut(),stop["option_details"].as_array()) {
+                    for (o,d) in options.iter_mut().zip(details) {
+                        if o["label"]==d["label"] {o["detail"]=d["detail"].clone(); o["action"]=d["action"].clone();}
+                    }
+                }
+                if let Some(o)=stop["recommended"].as_u64().and_then(|i|value["options"].get_mut(i as usize)) {o["recommended"]=json!(true);}
+                if stop["targets"].is_array() {value["targets"]=stop["targets"].clone();}
+                if stop["headline"].is_string() {value["headline"]=stop["headline"].clone();}
+            }
+            // The runtime's stop question and a skill proposal act on the chosen option
+            // itself, so an option answer to them takes no added words.
+            let proposal: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='USER_QUESTION_REQUESTED'
+                AND json_extract(payload_json,'$.question_id')=? AND json_extract(payload_json,'$.skill_proposal') IS NOT NULL)",
+                (&b.task,&id),|r|r.get(0))?;
+            if proposal || value["runtimeStop"]==true {value["optionsOnly"]=json!(true);}
+        }
+        // The files the owner attached to this answer. One recorded before answers named
+        // their files is shown only for a lone question, never guessed within a batch.
+        if status=="answered" {
+            if let Some((files,legacy))=attached.get(&id) {
+                if !*legacy || batch.is_null() {value["answerAttachments"]=json!(files);}
+            }
+        }
+        // A question the runtime replaced with a later one names it.
+        if status=="superseded" {
+            let by: Option<String> = db.query_row("SELECT json_extract(payload_json,'$.question_id') FROM runtime_events WHERE task_id=? AND type='USER_QUESTION_REQUESTED'
+                AND EXISTS(SELECT 1 FROM json_each(json_extract(payload_json,'$.supersedes')) WHERE value=?) ORDER BY id LIMIT 1",
+                (&b.task,&id),|r|r.get(0)).optional()?;
+            if let Some(by)=by {value["replacedBy"]=json!(format!("wd_{by}"));}
+        }
         Ok(value)
     }).collect()
 }
@@ -677,7 +1076,13 @@ pub fn answer_with_input(
             let execution = command["payload"]["executionId"]
                 .as_str()
                 .ok_or(CoreError::Refused("invalid_execution"))?;
-            let b = binding(db, &store.key().root().to_string_lossy(), project, actor, execution)?;
+            let b = binding(
+                db,
+                &store.key().root().to_string_lossy(),
+                project,
+                actor,
+                execution,
+            )?;
             waits::cancel_unauthorized_tx(db, &b.task)
         });
     }
@@ -774,30 +1179,81 @@ fn answer_in_transaction(
                     {
                         return refuse("stale_version");
                     }
-                    let text = if a["optionId"].is_null() {
-                        a["text"].as_str().unwrap_or("").to_owned()
+                    let typed = a["text"].as_str().unwrap_or("");
+                    // A chosen option's text is its label, optionally followed by a blank
+                    // line and the owner's own words; the answer recorded is exactly that.
+                    let (text, comment) = if a["optionId"].is_null() {
+                        (typed.to_owned(), false)
                     } else {
-                        d["options"]
+                        let label = d["options"]
                             .as_array()
                             .unwrap()
                             .iter()
                             .find(|o| o["optionId"] == a["optionId"])
                             .and_then(|o| o["label"].as_str())
-                            .ok_or(CoreError::Refused("invalid_request"))?
-                            .to_owned()
+                            .ok_or(CoreError::Refused("invalid_request"))?;
+                        if typed.is_empty() || typed == label {
+                            (label.to_owned(), false)
+                        } else {
+                            let words = typed
+                                .strip_prefix(label)
+                                .and_then(|rest| rest.strip_prefix("\n\n"))
+                                .map(str::trim)
+                                .filter(|words| !words.is_empty())
+                                .ok_or(CoreError::Refused("invalid_request"))?;
+                            (format!("{label}\n\n{words}"), true)
+                        }
                     };
-                    if text.trim().is_empty()
-                        || !a["optionId"].is_null()
-                            && a["text"]
-                                .as_str()
-                                .is_some_and(|s| !s.is_empty() && s != text)
-                    {
+                    if text.trim().is_empty() {
                         return refuse("invalid_request");
                     }
-                    converted.push((d["questionId"].as_str().unwrap().to_owned(), text));
+                    // A permission decision takes one of its two options, never free text.
+                    let permission = d["kind"] == "permission";
+                    if permission && (a["optionId"].is_null() || comment) {
+                        return refuse("invalid_request");
+                    }
+                    // The runtime's stop question and a skill proposal act on the chosen
+                    // option itself, so their option takes no added words.
+                    if comment && d["optionsOnly"] == true {
+                        return refuse("option_comment_unavailable");
+                    }
+                    converted.push((
+                        d["questionId"].as_str().unwrap().to_owned(),
+                        text,
+                        permission,
+                    ));
                 }
-                let answered_text = converted.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
-                for (q, text) in converted {
+                let answered_text = converted
+                    .iter()
+                    .map(|(_, t, _)| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                // Which answered question each captured file came with, when the
+                // transport said so: one question id per file, each answered here.
+                let owners = match (p.get("captureQuestions"), capture) {
+                    (None, _) => None,
+                    (Some(Value::Array(ids)), Some(c))
+                        if ids.len() == c.blocks.len()
+                            && ids
+                                .iter()
+                                .all(|q| converted.iter().any(|(id, _, _)| q == id)) =>
+                    {
+                        Some(ids.clone())
+                    }
+                    _ => return refuse("invalid_input_capture"),
+                };
+                for (q, text, permission) in converted {
+                    if permission {
+                        if !crate::permission_decisions::answer_tx(
+                            db,
+                            &b.task,
+                            &q,
+                            text == crate::permission_decisions::ALLOW,
+                        )? {
+                            return refuse("superseded");
+                        }
+                        continue;
+                    }
                     if !waits::answer_tx(
                         db,
                         &b.task,
@@ -810,8 +1266,18 @@ fn answer_in_transaction(
                     }
                 }
                 if let Some(capture) = capture {
-                    let descriptors = capture.persist(store, db, &b.task, session.unwrap_or(&b.session), &answered_text)?;
-                    lifecycle::event_tx(db, &b.task, "USER_ANSWER_ATTACHMENTS", json!({"attachments":descriptors}))?;
+                    let descriptors = capture.persist(
+                        store,
+                        db,
+                        &b.task,
+                        session.unwrap_or(&b.session),
+                        &answered_text,
+                    )?;
+                    let mut payload = json!({"attachments":descriptors});
+                    if let Some(owners) = owners {
+                        payload["question_ids"] = Value::Array(owners);
+                    }
+                    lifecycle::event_tx(db, &b.task, "USER_ANSWER_ATTACHMENTS", payload)?;
                 }
                 Ok(super::receipt(
                     command,

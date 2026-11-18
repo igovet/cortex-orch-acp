@@ -26,6 +26,11 @@ pub enum Error {
     Invalid,
     #[error("authority_refused")]
     Forbidden,
+    /// An authority refusal that names its stable, secret-free refusal code
+    /// (for example `scope_not_granted`). Enforcement is identical to
+    /// `Forbidden`; only the reported reason is more precise.
+    #[error("authority_refused")]
+    Refused(&'static str),
     #[error("operation_busy_or_unreconciled")]
     Busy,
     #[error("io_error")]

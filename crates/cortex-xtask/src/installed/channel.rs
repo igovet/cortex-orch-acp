@@ -22,7 +22,11 @@ impl Channel {
             "release" => false,
             _ => return Err("unsupported installed-package channel".into()),
         };
-        let package = if dev { "cortex-workspace-dev" } else { "cortex-workspace" };
+        let package = if dev {
+            "cortex-workspace-dev"
+        } else {
+            "cortex-workspace"
+        };
         Ok(Channel {
             name: name.into(),
             package: package.into(),
@@ -30,7 +34,9 @@ impl Channel {
             service: format!("cortex-workspace-service{}", if dev { "-dev" } else { "" }),
             store: (if dev { ".cortex-dev" } else { ".cortex" }).into(),
             runtime: Path::new("/usr/lib").join(package).join("runtime"),
-            socket: Path::new("/run/user/1001").join(package).join("service.sock"),
+            socket: Path::new("/run/user/1001")
+                .join(package)
+                .join("service.sock"),
         })
     }
 
@@ -40,11 +46,20 @@ impl Channel {
 
     pub fn config(&self, home: &Path) -> PathBuf {
         let base = home.join(".config");
-        (if self.name == "dev" { base.join(&self.package) } else { base }).join("cortex")
+        (if self.name == "dev" {
+            base.join(&self.package)
+        } else {
+            base
+        })
+        .join("cortex")
     }
 
     pub fn catalog(&self, home: &Path) -> PathBuf {
-        let base = if self.name == "dev" { self.state(home).join("state") } else { home.join(".local/state") };
+        let base = if self.name == "dev" {
+            self.state(home).join("state")
+        } else {
+            home.join(".local/state")
+        };
         base.join("cortex/catalog")
     }
 

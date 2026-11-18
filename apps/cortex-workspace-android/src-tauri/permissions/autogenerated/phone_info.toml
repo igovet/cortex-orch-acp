@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-phone-info"
+description = "Enables the phone_info command without any pre-configured scope."
+commands.allow = ["phone_info"]
+
+[[permission]]
+identifier = "deny-phone-info"
+description = "Denies the phone_info command without any pre-configured scope."
+commands.deny = ["phone_info"]

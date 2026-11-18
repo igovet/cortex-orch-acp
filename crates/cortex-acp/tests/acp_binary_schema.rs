@@ -124,7 +124,9 @@ impl Schema {
                     .filter(|branch| self.check(branch, value, path).is_ok())
                     .count();
                 if passing == 0 || (exactly_one && passing != 1) {
-                    return Err(format!("{path}: {passing} {keyword} branches match {value}"));
+                    return Err(format!(
+                        "{path}: {passing} {keyword} branches match {value}"
+                    ));
                 }
             }
         }
@@ -140,7 +142,8 @@ fn schema() -> Schema {
 fn the_validator_accepts_and_rejects_by_the_real_schema() {
     let schema = schema();
     let response = json!({"$ref": "#/$defs/AgentResponse"});
-    let good = json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}});
+    let good =
+        json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}});
     schema.valid(&response, &good).unwrap();
     let bad = json!({"jsonrpc":"2.0","id":1,"error":{"code":"not-an-integer","message":"m"}});
     assert!(schema.valid(&response, &bad).is_err());
@@ -169,7 +172,8 @@ struct Probe {
 
 impl Probe {
     fn start(label: &str) -> Self {
-        let root = std::env::temp_dir().join(format!("cxacp-schema-{}-{label}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("cxacp-schema-{}-{label}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         for directory in ["project", "home"] {
             fs::create_dir_all(root.join(directory)).unwrap();
@@ -198,7 +202,13 @@ impl Probe {
             let _ = sender.send(None);
         });
         let input = child.stdin.take();
-        Self { child, input, frames, schema: schema(), root }
+        Self {
+            child,
+            input,
+            frames,
+            schema: schema(),
+            root,
+        }
     }
 
     fn send(&mut self, id: i64, method: &str, params: Value) {
@@ -220,7 +230,11 @@ impl Probe {
     /// The next frame, validated as the given kind.
     fn receive(&self, kind: &str) -> Value {
         let frame = self.receive_frame();
-        let definition = if kind == "response" { "AgentResponse" } else { "AgentNotification" };
+        let definition = if kind == "response" {
+            "AgentResponse"
+        } else {
+            "AgentNotification"
+        };
         self.schema
             .valid(&json!({"$ref": format!("#/$defs/{definition}")}), &frame)
             .unwrap_or_else(|reason| panic!("{kind} violates the ACP schema: {reason}\n{frame}"));
@@ -232,13 +246,22 @@ impl Probe {
     fn check_update(&self, frame: &Value) {
         if frame["method"] == "session/update" {
             self.schema
-                .valid(&json!({"$ref": "#/$defs/SessionNotification"}), &frame["params"])
-                .unwrap_or_else(|reason| panic!("update violates the ACP schema: {reason}\n{frame}"));
+                .valid(
+                    &json!({"$ref": "#/$defs/SessionNotification"}),
+                    &frame["params"],
+                )
+                .unwrap_or_else(|reason| {
+                    panic!("update violates the ACP schema: {reason}\n{frame}")
+                });
         }
     }
 
     fn prompt(&mut self, id: i64, session: &str, text: &str) {
-        self.send(id, "session/prompt", json!({"sessionId":session,"prompt":[{"type":"text","text":text}]}));
+        self.send(
+            id,
+            "session/prompt",
+            json!({"sessionId":session,"prompt":[{"type":"text","text":text}]}),
+        );
     }
 }
 
@@ -253,7 +276,11 @@ impl Drop for Probe {
 #[test]
 fn binary_frames_are_schema_valid_and_startup_dispatches_no_engine() {
     let mut probe = Probe::start("startup");
-    probe.send(1, "initialize", json!({"protocolVersion":1,"clientCapabilities":{}}));
+    probe.send(
+        1,
+        "initialize",
+        json!({"protocolVersion":1,"clientCapabilities":{}}),
+    );
     let init = probe.receive("response")["result"].clone();
     assert_eq!(init["protocolVersion"], 1);
     assert_eq!(init["agentCapabilities"]["loadSession"], true);
@@ -270,37 +297,85 @@ fn binary_frames_are_schema_valid_and_startup_dispatches_no_engine() {
     let new = probe.receive("response")["result"].clone();
     let sid = new["sessionId"].as_str().unwrap().to_owned();
     let ids = |options: &Value| -> BTreeSet<String> {
-        options.as_array().unwrap().iter().map(|o| o["id"].as_str().unwrap().to_owned()).collect()
+        options
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["id"].as_str().unwrap().to_owned())
+            .collect()
     };
-    assert_eq!(ids(&new["configOptions"]), BTreeSet::from(["language".to_owned(), "access_mode".to_owned()]));
-    let mode = new["configOptions"].as_array().unwrap().iter().find(|o| o["id"] == "access_mode").unwrap();
+    assert_eq!(
+        ids(&new["configOptions"]),
+        BTreeSet::from(["language".to_owned(), "access_mode".to_owned()])
+    );
+    let mode = new["configOptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "access_mode")
+        .unwrap();
     assert_eq!(mode["currentValue"], "development");
     // Only Paseo receives access as ACP `modes`.
     assert!(new.get("modes").is_none());
-    let values: BTreeSet<_> = mode["options"].as_array().unwrap().iter().map(|o| o["value"].as_str().unwrap()).collect();
+    let values: BTreeSet<_> = mode["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["value"].as_str().unwrap())
+        .collect();
     assert_eq!(values, BTreeSet::from(["development", "guarded", "auto"]));
     let commands = probe.receive("notification")["params"]["update"]["availableCommands"].clone();
-    let names: BTreeSet<_> = commands.as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_owned()).collect();
-    for expected in ["cortex-status", "cortex-setup", "cortex-model", "cortex-effort", "cortex-language"] {
-        assert!(names.contains(expected), "{expected} missing from {names:?}");
+    let names: BTreeSet<_> = commands
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap().to_owned())
+        .collect();
+    for expected in [
+        "cortex-status",
+        "cortex-setup",
+        "cortex-model",
+        "cortex-effort",
+        "cortex-language",
+    ] {
+        assert!(
+            names.contains(expected),
+            "{expected} missing from {names:?}"
+        );
     }
 
     probe.prompt(3, &sid, "/cortex-status");
-    assert_eq!(probe.receive("notification")["params"]["update"]["sessionUpdate"], "agent_message_chunk");
-    assert_eq!(probe.receive("response")["result"]["stopReason"], "end_turn");
+    assert_eq!(
+        probe.receive("notification")["params"]["update"]["sessionUpdate"],
+        "agent_message_chunk"
+    );
+    assert_eq!(
+        probe.receive("response")["result"]["stopReason"],
+        "end_turn"
+    );
 
     probe.prompt(30, &sid, "/cortex-language ru");
-    assert_eq!(probe.receive("notification")["params"]["update"]["sessionUpdate"], "config_option_update");
+    assert_eq!(
+        probe.receive("notification")["params"]["update"]["sessionUpdate"],
+        "config_option_update"
+    );
     assert_eq!(
         probe.receive("notification")["params"]["update"]["content"]["text"],
         "cortex-language set to 'ru' (pending — applies to the next run)."
     );
-    assert_eq!(probe.receive("response")["result"]["stopReason"], "end_turn");
+    assert_eq!(
+        probe.receive("response")["result"]["stopReason"],
+        "end_turn"
+    );
 
     // An explicit harvest and an ordinary prompt are not commands; with no
     // route they fail closed before any engine is reached. An absolute path
     // is not a command-shaped slash token.
-    for (id, text) in [(31, "/harvest"), (32, "/absolute/project/path"), (4, "Must not reach an engine")] {
+    for (id, text) in [
+        (31, "/harvest"),
+        (32, "/absolute/project/path"),
+        (4, "Must not reach an engine"),
+    ] {
         probe.prompt(id, &sid, text);
         let error = probe.receive("response")["error"].clone();
         assert_eq!(error["message"], "orchestration_unavailable");
@@ -315,58 +390,134 @@ fn binary_frames_are_schema_valid_and_startup_dispatches_no_engine() {
         probe.receive("response")["error"],
         json!({"code":-32601,"message":"Method 'authenticate' is not supported."})
     );
-    probe.send(11, "session/set_config_option", json!({"sessionId":sid,"configId":"language","value":"en"}));
-    assert!(!probe.receive("response")["result"]["configOptions"].as_array().unwrap().is_empty());
-    assert_eq!(probe.receive("notification")["params"]["update"]["sessionUpdate"], "config_option_update");
+    probe.send(
+        11,
+        "session/set_config_option",
+        json!({"sessionId":sid,"configId":"language","value":"en"}),
+    );
+    assert!(!probe.receive("response")["result"]["configOptions"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        probe.receive("notification")["params"]["update"]["sessionUpdate"],
+        "config_option_update"
+    );
     let refusals: Vec<(i64, &str, Value, &str)> = vec![
-        (12, "session/set_mode", json!({"sessionId":sid,"modeId":"invalid"}),
-         "'invalid' is not a valid mode; expected one of ['development', 'guarded', 'auto']."),
-        (13, "session/set_config_option", json!({"sessionId":sid,"configId":"cortex_question_answer",
-            "value":json!({"batchId":"missing","answers":[],"requestKey":"none"}).to_string()}), "invalid_question_answer"),
-        (14, "session/set_config_option", json!({"sessionId":sid,"configId":"cortex_queued_message",
+        (
+            12,
+            "session/set_mode",
+            json!({"sessionId":sid,"modeId":"invalid"}),
+            "'invalid' is not a valid mode; expected one of ['development', 'guarded', 'auto'].",
+        ),
+        (
+            13,
+            "session/set_config_option",
+            json!({"sessionId":sid,"configId":"cortex_question_answer",
+            "value":json!({"batchId":"missing","answers":[],"requestKey":"none"}).to_string()}),
+            "invalid_question_answer",
+        ),
+        (
+            14,
+            "session/set_config_option",
+            json!({"sessionId":sid,"configId":"cortex_queued_message",
             "value":json!({"clientMessageId":"no-task","content":[{"type":"text","text":"Not dispatched"}]}).to_string()}),
-         "session_has_no_task"),
-        (15, "session/set_config_option", json!({"sessionId":sid,"configId":"cortex_stop_command",
-            "value":json!({"toolCallRef":"none","reason":"Not running","requestKey":"stop"}).to_string()}), "session_has_no_task"),
-        (16, "_cortex/workspace_control", json!({}), "project_inactive"),
-        (17, "session/new", json!({"cwd":project,"mcpServers":[
-            {"name":"ungranted","command":"/bin/false","args":[],"env":[]}]}), "external_mcp_server_unconfigured"),
-        (18, "session/prompt", json!({"sessionId":sid,"prompt":[{"type":"image","mimeType":"image/png","data":"%%%"}]}),
-         "An image content block data field must be standard base64."),
-        (19, "session/prompt", json!({"sessionId":sid,"prompt":[
-            {"type":"resource_link","name":"unfetched","uri":"https://example.invalid"}]}), "orchestration_unavailable"),
+            "session_has_no_task",
+        ),
+        (
+            15,
+            "session/set_config_option",
+            json!({"sessionId":sid,"configId":"cortex_stop_command",
+            "value":json!({"toolCallRef":"none","reason":"Not running","requestKey":"stop"}).to_string()}),
+            "session_has_no_task",
+        ),
+        (
+            16,
+            "_cortex/workspace_control",
+            json!({}),
+            "project_inactive",
+        ),
+        (
+            17,
+            "session/new",
+            json!({"cwd":project,"mcpServers":[
+            {"name":"ungranted","command":"/bin/false","args":[],"env":[]}]}),
+            "external_mcp_server_unconfigured",
+        ),
+        (
+            18,
+            "session/prompt",
+            json!({"sessionId":sid,"prompt":[{"type":"image","mimeType":"image/png","data":"%%%"}]}),
+            "An image content block data field must be standard base64.",
+        ),
+        (
+            19,
+            "session/prompt",
+            json!({"sessionId":sid,"prompt":[
+            {"type":"resource_link","name":"unfetched","uri":"https://example.invalid"}]}),
+            "orchestration_unavailable",
+        ),
     ];
     for (id, method, params, reason) in refusals {
         probe.send(id, method, params);
-        assert_eq!(probe.receive("response")["error"]["message"], reason, "request {id}");
+        assert_eq!(
+            probe.receive("response")["error"]["message"],
+            reason,
+            "request {id}"
+        );
     }
 
     // Reloading replays the transcript, interleaved with the recorded language
     // selections, in order.
     probe.send(20, "session/cancel", json!({"sessionId":sid}));
-    probe.send(21, "session/load", json!({"cwd":project,"sessionId":sid,"mcpServers":[]}));
+    probe.send(
+        21,
+        "session/load",
+        json!({"cwd":project,"sessionId":sid,"mcpServers":[]}),
+    );
     let mut languages = vec![];
     loop {
         let frame = probe.receive_frame();
         if frame.get("id").is_some() {
-            probe.schema.valid(&json!({"$ref":"#/$defs/AgentResponse"}), &frame).unwrap();
-            assert!(!frame["result"]["configOptions"].as_array().unwrap().is_empty());
+            probe
+                .schema
+                .valid(&json!({"$ref":"#/$defs/AgentResponse"}), &frame)
+                .unwrap();
+            assert!(!frame["result"]["configOptions"]
+                .as_array()
+                .unwrap()
+                .is_empty());
             break;
         }
-        probe.schema.valid(&json!({"$ref":"#/$defs/AgentNotification"}), &frame).unwrap();
+        probe
+            .schema
+            .valid(&json!({"$ref":"#/$defs/AgentNotification"}), &frame)
+            .unwrap();
         probe.check_update(&frame);
         let replayed = &frame["params"]["update"];
         if replayed["sessionUpdate"] == "config_option_update" {
-            let language = replayed["configOptions"].as_array().unwrap().iter().find(|o| o["id"] == "language").unwrap();
+            let language = replayed["configOptions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|o| o["id"] == "language")
+                .unwrap();
             languages.push(language["currentValue"].as_str().unwrap().to_owned());
         }
     }
     assert_eq!(languages, ["ru", "en"]);
-    assert_eq!(probe.receive("notification")["params"]["update"]["sessionUpdate"], "available_commands_update");
+    assert_eq!(
+        probe.receive("notification")["params"]["update"]["sessionUpdate"],
+        "available_commands_update"
+    );
 
     // Exactly one project store exists for the logical project and channel, and
     // no runtime task was ever created.
-    let directory = if channel == "dev" { ".cortex-dev" } else { ".cortex" };
+    let directory = if channel == "dev" {
+        ".cortex-dev"
+    } else {
+        ".cortex"
+    };
     let databases: Vec<_> = fs::read_dir(&project)
         .unwrap()
         .flatten()
@@ -374,7 +525,10 @@ fn binary_frames_are_schema_valid_and_startup_dispatches_no_engine() {
         .map(|e| e.path().join("cortex.sqlite3"))
         .filter(|p| p.is_file())
         .collect();
-    assert_eq!(databases, vec![project.join(directory).join("cortex.sqlite3")]);
+    assert_eq!(
+        databases,
+        vec![project.join(directory).join("cortex.sqlite3")]
+    );
 
     drop(probe.input.take());
     assert!(probe.child.wait().unwrap().success());

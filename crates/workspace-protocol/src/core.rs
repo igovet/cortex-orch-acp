@@ -228,6 +228,10 @@ pub enum CoreQuery {
     ResultGet(Target),
     #[serde(rename = "history.page")]
     History(Page),
+    /// The same conversation read from its end backwards: without a cursor the newest `limit` source rows, with a
+    /// `prevCursor` the `limit` rows before it. Rows return in source order; `history.page` keeps reading forward.
+    #[serde(rename = "history.earlier")]
+    HistoryEarlier(Page),
     #[serde(rename = "reports.page")]
     Reports(Page),
     #[serde(rename = "requests.get")]
@@ -426,6 +430,7 @@ impl NativeBody for CoreQuery {
             | Self::Questions(p)
             | Self::Permissions(p)
             | Self::History(p)
+            | Self::HistoryEarlier(p)
             | Self::Reports(p) => {
                 identity(&p.target)?;
                 p.validate(100)

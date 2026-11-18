@@ -269,7 +269,8 @@ pub async fn file(
         Ok(reply)
     }
 }
-pub fn attachments(root: &Path, project: &str, task: &str) -> Result<Value> {
+/// A saved task's files as references: each body is stored privately here first.
+pub fn attachments(root: &Path, state: &Path, project: &str, task: &str) -> Result<Value> {
     let store = open(root, OpenMode::LiveReadOnly)?
         .ok_or_else(|| refuse("unknown_task", "Unknown task."))?;
     let files=store.read(|db| {
@@ -279,5 +280,7 @@ pub fn attachments(root: &Path, project: &str, task: &str) -> Result<Value> {
         Ok(value.get("attachments").cloned().unwrap_or(json!([])))
     }).map_err(core)?;
     super::product::attachments(&files)?;
-    Ok(files)
+    let mut wrapped = json!({"attachments":files});
+    super::attachment_files::externalize(state, &mut wrapped)?;
+    Ok(wrapped["attachments"].take())
 }

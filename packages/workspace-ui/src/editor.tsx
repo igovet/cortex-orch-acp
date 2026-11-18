@@ -112,11 +112,22 @@ function heldBy(buffers: Buffers) {
   buffers.subscribe((key, text, undoable) => {
     const session = made.sessions.get(key);
     if (!session) return;
-    const spec = (state: EditorState): TransactionSpec => ({ changes: { from: 0, to: state.doc.length, insert: text }, annotations: undoable ? [isolateHistory.of("full")] : [Transaction.addToHistory.of(false)] });
+    // Only the span that differs is replaced, so the reader's position (mapped through the change) stays where it was.
+    const spec = (state: EditorState): TransactionSpec => ({ changes: changedSpan(state.doc.toString(), text), annotations: undoable ? [isolateHistory.of("full")] : [Transaction.addToHistory.of(false)] });
     if (made.shown?.key === key) made.shown.view.dispatch(spec(made.shown.view.state));
     else session.state = session.state.update(spec(session.state)).state;
   });
   return made;
+}
+
+/** The smallest single replacement turning `before` into `after`. */
+export function changedSpan(before: string, after: string) {
+  let from = 0;
+  const max = Math.min(before.length, after.length);
+  while (from < max && before.charCodeAt(from) === after.charCodeAt(from)) from++;
+  let end = before.length, to = after.length;
+  while (end > from && to > from && before.charCodeAt(end - 1) === after.charCodeAt(to - 1)) { end--; to--; }
+  return { from, to: end, insert: after.slice(from, to) };
 }
 
 /** The editable file. The text it holds belongs to the buffer store, so this view can come and go without losing any. */

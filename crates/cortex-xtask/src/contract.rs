@@ -41,11 +41,24 @@ fn ts_type(spec: &Value) -> Res<String> {
             let mut fields = Vec::new();
             if let Some(props) = spec.get("properties").and_then(Value::as_obj) {
                 for (key, value) in props {
-                    let optional = if required.contains(&key.as_str()) { "" } else { "?" };
-                    fields.push(format!("{}{}: {}", canonical(&Value::str(key.clone()))?, optional, ts_type(value)?));
+                    let optional = if required.contains(&key.as_str()) {
+                        ""
+                    } else {
+                        "?"
+                    };
+                    fields.push(format!(
+                        "{}{}: {}",
+                        canonical(&Value::str(key.clone()))?,
+                        optional,
+                        ts_type(value)?
+                    ));
                 }
             }
-            if spec.get("additionalProperties").map(Value::truthy).unwrap_or(true) {
+            if spec
+                .get("additionalProperties")
+                .map(Value::truthy)
+                .unwrap_or(true)
+            {
                 fields.push("[key: string]: unknown".into());
             }
             Ok(format!("{{ {} }}", fields.join("; ")))
@@ -61,19 +74,44 @@ fn ts_type(spec: &Value) -> Res<String> {
 
 fn check_subset(schema: &Value) -> Res<()> {
     const ALLOWED: &[&str] = &[
-        "$schema", "$id", "title", "$defs", "$ref", "type", "properties", "required", "additionalProperties",
-        "items", "maxItems", "minItems", "uniqueItems", "maxLength", "minLength", "pattern", "minimum",
-        "maximum", "const", "enum", "oneOf", "anyOf",
+        "$schema",
+        "$id",
+        "title",
+        "$defs",
+        "$ref",
+        "type",
+        "properties",
+        "required",
+        "additionalProperties",
+        "items",
+        "maxItems",
+        "minItems",
+        "uniqueItems",
+        "maxLength",
+        "minLength",
+        "pattern",
+        "minimum",
+        "maximum",
+        "const",
+        "enum",
+        "oneOf",
+        "anyOf",
     ];
     const PATTERNS: &[&str] = &["^(0|[1-9][0-9]*)$", "^[1-9][0-9]*$", "^[0-9a-f]{64}$"];
     let defs = schema.req("$defs")?.as_obj().ok_or("invalid $defs")?;
     fn visit(spec: &Value, defs: &[(String, Value)]) -> Res<()> {
         let items = spec.as_obj().ok_or("unsupported schema keyword")?;
-        if items.iter().any(|(k, _)| !ALLOWED.contains(&k.as_str()) && !k.starts_with("x-")) {
+        if items
+            .iter()
+            .any(|(k, _)| !ALLOWED.contains(&k.as_str()) && !k.starts_with("x-"))
+        {
             return Err("unsupported schema keyword".into());
         }
         if let Some(t) = spec.get("type") {
-            if !matches!(t.as_str(), Some("object" | "array" | "string" | "integer" | "null" | "boolean")) {
+            if !matches!(
+                t.as_str(),
+                Some("object" | "array" | "string" | "integer" | "null" | "boolean")
+            ) {
                 return Err("unsupported schema type".into());
             }
         }
@@ -83,7 +121,10 @@ fn check_subset(schema: &Value) -> Res<()> {
             }
         }
         if let Some(r) = spec.get("$ref") {
-            let ok = r.as_str().map(|r| defs.iter().any(|(n, _)| r == format!("#/$defs/{n}"))).unwrap_or(false);
+            let ok = r
+                .as_str()
+                .map(|r| defs.iter().any(|(n, _)| r == format!("#/$defs/{n}")))
+                .unwrap_or(false);
             if !ok {
                 return Err("unsupported schema reference".into());
             }
@@ -123,22 +164,41 @@ pub fn render(schema: &Value, lock: &Value) -> Res<Vec<(String, String)>> {
     let defs_value = schema.req("$defs")?;
     let defs = defs_value.as_obj().ok_or("invalid $defs")?;
     let get_def = |n: &str| defs_value.req(n);
-    let attachment_files = limits.req("attachmentFiles")?.as_i64().ok_or("invalid limit")?;
-    let attachment_bytes = limits.req("attachmentBytes")?.as_i64().ok_or("invalid limit")?;
+    let attachment_files = limits
+        .req("attachmentFiles")?
+        .as_i64()
+        .ok_or("invalid limit")?;
+    let attachment_bytes = limits
+        .req("attachmentBytes")?
+        .as_i64()
+        .ok_or("invalid limit")?;
     if get_def("Attachments")?.req("maxItems")?.as_i64() != Some(attachment_files)
-        || get_def("Attachment")?.req("properties")?.req("data")?.req("maxLength")?.as_i64()
+        || get_def("Attachment")?
+            .req("properties")?
+            .req("data")?
+            .req("maxLength")?
+            .as_i64()
             != Some((attachment_bytes + 2) / 3 * 4)
     {
         return Err("attachment schema bounds must derive from x-limits".into());
     }
     let version = schema.req("x-wire-version")?;
-    let major = version.req("major")?.as_i64().ok_or("invalid wire version")?;
-    let minor = version.req("minor")?.as_i64().ok_or("invalid wire version")?;
+    let major = version
+        .req("major")?
+        .as_i64()
+        .ok_or("invalid wire version")?;
+    let minor = version
+        .req("minor")?
+        .as_i64()
+        .ok_or("invalid wire version")?;
     let version_key = format!("{major}.{minor}");
     let digest = hex(&Sha256::digest(canonical(schema)?.as_bytes()));
     if let Some(existing) = lock.get(&version_key) {
         if existing.as_str() != Some(digest.as_str()) {
-            return Err("schema changed: bump wire version; existing version fingerprints are immutable".into());
+            return Err(
+                "schema changed: bump wire version; existing version fingerprints are immutable"
+                    .into(),
+            );
         }
     }
     let mut updated_lock = lock.clone();
@@ -151,7 +211,11 @@ pub fn render(schema: &Value, lock: &Value) -> Res<Vec<(String, String)>> {
     }
     types += &format!(
         "export interface WireTypes {{ {} }}\n",
-        names.iter().map(|n| format!("{n}: {n}")).collect::<Vec<_>>().join("; ")
+        names
+            .iter()
+            .map(|n| format!("{n}: {n}"))
+            .collect::<Vec<_>>()
+            .join("; ")
     );
     let constants: Vec<(&str, Value)> = vec![
         ("PROTOCOL", version.clone()),
@@ -171,11 +235,16 @@ pub fn render(schema: &Value, lock: &Value) -> Res<Vec<(String, String)>> {
     }
     js += reexport;
 
-    let fixtures = schema.req("x-fixtures")?.replace_text("$fingerprint", &digest);
+    let fixtures = schema
+        .req("x-fixtures")?
+        .replace_text("$fingerprint", &digest);
     let fixture_items = fixtures.as_arr().ok_or("invalid fixtures")?;
 
     let mut rust = String::from(HEADER);
-    rust += &format!("pub const SCHEMA_FINGERPRINT: &str =\n    {};\n", canonical(&Value::str(digest.clone()))?);
+    rust += &format!(
+        "pub const SCHEMA_FINGERPRINT: &str =\n    {};\n",
+        canonical(&Value::str(digest.clone()))?
+    );
     rust += &format!("pub const WIRE_MAJOR: u64 = {major};\n");
     rust += &format!("pub const WIRE_MINOR: u64 = {minor};\n");
     for (key, value) in limits.as_obj().ok_or("invalid limits")? {
@@ -186,21 +255,33 @@ pub fn render(schema: &Value, lock: &Value) -> Res<Vec<(String, String)>> {
             }
             constant.extend(ch.to_uppercase());
         }
-        rust += &format!("pub const {constant}: usize = {};\n", value.as_i64().ok_or("invalid limit")?);
+        rust += &format!(
+            "pub const {constant}: usize = {};\n",
+            value.as_i64().ok_or("invalid limit")?
+        );
     }
     for name in &names {
-        let body = TYPE_TEMPLATE.replace("\"NAME\"", &canonical(&Value::str(*name))?).replace("NAME", rust_name(name));
+        let body = TYPE_TEMPLATE
+            .replace("\"NAME\"", &canonical(&Value::str(*name))?)
+            .replace("NAME", rust_name(name));
         rust += "\n";
         rust += &body;
     }
-    let mut ts_fixtures = String::from("// Generated valid compile-time vectors; JSON validation is separate.\n");
-    ts_fixtures += &format!("import type {{ {} }} from './index.js';\n", names.join(", "));
+    let mut ts_fixtures =
+        String::from("// Generated valid compile-time vectors; JSON validation is separate.\n");
+    ts_fixtures += &format!(
+        "import type {{ {} }} from './index.js';\n",
+        names.join(", ")
+    );
     for (index, fixture) in fixture_items.iter().enumerate() {
         if fixture.req("valid")?.truthy() {
             ts_fixtures += &format!(
                 "export const vector{index} = {} satisfies {};\n",
                 canonical(fixture.req("value")?)?,
-                fixture.req("type")?.as_str().ok_or("invalid fixture type")?
+                fixture
+                    .req("type")?
+                    .as_str()
+                    .ok_or("invalid fixture type")?
             );
         }
     }
@@ -216,9 +297,18 @@ pub fn render(schema: &Value, lock: &Value) -> Res<Vec<(String, String)>> {
     Ok(vec![
         (FINGERPRINT_PATH.into(), format!("{digest}\n")),
         (LOCK_PATH.into(), pretty(&updated_lock)?),
-        ("packages/workspace-contract/fixtures.ts".into(), ts_fixtures),
-        ("packages/workspace-contract/schema.json".into(), pretty(schema)?),
-        ("packages/workspace-contract/fixtures.json".into(), pretty(&fixtures)?),
+        (
+            "packages/workspace-contract/fixtures.ts".into(),
+            ts_fixtures,
+        ),
+        (
+            "packages/workspace-contract/schema.json".into(),
+            pretty(schema)?,
+        ),
+        (
+            "packages/workspace-contract/fixtures.json".into(),
+            pretty(&fixtures)?,
+        ),
         ("packages/workspace-contract/index.ts".into(), types),
         ("packages/workspace-contract/index.js".into(), js),
         ("crates/workspace-protocol/src/generated.rs".into(), rust),
@@ -235,7 +325,11 @@ pub fn run(root: &Path, write: bool) -> Res<()> {
     if !write && !lock_path.exists() {
         return Err("missing schema version lock".into());
     }
-    let lock = if lock_path.exists() { parse(&read_text(&lock_path)?)? } else { Value::obj() };
+    let lock = if lock_path.exists() {
+        parse(&read_text(&lock_path)?)?
+    } else {
+        Value::obj()
+    };
     let outputs = render(&schema, &lock)?;
     let mut drift = Vec::new();
     for (path, content) in &outputs {
@@ -249,6 +343,9 @@ pub fn run(root: &Path, write: bool) -> Res<()> {
     if !drift.is_empty() {
         return Err(format!("Workspace contract drift: {}", drift.join(", ")));
     }
-    println!("Workspace contract {}: OK", if write { "write" } else { "check" });
+    println!(
+        "Workspace contract {}: OK",
+        if write { "write" } else { "check" }
+    );
     Ok(())
 }

@@ -1,12 +1,18 @@
 //! Worker skill/reference rendering from the shared `agent-sources` (`profiles check|write`).
 
-use crate::fsutil::{py_rstrip, py_split_ws, py_splitlines, py_strip, read_bytes, read_text, write_bytes};
+use crate::fsutil::{
+    py_rstrip, py_split_ws, py_splitlines, py_strip, read_bytes, read_text, write_bytes,
+};
 use crate::json::{parse, quote, Res, Value};
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-const WORKER_REFERENCES: &[&str] = &["code-and-evidence.md", "interactive-resources.md", "report-publication.md"];
+const WORKER_REFERENCES: &[&str] = &[
+    "code-and-evidence.md",
+    "interactive-resources.md",
+    "report-publication.md",
+];
 const SPECIALIZED: &[&str] = &[
     "Profile title",
     "Role and responsibility",
@@ -15,8 +21,15 @@ const SPECIALIZED: &[&str] = &[
     "Quality criteria",
     "Report and handoff",
 ];
-const REPORT_TEMPLATES: &[&str] =
-    &["general", "planning", "investigation", "implementation", "verification", "documentation", "synthesis"];
+const REPORT_TEMPLATES: &[&str] = &[
+    "general",
+    "planning",
+    "investigation",
+    "implementation",
+    "verification",
+    "documentation",
+    "synthesis",
+];
 
 fn verification_source(access_class: &str) -> Option<&'static str> {
     match access_class {
@@ -93,23 +106,38 @@ fn when_to_use(section: &str) -> Res<BTreeMap<&'static str, String>> {
         }
     }
     if found.len() != 2 {
-        return Err("When to use must have one Select and one Choose another specialist bullet".into());
+        return Err(
+            "When to use must have one Select and one Choose another specialist bullet".into(),
+        );
     }
-    Ok(found.into_iter().map(|(k, v)| (k, py_split_ws(&v.join(" ")).join(" "))).collect())
+    Ok(found
+        .into_iter()
+        .map(|(k, v)| (k, py_split_ws(&v.join(" ")).join(" ")))
+        .collect())
 }
 
 pub fn expected_skills(root: &Path) -> Res<BTreeMap<PathBuf, Vec<u8>>> {
     let sources = root.join("agent-sources");
     let template = read_text(&sources.join("worker-protocol.md"))?;
     let profiles_doc = parse(&read_text(&root.join("profiles.json"))?)?;
-    let profiles = profiles_doc.req("profiles")?.as_arr().ok_or("invalid profiles")?;
+    let profiles = profiles_doc
+        .req("profiles")?
+        .as_arr()
+        .ok_or("invalid profiles")?;
     let mut rendered = BTreeMap::new();
     for profile in profiles {
         let pname = profile.get("name").and_then(Value::as_str).unwrap_or("?");
-        let access_class = profile.get("access_class").and_then(Value::as_str).unwrap_or("");
-        let verification = verification_source(access_class).ok_or(format!("invalid access class for {pname}"))?;
+        let access_class = profile
+            .get("access_class")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let verification =
+            verification_source(access_class).ok_or(format!("invalid access class for {pname}"))?;
         let source = profile.req("source")?.as_str().ok_or("invalid source")?;
-        let report_template = profile.get("report_template").and_then(Value::as_str).unwrap_or("");
+        let report_template = profile
+            .get("report_template")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if !REPORT_TEMPLATES.contains(&report_template) {
             return Err(format!("invalid report template for {pname}"));
         }
@@ -117,7 +145,9 @@ pub fn expected_skills(root: &Path) -> Res<BTreeMap<PathBuf, Vec<u8>>> {
         let stated = when_to_use(&values["When to use this profile"])?;
         for key in ["select_when", "avoid_when"] {
             if profile.get(key).and_then(Value::as_str) != stated.get(key).map(String::as_str) {
-                return Err(format!("profiles.json select_when/avoid_when differ from {source} When to use"));
+                return Err(format!(
+                    "profiles.json select_when/avoid_when differ from {source} When to use"
+                ));
             }
         }
         let selected = if access_class == "consultant" {
@@ -137,18 +167,27 @@ pub fn expected_skills(root: &Path) -> Res<BTreeMap<PathBuf, Vec<u8>>> {
             return Err("unresolved worker protocol placeholder".into());
         }
         let stem = source.strip_suffix(".md").unwrap_or(source);
-        let stem = Path::new(stem).file_name().and_then(|s| s.to_str()).unwrap_or(stem);
+        let stem = Path::new(stem)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(stem);
         let name = format!("worker-{stem}");
         let description = format!(
             "Cortex delegated specialist only: {}",
-            profile.req("description")?.as_str().ok_or("invalid description")?
+            profile
+                .req("description")?
+                .as_str()
+                .ok_or("invalid description")?
         );
         let text = format!(
             "---\nname: {name}\ndescription: {}\n---\n\n{}\n\n<!-- END OF COMPLETE CORTEX WORKER SKILL -->\n",
             quote(&description, true),
             py_rstrip(&prompt)
         );
-        rendered.insert(root.join("skills").join(&name).join("SKILL.md"), text.into_bytes());
+        rendered.insert(
+            root.join("skills").join(&name).join("SKILL.md"),
+            text.into_bytes(),
+        );
     }
     Ok(rendered)
 }
@@ -159,7 +198,10 @@ pub fn expected_worker_references(root: &Path) -> Res<BTreeMap<PathBuf, Vec<u8>>
     for skill_path in expected_skills(root)?.keys() {
         let reference_root = skill_path.parent().unwrap().join("references");
         for filename in WORKER_REFERENCES {
-            rendered.insert(reference_root.join(filename), read_bytes(&source_root.join(filename))?);
+            rendered.insert(
+                reference_root.join(filename),
+                read_bytes(&source_root.join(filename))?,
+            );
         }
     }
     Ok(rendered)
@@ -169,7 +211,10 @@ fn existing_generated(root: &Path) -> Res<(BTreeSet<PathBuf>, BTreeSet<PathBuf>)
     let mut skills = BTreeSet::new();
     let mut references = BTreeSet::new();
     let dir = root.join("skills");
-    for entry in std::fs::read_dir(&dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?.flatten() {
+    for entry in std::fs::read_dir(&dir)
+        .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
+        .flatten()
+    {
         if !entry.file_name().to_string_lossy().starts_with("worker-") {
             continue;
         }
@@ -191,7 +236,10 @@ fn existing_generated(root: &Path) -> Res<(BTreeSet<PathBuf>, BTreeSet<PathBuf>)
 pub fn check(root: &Path) -> Res<()> {
     let skills = expected_skills(root)?;
     if skills.len() != 23 {
-        return Err(format!("expected exactly 23 worker profiles, found {}", skills.len()));
+        return Err(format!(
+            "expected exactly 23 worker profiles, found {}",
+            skills.len()
+        ));
     }
     let (found_skills, found_refs) = existing_generated(root)?;
     if found_skills != skills.keys().cloned().collect::<BTreeSet<_>>() {
@@ -203,7 +251,10 @@ pub fn check(root: &Path) -> Res<()> {
     }
     for (path, body) in skills.iter().chain(references.iter()) {
         if read_bytes(path)? != *body {
-            return Err(format!("generated worker skill or reference is stale: {}", path.display()));
+            return Err(format!(
+                "generated worker skill or reference is stale: {}",
+                path.display()
+            ));
         }
     }
     Ok(())
@@ -221,6 +272,9 @@ pub fn write(root: &Path) -> Res<()> {
 pub fn run(root: &Path, do_write: bool) -> Res<()> {
     let result = if do_write { write(root) } else { check(root) };
     result.map_err(|e| format!("Agent profile generation failed: {e}"))?;
-    println!("Worker skills {}: 23 compact prompts with shared references", if do_write { "write" } else { "check" });
+    println!(
+        "Worker skills {}: 23 compact prompts with shared references",
+        if do_write { "write" } else { "check" }
+    );
     Ok(())
 }

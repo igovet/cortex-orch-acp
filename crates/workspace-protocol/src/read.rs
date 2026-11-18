@@ -48,6 +48,14 @@ pub struct ReadPage<T> {
     pub items: Vec<T>,
     pub next_cursor: Option<String>,
     pub high_watermark: Version,
+    /// History only: where a later read continues to fetch just the rows written after this page (a forward cursor
+    /// past `highWatermark`). Absent on other pages and from a peer that cannot read forward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_cursor: Option<String>,
+    /// History read backwards (`history.earlier`) only: where the next read continues with the rows before this page's
+    /// first one. Absent when the page reaches the session's first row, and on every other page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_cursor: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(

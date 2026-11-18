@@ -9,7 +9,6 @@ use cortex_core::{
     store::executor::StoreExecutor,
     CoreError, CoreResult,
 };
-use cortex_engine::engine::PermissionDecision;
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -129,8 +128,9 @@ pub(super) async fn execute(
     let k = key.clone();
     let h = hash.clone();
     let n = name.clone();
-    let (mode,incoming,saved)=recv(executor.write(move|db|{
+    let (mode,incoming,saved,who)=recv(executor.write(move|db|{
         let i=writer(db,&c)?;
+        let who=i.profile.clone().unwrap_or_else(||i.role.clone());
         let old:Option<(String,String,String)>=db.query_row("SELECT operation,digest,result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?",
             (&i.task,&c.channel_id,&k),|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         let mode=access::current(db,&i.task)?;
@@ -138,7 +138,7 @@ pub(super) async fn execute(
             if op!=n || d!=h {return Err(CoreError::Refused("request_key_conflict"));}
             let saved:Value=serde_json::from_str(&result)?;
             if saved["complete"]!=true {return Err(CoreError::Refused("outside_outcome_unknown"));}
-            return Ok((mode,None,Some(saved["reply"].clone())));
+            return Ok((mode,None,Some(saved["reply"].clone()),who));
         }
         let sessions=db.prepare("SELECT session_id FROM acp_host_sessions WHERE task_id=? AND json_extract(client_info,'$.name')='cortex-rust-acp'")?
             .query_map([&i.task],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
@@ -146,7 +146,7 @@ pub(super) async fn execute(
         db.execute("INSERT INTO runtime_requests VALUES (?,?,?,?,?,?)",
             (&i.task,&k,&c.channel_id,&n,&h,json!({"complete":false,"mode":mode}).to_string()))?;
         lifecycle::event_tx(db,&i.task,"NATIVE_OUTSIDE_REQUESTED",json!({"channel_id":c.channel_id,"operation":n,"request_key":k,"mode":mode}))?;
-        Ok((mode,sessions.into_iter().next(),None))
+        Ok((mode,sessions.into_iter().next(),None,who))
     })?).await?;
     if let Some(saved) = saved {
         return Ok(saved);
@@ -159,22 +159,59 @@ pub(super) async fn execute(
             .map(|p| path.starts_with(p))
             .unwrap_or(true)
     });
-    let routine = write
-        && mode != "guarded"
-        && !protected(&path)
-        && !selected_control_plane
-        && !crate::native_command_sandbox::policy::protected_target(&root, &path);
-    let approved = if routine || mode == "auto" {
-        true
+    // The access mode's decision table, as for native engine requests: Cortex
+    // private state is refused in every mode; Auto allows and records the rest;
+    // Guarded and Development ask the owner on the same decision card (a write
+    // outside the project asks in Development too). The scope, path-safety and
+    // consent checks above stay as they are.
+    use cortex_engine::permission::PathClass;
+    let class = match crate::native_engine_policy::path_class(&root, &path) {
+        PathClass::Ordinary
+            if selected_control_plane
+                || protected(&path)
+                || crate::native_command_sandbox::policy::protected_target(&root, &path) =>
+        {
+            PathClass::Control
+        }
+        class => class,
+    };
+    let rule = match class {
+        PathClass::Private => "cortex_private",
+        PathClass::Credential => "credential",
+        PathClass::Control => "control_target",
+        PathClass::Ordinary if write => "outside_write",
+        PathClass::Ordinary => "outside_command",
+    };
+    use crate::native_owner_decisions::Owner;
+    let (approved, decider) = if class == PathClass::Private {
+        (false, "runtime".to_owned())
+    } else if mode == "auto" {
+        (true, format!("mode:{mode}"))
     } else {
-        match (permissions, incoming) {
-            (Some(p), Some(sid)) => {
-                matches!(p.decide(&sid,&request).await,Ok(PermissionDecision::Selected(id)) if id=="allow")
-            }
-            _ => false,
+        let card = cortex_engine::permission::owner_card(&request, &who, rule);
+        let details = crate::native_owner_decisions::details(&request, &who, rule, &mode);
+        match crate::native_owner_decisions::ask(
+            &executor,
+            &credential,
+            permissions,
+            incoming,
+            &key,
+            &card,
+            details,
+        )
+        .await
+        {
+            Ok(Owner::Allowed) => (true, "owner".to_owned()),
+            Ok(Owner::Denied) => (false, "owner".to_owned()),
+            Ok(Owner::Withdrawn(reason)) => (false, format!("withdrawn:{reason}")),
+            Ok(Owner::Unavailable) => (false, "no_owner_client".to_owned()),
+            Err(e) => (false, format!("error:{}", e.code())),
         }
     };
     let result = async {
+        if class == PathClass::Private {
+            return Err(CoreError::Refused("cortex_private"));
+        }
         if !approved {
             return Err(CoreError::Refused("outside_action_not_confirmed"));
         }
@@ -232,7 +269,7 @@ pub(super) async fn execute(
         let i=channels::authenticate(db,&c.channel_id,c.secret(),true)?;
         db.execute("UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=? AND operation=? AND digest=?",
             (json!({"complete":true,"reply":v}).to_string(),&i.task,&c.channel_id,&key,&name,&hash))?;
-        lifecycle::event_tx(db,&i.task,"NATIVE_OUTSIDE_SETTLED",json!({"channel_id":c.channel_id,"operation":name,"request_key":key,"mode":mode,"allowed":approved}))?;
+        lifecycle::event_tx(db,&i.task,"NATIVE_OUTSIDE_SETTLED",json!({"channel_id":c.channel_id,"operation":name,"request_key":key,"mode":mode,"allowed":approved,"rule":rule,"decider":decider}))?;
         Ok(())
     })?).await?;
     Ok(reply)

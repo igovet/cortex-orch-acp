@@ -6,9 +6,12 @@ members = [
     "crates/cortex-engine",
     "crates/cortex-xtask",
     "crates/cortex-paseo-tools",
+    "crates/workspace-client",
     "crates/workspace-protocol",
+    "crates/workspace-remote",
     "crates/workspace-service",
     "apps/cortex-workspace-desktop/src-tauri",
+    "apps/cortex-workspace-android/src-tauri",
     "prototypes/cortex-workspace/desktop/src-tauri",
 ]
 default-members = ["crates/workspace-protocol"]
@@ -25,4 +28,4 @@ rust = "1.99.1"
 tauri-cli = "2.10.1"
 tauri = "2.10.1"
 tauri-build = "2.5.6"
-lock-sha256 = "4c4b42fb706d6df5d0a8b1ab6258033b3d68580aa295fd9e8fa074ab4b0e8329"
+lock-sha256 = "ca7678412cc54798afe5d4593113f95dd9041996c307fc79663c72875e25a950"

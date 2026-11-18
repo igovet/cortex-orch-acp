@@ -20,7 +20,10 @@ fn require_native_health(output: &str) -> Res<()> {
         r"(?im)^(?:corrupted double-linked list|corrupted size vs[.] prev_size|double free or corruption|free[(][)]:|malloc[(][)]:|Segmentation fault|Aborted(?: [(]core dumped[)])?)",
     )
     .unwrap();
-    require(!fatal.is_match(output), "native process failure diagnostic; archive is not qualified")
+    require(
+        !fatal.is_match(output),
+        "native process failure diagnostic; archive is not qualified",
+    )
 }
 
 fn require_native_journey(output: &str, backend: &str) -> Res<()> {
@@ -30,16 +33,40 @@ fn require_native_journey(output: &str, backend: &str) -> Res<()> {
             rows.push(parse(text).map_err(|e| format!("malformed native journey evidence: {e}"))?);
         }
     }
-    require(rows.len() == 2, "missing or duplicate native journey evidence")?;
-    let paused: Vec<Option<bool>> = rows.iter().map(|r| match r.get("paused_resumed") { Some(Value::Bool(v)) => Some(*v), _ => None }).collect();
-    require(paused == [Some(false), Some(true)], "native journey did not run the plain then Stop/Resume scenarios")?;
-    let ids: BTreeSet<&str> = rows.iter().filter_map(|r| r.get("task_id").and_then(Value::as_str)).filter(|t| !t.is_empty()).collect();
-    require(ids.len() == 2, "exactly two distinct native task identities are required")?;
+    require(
+        rows.len() == 2,
+        "missing or duplicate native journey evidence",
+    )?;
+    let paused: Vec<Option<bool>> = rows
+        .iter()
+        .map(|r| match r.get("paused_resumed") {
+            Some(Value::Bool(v)) => Some(*v),
+            _ => None,
+        })
+        .collect();
+    require(
+        paused == [Some(false), Some(true)],
+        "native journey did not run the plain then Stop/Resume scenarios",
+    )?;
+    let ids: BTreeSet<&str> = rows
+        .iter()
+        .filter_map(|r| r.get("task_id").and_then(Value::as_str))
+        .filter(|t| !t.is_empty())
+        .collect();
+    require(
+        ids.len() == 2,
+        "exactly two distinct native task identities are required",
+    )?;
     for r in &rows {
         let ok = r.get("backend").and_then(Value::as_str) == Some(backend)
             && r.get("state").and_then(Value::as_str) == Some("COMPLETED")
-            && r.get("contained_checks").and_then(Value::as_i64).is_some_and(|c| c > 0);
-        require(ok, "native journey row is incomplete or for another backend")?;
+            && r.get("contained_checks")
+                .and_then(Value::as_i64)
+                .is_some_and(|c| c > 0);
+        require(
+            ok,
+            "native journey row is incomplete or for another backend",
+        )?;
     }
     Ok(())
 }
@@ -53,12 +80,22 @@ fn require_python_policy(output: &str, allowed: bool) -> Res<()> {
             rows.push(parse(text).map_err(|e| format!("malformed python policy evidence: {e}"))?);
         }
     }
-    let stages: Vec<&str> = rows.iter().filter_map(|r| r.get("stage").and_then(Value::as_str)).collect();
-    require(stages == ["image", "after-install"], "missing or duplicate python policy evidence")?;
+    let stages: Vec<&str> = rows
+        .iter()
+        .filter_map(|r| r.get("stage").and_then(Value::as_str))
+        .collect();
+    require(
+        stages == ["image", "after-install"],
+        "missing or duplicate python policy evidence",
+    )?;
     for r in &rows {
         let present = matches!(r.get("present"), Some(Value::Bool(true)));
-        let said = matches!(r.get("allowed_by_archive_depends"), Some(Value::Bool(v)) if *v == allowed);
-        require(said && (allowed || !present), "python3 is present in the gate container but no archive requires it")?;
+        let said =
+            matches!(r.get("allowed_by_archive_depends"), Some(Value::Bool(v)) if *v == allowed);
+        require(
+            said && (allowed || !present),
+            "python3 is present in the gate container but no archive requires it",
+        )?;
     }
     Ok(())
 }
@@ -69,7 +106,9 @@ fn depends_of(archive: &Path) -> Res<BTreeSet<String>> {
     let mut set = BTreeSet::new();
     for part in fields.split(',') {
         let part = part.trim();
-        let m = name.find(part).ok_or_else(|| format!("unparsable Depends entry {part:?}"))?;
+        let m = name
+            .find(part)
+            .ok_or_else(|| format!("unparsable Depends entry {part:?}"))?;
         set.insert(m.as_str().to_string());
     }
     Ok(set)
@@ -79,7 +118,13 @@ fn depends_of(archive: &Path) -> Res<BTreeSet<String>> {
 fn run_logged(argv: &[&str], log: &Path, timeout: Duration) -> Res<i32> {
     let sink = std::fs::File::create(log).map_err(|e| e.to_string())?;
     let err = sink.try_clone().map_err(|e| e.to_string())?;
-    let mut child = Command::new(argv[0]).args(&argv[1..]).stdin(Stdio::null()).stdout(sink).stderr(err).spawn().map_err(|e| e.to_string())?;
+    let mut child = Command::new(argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(sink)
+        .stderr(err)
+        .spawn()
+        .map_err(|e| e.to_string())?;
     let start = Instant::now();
     loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
@@ -119,7 +164,11 @@ pub fn run(cli: &Cli, channel: &Channel, close_cycles: u32) -> Res<i32> {
 }
 
 fn run_inner(cli: &Cli, channel: &Channel, close_cycles: u32) -> Res<()> {
-    let (Some(archive), Some(prior), Some(evidence)) = (cli.path("archive"), cli.path("prior-archive"), cli.path("evidence")) else {
+    let (Some(archive), Some(prior), Some(evidence)) = (
+        cli.path("archive"),
+        cli.path("prior-archive"),
+        cli.path("evidence"),
+    ) else {
         return Err("--archive, --prior-archive and --evidence are required".into());
     };
     // A diagnostic single-phase run; never acceptance evidence.
@@ -128,20 +177,36 @@ fn run_inner(cli: &Cli, channel: &Channel, close_cycles: u32) -> Res<()> {
     if !["both", "x11", "wayland"].contains(&display) {
         return Err("--display must be both, x11 or wayland".into());
     }
-    let archive = archive.canonicalize().map_err(|e| format!("archive: {e}"))?;
-    let prior = prior.canonicalize().map_err(|e| format!("prior archive: {e}"))?;
+    let archive = archive
+        .canonicalize()
+        .map_err(|e| format!("archive: {e}"))?;
+    let prior = prior
+        .canonicalize()
+        .map_err(|e| format!("prior archive: {e}"))?;
     find_root(cli)?;
-    let evidence = if evidence.is_absolute() { evidence } else { std::env::current_dir().map_err(|e| e.to_string())?.join(evidence) };
-    std::fs::create_dir_all(evidence.parent().ok_or("bad evidence path")?).map_err(|e| e.to_string())?;
+    let evidence = if evidence.is_absolute() {
+        evidence
+    } else {
+        std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(evidence)
+    };
+    std::fs::create_dir_all(evidence.parent().ok_or("bad evidence path")?)
+        .map_err(|e| e.to_string())?;
     std::fs::create_dir(&evidence).map_err(|e| format!("evidence directory must be new: {e}"))?;
     let archive_hash = sha_file(&archive)?;
     let prior_hash = sha_file(&prior)?;
     let native_engine = match cli.path("native-engine") {
         Some(p) => p,
-        None => archive.parent().ok_or("archive has no parent")?.join("native-fake-engine"),
+        None => archive
+            .parent()
+            .ok_or("archive has no parent")?
+            .join("native-fake-engine"),
     }
     .canonicalize()
-    .map_err(|e| format!("native fake engine peer is required beside the archive (or --native-engine): {e}"))?;
+    .map_err(|e| {
+        format!("native fake engine peer is required beside the archive (or --native-engine): {e}")
+    })?;
     let engine_hash = sha_file(&native_engine)?;
     require_archives(channel, &[&archive, &prior])?;
     let mut depends = depends_of(&archive)?;
@@ -155,7 +220,8 @@ fn run_inner(cli: &Cli, channel: &Channel, close_cycles: u32) -> Res<()> {
         // The context lives under the system temp dir, never beside the evidence.
         let context = &tmp.0;
         std::fs::copy(&me, context.join("cortex-xtask")).map_err(|e| e.to_string())?;
-        std::fs::copy(&native_engine, context.join("native-fake-engine")).map_err(|e| e.to_string())?;
+        std::fs::copy(&native_engine, context.join("native-fake-engine"))
+            .map_err(|e| e.to_string())?;
         for f in ["cortex-xtask", "native-fake-engine"] {
             chmod(&context.join(f), 0o755)?;
         }
@@ -172,7 +238,12 @@ fn run_inner(cli: &Cli, channel: &Channel, close_cycles: u32) -> Res<()> {
                 &stage.join("DEBIAN/control"),
                 "Package: cortex-gate-python-shim\nVersion: 1\nArchitecture: all\nMaintainer: Cortex\nSection: misc\nPriority: optional\nProvides: python3 (= 3.14.0), python3-minimal (= 3.14.0), python3-gi (= 3.56.0)\nDescription: gate image shim, no files; image carries no Python\n",
             )?;
-            run_ok(&["dpkg-deb", "--build", &stage.to_string_lossy(), &context.join("shim.deb").to_string_lossy()])?;
+            run_ok(&[
+                "dpkg-deb",
+                "--build",
+                &stage.to_string_lossy(),
+                &context.join("shim.deb").to_string_lossy(),
+            ])?;
             "COPY shim.deb /shim.deb\nRUN dpkg -i /shim.deb && printf 'Package: python3 python3-minimal python3-gi python3.* libpython3*\\nPin: release *\\nPin-Priority: -1\\n' > /etc/apt/preferences.d/no-python\n".to_string()
         };
         let dockerfile = format!(
@@ -181,12 +252,23 @@ fn run_inner(cli: &Cli, channel: &Channel, close_cycles: u32) -> Res<()> {
             channel.package
         );
         write(&context.join("Dockerfile"), &dockerfile)?;
-        let built = capture(Command::new("docker").args(["build", "-t", &image]).arg(context), Duration::from_secs(1800))?;
-        write(&evidence.join("image-build.log"), &format!("{}{}", built.stdout, built.stderr))?;
+        let built = capture(
+            Command::new("docker")
+                .args(["build", "-t", &image])
+                .arg(context),
+            Duration::from_secs(1800),
+        )?;
+        write(
+            &evidence.join("image-build.log"),
+            &format!("{}{}", built.stdout, built.stderr),
+        )?;
         print!("{}{}", built.stdout, built.stderr);
         require(built.code == 0, "docker build failed")?;
     }
-    let image_id = run_ok(&["docker", "image", "inspect", &image, "--format", "{{.Id}}"])?.stdout.trim().to_string();
+    let image_id = run_ok(&["docker", "image", "inspect", &image, "--format", "{{.Id}}"])?
+        .stdout
+        .trim()
+        .to_string();
     let mut scenarios: Vec<Value> = Vec::new();
     let mut result = obj(vec![
         ("channel", s(&channel.name)),
@@ -202,18 +284,42 @@ fn run_inner(cli: &Cli, channel: &Channel, close_cycles: u32) -> Res<()> {
         ("accepted", b(false)),
     ]);
     let outcome = (|| -> Res<()> {
-        let backends: Vec<&str> = if display == "both" { vec!["x11", "wayland"] } else { vec![display] };
+        let backends: Vec<&str> = if display == "both" {
+            vec!["x11", "wayland"]
+        } else {
+            vec![display]
+        };
         for backend in backends {
             for mode in ["clean", "upgrade"] {
                 let folder = evidence.join(format!("{backend}-{mode}"));
                 std::fs::create_dir(&folder).map_err(|e| e.to_string())?;
                 chmod(&folder, 0o777)?; // Disposable container user writes only this evidence directory.
-                let mount = |src: &Path, dst: &str, ro: bool| format!("type=bind,source={},target={dst}{}", src.display(), if ro { ",readonly" } else { "" });
+                let mount = |src: &Path, dst: &str, ro: bool| {
+                    format!(
+                        "type=bind,source={},target={dst}{}",
+                        src.display(),
+                        if ro { ",readonly" } else { "" }
+                    )
+                };
                 let id = run_ok(&[
-                    "docker", "run", "--detach", "--privileged", "--cgroupns=private", "--network=none", "--tmpfs", "/run", "--tmpfs", "/run/lock", "--tmpfs", "/tmp",
-                    "--mount", &mount(&archive, "/archives/candidate.deb", true),
-                    "--mount", &mount(&prior, "/archives/prior.deb", true),
-                    "--mount", &mount(&folder, "/evidence", false),
+                    "docker",
+                    "run",
+                    "--detach",
+                    "--privileged",
+                    "--cgroupns=private",
+                    "--network=none",
+                    "--tmpfs",
+                    "/run",
+                    "--tmpfs",
+                    "/run/lock",
+                    "--tmpfs",
+                    "/tmp",
+                    "--mount",
+                    &mount(&archive, "/archives/candidate.deb", true),
+                    "--mount",
+                    &mount(&prior, "/archives/prior.deb", true),
+                    "--mount",
+                    &mount(&folder, "/evidence", false),
                     &image,
                 ])?
                 .stdout
@@ -222,15 +328,36 @@ fn run_inner(cli: &Cli, channel: &Channel, close_cycles: u32) -> Res<()> {
                 let scenario = (|| -> Res<()> {
                     let cycles = close_cycles.to_string();
                     let code = run_logged(
-                        &["docker", "exec", &id, "/harness/cortex-xtask", "installed-inside", "--channel", &channel.name, "--close-cycles", &cycles, "--python-allowed", if python_allowed { "yes" } else { "no" }, "--only-phase", only.unwrap_or(""), backend, mode],
+                        &[
+                            "docker",
+                            "exec",
+                            &id,
+                            "/harness/cortex-xtask",
+                            "installed-inside",
+                            "--channel",
+                            &channel.name,
+                            "--close-cycles",
+                            &cycles,
+                            "--python-allowed",
+                            if python_allowed { "yes" } else { "no" },
+                            "--only-phase",
+                            only.unwrap_or(""),
+                            backend,
+                            mode,
+                        ],
                         &folder.join("output.log"),
                         Duration::from_secs(1200),
                     );
                     // Complete fixture-only output; never an owner's log or environment.
-                    let output = std::fs::read_to_string(folder.join("output.log")).unwrap_or_default();
+                    let output =
+                        std::fs::read_to_string(folder.join("output.log")).unwrap_or_default();
                     print!("{output}");
                     let code = code?;
-                    scenarios.push(obj(vec![("backend", s(backend)), ("mode", s(mode)), ("exit_code", n(code as i64))]));
+                    scenarios.push(obj(vec![
+                        ("backend", s(backend)),
+                        ("mode", s(mode)),
+                        ("exit_code", n(code as i64)),
+                    ]));
                     require(code == 0, &format!("{backend} {mode} failed"))?;
                     require_native_health(&output)?;
                     require_python_policy(&output, python_allowed)?;
@@ -245,9 +372,23 @@ fn run_inner(cli: &Cli, channel: &Channel, close_cycles: u32) -> Res<()> {
                 removed?;
             }
         }
-        require(sha_file(&archive)? == archive_hash && sha_file(&prior)? == prior_hash, "archive changed during check")?;
-        require(sha_file(&native_engine)? == engine_hash, "fake engine changed during check")?;
-        require(sha_file(&me)? == result.get("harness_sha256").and_then(|h| h.get("cortex-xtask")).and_then(Value::as_str).unwrap_or(""), "harness changed during check")?;
+        require(
+            sha_file(&archive)? == archive_hash && sha_file(&prior)? == prior_hash,
+            "archive changed during check",
+        )?;
+        require(
+            sha_file(&native_engine)? == engine_hash,
+            "fake engine changed during check",
+        )?;
+        require(
+            sha_file(&me)?
+                == result
+                    .get("harness_sha256")
+                    .and_then(|h| h.get("cortex-xtask"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            "harness changed during check",
+        )?;
         Ok(())
     })();
     let complete = outcome.is_ok() && only.is_none() && display == "both" && scenarios.len() == 4;
@@ -255,7 +396,10 @@ fn run_inner(cli: &Cli, channel: &Channel, close_cycles: u32) -> Res<()> {
     result.set("accepted", b(complete));
     write(&evidence.join("result.json"), &pretty_ascii(&result)?)?;
     outcome?;
-    require(complete, "partial display run is diagnostic, not owner acceptance")
+    require(
+        complete,
+        "partial display run is diagnostic, not owner acceptance",
+    )
 }
 
 #[cfg(test)]
@@ -275,16 +419,32 @@ mod tests {
 
     #[test]
     fn native_journey_needs_two_distinct_completed_tasks() {
-        let ok = format!("{}\nnoise\n{}\n", journey("x11", "t1", false, 2), journey("x11", "t2", true, 1));
+        let ok = format!(
+            "{}\nnoise\n{}\n",
+            journey("x11", "t1", false, 2),
+            journey("x11", "t2", true, 1)
+        );
         assert!(require_native_journey(&ok, "x11").is_ok());
         assert!(require_native_journey(&ok, "wayland").is_err());
-        let dup = format!("{}\n{}\n", journey("x11", "t1", false, 2), journey("x11", "t1", true, 1));
+        let dup = format!(
+            "{}\n{}\n",
+            journey("x11", "t1", false, 2),
+            journey("x11", "t1", true, 1)
+        );
         assert!(require_native_journey(&dup, "x11").is_err());
         let one = journey("x11", "t1", false, 2);
         assert!(require_native_journey(&one, "x11").is_err());
-        let none = format!("{}\n{}\n", journey("x11", "t1", false, 0), journey("x11", "t2", true, 1));
+        let none = format!(
+            "{}\n{}\n",
+            journey("x11", "t1", false, 0),
+            journey("x11", "t2", true, 1)
+        );
         assert!(require_native_journey(&none, "x11").is_err());
-        let order = format!("{}\n{}\n", journey("x11", "t1", true, 2), journey("x11", "t2", false, 1));
+        let order = format!(
+            "{}\n{}\n",
+            journey("x11", "t1", true, 2),
+            journey("x11", "t2", false, 1)
+        );
         assert!(require_native_journey(&order, "x11").is_err());
     }
 
@@ -306,7 +466,10 @@ mod tests {
             files.set(
                 name,
                 obj(vec![
-                    ("bytes_sha256", s(sha_bytes(crate::json::pretty(value).unwrap().as_bytes()))),
+                    (
+                        "bytes_sha256",
+                        s(sha_bytes(crate::json::pretty(value).unwrap().as_bytes())),
+                    ),
                     ("semantic_sha256", s(sha_bytes(canon(value).as_bytes()))),
                 ]),
             );
@@ -332,7 +495,11 @@ mod tests {
             ]))
         };
         let mut lines = vec![row("seeded", "release"), shown("cold-start")];
-        for stage in ["candidate-install", "first-launch", "unreadable-project-launch"] {
+        for stage in [
+            "candidate-install",
+            "first-launch",
+            "unreadable-project-launch",
+        ] {
             lines.push(row(stage, "release"));
         }
         lines.push(shown("incident"));
@@ -347,17 +514,34 @@ mod tests {
     }
 
     fn policy(stage: &str, present: bool, allowed: bool) -> String {
-        line(&obj(vec![("step", s("python_policy")), ("stage", s(stage)), ("present", b(present)), ("allowed_by_archive_depends", b(allowed))]))
+        line(&obj(vec![
+            ("step", s("python_policy")),
+            ("stage", s(stage)),
+            ("present", b(present)),
+            ("allowed_by_archive_depends", b(allowed)),
+        ]))
     }
 
     #[test]
     fn python_policy_is_fail_closed() {
-        let clean = format!("{}\n{}\n", policy("image", false, false), policy("after-install", false, false));
+        let clean = format!(
+            "{}\n{}\n",
+            policy("image", false, false),
+            policy("after-install", false, false)
+        );
         assert!(require_python_policy(&clean, false).is_ok());
-        let present = format!("{}\n{}\n", policy("image", false, false), policy("after-install", true, false));
+        let present = format!(
+            "{}\n{}\n",
+            policy("image", false, false),
+            policy("after-install", true, false)
+        );
         assert!(require_python_policy(&present, false).is_err());
         // Python is tolerated only when the archive's own Depends require it, and the evidence says so.
-        let old = format!("{}\n{}\n", policy("image", true, true), policy("after-install", true, true));
+        let old = format!(
+            "{}\n{}\n",
+            policy("image", true, true),
+            policy("after-install", true, true)
+        );
         assert!(require_python_policy(&old, true).is_ok());
         assert!(require_python_policy(&old, false).is_err());
         assert!(require_python_policy(&policy("image", false, false), false).is_err());

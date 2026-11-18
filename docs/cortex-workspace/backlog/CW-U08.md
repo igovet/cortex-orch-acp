@@ -1,6 +1,6 @@
 # CW-U08: Command and lifecycle controls
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: commands as UI controls, command stop and lifecycle controls ([maintenance and controls](../maintenance-and-controls.md)); resume after Stop is only partly transparent; no-paid checks only · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Command and lifecycle controls.

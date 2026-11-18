@@ -1,5 +1,6 @@
 import { createSignal } from "solid-js";
 import type { FileRead, FileSaveResult } from "@cortex/workspace-domain";
+import { same } from "./stable";
 
 /** The machine's bound for one file, and what one request can carry once the text is escaped. */
 const MAX_FILE_BYTES = 512 * 1024, MAX_REQUEST_BYTES = 900_000;
@@ -59,10 +60,11 @@ export function createBuffers(io: BufferIo) {
   let autosave = false;
 
   const find = (key: string) => list().find(b => b.key === key);
-  // A patch that changes nothing keeps the record, so the disk poll on a quiet file wakes no screen.
+  // A patch that changes nothing keeps the record, so the disk poll on a quiet file wakes no screen. A conflict is compared
+  // as data: each poll of a file changed on disk reads it as a new object with the same revision and text.
   const update = (key: string, patch: Partial<FileBuffer>) => {
     const b = find(key);
-    if (!b || (Object.keys(patch) as (keyof FileBuffer)[]).every(k => Object.is(b[k], patch[k]))) return;
+    if (!b || (Object.keys(patch) as (keyof FileBuffer)[]).every(k => same(b[k], patch[k]))) return;
     setList(all => all.map(b => b.key === key ? { ...b, ...patch } : b));
   };
   const cancel = (key: string) => { clearTimeout(timers.get(key)); timers.delete(key); };

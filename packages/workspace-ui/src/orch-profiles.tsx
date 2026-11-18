@@ -7,12 +7,14 @@ import { HELP } from "./orch-help";
 import { orchTo, Shell, useProjectName, useReadOnly, useSwitchProfile } from "./orch-shared";
 import { clock } from "./selectors";
 import { Chk, Hint, Lock, SetH, Srow } from "./settings-kit";
+import { share } from "./stable";
 
 /** The landing page: what is wrong first, then one line per page. */
 export function Overview() {
   const ws = useWs(), name = useProjectName();
   const m = () => ws.machine(), c = () => m().config;
-  const issues = createMemo(() => configIssues(m()));
+  // Every machine read rebuilds these lines: equal ones stay the old objects, so their rows (and focus on them) stay.
+  const issues = createMemo<ReturnType<typeof configIssues>>(prev => share(prev, configIssues(m())), []);
   const rules = () => c().surfaces.routing;
   const engineRow = (e: typeof ENGINE_KEYS[number]) => { const r = rules().engines[e], total = c().catalogue[e].models.length; return `${engineLabel(e)}: ${r.enabled.length} of ${total} models on, ${r.auto.filter(id => r.enabled.includes(id)).length} automatic`; };
   const servers = () => c().surfaces.mcp_servers, on = () => servers().filter(s => s.enabled);
@@ -21,13 +23,13 @@ export function Overview() {
   const ceiling = () => c().surfaces.user_defaults.ceiling;
   const source = () => routingSource(m(), null), own = () => projectsWithRouting(m()).map(id => name(id));
   const coord = () => c().surfaces.user_defaults.coordinator;
-  const rows = (): [Parameters<typeof orchTo>[1], string, string][] => [
+  const rows = createMemo<[Parameters<typeof orchTo>[1], string, string][]>(prev => share(prev, [
     ["defaults", "Coordinator", coord() ? `${engineLabel(coord()!.engine)} ${coord()!.model}, ${coord()!.effort} effort` : "Exact route"],
     ["models", "Models", ENGINE_KEYS.filter(e => c().catalogue[e].models.length).map(engineRow).join(". ")],
     ["routing", "Routing", `${pins() ? `${pins()} pin${pins() === 1 ? "" : "s"}` : "No pins"}, ${leans() ? `${leans()} custom work kind${leans() === 1 ? "" : "s"}` : "built-in work kinds"}`],
     ["policy", "Limits and fallback", `${ceiling().attempts === null ? "No attempt limit" : `Attempts ${ceiling().attempts}`}, fallback ${ceiling().consent ? "allowed" : "off"}`],
     ["tools", "Tools and MCP", `${on().length} of ${servers().length} servers on, ${granted()} tools granted`],
-  ];
+  ]), []);
   return <Shell title="Orchestration" lead="Everything needed to run tasks on this machine.">
     <Show when={issues().length > 0}>
       <SetH title="Needs attention" />
@@ -93,17 +95,18 @@ export function Files() {
   const reset = () => ws.open({ kind: "confirm", title: "Reset to the default preset?", danger: true, action: "Reset", note: "Replaces all routing rules, the coordinator default, the language and the owner ceiling, in routing.json and defaults.json. A private backup of each is kept beside it. Project routing and the environment override are not changed." + (ws.store.mode === "demo" ? " Simulated: nothing is written." : ""), go: () => run({ type: "reset_preset", machineId: m().id, confirmed: true }) });
   const own = () => projectsWithRouting(m()).map(id => name(id));
   const active = () => routingSource(m(), null).kind;
-  const sources = () => [
+  type Source = { t: string; path: string | null; label: string; exists: boolean; sub: string; on: boolean; rev: number | null };
+  const sources = createMemo<Source[]>(prev => share(prev, [
     // Friendly names on screen; the exact location stays behind an explicit Copy action, never in a label.
     { t: "Project routing file", path: "<project>/.cortex/routing.json", label: "In each project", exists: own().length > 0, sub: own().join(", "), on: false, rev: null as number | null },
     { t: "Environment routing file", path: f().envRouting ?? null, label: f().envRouting ? "Set by the environment" : "No environment override", exists: !!f().envRouting, sub: "Read-only", on: active() === "environment", rev: null },
     { t: "User routing file", path: "~/.config/cortex/routing.json", label: "In your user settings", exists: !f().missing.includes("routing.json"), sub: "", on: active() === "machine", rev: c().revisions.routing },
-  ];
-  const others = () => [
+  ]), []);
+  const others = createMemo<{ t: string; d: string; rev: number | null }[]>(prev => share(prev, [
     { t: "defaults.json", d: "Coordinator default, language and ceiling.", rev: c().revisions.user_defaults }, { t: "mcp-servers.json", d: "External servers. Per machine only.", rev: c().revisions.mcp_servers },
     { t: "connections.json", d: "Registered engine accounts.", rev: null }, { t: "routing-profiles.json", d: "Saved profiles.", rev: null },
-  ];
-  const envs = () => [["Engine updates", "CORTEX_ENGINE_UPDATE", f().env.engineUpdate ?? "on"], ["Engine version following", "CORTEX_ENGINE_FOLLOW", f().env.engineFollow ?? "on"], ["OpenCode executable", "CORTEX_OPENCODE_BINARY", f().env.opencodeBinary]].filter(([, , v]) => v) as [string, string, string][];
+  ]), []);
+  const envs = createMemo<[string, string, string][]>(prev => share(prev, [["Engine updates", "CORTEX_ENGINE_UPDATE", f().env.engineUpdate ?? "on"], ["Engine version following", "CORTEX_ENGINE_FOLLOW", f().env.engineFollow ?? "on"], ["OpenCode executable", "CORTEX_OPENCODE_BINARY", f().env.opencodeBinary]].filter(([, , v]) => v) as [string, string, string][]), []);
   const copy = (value: string) => { void navigator.clipboard?.writeText(value).catch(() => undefined); };
   const preserved = () => [...f().preservedRouting, ...f().preservedDefaults, ...c().surfaces.user_defaults.preserved];
   return <Shell wide title="Files and presets" lead={ws.t("filesLead")}>

@@ -1,6 +1,6 @@
 # CW-F03: CodeMirror 6 (+@codemirror/merge, +@codemirror/lsp-client) and xterm.js (@xterm/addon-webgl + canvas fallback) fixture inside the real Tauri webview
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Implemented in the product: CodeMirror 6 editor and xterm.js terminal run in the Tauri webview ([IDE and Git](../ide-and-git.md)); a separate merge, language-server or WebGL-fallback fixture is not confirmed in code · **Phase:** 3+ · **Size:** L
 
 ## Goal
 

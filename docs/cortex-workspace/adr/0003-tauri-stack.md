@@ -1,6 +1,6 @@
 # Desktop and mobile stack
 
-**Status: planned; no implementation or qualification is implied.**
+**Status: decided and implemented for the desktop (Tauri 2, SolidJS, TypeScript); the Android stack is not chosen and no Android client exists.**
 
 Decision: Use Tauri 2/SolidJS on desktop and provisionally React Native on Android; the Android choice is settled by the measured go/no-go in [CW-F02](../backlog/CW-F02.md) against Tauri Android. CodeMirror 6 replaces Monaco for mobile feasibility. Rejected alternatives: Electron with React as the desktop shell, and Monaco as the editor base. Avoid claiming unmeasured performance.
 

@@ -2,7 +2,7 @@ import { createMemo, createSignal, createUniqueId, For, Show } from "solid-js";
 import { GitLetter } from "./diff";
 import type { Commit, GitFile, ProjectRepo, RepoCheckout } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
-import { A, Count, I, MenuItem, place, Pop, useWantOverview } from "./kit";
+import { A, Count, I, Keyed, MenuItem, place, Pop, useWantOverview } from "./kit";
 import { ActionBar, revealCutIn, SectionHead, Toolbar } from "./layout";
 import { conflictFacts, dirName, fileName, fileResolved, inConflict, worktreeRows, worktreeState, type WorktreeRow } from "./review-model";
 import type { Route } from "./router";
@@ -36,7 +36,7 @@ function Status(props: { repo: ProjectRepo; c: RepoCheckout; codeAt: (path: stri
   const remote = () => !!props.repo.remote.trim();
   const noUpstream = () => c().upstream !== undefined ? !c().upstream : !props.repo.remote;
   const pullBlocked = () => noUpstream() ? "No upstream is configured for this checkout" : !c().behind ? "No incoming commits in the last fetched state. Fetch to check the upstream." : undefined;
-  let commitButton: HTMLButtonElement | undefined, committing = false;
+  let commitButton: HTMLButtonElement | undefined, refreshButton: HTMLButtonElement | undefined, committing = false;
   // Staging and committing are one action: the button stays busy to the end, and neither a click nor Ctrl+Enter starts it twice.
   const commit = () => {
     if (blocked() || committing || ws.gate("git_commit")) return;
@@ -55,11 +55,15 @@ function Status(props: { repo: ProjectRepo; c: RepoCheckout; codeAt: (path: stri
   return <aside class="side-pane" aria-label="Status" ref={revealCutIn}>
     <Toolbar small class="git-sum" label="Checkout status"
       mid={<span id={facts} class="cap muted trunc tnum">{c().ahead} ahead, {c().behind} behind <span class="mono">{c().base}</span><Show when={remote() && noUpstream()}>, no upstream</Show></span>}
-      end={<Show when={remote()}>
+      end={<>
+        {/* Git is read when this page opens, after the owner's own Git action and when a task's work moves; this reads it now. */}
+        <button class="ib" aria-label="Refresh Git status" ref={refreshButton} onClick={() => void ws.busy(ws.store.refreshProjectFacts(props.repo.projectId, true), refreshButton)}><I n="refresh" /></button>
+        <Show when={remote()}>
         <button class="ib" aria-label="Fetch" {...ws.needs("git_fetch")} aria-describedby={describe(ws.gate("git_fetch"))} onClick={() => ws.run({ type: "git_fetch", projectId: props.repo.projectId, now: ws.store.clock() })}><I n="refresh" /></button>
         <button class="ib" data-why={pullBlocked()} aria-label="Pull" {...ws.needs("git_pull")} aria-disabled={pullBlocked() || !ws.can("workspace.git_pull") ? "true" : undefined} aria-describedby={describe(pullBlocked() || !ws.can("workspace.git_pull"))} onClick={() => { if (!pullBlocked()) ws.run({ type: "git_pull", checkoutId: c().id, now: ws.store.clock() }); }}><I n="download" /></button>
         <button class="ib" aria-label="Push" {...ws.needs("git_push")} aria-describedby={describe(ws.gate("git_push"))} onClick={() => ws.open({ kind: "push", checkoutId: c().id })}><I n="upload" /></button>
-      </Show>} />
+        </Show>
+      </>} />
     <div class="gscroll">
       <Show when={merge()}>{m => <>
         <SectionHead class="git-g" title="Conflicts" count={conflictFacts(m()).leftFiles} />
@@ -68,11 +72,11 @@ function Status(props: { repo: ProjectRepo; c: RepoCheckout; codeAt: (path: stri
       <Show when={staged() > 0}><SectionHead class="git-g" title="Staged" count={staged()} /></Show>
       <For each={merge()?.files.filter(fileResolved) ?? []}>{f => <div class="gf"><Row path={f.path} status="M" /></div>}</For>
       <For each={merge()?.clean ?? []}>{f => <div class="gf"><Row path={f.path} status={f.status} /></div>}</For>
-      <For each={group("staged")}>{f => <FileRow f={f} c={c()} go={props.codeAt} />}</For>
+      <Keyed each={group("staged")} by={f => f.path}>{f => <FileRow f={f()} c={c()} go={props.codeAt} />}</Keyed>
       <Show when={group("unstaged").length > 0}><SectionHead class="git-g" title="Unstaged" count={group("unstaged").length} /></Show>
-      <For each={group("unstaged")}>{f => <FileRow f={f} c={c()} go={props.codeAt} />}</For>
+      <Keyed each={group("unstaged")} by={f => f.path}>{f => <FileRow f={f()} c={c()} go={props.codeAt} />}</Keyed>
       <Show when={group("untracked").length > 0}><SectionHead class="git-g" title="Untracked" count={group("untracked").length} /></Show>
-      <For each={group("untracked")}>{f => <FileRow f={f} c={c()} go={props.codeAt} />}</For>
+      <Keyed each={group("untracked")} by={f => f.path}>{f => <FileRow f={f()} c={c()} go={props.codeAt} />}</Keyed>
       <Show when={c().files.length === 0 && !merge()}><div class="cap muted ws-pad">No uncommitted changes.</div></Show>
     </div>
     <div class="commit-box">
@@ -83,7 +87,7 @@ function Status(props: { repo: ProjectRepo; c: RepoCheckout; codeAt: (path: stri
         <button class="ib ws-ib" popovertarget="m-commit" aria-label="More commit options"><I n="more" s={14} /></button>
         <Pop id="m-commit" class="pop-up" align="up" label="Commit options"><MenuItem label="Amend last commit…" disabled={last() && c().draft.trim() ? undefined : "Write a message first"} needs="git_commit" onSelect={() => ws.open({ kind: "amend", checkoutId: c().id, message: c().draft, pushed: remote() && !!last()?.pushed })} /></Pop>
       </>}>
-        <button class="btn btn-primary btn-sm" ref={commitButton} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("git_commit")} onClick={commit}>Commit<span class="key">Ctrl+Enter</span></button>
+        <button class="btn btn-primary btn-sm" ref={commitButton} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("git_commit")} onClick={commit}>Commit<Show when={ws.keys("Ctrl+Enter")}>{k => <span class="key">{k()}</span>}</Show></button>
       </ActionBar>
     </div>
   </aside>;
@@ -95,13 +99,14 @@ function History(props: { repo: ProjectRepo; c: RepoCheckout }) {
   const selected = () => props.repo.commits.find(x => x.sha === sha()) ?? props.repo.commits[0];
   const title = (id: string | null) => id ? ws.store.index().byId.get(id)?.task.title ?? null : null;
   const copy = () => { void navigator.clipboard?.writeText(selected().sha); };
-  const row = (x: Commit) => <div class="hrow" role="option" tabindex="0" aria-selected={selected()?.sha === x.sha ? "true" : "false"} onClick={() => setSha(x.sha)} onKeyDown={e => { if (e.key === "Enter") setSha(x.sha); }}>
-    <svg viewBox="0 0 56 34" aria-hidden="true"><For each={x.graph.paths}>{p => <path class={`g ${p.cls}`} d={p.d} />}</For><circle class={x.graph.dot.cls} cx={x.graph.dot.x} cy="17" r="3.5" /></svg>
-    <span class="row hmsg"><span class="trunc">{x.message}</span><Show when={title(x.taskId)}>{t => <span class="tagc task"><I n="message" s={12} />{t()}</span>}</Show><For each={x.tags}>{tag => <span class="tagc w-wide">{tag}</span>}</For></span>
-    <span class="cap muted trunc">{x.author}</span><span class="mono faint trunc">{x.sha}</span><span class="cap faint trunc">{x.when}</span>
+  const row = (c: () => Commit) => <div class="hrow" role="option" tabindex="0" aria-selected={selected()?.sha === c().sha ? "true" : "false"} onClick={() => setSha(c().sha)} onKeyDown={e => { if (e.key === "Enter") setSha(c().sha); }}>
+    <svg viewBox="0 0 56 34" aria-hidden="true"><For each={c().graph.paths}>{p => <path class={`g ${p.cls}`} d={p.d} />}</For><circle class={c().graph.dot.cls} cx={c().graph.dot.x} cy="17" r="3.5" /></svg>
+    <span class="row hmsg"><span class="trunc">{c().message}</span><Show when={title(c().taskId)}>{t => <span class="tagc task"><I n="message" s={12} />{t()}</span>}</Show><For each={c().tags}>{tag => <span class="tagc w-wide">{tag}</span>}</For></span>
+    <span class="cap muted trunc">{c().author}</span><span class="mono faint trunc">{c().sha}</span><span class="cap faint trunc">{c().when}</span>
   </div>;
   return <>
-    <div class="hist" role="listbox" aria-label="History"><For each={props.repo.commits}>{row}</For></div>
+    {/* Kept by SHA: a fetch that adds a commit on top shifts every row, and each row must keep its node and focus. */}
+    <div class="hist" role="listbox" aria-label="History"><Keyed each={props.repo.commits} by={x => x.sha}>{x => row(x)}</Keyed></div>
     <Show when={selected()}>{x => <div class="cdetail">
       <SectionHead class="cdetail-h" title={x().message}>
         <button class="btn btn-sm" {...ws.needs("revert_commit")} onClick={() => ws.open({ kind: "revert-commit", checkoutId: props.c.id, sha: x().sha, message: x().message })}>Revert commit…</button>
@@ -127,16 +132,18 @@ function Worktrees(props: { repo: ProjectRepo | null; summary: ProjectSummary; p
   const [menu, setMenu] = createSignal<Menu | null>(null);
   let pop: HTMLDivElement | undefined;
   const open = (row: WorktreeRow, trigger: HTMLElement) => { setMenu({ row }); if (pop) { place(pop, trigger, "right"); pop.showPopover?.(); } };
-  const task = () => menu()?.row.task ?? null;
-  const c = () => menu()?.row.checkout ?? null;
+  // The rows are rebuilt on every read; the open menu follows its row by key, so it acts on what the row holds now.
+  const row = () => { const m = menu(); return m ? rows().find(r => r.key === m.row.key) ?? m.row : null; };
+  const task = () => row()?.task ?? null;
+  const c = () => row()?.checkout ?? null;
   const finished = () => { const t = task()?.task; return !!t && ["review", "ready_to_merge"].includes(t.status) ? undefined : "Available for a finished task"; };
   const mergeable = () => { const t = task()?.task; return t?.status === "ready_to_merge" && t.acceptance ? undefined : "Available in Ready to merge"; };
-  const gr = (r: WorktreeRow) => <div class="gr" style={{ "--cols": COLS }}>
-    <span class="trunc"><span class="mono ws-fg">{r.branch}</span><span class="sub">{r.path}</span></span>
-    <span class="cap muted trunc"><Show when={r.task} fallback={r.label}>{v => <A class="lnk" to={{ name: "task", machine: v().machine.id, task: v().id }}>{r.label}</A>}</Show></span>
-    <span class="cap tnum">{r.ahead === null ? "" : `${r.ahead} / ${r.behind}`}</span>
-    <span><span class={`st ${r.state.tone}`}><I n={r.state.icon} s={12} class={r.state.spin ? "spin" : undefined} />{r.state.label}</span></span>
-    <button class="ib ws-ib" aria-label={`Actions for ${r.branch}`} onClick={e => open(r, e.currentTarget)}><I n="more" s={14} /></button>
+  const gr = (r: () => WorktreeRow) => <div class="gr" style={{ "--cols": COLS }}>
+    <span class="trunc"><span class="mono ws-fg">{r().branch}</span><span class="sub">{r().path}</span></span>
+    <span class="cap muted trunc"><Show when={r().task} fallback={r().label}>{v => <A class="lnk" to={{ name: "task", machine: v().machine.id, task: v().id }}>{r().label}</A>}</Show></span>
+    <span class="cap tnum">{r().ahead === null ? "" : `${r().ahead} / ${r().behind}`}</span>
+    <span><span class={`st ${r().state.tone}`}><I n={r().state.icon} s={12} class={r().state.spin ? "spin" : undefined} />{r().state.label}</span></span>
+    <button class="ib ws-ib" aria-label={`Actions for ${r().branch}`} onClick={e => open(r(), e.currentTarget)}><I n="more" s={14} /></button>
   </div>;
   return <div class="hist" aria-label="Branches and worktrees">
     <Show when={main()}>{m => <>
@@ -145,7 +152,7 @@ function Worktrees(props: { repo: ProjectRepo | null; summary: ProjectSummary; p
         <button class="ib ws-ib" aria-label="Open the project folder" onClick={() => props.pick(m().id)}><I n="arrow-right" s={14} /></button></div></div>
     </>}</Show>
     <SectionHead class="ws-wg" title="Worktrees" count={rows().length} />
-    <Show when={rows().length > 0} fallback={<div class="cap muted ws-pad">No worktrees in this project.</div>}><div class="gt"><For each={rows()}>{gr}</For></div></Show>
+    <Show when={rows().length > 0} fallback={<div class="cap muted ws-pad">No worktrees in this project.</div>}><div class="gt"><Keyed each={rows()} by={r => r.key}>{r => gr(r)}</Keyed></div></Show>
     <Show when={(props.repo?.branches.length ?? 0) > 0}>
       <SectionHead class="ws-wg" title="Other branches" count={props.repo!.branches.length} />
       <div class="gt"><For each={props.repo!.branches}>{b => <div class="gr" style={{ "--cols": COLS }}><span class="trunc"><span class="mono ws-fg">{b.name}</span><span class="sub">{b.where}</span></span><span class="cap muted trunc">{b.task ?? "None"}</span><span class="cap tnum">{b.ahead} / {b.behind}</span><span><span class="st st-idle">No checkout</span></span><span></span></div>}</For></div>

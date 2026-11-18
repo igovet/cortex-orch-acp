@@ -1,6 +1,6 @@
 # CW-C07: Artifact/version-bound human acceptance separate from runtime completion
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: acceptance is bound to the result revision and is separate from Git actions ([local task execution](../local-task-execution.md)); acceptance with an unmet check for a technical blocker is only partly implemented (CW-R40); no-paid checks only · **Phase:** 3+ · **Size:** L
 
 ## Goal
 

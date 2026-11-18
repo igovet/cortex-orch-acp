@@ -167,7 +167,7 @@ export function configIssues(machine: Machine): ConfigIssue[] {
   if (c.files.migration || c.surfaces.routing.version !== 2) out.push({ id: "migration", text: "The model policy needs migration.", page: "files" });
   if (!bound.ok) out.push({ id: "coordinator", text: `Coordinator not bound: ${bound.text}`, page: "defaults" });
   if (ENGINE_KEYS.some(e => c.catalogue[e].failed)) out.push({ id: "catalogue", text: `A model list could not be read: ${ENGINE_KEYS.filter(e => c.catalogue[e].failed).map(engineLabel).join(", ")}. The previous list is kept.`, page: "models" });
-  for (const e of ENGINE_KEYS) if (notOffered(c.surfaces.routing, c.catalogue, e).length) out.push({ id: `offered:${e}`, text: `${engineLabel(e)} no longer offers ${notOffered(c.surfaces.routing, c.catalogue, e).join(", ")}.`, page: "models" });
+  for (const e of ENGINE_KEYS) if (notOffered(c.surfaces.routing, c.catalogue, e).length) out.push({ id: `offered:${e}`, text: `${engineLabel(e)} no longer offers ${notOffered(c.surfaces.routing, c.catalogue, e).map(id => id.toLowerCase() === "default" ? "the engine alias \"default\" (it names no concrete model; pick a concrete one)" : id).join(", ")}.`, page: "models" });
   for (const s of c.surfaces.mcp_servers) {
     if (s.problem) out.push({ id: `server:${s.name}`, text: `${s.name}: ${s.problem}`, page: "tools", server: s.name });
     if (s.enabled && [...s.readPaths, ...s.writePaths].some(pathMissing)) out.push({ id: `path:${s.name}`, text: `${s.name} will not start: a path does not exist.`, page: "tools", server: s.name });

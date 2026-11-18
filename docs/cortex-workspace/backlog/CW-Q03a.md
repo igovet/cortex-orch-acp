@@ -1,6 +1,6 @@
 # CW-Q03a: Rendered Ubuntu accessibility and long-history checks
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: text-only rendered audits, layout and scroll gates run in containers ([testing and acceptance](../testing-and-acceptance.md)); a real Ubuntu session and GPU are not verified · **Phase:** 3+ · **Size:** L
 
 Split from [CW-Q03](CW-Q03.md) for the desktop (Ubuntu) hardware.
 

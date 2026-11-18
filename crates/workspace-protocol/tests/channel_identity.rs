@@ -4,7 +4,9 @@ use serde_json::Value;
 use std::{collections::BTreeSet, path::Path};
 
 fn read(relative: &str) -> Value {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(relative);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(relative);
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
@@ -30,7 +32,10 @@ fn the_dev_and_release_channels_share_no_installed_identity() {
         "config_namespace",
         "state_namespace",
     ] {
-        let values: BTreeSet<_> = ["dev", "release"].iter().map(|c| channels[c][field].as_str().unwrap().to_owned()).collect();
+        let values: BTreeSet<_> = ["dev", "release"]
+            .iter()
+            .map(|c| channels[c][field].as_str().unwrap().to_owned())
+            .collect();
         assert_eq!(values.len(), 2, "channels share `{field}`");
     }
 }

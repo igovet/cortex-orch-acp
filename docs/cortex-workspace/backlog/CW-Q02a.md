@@ -1,6 +1,6 @@
 # CW-Q02a: Desktop fault and race matrix
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: individual fault and race cases are covered by no-paid tests; the complete desktop matrix is not confirmed · **Phase:** 3+ · **Size:** L
 
 Split from [CW-Q02](CW-Q02.md) for the Ubuntu desktop. The phone and device rows are in [CW-Q02b](CW-Q02b.md).
 

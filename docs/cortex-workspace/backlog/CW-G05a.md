@@ -1,6 +1,6 @@
 # CW-G05a: Desktop Git panel
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: the desktop Git panel with status, diff, stage, commit, branches, pull and push ([IDE and Git](../ide-and-git.md)); not verified on a real session · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Build the desktop Solid Git panel: status, diff, stage and unstage, commit preview, branch switch, fetch and pull, and push confirmation. Each step shows worktree identity and its typed outcome. No control turns a result acceptance into a commit or a push.

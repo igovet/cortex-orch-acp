@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-workspace-request"
+description = "Enables the workspace_request command without any pre-configured scope."
+commands.allow = ["workspace_request"]
+
+[[permission]]
+identifier = "deny-workspace-request"
+description = "Denies the workspace_request command without any pre-configured scope."
+commands.deny = ["workspace_request"]

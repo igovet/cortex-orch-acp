@@ -1,6 +1,6 @@
 # CW-G02: Version-checked stage and unstage, with CLI-backed commit
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: stage, unstage and commit through the `git` CLI ([IDE and Git](../ide-and-git.md)); no-paid checks only · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Stage and unstage through the git2-rs index API. Each operation is guarded by the expected file state hash. Commit preview and commit execution go through the installed Git CLI, so the owner's hooks, signing and credential helpers run unchanged.

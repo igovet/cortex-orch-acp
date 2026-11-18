@@ -1,6 +1,7 @@
 //! Window-independent Cortex domain foundation. No ACP/Tauri or Python runtime dependency.
 //! Blocking Store methods must run on a dedicated executor, never a Tokio reactor.
 pub mod access;
+pub mod assignment_brief;
 pub mod channels;
 pub mod error;
 pub mod events;
@@ -8,6 +9,8 @@ pub mod external;
 pub mod input;
 pub mod lifecycle;
 pub mod ownership;
+pub mod permission_decisions;
+pub mod pipeline;
 pub mod ports;
 pub mod projections;
 pub mod recovery_context;

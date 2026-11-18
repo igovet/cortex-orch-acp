@@ -1,7 +1,7 @@
 # Tool discovery and read batches
 
-Source: the advertised tool schemas in `crates/cortex-engine/src/schema.rs` and the brokered gateway in `crates/cortex-engine/src/gateway.rs`.
-Focused coverage: the `cortex-engine` Rust tests.
+Source: the advertised tool schemas in `crates/cortex-engine/src/schema.rs`, the brokered gateway in `crates/cortex-engine/src/gateway.rs`, and the native handlers in `crates/workspace-service/src/native_documents.rs` (discovery) and `native_batch.rs` with `CorePolicy::batch` in `native_sessions.rs` (batches).
+Focused coverage: the `cortex-engine` gateway tests, the `workspace-service` `native_batch` unit test and the `native_sessions` gateway scenario `recovery_project_operations_and_structured_tool_errors`.
 
 ## Additive, not an evaluator
 
@@ -12,10 +12,22 @@ never inspects external MCP servers or grants permission to call a tool.
 Existing individual tools, all 23 profiles and ordinary engine loading remain.
 This is not a Cortex-owned Code Mode sandbox or a two-tool replacement for MCP.
 
+`read_batch` is offered to every role whose catalogue lists it (every
+coordinator, worker and consultant catalogue), and discovery entries mark the six
+batchable reads with `read_batch_supported: true`.
+
 `read_batch` groups explicitly selected independent evidence pages:
 `list_reports`, `read_report`, `read_draft`, `list_sources`, `read_source`
-and `read_large_output`. All envelope fields, unique identities, offered names
-and current native argument schemas are checked before any member executes.
+and `read_large_output`, and only those the calling channel is itself offered.
+The advertised item schema refuses any other tool name (`-32602`), and the
+runtime refuses the whole batch before any member executes, as a tool error
+naming the exact location, when the request exceeds its byte or depth bound
+(`request_too_large`, `invalid_arguments` at `calls`), an id repeats
+(`calls[i].id`), a member is not offered to the channel (`tool_not_available` at
+`calls[i].tool`) or a member's arguments do not match that tool's own schema
+(`calls[i].arguments`). Each member then runs, one at a time and in order,
+through exactly the handler a direct call of that tool uses, so it has the same
+guards, paging and size bounds and returns the same result.
 Arguments are declarative JSON, not expressions or references to prior results.
 Commands, external calls, publishing, lifecycle actions, project/skill reads,
 recursive discovery/batching and mutations are prohibited.
@@ -36,9 +48,11 @@ Argument contracts and units live in the advertised schemas. Current limits:
 - Batch: 1–8 members, unique case-sensitive item identities; at most 32,768
   compact UTF-8 request bytes and 16 container levels.
 - Native data objects: at most 6,144 compact UTF-8 bytes inline per item and
-  65,536 bytes for the structured batch envelope. Larger results defer as exact
-  JSON up to 1 MiB, with retained id, byte count and SHA-256. Nothing is silently
-  cut to fit. An oversized `read_large_output` page returns `batch_result_limit`
+  65,536 bytes for the structured batch envelope (above it the batch is the
+  `result_too_large` tool error). Larger item results are retained whole as
+  owner-private output and the item is `deferred` with its `large_output_id`,
+  `byte_count` and `result_sha256`, readable with `read_large_output`. Nothing is
+  silently cut to fit. An oversized `read_large_output` page returns `batch_result_limit`
   instead of recursively spilling; request a smaller original page.
 - Five seconds is a monotonic admission budget, not an interruptible read timeout.
 
@@ -48,35 +62,35 @@ retains its task/owner binding, authorization and cursor semantics. A native
 inside that item's result unchanged. Caller-selected small pages avoid waste.
 
 Every member retains its id/tool and `ok`, `error`, `deferred` or `not_run`
-status. The envelope reports executed/returned counts and complete/incomplete.
-Any non-ok item makes the outer MCP response an error; successful siblings are
+status; an `error` item carries the member's structured error (`code`, `field`
+when known, `hint`). The envelope reports executed, returned and deferred counts
+and complete/incomplete. A `deferred` item ran and is retained under its
+`large_output_id`: a normal outcome that keeps the batch complete and the MCP
+response not an error, so a real report above the inline bound is read through
+`read_large_output` without the batch looking failed. Only an `error` or
+`not_run` item makes the batch incomplete and the outer MCP response an error
+(`isError: true` with the full envelope); successful siblings are
 still usable evidence, never proof of the failed item. Complete describes batch
 delivery, not complete document coverage or successful underlying command output.
 
 ## Authority, cancellation and evidence
 
-These two tools require current channel/owner authority and an active runtime
-task; a worker channel additionally needs a resolved running assignment with a
-role and stage, while a coordinator channel
-needs none. Authority and effective catalogue are
-rechecked between reads and before delivery, even when the server's original
-channel context is cached. Loss of authority or changed role/stage offers aborts
-the wrapper and withholds all accumulated bodies and references. Existing
-individual historical reads retain their original behavior.
+These two tools require current channel/owner authority. The channel's exact
+identity (task, attempt, owner epoch, role, profile, stage) is rechecked before
+and after every member; a channel that is no longer current aborts the batch as
+a named `-32001` refusal and withholds all accumulated bodies and references. An
+authority refusal of a member does the same. A member's ordinary failure is that
+item's error only.
 
-The synchronous stdio transport cannot consume a cancellation notification while
-an inner read runs. Cancellation is cooperative through observed authority changes
-and engine/process teardown, not preemption. Disconnect/crash can leave executed
+Cancellation is cooperative through observed authority changes and
+engine/process teardown, not preemption. Disconnect/crash can leave executed
 reads or retained outputs without a delivered response. Retry means a fresh read,
 not replay or batch resumption.
 
-Read-only describes the requested operation: normal runtime bookkeeping, audit
-events and retained-output writes still occur. Inline report pages get a
-runtime-derived, typed outer-request/item observation at final delivery.
-Deferred/error/withheld pages do not establish a successful report handoff read.
-Reading a deferred JSON blob alone does not establish the original report read.
-Batch observations are not extra native MCP requests or command check receipts.
-Display history keeps metadata/status rather than returned discovery/batch bodies.
+Read-only describes the requested operation: deferred items write retained
+output. The native runtime keeps no per-read delivery observation for reports,
+for a batch or a direct call, and emits no batch audit events. Display history
+keeps metadata/status rather than returned discovery/batch bodies.
 
 ## Examples and measurement
 

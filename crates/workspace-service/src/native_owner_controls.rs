@@ -434,12 +434,21 @@ fn cursor_text(activity: Option<(i64, i64)>, messages: Option<(i64, i64)>) -> Op
     match (activity, messages) {
         (None, None) => None,
         (a, None) => a.map(|a| format!("na1.{}.{}", a.0, a.1)),
-        (a, Some(m)) => { let a = a.unwrap_or((0, 0)); Some(format!("na2.{}.{}.{}.{}", a.0, a.1, m.0, m.1)) }
+        (a, Some(m)) => {
+            let a = a.unwrap_or((0, 0));
+            Some(format!("na2.{}.{}.{}.{}", a.0, a.1, m.0, m.1))
+        }
     }
 }
 /// One task's queued guidance messages (optionally one worker's), the newest `PAGE` older than `before`, oldest first, with
 /// the oldest returned key and whether older ones remain.
-fn guidance(db: &rusqlite::Connection, task: &str, draft: &str, worker: Option<&str>, before: Option<(i64, i64)>) -> CoreResult<(Vec<Value>, Option<(i64, i64)>, bool)> {
+fn guidance(
+    db: &rusqlite::Connection,
+    task: &str,
+    draft: &str,
+    worker: Option<&str>,
+    before: Option<(i64, i64)>,
+) -> CoreResult<(Vec<Value>, Option<(i64, i64)>, bool)> {
     let (at, id) = before.unwrap_or((i64::MAX, i64::MAX));
     let mut rows = db.prepare(&format!("SELECT id,payload_json,coalesce({ms},0) FROM runtime_events WHERE task_id=? AND type='NATIVE_GUIDANCE_QUEUED'
         AND (?4 IS NULL OR json_extract(payload_json,'$.worker')=?4) AND (coalesce({ms},0),id)<(?2,?3) ORDER BY id DESC LIMIT {}", PAGE + 1, ms = ms("created_at")))?
@@ -470,7 +479,13 @@ const NARRATION_CHUNKS: i64 = 4000;
 /// worker page's order (time, then sequence above every runtime event id, like its tool steps). Written by the worker
 /// into the same session history the Conversation reads, so nothing here is text the Conversation did not already
 /// hold. The newest messages fill the bound; a cut says so. Older builds' rows carry the same prefix and read the same.
-fn narration(db: &rusqlite::Connection, session: &str, attempt: &str, budget: &mut usize, before: Option<(i64, i64)>) -> CoreResult<(Vec<Value>, bool)> {
+fn narration(
+    db: &rusqlite::Connection,
+    session: &str,
+    attempt: &str,
+    budget: &mut usize,
+    before: Option<(i64, i64)>,
+) -> CoreResult<(Vec<Value>, bool)> {
     let prefix = format!("{attempt}:");
     // A page after a cursor reads from the cursor's time on (with slack for a message's chunks), then keeps exact keys below.
     let until = before.map_or(i64::MAX, |(at, _)| at.saturating_add(600_000));
@@ -484,7 +499,11 @@ fn narration(db: &rusqlite::Connection, session: &str, attempt: &str, budget: &m
     for (seq, id, chunk, at) in rows.into_iter().take(NARRATION_CHUNKS as usize) {
         let Some(chunk) = chunk else { continue };
         match messages.last_mut() {
-            Some(m) if m.2 == id => { m.0 = seq; m.1 = at.or(m.1); m.3.push(chunk); }
+            Some(m) if m.2 == id => {
+                m.0 = seq;
+                m.1 = at.or(m.1);
+                m.3.push(chunk);
+            }
             _ => messages.push((seq, at, id, vec![chunk])),
         }
     }
@@ -493,10 +512,17 @@ fn narration(db: &rusqlite::Connection, session: &str, attempt: &str, budget: &m
         chunks.reverse();
         let body = chunks.concat();
         let body = body.trim();
-        if body.is_empty() { continue; }
-        if before.is_some_and(|(a, s)| (at.unwrap_or(0), STEP_SEQUENCE + first) >= (a, s)) { continue; }
+        if body.is_empty() {
+            continue;
+        }
+        if before.is_some_and(|(a, s)| (at.unwrap_or(0), STEP_SEQUENCE + first) >= (a, s)) {
+            continue;
+        }
         let body: String = body.chars().take(NARRATION_CHARS).collect();
-        if out.len() >= NARRATION_MESSAGES || body.len() > *budget { partial = true; break; }
+        if out.len() >= NARRATION_MESSAGES || body.len() > *budget {
+            partial = true;
+            break;
+        }
         *budget -= body.len();
         out.push(json!({"sequence":STEP_SEQUENCE+first,"kind":"note","text":body,"at":at}));
     }
@@ -506,6 +532,58 @@ fn narration(db: &rusqlite::Connection, session: &str, attempt: &str, budget: &m
 /// Milliseconds since the epoch of a stored RFC 3339 time column, or NULL.
 fn ms(column: &str) -> String {
     format!("CAST(round((julianday({column})-2440587.5)*86400000) AS INTEGER)")
+}
+/// Runtime facts of the owner's messages to the coordinator and write denials, read
+/// with the task's product facts (and so after each of its runtime events): every
+/// recorded message carries `recorded` (waiting for the coordinator's next step) or
+/// `delivered` with `deliveredAt`; a saved queue row with the same id takes that state.
+/// `writeDenials` lists the owner's `deny-write` paths in force with when each was set.
+fn owner_steering(
+    db: &rusqlite::Connection,
+    task: &str,
+    draft: &str,
+    wanted: bool,
+    product: &mut Value,
+) -> CoreResult<()> {
+    let millis = |at: &Value| -> CoreResult<Value> {
+        Ok(match at.as_str() {
+            Some(at) => json!(db.query_row(&format!("SELECT {}", ms("?1")), [at], |r| r
+                .get::<_, Option<i64>>(0))?),
+            None => Value::Null,
+        })
+    };
+    let denials = cortex_core::lifecycle::steering::denial_records(db, task)?;
+    if !denials.is_empty() || product["tasks"][draft].is_object() {
+        let mut listed = Vec::new();
+        for d in denials {
+            listed.push(json!({"path":d.path,"setAt":millis(&json!(d.set_at))?}));
+        }
+        product["tasks"][draft]["writeDenials"] = json!(listed);
+    }
+    // Message states only for the tasks a read asks about (the task on view).
+    if !wanted {
+        return Ok(());
+    }
+    let states = cortex_core::lifecycle::steering::message_states(db, task)?;
+    let Some(messages) = product["messages"].as_array_mut() else {
+        return Ok(());
+    };
+    for s in states {
+        let delivered = millis(&s["deliveredAt"])?;
+        let row = json!({"id":s["request"],"taskId":draft,"workerId":null,"text":s["text"],"mode":"send_now",
+            "delivery":s["delivery"],"at":millis(&s["at"])?,"deliveredAt":delivered,"failure":null});
+        match messages
+            .iter_mut()
+            .find(|m| m["id"] == s["request"] && m["workerId"].is_null())
+        {
+            Some(saved) => {
+                saved["delivery"] = row["delivery"].clone();
+                saved["deliveredAt"] = delivered;
+            }
+            None => messages.push(row),
+        }
+    }
+    Ok(())
 }
 /// The host check receipts of a task's current result. A reopened task keeps its
 /// plan revision until its next execution baseline, so receipts recorded before
@@ -521,7 +599,9 @@ pub(super) fn checks(db: &rusqlite::Connection, task: &str) -> CoreResult<Value>
     // The newest receipts decide each check. A task with more than the bound is never refused: the
     // result is marked `checksPartial` (older receipts were not read) and the presenter keeps it unacceptable.
     let mut receipts = query
-        .query_map(rusqlite::params![task, CHECK_RECEIPTS as i64 + 1], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        .query_map(rusqlite::params![task, CHECK_RECEIPTS as i64 + 1], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?
         .collect::<Result<Vec<_>, _>>()?;
     let partial = receipts.len() > CHECK_RECEIPTS;
     receipts.truncate(CHECK_RECEIPTS);
@@ -570,13 +650,34 @@ pub(crate) const RECEIPTS_PARTIAL_REASON: &str = "This result has more check rec
 /// activity (naming the cursor that reads it back), then the oldest queued messages. True if anything moved.
 fn fit_frame(value: &mut Value) -> CoreResult<bool> {
     let limit = workspace_protocol::FRAME_BYTES - 2048;
-    let key = |a: &Value| (a["at"].as_i64().unwrap_or(0), a["sequence"].as_i64().unwrap_or(0));
+    let key = |a: &Value| {
+        (
+            a["at"].as_i64().unwrap_or(0),
+            a["sequence"].as_i64().unwrap_or(0),
+        )
+    };
     let mut trimmed = false;
     while serde_json::to_vec(&*value)?.len() > limit {
         trimmed = true;
-        let largest = value["workers"].as_array().into_iter().flatten().enumerate()
-            .map(|(n, w)| (n, w["activity"].as_array().map_or(0, |a| a.iter().map(|i| i.to_string().len()).sum::<usize>())))
-            .filter(|(n, size)| *size > 0 && value["workers"][*n]["activity"].as_array().is_some_and(|a| !a.is_empty()))
+        let largest = value["workers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(n, w)| {
+                (
+                    n,
+                    w["activity"]
+                        .as_array()
+                        .map_or(0, |a| a.iter().map(|i| i.to_string().len()).sum::<usize>()),
+                )
+            })
+            .filter(|(n, size)| {
+                *size > 0
+                    && value["workers"][*n]["activity"]
+                        .as_array()
+                        .is_some_and(|a| !a.is_empty())
+            })
             .max_by_key(|(_, size)| *size);
         if let Some((n, _)) = largest {
             let worker = &mut value["workers"][n];
@@ -585,16 +686,26 @@ fn fit_frame(value: &mut Value) -> CoreResult<bool> {
             let dropped: Vec<Value> = items.drain(..drop).collect();
             let boundary = match items.first() {
                 Some(first) => key(first),
-                None => { let last = key(dropped.last().expect("one dropped")); (last.0, last.1 + 1) }
+                None => {
+                    let last = key(dropped.last().expect("one dropped"));
+                    (last.0, last.1 + 1)
+                }
             };
             worker["activityPartial"] = json!(true);
             // The queued-message bound a cursor already carries stays: only the activity bound moves.
-            let messages = worker["activityCursor"].as_str().and_then(parse_cursor).map(|c| c.1).filter(|m| *m != (0, 0));
+            let messages = worker["activityCursor"]
+                .as_str()
+                .and_then(parse_cursor)
+                .map(|c| c.1)
+                .filter(|m| *m != (0, 0));
             worker["activityCursor"] = json!(cursor_text(Some(boundary), messages));
             continue;
         }
         match value["product"]["messages"].as_array_mut() {
-            Some(m) if !m.is_empty() => { let n = m.len().div_ceil(2); m.drain(..n); }
+            Some(m) if !m.is_empty() => {
+                let n = m.len().div_ceil(2);
+                m.drain(..n);
+            }
             _ => return refused("native_facts_limit"),
         }
     }
@@ -604,7 +715,11 @@ fn fit_frame(value: &mut Value) -> CoreResult<bool> {
 /// time the task was reopened (Request changes or steering) up to event `upto`. Event ids
 /// and revisions move with every runtime event, so they are never shown as a version; they
 /// stay in `sourceVersion`, which commands bind to.
-pub(super) fn result_ordinal(db: &rusqlite::Connection, task: &str, upto: Option<i64>) -> CoreResult<u64> {
+pub(super) fn result_ordinal(
+    db: &rusqlite::Connection,
+    task: &str,
+    upto: Option<i64>,
+) -> CoreResult<u64> {
     let reopened: i64 = db.query_row(
         "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='TASK_REOPENED' AND id<=?",
         (task, upto.unwrap_or(i64::MAX)),
@@ -624,7 +739,9 @@ pub(super) fn edit_hunk(recorded: &str) -> Vec<String> {
     const LINES: usize = 200;
     let mut rows = recorded.lines();
     let header = (rows.next(), rows.next(), rows.next());
-    let (Some(a), Some(b), Some(h)) = header else { return Vec::new() };
+    let (Some(a), Some(b), Some(h)) = header else {
+        return Vec::new();
+    };
     if !a.starts_with("--- ") || !b.starts_with("+++ ") || !h.starts_with("@@ ") {
         return Vec::new();
     }
@@ -651,19 +768,82 @@ pub(super) fn edit_hunk(recorded: &str) -> Vec<String> {
     let start = head - before;
     let (old_count, new_count) = (old_end - start + after, new_end - start + after);
     let at = |count: usize| if count == 0 { start } else { start + 1 };
-    let mut out = vec![format!("@@ -{},{old_count} +{},{new_count} @@", at(old_count), at(new_count))];
+    let mut out = vec![format!(
+        "@@ -{},{old_count} +{},{new_count} @@",
+        at(old_count),
+        at(new_count)
+    )];
     out.extend(old[start..head].iter().map(|l| format!(" {l}")));
     out.extend(old[head..old_end].iter().map(|l| format!("-{l}")));
     out.extend(new[head..new_end].iter().map(|l| format!("+{l}")));
-    out.extend(old[old_end..old_end + after].iter().map(|l| format!(" {l}")));
+    out.extend(
+        old[old_end..old_end + after]
+            .iter()
+            .map(|l| format!(" {l}")),
+    );
     if out.len() > LINES + 1 {
         let more = out.len() - LINES - 1;
         out.truncate(LINES + 1);
-        out.push(format!("… {more} more line{} in Changes", if more == 1 { "" } else { "s" }));
+        out.push(format!(
+            "… {more} more line{} in Changes",
+            if more == 1 { "" } else { "s" }
+        ));
     }
     out.into_iter()
         .map(|l| crate::machine::redact_display_text(&l.chars().take(2000).collect::<String>()))
         .collect()
+}
+/// The engine, model and effort a worker's engine session was configured with, from the
+/// record its session start wrote once the engine confirmed them, newest session of this
+/// worker first. Null while no session of it was configured (not started yet, an older
+/// store without the record): never another session's route, such as the coordinator's.
+pub(super) fn worker_route(
+    db: &rusqlite::Connection,
+    task: &str,
+    assignment: &str,
+) -> CoreResult<Value> {
+    let raw: Option<String> = db.query_row("SELECT e.payload_json FROM runtime_events e JOIN trusted_channels c
+        ON c.task_id=e.task_id AND c.channel_id=json_extract(e.payload_json,'$.channel_id')
+        WHERE e.task_id=? AND e.type='NATIVE_SESSION_CONFIGURED' AND c.role='worker' AND c.assignment_id=? ORDER BY e.id DESC LIMIT 1",
+        (task, assignment), |r| r.get(0)).optional()?;
+    let Some(p) = raw
+        .map(|raw| serde_json::from_str::<Value>(&raw))
+        .transpose()?
+    else {
+        return Ok(Value::Null);
+    };
+    let (Some(engine), Some(model)) = (
+        p["engine"].as_str(),
+        p["model"].as_str().filter(|m| !m.is_empty()),
+    ) else {
+        return Ok(Value::Null);
+    };
+    let effort = ["thought_level", "effort", "reasoning_effort"]
+        .iter()
+        .find_map(|k| p["parameters"][k].as_str().filter(|s| !s.is_empty()))
+        .unwrap_or("");
+    let mut route = json!({"engine":engine,"model":model,"effort":effort});
+    // The engine's own name for the model, recorded with the configured session; an older
+    // record has none and the desktop resolves the id through its catalogue.
+    if let Some(label) = p["model_label"].as_str().filter(|l| !l.is_empty()) {
+        route["modelLabel"] = json!(label);
+    }
+    // Why a reviewer got its route, from the recorded route decision.
+    let rule: Option<String> = db.query_row("SELECT json_extract(payload_json,'$.decision.review_route.rule') FROM runtime_events
+        WHERE task_id=? AND type='NATIVE_ROUTE_SELECTED' AND json_extract(payload_json,'$.assignment_ref')=? ORDER BY id DESC LIMIT 1",
+        (task, assignment), |r| r.get(0)).optional()?.flatten();
+    let why = match rule.as_deref() {
+        Some("different_from_all_authors") => Some("A model you prefer for review, different from every model that wrote the work"),
+        Some("different_from_dominant_author") => Some("A model you prefer for review, different from the model that wrote most of the change"),
+        Some("same_model_fresh_session") => Some("A model you prefer for review that also wrote part of the work, reviewing in a fresh session: no other review model was usable"),
+        Some("no_review_preferred_model") => Some("No model you prefer for review was usable, so another model reviews"),
+        Some("no_authors") => Some("A model you prefer for review"),
+        _ => None,
+    };
+    if let Some(why) = why {
+        route["why"] = json!(why);
+    }
+    Ok(route)
 }
 pub(super) fn worker_status(node: &str, process: &str, task_state: &str) -> &'static str {
     match (node, process) {
@@ -677,6 +857,32 @@ pub(super) fn worker_status(node: &str, process: &str, task_state: &str) -> &'st
 /// A finished result's identity is its Python-parity review identity (Python
 /// `result_projection`: version = the task's latest event), which Accept, owner
 /// reruns and the presented result share. Without one, the check identity stays.
+/// How long a deferring presentation read (`defer`) waits for the folder observation
+/// before it answers with pending review facts (`pending_reviews`).
+pub(crate) const OBSERVATION_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+/// Why Accept is off while the folder observation of a deferring read is still running.
+pub(crate) const CHECKING_REASON: &str = "Checking the result against the project\u{2026}";
+/// The completed results of a deferring read whose folder observation has not finished:
+/// each keeps its own record (summary, version, runtime checks) and carries a pending
+/// review with Accept off. No digest, staleness or acceptance is claimed from it.
+fn pending_reviews(facts: &mut Value, completed: &[(String, String, Option<String>, u64)]) {
+    for (draft, _, synthesis, ordinal) in completed {
+        let task = &mut facts["product"]["tasks"][draft];
+        if !task["result"].is_object() {
+            task["result"] = json!({"checks":[]});
+        }
+        let result = &mut task["result"];
+        result["digest"] = Value::Null;
+        result["acceptanceAvailable"] = json!(false);
+        result["summary"] = json!(synthesis
+            .as_deref()
+            .unwrap_or("Native result summary unavailable."));
+        result["version"] = json!(ordinal);
+        task["reviewActions"] = json!({"accept":false,"pending":true,"requestChanges":true,
+            "reason":CHECKING_REASON,"unblockAction":null,"acknowledgeOpenChecks":false});
+        task["workspaceDigest"] = Value::Null;
+    }
+}
 fn identify(result: &mut Value, actions: &Value) {
     if let (Some(version), Some(digest)) = (actions["version"].as_str(), actions["digest"].as_str())
     {
@@ -712,6 +918,7 @@ impl Runtime {
                 .unwrap_or(Value::Null),
             None => Value::Null,
         };
+        // The rerun-check identity check decides on the folder as it is now.
         let native = crate::machine::task_facts::native_observation(&self.host.root).await;
         self.reviews(project, vec![(execution.to_owned(), record)], native)
             .await
@@ -726,31 +933,77 @@ impl Runtime {
         let root = self.host.root.clone();
         let project = project.to_owned();
         tokio::task::spawn_blocking(move || {
-            completed
-                .iter()
-                .map(|(execution, record)| {
-                    crate::machine::task_facts::native_review(
-                        &root,
-                        &project,
-                        execution,
-                        "COMPLETED",
-                        record,
-                        native.as_deref(),
-                    )
-                })
-                .collect()
+            crate::machine::task_facts::native_reviews(
+                &root,
+                &project,
+                &completed,
+                native.as_deref(),
+            )
         })
         .await
         .map_err(|_| CoreError::Refused("native_facts_unavailable"))
     }
-    /// Existing presentation DTOs, read from the native owner's one store. No helper.
+    /// Existing presentation DTOs, read from the native owner's one store, with a fresh
+    /// folder observation. No helper. The service reads `owner_facts_observed`.
+    #[cfg(test)]
     pub(super) async fn owner_facts(
+        &self,
+        project: &str,
+        product: Value,
+        params: Value,
+    ) -> CoreResult<Value> {
+        self.owner_read(project, product, params, false, None).await
+    }
+    /// `owner_facts` with its folder observation already started (the service passes
+    /// `machine::task_facts::recent_observation` of the project root),
+    /// so the folder is observed while the saved records and the store are read. An
+    /// observation the read turns out not to need is stopped.
+    pub(crate) async fn owner_facts_observed(
+        &self,
+        project: &str,
+        product: Value,
+        params: Value,
+        observing: tokio::task::JoinHandle<CoreResult<String>>,
+    ) -> CoreResult<Value> {
+        self.owner_read(project, product, params, false, Some(observing))
+            .await
+    }
+    /// The worker rows of `owner_facts` alone (`workers`): the same rows, cursors and
+    /// pages, without the product facts, folder observation and result reviews that a
+    /// worker read never returns. The frame bound applies to the rows themselves.
+    pub(crate) async fn owner_workers(&self, project: &str, params: Value) -> CoreResult<Value> {
+        let facts = self
+            .owner_read(
+                project,
+                json!({"tasks":{},"sprints":[],"messages":[]}),
+                params,
+                true,
+                None,
+            )
+            .await?;
+        Ok(facts["workers"].clone())
+    }
+    async fn owner_read(
         &self,
         project: &str,
         mut product: Value,
         params: Value,
+        workers_only: bool,
+        observing: Option<tokio::task::JoinHandle<CoreResult<String>>>,
     ) -> CoreResult<Value> {
-        let __t0 = std::time::Instant::now();
+        // A started observation never outlives this read, whatever it returns, except
+        // that a deferring read (`defer`) that stops waiting for it leaves it to finish:
+        // it is a presentation observation, and the read that follows takes it over.
+        let defer = params["defer"] == true;
+        struct Started(Option<tokio::task::JoinHandle<CoreResult<String>>>);
+        impl Drop for Started {
+            fn drop(&mut self) {
+                if let Some(observing) = self.0.take() {
+                    observing.abort();
+                }
+            }
+        }
+        let mut observing = Started(observing);
         let (mut facts, completed) = recv(self.host.executor.read(move |db| {
             let tasks=db.prepare("SELECT t.task_id,e.execution_id,e.runtime_task_id,r.state,r.synthesis FROM workspace_tasks t
                 JOIN workspace_executions e ON e.execution_id=t.execution_id JOIN runtime_tasks r ON r.task_id=e.runtime_task_id ORDER BY t.rowid DESC LIMIT 1001")?
@@ -773,6 +1026,10 @@ impl Runtime {
             let mut step_budget:usize=2_000_000;
             let mut narration_budget:usize=400_000;
             for (draft,execution,task,state,synthesis) in tasks {
+                let wanted=!params["taskIds"].as_array().is_some_and(|a|!a.contains(&json!(draft)));
+                // A worker read returns no product: only its requested tasks' rows are read.
+                if workers_only && !wanted {continue;}
+                if !workers_only {
                 let ordinal=result_ordinal(db,&task,None)?;
                 if state=="COMPLETED" { completed.push((draft.clone(),execution.clone(),synthesis.clone(),ordinal)); }
                 // Acceptance records the event id it accepted; the owner reads the result number.
@@ -783,6 +1040,7 @@ impl Runtime {
                 let settings:Option<String>=db.query_row("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='NATIVE_TASK_SETTINGS' ORDER BY id DESC LIMIT 1",
                     [&task],|r|r.get(0)).optional()?;
                 if let Some(raw)=settings {product["tasks"][&draft]["settings"]=serde_json::from_str::<Value>(&raw)?["settings"].clone();}
+                owner_steering(db,&task,&draft,wanted,&mut product)?;
                 // Only this result's host checks: a reopened task shows none until its next run records them.
                 let mut result=checks(db,&task)?;
                 if result["checks"].as_array().is_some_and(|a|!a.is_empty()) {
@@ -793,12 +1051,13 @@ impl Runtime {
                     result["version"]=json!(ordinal);
                     product["tasks"][&draft]["result"]=result;
                 }
+                }
                 // The newest queued guidance messages ride with the product; older ones are read, per worker,
                 // behind the cursor its page returns (`guidance_floor` is where the product's window ends).
                 let (queued,oldest,more_queued)=guidance(db,&task,&draft,None,None)?;
                 let guidance_floor=if more_queued {oldest} else {None};
-                product["messages"].as_array_mut().ok_or(CoreError::Refused("state_unreadable"))?.extend(queued);
-                if params["taskIds"].as_array().is_some_and(|a|!a.contains(&json!(draft))) {continue;}
+                if !workers_only {product["messages"].as_array_mut().ok_or(CoreError::Refused("state_unreadable"))?.extend(queued);}
+                if !wanted {continue;}
                 let nodes=db.prepare("SELECT n.assignment_ref,n.role,n.objective,n.status,p.status,n.scope_json,n.result_json,n.revision,p.attempt_id FROM runtime_nodes n
                     JOIN delegation_provisioning p ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
                     WHERE n.task_id=? ORDER BY n.rowid DESC LIMIT 1001")?
@@ -825,6 +1084,26 @@ impl Runtime {
                         if let Some((attempt,_))=call.split_once(':') { calls.entry(attempt.to_owned()).or_default().push((call.clone(),first,last,at)); }
                     }
                 }
+                // Every retained update of the presented workers' calls, read in one pass over the session
+                // (oldest first, with its seq) instead of one session scan per call.
+                let mut updates=std::collections::HashMap::<String,(Vec<i64>,Vec<String>)>::new();
+                if let Some(session)=&session {
+                    let needed:std::collections::HashSet<&str>=nodes.iter()
+                        .filter(|n|params["workerId"].as_str().is_none_or(|w|w==n.0))
+                        .filter_map(|n|n.8.as_deref().and_then(|a|calls.get(a)))
+                        .flatten().map(|c|c.0.as_str()).collect();
+                    if !needed.is_empty() {
+                        let mut q=db.prepare("SELECT seq,json_extract(update_json,'$.toolCallId'),update_json FROM host_updates
+                            WHERE session_id=? AND json_valid(update_json) AND json_type(update_json,'$.toolCallId')='text' ORDER BY seq")?;
+                        let mut rows=q.query([session])?;
+                        while let Some(r)=rows.next()? {
+                            let call:String=r.get(1)?;
+                            if needed.contains(call.as_str()) { let u=updates.entry(call).or_default(); u.0.push(r.get(0)?); u.1.push(r.get(2)?); }
+                        }
+                    }
+                }
+                // The task's command receipts, read once for all its workers (each worker filters its own below).
+                let mut command_rows:Option<Vec<(i64,String,Value,Option<String>,Option<i64>,Option<String>)>>=None;
                 for (id,role,goal,status,process,scope,node_result,revision,attempt) in nodes {
                     if params["workerId"].as_str().is_some_and(|w|w!=id) {continue;}
                     let superseded=revision<current_revision || reopened.is_some_and(|r|revision<=r);
@@ -836,15 +1115,23 @@ impl Runtime {
                     // When each command started: a finished one keeps its place in time.
                     let mut began=std::collections::HashMap::<String,Option<i64>>::new();
                     // Every receipt is read in order (nothing is cut here); the page below takes the window.
-                    for row in db.prepare(&format!("SELECT e.id,e.type,e.payload_json,c.assignment_id,{},c.channel_id FROM runtime_events e
-                        LEFT JOIN trusted_channels c ON e.type='NATIVE_COMMAND_STARTED' AND c.task_id=e.task_id AND c.channel_id=json_extract(e.payload_json,'$.channel_id')
-                        WHERE e.task_id=? AND e.type IN ('NATIVE_COMMAND_STARTED','NATIVE_COMMAND_FINISHED') ORDER BY e.id",ms("e.created_at")))?
-                        .query_map([&task],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,Option<i64>>(4)?,r.get::<_,Option<String>>(5)?)))? {
-                        let (event,kind,raw,assignment,stamp,channel)=row?;let v:Value=serde_json::from_str(&raw)?;
+                    if command_rows.is_none() {
+                        let mut rows=Vec::new();
+                        for row in db.prepare(&format!("SELECT e.id,e.type,e.payload_json,c.assignment_id,{},c.channel_id FROM runtime_events e
+                            LEFT JOIN trusted_channels c ON e.type='NATIVE_COMMAND_STARTED' AND c.task_id=e.task_id AND c.channel_id=json_extract(e.payload_json,'$.channel_id')
+                            WHERE e.task_id=? AND e.type IN ('NATIVE_COMMAND_STARTED','NATIVE_COMMAND_FINISHED') ORDER BY e.id",ms("e.created_at")))?
+                            .query_map([&task],|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,Option<i64>>(4)?,r.get::<_,Option<String>>(5)?)))? {
+                            let (event,kind,raw,assignment,stamp,channel)=row?;
+                            rows.push((event,kind,serde_json::from_str::<Value>(&raw)?,assignment,stamp,channel));
+                        }
+                        command_rows=Some(rows);
+                    }
+                    for (event,kind,v,assignment,stamp,channel) in command_rows.iter().flatten() {
+                        let (event,stamp)=(*event,*stamp);
                         let reference=if kind=="NATIVE_COMMAND_STARTED" {&v["ref"]}else{&v["receipt"]["tool_call_ref"]};
                         let key=reference.as_str().unwrap_or_default().to_owned();
                         // A command on a channel that is no worker's (the coordinator's own) is never shown on a worker page.
-                        let assignment=if kind=="NATIVE_COMMAND_STARTED" && assignment.is_none() && channel.is_some() {Some("\u{0}coordinator".to_owned())} else {assignment};
+                        let assignment=if kind=="NATIVE_COMMAND_STARTED" && assignment.is_none() && channel.is_some() {Some("\u{0}coordinator".to_owned())} else {assignment.clone()};
                         if kind=="NATIVE_COMMAND_STARTED" { owners.insert(key.clone(),assignment); began.insert(key.clone(),stamp); }
                         let stamp=began.get(&key).copied().flatten().or(stamp);
                         let owner=owners.get(&key).cloned().flatten();
@@ -921,8 +1208,16 @@ impl Runtime {
                         for (call,first,last,stamp) in own {
                             if cursor.is_some_and(|(a,s)|(stamp.unwrap_or(0),STEP_SEQUENCE+first)>=(a,s)) {continue;}
                             if steps.len()==PAGE {more=true;floor=floor.max(Some(steps.iter().map(|i:&Value|(i["at"].as_i64().unwrap_or(0),i["sequence"].as_i64().unwrap_or(0))).min().unwrap()));break;}
-                            let raw:Option<String>=db.query_row("SELECT update_json FROM host_updates WHERE session_id=? AND seq=?",(session,last),|r|r.get(0)).optional()?;
-                            let Some((text,status))=raw.map(|raw|cortex_core::projections::tool_step(db,session,*last,&raw)).transpose()?.flatten() else {continue};
+                            let step=match updates.get(call.as_str()).filter(|u|u.0.last()==Some(last)) {
+                                Some(read)=>{
+                                    cortex_core::projections::tool_step_from(db,session,*last,read.1.last().expect("filtered above"),call,&read.1)?
+                                }
+                                None=>{
+                                    let raw:Option<String>=db.query_row("SELECT update_json FROM host_updates WHERE session_id=? AND seq=?",(session,last),|r|r.get(0)).optional()?;
+                                    raw.map(|raw|cortex_core::projections::tool_step(db,session,*last,&raw)).transpose()?.flatten()
+                                }
+                            };
+                            let Some((text,status))=step else {continue};
                             let mut item=json!({"sequence":STEP_SEQUENCE+first,"kind":"tool","text":text,"at":stamp,"toolCallRef":call});
                             if let Some(body)=text.strip_prefix(STEP_PREFIX) {
                                 let mut d:Value=serde_json::from_str(body)?;
@@ -978,7 +1273,11 @@ impl Runtime {
                         .filter(|r|r.is_object() && (status=="completed" || (status=="failed" && r["assignment_outcome"]=="failed")))
                         .map(|r|{
                             let reported=r["checks"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-                            let checks=reported.iter().filter(|c|c.is_object()).map(|c|json!({"name":c["name"].as_str().unwrap_or(""),
+                            // A failure the runtime's fresh assessment still derives as closed by a later passing run of the same check,
+                            // retracted or superseded is the check's history, not its state: the worker's current checks leave it out.
+                            // A persisted reference alone is never taken on trust.
+                            let settled=crate::machine::withdrawn_checks(db,&task,Some(id.as_str()),&r,reported);
+                            let checks=reported.iter().zip(settled).filter(|(c,gone)|c.is_object() && !gone).map(|(c,_)|json!({"name":c["name"].as_str().unwrap_or(""),
                                 "outcome":match c["outcome"].as_str(){Some(s @ ("passed"|"failed"|"not_run"|"unverified"))=>s,_=>"unverified"},
                                 "detail":c["blocker"].as_str().unwrap_or(""),"source":"worker"})).collect::<Vec<_>>();
                             let summary=r["summary"].as_str().filter(|s|!s.is_empty()).map(|s|s.chars().take(8000).collect::<String>())
@@ -991,10 +1290,11 @@ impl Runtime {
                             result
                         })
                         .filter(|r|!r["summary"].as_str().unwrap_or("").is_empty());
+                    let route=worker_route(db,&task,&id)?;
                     workers.push(json!({"id":id,"taskId":draft,"executionId":execution,"role":role.trim_start_matches("worker-"),
                         "status":worker_status(&status,&process,&state),
                         "lane":if role.contains("review"){"review"}else{"execution"},"goal":goal,"now":null,"waitsFor":null,
-                        "scope":serde_json::from_str::<Value>(&scope)?,"route":null,"attempt":null,"elapsedMs":null,"runningSince":null,
+                        "scope":serde_json::from_str::<Value>(&scope)?,"route":route,"attempt":null,"elapsedMs":null,"runningSince":null,
                         "context":null,"usage":null,"activity":activity,"result":worker_result,"messages":[]}));
                     // Present only when they apply, so a current worker keeps its recorded shape.
                     let worker=workers.last_mut().expect("pushed above");
@@ -1026,12 +1326,26 @@ impl Runtime {
                 .as_object()
                 .is_some_and(|tasks| tasks.values().any(|task| task["result"].is_object()))
         {
-            eprintln!("perf-sec db_ms={}", __t0.elapsed().as_millis()); let __t1 = std::time::Instant::now();
-            let current = native_effects::observe(self.host.root.clone())
-                .await
-                .ok()
-                .and_then(|e| e.project_digest);
-            eprintln!("perf-sec observe_ms={}", __t1.elapsed().as_millis()); let __t2 = std::time::Instant::now();
+            let current = match observing.0.take() {
+                // A deferring read waits for the folder observation only briefly. A result's
+                // own record (summary, version, runtime checks) is shown at once; what
+                // depends on the folder (Accept, staleness, the review notes) is pending
+                // until the read that follows, never computed from a missing observation.
+                Some(mut started) if defer => {
+                    match tokio::time::timeout(OBSERVATION_WAIT, &mut started).await {
+                        Ok(observed) => observed.ok().and_then(|observed| observed.ok()),
+                        Err(_) => {
+                            drop(started);
+                            pending_reviews(&mut facts, &completed);
+                            return Ok(facts);
+                        }
+                    }
+                }
+                Some(started) => started.await.ok().and_then(|observed| observed.ok()),
+                None => native_effects::observe_digest(self.host.root.clone())
+                    .await
+                    .ok(),
+            };
             // A finished result carries the same review actions and acceptance
             // availability as Python's `result_projection`, never a fixed refusal.
             let records = completed
@@ -1041,7 +1355,6 @@ impl Runtime {
                 })
                 .collect();
             let reviews = self.reviews(project, records, current.clone()).await?;
-            eprintln!("perf-sec reviews_ms={}", __t2.elapsed().as_millis());
             for ((draft, _, synthesis, ordinal), (actions, work)) in completed.iter().zip(reviews) {
                 let task = &mut facts["product"]["tasks"][draft];
                 if !task["result"].is_object() {
@@ -1060,7 +1373,10 @@ impl Runtime {
                     "Native result summary unavailable."
                 }));
                 result["version"] = json!(ordinal);
-                if let Some(notes) = actions["reviewWarnings"].as_array().filter(|a| !a.is_empty()) {
+                if let Some(notes) = actions["reviewWarnings"]
+                    .as_array()
+                    .filter(|a| !a.is_empty())
+                {
                     task["result"]["warnings"] = json!(notes);
                 }
                 task["reviewActions"] = actions;
@@ -1079,7 +1395,9 @@ impl Runtime {
                     // files, so it is never labelled stale; a verified digest that no longer
                     // matches the folder stays stale.
                     let placeholder = task["reviewActions"]["workspaceChanged"] != true
-                        && task["result"]["digest"].as_str().is_some_and(|d| d.starts_with("result:"));
+                        && task["result"]["digest"]
+                            .as_str()
+                            .is_some_and(|d| d.starts_with("result:"));
                     // A project-folder sprint task whose own recorded writes still hold
                     // what it wrote: later tasks' writes do not make its result stale.
                     let own_writes = task["reviewActions"]["ownWritesOnly"] == true;
@@ -1092,7 +1410,11 @@ impl Runtime {
                     if let Some(actions) = task["reviewActions"].as_object_mut() {
                         actions.remove("ownWritesOnly");
                     }
-                    task["workspaceDigest"] = if placeholder || own_writes || committed { task["result"]["digest"].clone() } else { json!(current) };
+                    task["workspaceDigest"] = if placeholder || own_writes || committed {
+                        task["result"]["digest"].clone()
+                    } else {
+                        json!(current)
+                    };
                 }
             }
         }
@@ -1124,8 +1446,13 @@ mod tests {
         let (notes, partial) = narration(&db, "s", "xa_w", &mut budget, None).unwrap();
         assert!(!partial);
         let texts: Vec<_> = notes.iter().map(|n| n["text"].as_str().unwrap()).collect();
-        assert_eq!(texts, ["Running the focused test suites.", "Then the typecheck."]);
-        assert!(notes.iter().all(|n| n["kind"] == "note" && n["sequence"].as_i64().unwrap() > STEP_SEQUENCE));
+        assert_eq!(
+            texts,
+            ["Running the focused test suites.", "Then the typecheck."]
+        );
+        assert!(notes
+            .iter()
+            .all(|n| n["kind"] == "note" && n["sequence"].as_i64().unwrap() > STEP_SEQUENCE));
         assert!(notes[0]["sequence"].as_i64() < notes[1]["sequence"].as_i64());
         // A small shared budget keeps the newest message and says the page is partial.
         let mut budget = 25;
@@ -1138,7 +1465,9 @@ mod tests {
     #[test]
     fn an_oversized_reply_trims_the_oldest_activity_and_names_its_cursor() {
         let big = "x".repeat(200_000);
-        let items: Vec<Value> = (0..60).map(|i| json!({"sequence":i,"at":1000+i,"kind":"note","text":big})).collect();
+        let items: Vec<Value> = (0..60)
+            .map(|i| json!({"sequence":i,"at":1000+i,"kind":"note","text":big}))
+            .collect();
         let mut value = json!({"product":{"messages":[]},"workers":[{"id":"w","activity":items}]});
         assert!(serde_json::to_vec(&value).unwrap().len() > workspace_protocol::FRAME_BYTES);
         assert!(fit_frame(&mut value).unwrap());
@@ -1146,9 +1475,18 @@ mod tests {
         assert!(!kept.is_empty() && kept.len() < 60);
         assert_eq!(kept.last().unwrap()["sequence"], 59, "the newest rows stay");
         assert_eq!(value["workers"][0]["activityPartial"], true);
-        let ((at, sequence), _) = parse_cursor(value["workers"][0]["activityCursor"].as_str().unwrap()).unwrap();
-        assert_eq!((at, sequence), (kept[0]["at"].as_i64().unwrap(), kept[0]["sequence"].as_i64().unwrap()));
-        assert!(serde_json::to_vec(&value).unwrap().len() <= workspace_protocol::FRAME_BYTES - 2048);
+        let ((at, sequence), _) =
+            parse_cursor(value["workers"][0]["activityCursor"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            (at, sequence),
+            (
+                kept[0]["at"].as_i64().unwrap(),
+                kept[0]["sequence"].as_i64().unwrap()
+            )
+        );
+        assert!(
+            serde_json::to_vec(&value).unwrap().len() <= workspace_protocol::FRAME_BYTES - 2048
+        );
         assert!(parse_cursor("na1.1.x").is_none() && parse_cursor("nh2.1.2").is_none());
     }
     #[test]
@@ -1190,13 +1528,27 @@ mod tests {
         let receipt = |id: i64, argv: &str| {
             let event = json!({"receipt":{"revision":1,"argv":[argv],"revision_digest":"d",
                 "tool_call_ref":format!("c-{id}"),"observation":{"complete":true,"exit_code":0}}});
-            db.execute("INSERT INTO runtime_events VALUES (?,'t','NATIVE_COMMAND_FINISHED',?)", (id, event.to_string())).unwrap();
+            db.execute(
+                "INSERT INTO runtime_events VALUES (?,'t','NATIVE_COMMAND_FINISHED',?)",
+                (id, event.to_string()),
+            )
+            .unwrap();
         };
         receipt(394, "node");
-        assert_eq!(checks(&db, "t").unwrap()["checks"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            checks(&db, "t").unwrap()["checks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         db.execute("INSERT INTO runtime_events VALUES (408,'t','TASK_REOPENED','{\"previous\":\"COMPLETED\",\"revision\":1}')", []).unwrap();
         // Another task's reopen fences nothing here.
-        db.execute("INSERT INTO runtime_events VALUES (409,'other','TASK_REOPENED','{}')", []).unwrap();
+        db.execute(
+            "INSERT INTO runtime_events VALUES (409,'other','TASK_REOPENED','{}')",
+            [],
+        )
+        .unwrap();
         let reopened = checks(&db, "t").unwrap();
         assert_eq!(reopened["checks"], json!([]), "{reopened}");
         assert_eq!(reopened["digest"], Value::Null);
@@ -1209,39 +1561,91 @@ mod tests {
     }
     /// The recorded diff of a Cortex write, as `native_project` formats it.
     fn recorded(path: &str, old: &str, new: &str) -> String {
-        format!("--- {path}\n+++ {path}\n@@ -1,{} +1,{} @@\n{}{}", old.lines().count(), new.lines().count(),
-            old.lines().map(|l| format!("-{l}\n")).collect::<String>(), new.lines().map(|l| format!("+{l}\n")).collect::<String>())
+        format!(
+            "--- {path}\n+++ {path}\n@@ -1,{} +1,{} @@\n{}{}",
+            old.lines().count(),
+            new.lines().count(),
+            old.lines().map(|l| format!("-{l}\n")).collect::<String>(),
+            new.lines().map(|l| format!("+{l}\n")).collect::<String>()
+        )
     }
     #[test]
     fn an_edit_shows_its_changed_lines_with_a_little_context() {
         // A new file is all additions.
-        assert_eq!(edit_hunk(&recorded("ARCHITECTURE.md", "", "# Architecture\n\n- a\n")), ["@@ -0,0 +1,3 @@", "+# Architecture", "+", "+- a"]);
+        assert_eq!(
+            edit_hunk(&recorded("ARCHITECTURE.md", "", "# Architecture\n\n- a\n")),
+            ["@@ -0,0 +1,3 @@", "+# Architecture", "+", "+- a"]
+        );
         // One replaced line in the middle keeps three lines on each side.
         let old = (1..=10).map(|n| format!("line {n}\n")).collect::<String>();
         let new = old.replace("line 5\n", "line five\n-dash\n");
-        assert_eq!(edit_hunk(&recorded("a.txt", &old, &new)), ["@@ -2,7 +2,8 @@", " line 2", " line 3", " line 4", "-line 5", "+line five", "+-dash", " line 6", " line 7", " line 8"]);
+        assert_eq!(
+            edit_hunk(&recorded("a.txt", &old, &new)),
+            [
+                "@@ -2,7 +2,8 @@",
+                " line 2",
+                " line 3",
+                " line 4",
+                "-line 5",
+                "+line five",
+                "+-dash",
+                " line 6",
+                " line 7",
+                " line 8"
+            ]
+        );
         // Appended at the end, near the start of the file.
-        assert_eq!(edit_hunk(&recorded("b.txt", "one\n", "one\ntwo\n")), ["@@ -1,1 +1,2 @@", " one", "+two"]);
+        assert_eq!(
+            edit_hunk(&recorded("b.txt", "one\n", "one\ntwo\n")),
+            ["@@ -1,1 +1,2 @@", " one", "+two"]
+        );
         // No change, another shape, or nothing recorded: no lines, never an empty hunk.
         assert!(edit_hunk(&recorded("c.txt", "same\n", "same\n")).is_empty());
         assert!(edit_hunk("--- a\n+++ a\n@@ -1,1 +1,1 @@\n+new\n-old\n").is_empty());
         assert!(edit_hunk("").is_empty());
         // Bounded and redacted.
-        let long = edit_hunk(&recorded("d.txt", "", &(0..500).map(|n| format!("{n}\n")).collect::<String>()));
+        let long = edit_hunk(&recorded(
+            "d.txt",
+            "",
+            &(0..500).map(|n| format!("{n}\n")).collect::<String>(),
+        ));
         assert_eq!(long.len(), 202);
         assert_eq!(long[201], "… 300 more lines in Changes");
-        let secret = edit_hunk(&recorded("e.env", "", "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n"));
-        assert!(!secret.concat().contains("abcdefghijklmnopqrstuvwxyz0123456789"), "{secret:?}");
+        let secret = edit_hunk(&recorded(
+            "e.env",
+            "",
+            "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz0123456789\n",
+        ));
+        assert!(
+            !secret
+                .concat()
+                .contains("abcdefghijklmnopqrstuvwxyz0123456789"),
+            "{secret:?}"
+        );
     }
     #[test]
     fn result_number_counts_results_not_events() {
         let db = rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE runtime_events(id INTEGER PRIMARY KEY,task_id TEXT,type TEXT,payload_json TEXT);").unwrap();
         // Event ids 55 (first result), 57 (reopened), 117 (second result) and later noise.
-        for (id, kind) in [(1, "TASK_CREATED"), (55, "SYNTHESIS_RUNTIME_COMPOSED"), (57, "TASK_REOPENED"), (117, "SYNTHESIS_SUBMITTED"), (119, "NATIVE_TURN_SETTLED")] {
-            db.execute("INSERT INTO runtime_events VALUES (?,'t',?,'{}')", (id, kind)).unwrap();
+        for (id, kind) in [
+            (1, "TASK_CREATED"),
+            (55, "SYNTHESIS_RUNTIME_COMPOSED"),
+            (57, "TASK_REOPENED"),
+            (117, "SYNTHESIS_SUBMITTED"),
+            (119, "NATIVE_TURN_SETTLED"),
+        ] {
+            db.execute(
+                "INSERT INTO runtime_events VALUES (?,'t',?,'{}')",
+                (id, kind),
+            )
+            .unwrap();
         }
-        db.execute("INSERT INTO runtime_events VALUES (200,'other','TASK_REOPENED','{}')", []).unwrap();
+        db.execute(
+            "INSERT INTO runtime_events VALUES (200,'other','TASK_REOPENED','{}')",
+            [],
+        )
+        .unwrap();
         assert_eq!(result_ordinal(&db, "t", Some(56)).unwrap(), 1);
         assert_eq!(result_ordinal(&db, "t", Some(52)).unwrap(), 1);
         assert_eq!(result_ordinal(&db, "t", Some(119)).unwrap(), 2);
@@ -1251,11 +1655,20 @@ mod tests {
     fn running_worker_is_never_failed_while_its_channel_starts() {
         assert_eq!(worker_status("running", "starting", "RUNNING"), "working");
         assert_eq!(worker_status("running", "ready", "RUNNING"), "working");
-        assert_eq!(worker_status("completed", "terminated", "RUNNING"), "completed");
-        assert_eq!(worker_status("cancelled", "terminated", "PAUSED"), "cancelled");
+        assert_eq!(
+            worker_status("completed", "terminated", "RUNNING"),
+            "completed"
+        );
+        assert_eq!(
+            worker_status("cancelled", "terminated", "PAUSED"),
+            "cancelled"
+        );
         assert_eq!(worker_status("running", "terminated", "RUNNING"), "failed");
         assert_eq!(worker_status("failed", "terminated", "RUNNING"), "failed");
-        assert_eq!(worker_status("running", "terminated", "WAITING_USER"), "cancelled");
+        assert_eq!(
+            worker_status("running", "terminated", "WAITING_USER"),
+            "cancelled"
+        );
     }
 }
 impl NativeHost {

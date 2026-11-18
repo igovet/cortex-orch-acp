@@ -111,14 +111,16 @@ fn dispatch(command: &str, argv: &[String]) -> Res<Value> {
             bootstrap(&source, &bin_dir)
         }
         "configure-paseo-plugin-launch" => {
-            let flags = Flags::parse(
-                argv,
-                &["--rust-binary", "--runtime-root"],
-                &["--replace"],
-            )?;
+            let flags = Flags::parse(argv, &["--rust-binary", "--runtime-root"], &["--replace"])?;
             let runtime = flags.path("--runtime-root")?.unwrap_or(source);
             let binary = select_binary(flags.path("--rust-binary")?)?;
-            write_launch_config(&Roots::from_process()?, &runtime, &binary, flags.has("--replace"), true)
+            write_launch_config(
+                &Roots::from_process()?,
+                &runtime,
+                &binary,
+                flags.has("--replace"),
+                true,
+            )
         }
         "install-paseo-plugin" => {
             let flags = Flags::parse(argv, &["--rust-binary", "--source-root"], &[])?;
@@ -342,12 +344,18 @@ fn private_directory(path: &Path, create: bool) -> Res<PathBuf> {
         Ok(info) => info,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if !create {
-                return Err(format!("required directory does not exist: {}", path.display()));
+                return Err(format!(
+                    "required directory does not exist: {}",
+                    path.display()
+                ));
             }
             // A concurrent creator may win; its folder gets the checks below.
             match DirBuilder::new().mode(0o700).create(path) {
                 Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
-                    return Err(format!("cannot create private directory {}: {e}", path.display()))
+                    return Err(format!(
+                        "cannot create private directory {}: {e}",
+                        path.display()
+                    ))
                 }
                 _ => {}
             }
@@ -373,7 +381,10 @@ fn private_directory(path: &Path, create: bool) -> Res<PathBuf> {
     }
     let info = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
     if info.mode() & 0o7777 != 0o700 || info.file_type().is_symlink() {
-        return Err(format!("private directory is not owner-only: {}", path.display()));
+        return Err(format!(
+            "private directory is not owner-only: {}",
+            path.display()
+        ));
     }
     Ok(path.to_path_buf())
 }
@@ -502,7 +513,10 @@ fn is_managed_rust_record(value: &Value, desired: &Value) -> bool {
         return false;
     }
     let (binary, runtime, shim) = (Path::new(binary), Path::new(&runtime), Path::new(shim));
-    binary.is_absolute() && runtime.is_absolute() && shim.is_absolute() && shim == runtime.join(SHIM)
+    binary.is_absolute()
+        && runtime.is_absolute()
+        && shim.is_absolute()
+        && shim == runtime.join(SHIM)
 }
 
 /// Persist the Rust argv, the user storage roots and the runtime root.
@@ -523,13 +537,12 @@ fn write_launch_config(
     // The record lives in the Cortex config root of the environment it
     // describes, the root the provider reads first in that environment.
     let conventional = roots.home.join(".config");
-    let config_parent = if roots.raw_config_home.is_some()
-        && roots.config_base != resolve_lenient(&conventional)
-    {
-        private_directory(&roots.config_base, true)?
-    } else {
-        private_directory(&conventional, true)?
-    };
+    let config_parent =
+        if roots.raw_config_home.is_some() && roots.config_base != resolve_lenient(&conventional) {
+            private_directory(&roots.config_base, true)?
+        } else {
+            private_directory(&conventional, true)?
+        };
     let root = private_directory(&config_parent.join("cortex"), true)?;
     let path = root.join(LAUNCH_FILE);
     let summary = |created: bool| {
@@ -606,7 +619,9 @@ fn api(runtime: &Path, mut request: Value) -> Res<Value> {
     Err(format!(
         "{}: {}",
         error["code"].as_str().unwrap_or("configuration_error"),
-        error["message"].as_str().unwrap_or("The request was refused.")
+        error["message"]
+            .as_str()
+            .unwrap_or("The request was refused.")
     ))
 }
 fn connections_revision(runtime: &Path) -> Res<String> {
@@ -626,9 +641,18 @@ fn status() -> Res<Value> {
                "state_root":state_root.display().to_string()}),
     );
     for (key, request) in [
-        ("connections", json!({"surface":"connections","action":"read"})),
-        ("discovered_engines", json!({"surface":"connections","action":"discover_connections"})),
-        ("user_defaults", json!({"surface":"user_defaults","action":"read"})),
+        (
+            "connections",
+            json!({"surface":"connections","action":"read"}),
+        ),
+        (
+            "discovered_engines",
+            json!({"surface":"connections","action":"discover_connections"}),
+        ),
+        (
+            "user_defaults",
+            json!({"surface":"user_defaults","action":"read"}),
+        ),
     ] {
         match api(&source, request) {
             Ok(value) => {
@@ -643,10 +667,12 @@ fn status() -> Res<Value> {
 }
 
 fn add_connection(source: &Path, argv: &[String]) -> Res<Value> {
-    if argv
-        .iter()
-        .any(|a| matches!(a.as_str(), "--api-key-file" | "--api-key-stdin" | "--install-record"))
-    {
+    if argv.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "--api-key-file" | "--api-key-stdin" | "--install-record"
+        )
+    }) {
         return Err("API-key connections and install records are not offered by the Rust setup; \
             install the pinned adapter with `install-engine` and register its native account with `add-connection --engine ENGINE`."
             .into());
@@ -707,7 +733,10 @@ fn read_version(source: &Path) -> Res<String> {
 fn read_source(path: &Path) -> Res<Vec<u8>> {
     let info = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if !info.is_file() || info.file_type().is_symlink() {
-        return Err(format!("payload file is not a regular file: {}", path.display()));
+        return Err(format!(
+            "payload file is not a regular file: {}",
+            path.display()
+        ));
     }
     fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -717,7 +746,10 @@ fn place(runtime: &Path, source: &Path, target: &Path, mode: u32) -> Res<()> {
     let body = read_source(source)?;
     if let Some(parent) = target.parent() {
         if !resolve_lenient(parent).starts_with(resolve_lenient(runtime)) {
-            return Err(format!("payload path escapes the runtime: {}", target.display()));
+            return Err(format!(
+                "payload path escapes the runtime: {}",
+                target.display()
+            ));
         }
         if !parent.exists() {
             DirBuilder::new()
@@ -740,10 +772,20 @@ fn place(runtime: &Path, source: &Path, target: &Path, mode: u32) -> Res<()> {
 }
 fn stage(source: &Path, bin_dir: &Path, runtime: &Path) -> Res<()> {
     for relative in PAYLOAD_FILES {
-        place(runtime, &source.join(relative), &runtime.join(relative), 0o600)?;
+        place(
+            runtime,
+            &source.join(relative),
+            &runtime.join(relative),
+            0o600,
+        )?;
     }
     for binary in BINARIES {
-        place(runtime, &bin_dir.join(binary), &runtime.join("bin").join(binary), 0o700)?;
+        place(
+            runtime,
+            &bin_dir.join(binary),
+            &runtime.join("bin").join(binary),
+            0o700,
+        )?;
     }
     Ok(())
 }
@@ -813,7 +855,11 @@ pub fn plugin_payload_digest(root: &Path) -> std::io::Result<String> {
                     walk(root, &path, out)?;
                 }
             } else if name != "plugin-integrity.json" {
-                let relative = path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+                let relative = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
                 out.push((relative, path));
             }
         }
@@ -830,7 +876,11 @@ pub fn plugin_payload_digest(root: &Path) -> std::io::Result<String> {
         digest.update((body.len() as u64).to_be_bytes());
         digest.update(&body);
     }
-    Ok(digest.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 fn verify_plugin_source(source: &Path) -> Res<(PathBuf, Value, String)> {
@@ -856,11 +906,18 @@ fn verify_plugin_source(source: &Path) -> Res<(PathBuf, Value, String)> {
     if integrity["payload_sha256"] != actual.as_str() {
         return Err("Paseo plugin source hash does not match its integrity record.".into());
     }
-    Ok((root.canonicalize().map_err(|e| e.to_string())?, manifest, actual))
+    Ok((
+        root.canonicalize().map_err(|e| e.to_string())?,
+        manifest,
+        actual,
+    ))
 }
 
 fn resolve_paseo_cli() -> Res<String> {
-    let candidates: Vec<String> = match std::env::var("CORTEX_PASEO_CLI").ok().filter(|v| !v.is_empty()) {
+    let candidates: Vec<String> = match std::env::var("CORTEX_PASEO_CLI")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
         Some(c) => vec![c],
         None => PASEO_CLI_CANDIDATES.iter().map(|s| s.to_string()).collect(),
     };
@@ -868,8 +925,9 @@ fn resolve_paseo_cli() -> Res<String> {
         let found = if candidate.contains('/') {
             Path::new(&candidate).is_file()
         } else {
-            std::env::var_os("PATH")
-                .is_some_and(|p| std::env::split_paths(&p).any(|d| is_executable(&d.join(&candidate))))
+            std::env::var_os("PATH").is_some_and(|p| {
+                std::env::split_paths(&p).any(|d| is_executable(&d.join(&candidate)))
+            })
         };
         if found {
             return Ok(candidate);
@@ -886,8 +944,15 @@ fn invoke(cli: &str, args: &[&str], check: bool) -> Res<String> {
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     if check && !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() };
-        return Err(format!("Paseo command failed ({}): {detail}", args.join(" ")));
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        return Err(format!(
+            "Paseo command failed ({}): {detail}",
+            args.join(" ")
+        ));
     }
     Ok(stdout)
 }
@@ -933,7 +998,10 @@ fn migrate_legacy_provider(config: &Value, config_path: &Path, source: &Path) ->
     }
     let backup = config_path.with_file_name(format!(
         "{}.cortex-legacy-backup-{}",
-        config_path.file_name().and_then(|n| n.to_str()).unwrap_or("config.json"),
+        config_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("config.json"),
         unique_suffix()
     ));
     let migrate = || -> Res<()> {
@@ -959,8 +1027,14 @@ fn install_paseo_plugin(source: &Path, binary: &Path) -> Res<Value> {
     api(source, json!({"surface":"mcp_servers","action":"read"}))
         .map_err(|e| format!("MCP configuration preflight failed: {e}"))?;
     let cli = resolve_paseo_cli()?;
-    let daemon = json_output(&invoke(&cli, &["daemon", "status", "--json"], true)?, "Paseo daemon status")?;
-    if !matches!(daemon["localDaemon"].as_str(), Some("running" | "reachable")) {
+    let daemon = json_output(
+        &invoke(&cli, &["daemon", "status", "--json"], true)?,
+        "Paseo daemon status",
+    )?;
+    if !matches!(
+        daemon["localDaemon"].as_str(),
+        Some("running" | "reachable")
+    ) {
         return Err("local Paseo daemon is not reachable.".into());
     }
     let home = resolve_lenient(Path::new(daemon["home"].as_str().unwrap_or("")));
@@ -968,19 +1042,34 @@ fn install_paseo_plugin(source: &Path, binary: &Path) -> Res<Value> {
     let info = fs::symlink_metadata(&config_path)
         .ok()
         .filter(|i| i.is_file() && !i.file_type().is_symlink())
-        .ok_or_else(|| format!("refusing symlinked or non-regular Paseo daemon config: {}", config_path.display()))?;
+        .ok_or_else(|| {
+            format!(
+                "refusing symlinked or non-regular Paseo daemon config: {}",
+                config_path.display()
+            )
+        })?;
     if info.uid() != unsafe { libc::geteuid() } {
-        return Err(format!("Paseo daemon config is not owned by the current user: {}", config_path.display()));
+        return Err(format!(
+            "Paseo daemon config is not owned by the current user: {}",
+            config_path.display()
+        ));
     }
     let mode = info.mode() & 0o7777;
     if mode & 0o400 == 0 {
-        return Err(format!("Paseo daemon config is not readable by its owner: {}", config_path.display()));
+        return Err(format!(
+            "Paseo daemon config is not readable by its owner: {}",
+            config_path.display()
+        ));
     }
     if mode & 0o077 != 0 {
-        fs::set_permissions(&config_path, fs::Permissions::from_mode(mode & 0o700)).map_err(|e| e.to_string())?;
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(mode & 0o700))
+            .map_err(|e| e.to_string())?;
         let again = fs::symlink_metadata(&config_path).map_err(|e| e.to_string())?;
         if again.mode() & 0o077 != 0 {
-            return Err(format!("refusing overly-readable Paseo daemon config: {}", config_path.display()));
+            return Err(format!(
+                "refusing overly-readable Paseo daemon config: {}",
+                config_path.display()
+            ));
         }
     }
     let config: Value = fs::read(&config_path)
@@ -1001,19 +1090,28 @@ fn install_paseo_plugin(source: &Path, binary: &Path) -> Res<Value> {
     let launch = write_launch_config(&Roots::from_process()?, source, binary, false, true)?;
     let installed = (|| -> Res<Value> {
         let id = manifest["id"].as_str().unwrap_or("cortex-acp");
-        let plugins = json_output(&invoke(&cli, &["plugin", "ls", "--json"], true)?, "Paseo plugin list")?;
+        let plugins = json_output(
+            &invoke(&cli, &["plugin", "ls", "--json"], true)?,
+            "Paseo plugin list",
+        )?;
         let existing = plugins
             .as_array()
             .and_then(|rows| rows.iter().find(|p| p["id"] == id))
             .cloned();
         match existing {
             None => {
-                invoke(&cli, &["plugin", "install", &root.display().to_string()], true)?;
+                invoke(
+                    &cli,
+                    &["plugin", "install", &root.display().to_string()],
+                    true,
+                )?;
             }
             Some(existing) => {
                 let bound = resolve_lenient(Path::new(existing["path"].as_str().unwrap_or("")));
                 if bound != root {
-                    return Err("Paseo plugin id 'cortex-acp' is bound to another source path.".into());
+                    return Err(
+                        "Paseo plugin id 'cortex-acp' is bound to another source path.".into(),
+                    );
                 }
                 if existing["status"] != "running" {
                     invoke(&cli, &["plugin", "enable", id], false)?;
@@ -1026,7 +1124,10 @@ fn install_paseo_plugin(source: &Path, binary: &Path) -> Res<Value> {
             &invoke(&cli, &["plugin", "ls", id, "--json"], true)?,
             "Paseo plugin verification",
         )?;
-        let row = verified.as_array().and_then(|r| r.first()).unwrap_or(&verified);
+        let row = verified
+            .as_array()
+            .and_then(|r| r.first())
+            .unwrap_or(&verified);
         if row["id"] != id || row["status"] != "running" {
             return Err("Cortex Paseo plugin did not reach running status.".into());
         }
@@ -1037,9 +1138,11 @@ fn install_paseo_plugin(source: &Path, binary: &Path) -> Res<Value> {
             invoke(&cli, &["reload", "--json"], true)?;
         }
         let routing = init_storage(source)?["routing"].clone();
-        Ok(json!({"plugin_id":id,"source":root.display().to_string(),"status":"running",
+        Ok(
+            json!({"plugin_id":id,"source":root.display().to_string(),"status":"running",
             "payload_sha256":payload_sha256,"launch_config":launch,
-            "legacy_provider_migration":migration,"routing":routing}))
+            "legacy_provider_migration":migration,"routing":routing}),
+        )
     })();
     if installed.is_err() && launch["created"] == true {
         // Only the record this attempt created, only if still ours.

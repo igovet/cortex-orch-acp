@@ -1,7 +1,8 @@
 import { createMemo, For, Show } from "solid-js";
 import { CONNECTION_ENGINE, denyTokens, allRoutes, ceilingProblems, ceilingState, coordinatorEfforts, coordinatorResolution, effectiveCeiling, effortLabel, engineLabel, ENGINE_KEYS, ENGINES, FAILURE_CLASSES, HARD_DENIALS, modelLabel, LANGUAGES, ACCESS_MODES, routeIdOf, SURFACE_LABELS, type Ceiling, type CeilingFieldState, type EngineKey } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
-import { A, I } from "./kit";
+import { A, I, Keyed } from "./kit";
+import { share } from "./stable";
 import { HELP } from "./orch-help";
 import { Bar, orchTo, Shell, useDefaults, useProjectName, useReadOnly } from "./orch-shared";
 import { Adv, Chk, Err, Hint, KeyValues, Lock, NumField, Pick, Seg, SetH, Srow, Sw } from "./settings-kit";
@@ -29,7 +30,7 @@ export function Coordinator() {
     <div class="surface">
       <Srow t={<>Model<Hint text={HELP.coordinator} label="coordinator" /></>} d="Enabled models, grouped by engine."><Pick id="m-def-model" label="Main model" width="260px" value={coord() ? `${coord()!.engine}|${coord()!.model}` : ""} empty="Choose a model" options={models()} disabled={off()} onPick={pick} /></Srow>
       <Show when={coord()}><Srow t="Effort" d={efforts().observed ? "The levels this model reports." : FALLBACK_EFFORTS}><Seg label="Effort" value={coord()!.effort} disabled={off()} options={efforts().levels.map(e => ({ id: e, label: effortLabel(e) }))} onChange={effort => set({ coordinator: { ...coord()!, effort } })} /></Srow></Show>
-      <Srow t="Access mode" d="How much a task may do without asking."><Seg label="Access mode" value={v().mode} disabled={off()} options={ACCESS_MODES} onChange={mode => set({ mode })} /></Srow>
+      <Srow t="Access mode" d="What engine tools may do without asking. In every mode a command can read anything your account can read."><Seg label="Access mode" value={v().mode} disabled={off()} options={ACCESS_MODES} onChange={mode => set({ mode })} /></Srow>
       <Srow t={<>Language<Hint text={HELP.language} label="language" /></>} d="Language of messages. It does not guarantee the language of model replies."><Seg label="Language" value={v().language} disabled={off()} options={LANGUAGES.map(l => ({ id: l.id, label: l.id === "auto" ? "Automatic" : l.label as string }))} onChange={language => set({ language })} /></Srow>
       <Srow t="Checkout for new tasks" d="Preselected in New task. You choose each time."><Seg label="Default checkout" value={v().checkout} disabled={off()} options={[{ id: "worktree", label: "Worktree" }, { id: "main", label: "Project folder" }] as const} onChange={checkout => set({ checkout })} /></Srow>
       <Srow t="Status" d="What this resolves to now."><Show when={bound().ok} fallback={<><span class="st st-bad"><I n="x-circle" s={12} />{(bound() as { text: string }).text}</span><A class="lnk" to={orchTo(m().id, "models")}>Fix in Models</A></>}><span class="st st-ok"><I n="check-circle" s={12} />Bound to {(bound() as { route: string }).route}</span></Show></Srow>
@@ -58,14 +59,15 @@ function ListLimit(props: { label: string; value: string[] | null; options: { id
   return <div class="ws-limit">
     <label class="sw-l">Restrict<Sw label={`Restrict ${props.label}`} checked={props.value !== null} disabled={props.off} onChange={on => props.onChange(on ? [] : null)} /></label>
     <Show when={props.value !== null}>
-      <div class="ws-checks"><For each={props.options}>{o => <label class="ws-check"><Chk label={`${props.label}: ${o.label}`} checked={!!props.value?.includes(o.id)} disabled={props.off} onChange={on => flip(o.id, on)} /><span class="trunc">{o.label}</span></label>}</For></div>
+      <div class="ws-checks"><Keyed each={props.options} by={o => o.id}>{o => <label class="ws-check"><Chk label={`${props.label}: ${o().label}`} checked={!!props.value?.includes(o().id)} disabled={props.off} onChange={on => flip(o().id, on)} /><span class="trunc">{o().label}</span></label>}</Keyed></div>
       <Show when={props.value?.length === 0}><span class="cap st-warn">Nothing would be allowed.</span></Show>
     </Show>
   </div>;
 }
 function StoredLimits(props: { c: Ceiling }) {
   const s = () => props.c.stored;
-  const rows = () => [["Permission level", s().permissionLevel], ["Calls", s().calls], ["Tokens", s().tokens], ["Concurrency", s().concurrency], ["Spend limit", s().spendLimit], ["Spend limit enforceable", s().spendLimit === null ? null : s().spendEnforceable ? "Yes" : "No"]].filter(([, v]) => v !== null) as [string, string | number][];
+  // Read again at every machine read: equal rows stay the old ones, so their lines are not drawn again.
+  const rows = createMemo<[string, string | number][]>(prev => share(prev, [["Permission level", s().permissionLevel], ["Calls", s().calls], ["Tokens", s().tokens], ["Concurrency", s().concurrency], ["Spend limit", s().spendLimit], ["Spend limit enforceable", s().spendLimit === null ? null : s().spendEnforceable ? "Yes" : "No"]].filter(([, v]) => v !== null) as [string, string | number][]), []);
   return <Show when={rows().length > 0}>
     <SetH title="Stored, not applied" />
     <div class="surface"><For each={rows()}>{([t, v]) => <Srow t={t} d="Saved in the configuration, but not enforced."><span class="tnum">{v}</span><Lock text="Read-only" /></Srow>}</For></div>

@@ -1,6 +1,6 @@
 # CW-C10: Archive retention and guarded purge contract
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: automatic archive after seven days in Done, per-machine retention (30 days by default) and a guarded purge that asks about unmerged work ([maintenance and controls](../maintenance-and-controls.md)); no-paid checks only · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Archive retention and guarded purge contract.

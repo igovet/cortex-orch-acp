@@ -1,6 +1,6 @@
 # CW-U01: Desktop board, list and task creation
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: board, list and task creation on real data ([screens](../SCREENS.md)); no-paid checks only · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Build the desktop project board, a list view over the same data, and the create-task entry point, using the layout accepted at Gate D on 2026-11-05 ([desktop approval](../design/desktop-approval.md)). Each card shows execution stage, execution state and wait reason as three separate fields. Actions send intents to the service; the board never rewrites a runtime fact.

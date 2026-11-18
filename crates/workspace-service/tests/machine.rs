@@ -454,8 +454,11 @@ async fn native_retention_keeps_dirty_work_and_unconfirmed_executions() {
     assert_eq!(cleanup["skipped"], 1);
     assert_eq!(cleanup["asked"], 1);
     let value: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
-    assert_eq!(value["tasks"]["dirty"]["archiveQuestion"], true);
-    assert!(value["tasks"]["dirty"]["archive"].is_null());
+    assert!(value["tasks"]["dirty"]["archiveQuestion"].is_null());
+    assert_eq!(
+        value["tasks"]["dirty"]["archive"]["at"], 1,
+        "stays archived with its work"
+    );
     assert!(value["tasks"]["dirty"]["purgeBlocker"].is_string());
     // A runtime binding that cannot prove quiet is not permission to delete the draft.
     store.write(|db|{
@@ -485,7 +488,10 @@ async fn native_retention_keeps_dirty_work_and_unconfirmed_executions() {
     let reason = finish["reason"].as_str().unwrap();
     // Owner-readable: the task title, never its id or the raw refusal code.
     assert!(reason.contains("“fixture” no longer belongs"), "{reason}");
-    assert!(!reason.contains("unauthorized") && !reason.contains("dirty:"), "{reason}");
+    assert!(
+        !reason.contains("unauthorized") && !reason.contains("dirty:"),
+        "{reason}"
+    );
     store
         .read(|db| {
             assert_eq!(
@@ -720,14 +726,15 @@ async fn push_never_forces_non_fast_forward_or_accepts_an_option_as_branch() {
     f.git(&["checkout", "main"]);
     f.write("a.txt", b"divergent");
     f.git(&["commit", "-am", "divergent"]);
-    for branch in ["main", "--force"] {
+    // A rejected non-fast-forward push says so; an option is never taken as a branch.
+    for (branch, code) in [("main", "push_not_fast_forward"), ("--force", "git_failed")] {
         assert_eq!(
             f.call(
                 "git",
                 json!({"action":"push","remote":"origin","branch":branch,"confirmed":true})
             )
             .await["code"],
-            "git_failed"
+            code
         );
     }
     let out = Command::new("git")
@@ -775,6 +782,27 @@ async fn hunks_stage_unstage_and_revert_independently() {
         .await["code"],
         "stale_hunk"
     );
+    f.stop().await;
+}
+#[tokio::test]
+async fn project_skills_are_named_for_the_composer_without_their_bodies() {
+    let f = Fixture::new().await;
+    assert_eq!(
+        f.ok("repo.skills", json!({})).await,
+        json!({"skills":[],"omitted":0})
+    );
+    fs::create_dir_all(f.repo.join(".agents/skills/demo-data")).unwrap();
+    fs::write(
+        f.repo.join(".agents/skills/demo-data/SKILL.md"),
+        "---\nname: demo-data\ndescription: Refresh the demo dataset.\n---\nbody text\n",
+    )
+    .unwrap();
+    let r = f.ok("repo.skills", json!({})).await;
+    assert_eq!(
+        r["skills"],
+        json!([{"name":"demo-data","path":".agents/skills/demo-data/SKILL.md","description":"Refresh the demo dataset.","pathOnly":false}])
+    );
+    assert!(!r.to_string().contains("body text"));
     f.stop().await;
 }
 #[tokio::test]
@@ -1078,6 +1106,44 @@ async fn settings_validation_private_logs_and_diagnostics() {
             .unwrap()
             >= 5
     );
+    // The tool search path setting: owner folders are validated before they are saved;
+    // folders inside a project are refused. This test service never reads a shell.
+    let tools = f.base.join("tools-bin");
+    fs::create_dir(&tools).unwrap();
+    for bad in [json!("relative/bin"), json!(f.repo.join("bin"))] {
+        fs::create_dir_all(f.repo.join("bin")).unwrap();
+        assert_eq!(
+            f.call(
+                "maintenance",
+                json!({"action":"tool_path.set_extra","directories":[bad]})
+            )
+            .await["ok"],
+            false
+        );
+    }
+    f.ok(
+        "maintenance",
+        json!({"action":"tool_path.set_extra","directories":[tools]}),
+    )
+    .await;
+    assert_eq!(
+        f.call("maintenance", json!({"action":"tool_path.reread"}))
+            .await["ok"],
+        false,
+        "only the installed service reads the owner's shell"
+    );
+    let diagnostics = f.ok("diagnostics.run", json!({})).await;
+    let npm = diagnostics["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["name"] == "npm")
+        .unwrap()
+        .clone();
+    assert!(
+        !npm["detail"].as_str().unwrap().contains("desktop service"),
+        "{npm}"
+    );
     let logs = f.ok("logs.folder", json!({})).await["folder"]
         .as_str()
         .unwrap()
@@ -1265,23 +1331,46 @@ async fn private_queue_comments_sprints_and_drafts_are_durable_without_core() {
 #[tokio::test]
 async fn private_conversations_validate_attachment_bytes_and_canonical_encoding() {
     let f = Fixture::new().await;
+    // The upload validates the bytes; a saved comment takes only the reference it answers.
     for data in ["!bad", "YQ=", "YR==", "YQ==junk", "YQ==YQ=="] {
         assert_eq!(
             f.call(
-                "product.comment",
-                json!({"action":"add","taskId":"t","comment":{"id":"c","text":"x",
-            "attachments":[{"name":"x.txt","mimeType":"text/plain","data":data}]}})
+                "product.attachment",
+                json!({"action":"upload","files":[{"name":"x.txt","mimeType":"text/plain","data":data}]})
             )
             .await["code"],
             "invalid_attachments"
         );
     }
-    f.ok(
-        "product.comment",
-        json!({"action":"add","taskId":"t","comment":{"id":"c","text":"x",
-        "attachments":[{"name":"x.txt","mimeType":"text/plain","data":"YQ=="}]}}),
-    )
-    .await;
+    let file = json!({"name":"x.txt","mimeType":"text/plain","data":"YQ=="});
+    let refs = f
+        .ok(
+            "product.attachment",
+            json!({"action":"upload","files":[file]}),
+        )
+        .await;
+    assert_eq!(
+        f.call(
+            "product.comment",
+            json!({"action":"add","taskId":"t","comment":{"id":"c","text":"x","attachments":[file]}})
+        )
+        .await["code"],
+        "inline_attachment_refused"
+    );
+    let saved = f
+        .ok(
+            "product.comment",
+            json!({"action":"add","taskId":"t","comment":{"id":"c","text":"x","attachments":refs}}),
+        )
+        .await;
+    assert!(!saved.to_string().contains("\"data\""), "{saved}");
+    let body = f
+        .ok(
+            "product.attachment",
+            json!({"action":"read","sha256":saved[0]["attachments"][0]["sha256"]}),
+        )
+        .await;
+    assert_eq!(body["data"], "YQ==");
     f.stop().await;
 }
 
@@ -1376,8 +1465,8 @@ async fn core_context_editor_and_attachments_work() {
     assert_eq!(product["tasks"]["task"]["checkout"]["branch"], "main");
     assert_eq!(
         f.ok("product.read", json!({"attachments":true,"taskId":"task"}))
-            .await[0]["data"],
-        "YQ=="
+            .await[0]["sha256"],
+        "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
     );
     assert_eq!(
         f.call(
@@ -1532,5 +1621,306 @@ async fn repository_reads_repair_or_name_an_unsafe_private_settings_folder() {
     assert_eq!(mode(&settings), 0o777);
     fs::set_permissions(&settings, fs::Permissions::from_mode(0o700)).unwrap();
     f.snapshot().await;
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn automatic_archive_never_asks_and_keeps_the_work() {
+    let f = Fixture::new().await;
+    f.ok(
+        "product.sprint",
+        json!({"action":"create","description":"fixture"}),
+    )
+    .await;
+    let file = f.state.join("product").join(format!("{}.json", f.id));
+    let mut value: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    // One unmerged task, and one that still carries the retired question fields.
+    value["tasks"]["work"] = json!({"status":"done","work":"unmerged","doneAt":1});
+    value["tasks"]["stale"] = json!({"status":"done","work":"unmerged","doneAt":1,
+        "archiveQuestion":true,"archiveAskAfter":5});
+    fs::write(&file, value.to_string()).unwrap();
+    let cleanup = f.ok("cleanup.run", json!({})).await;
+    assert_eq!(cleanup["asked"], 0);
+    assert_eq!(cleanup["removed"], 0);
+    let value: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    for task in ["work", "stale"] {
+        let t = &value["tasks"][task];
+        assert!(t["archive"]["at"].is_u64(), "{task}: {t}");
+        assert_ne!(t["archiveQuestion"], true, "{task}: {t}");
+        assert!(t.get("archiveAskAfter").is_none(), "{task}: {t}");
+        assert_eq!(t["work"], "unmerged", "the work record is untouched");
+    }
+    f.stop().await;
+}
+/// Names of one `repo.list` folder reply, with each entry's ignored mark.
+fn listed(folder: &Value) -> Vec<(String, Value)> {
+    folder["entries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{folder}"))
+        .iter()
+        .map(|e| (e["name"].as_str().unwrap().to_owned(), e["ignored"].clone()))
+        .collect()
+}
+#[tokio::test]
+async fn code_tree_lists_ignored_and_dot_files_one_folder_level_at_a_time() {
+    let f = Fixture::new().await;
+    // The project store exists inside the folder, as it does for every activated project.
+    drop(f.store());
+    assert!(f.repo.join(".cortex").is_dir() || f.repo.join(".cortex-dev").is_dir());
+    f.write(".gitignore", b"target/\n.env\n");
+    f.git(&["add", ".gitignore"]);
+    f.git(&["commit", "-m", "ignore"]);
+    f.write(".env", b"API_KEY=fake-fixture-value\n");
+    f.write(".env.local", b"untracked\n");
+    f.write("target/debug/deep/x.o", b"obj");
+    f.write(".hidden/notes.md", b"hi");
+    f.write("sub/.git/config", b"[core]\n");
+    f.write("sub/kept.txt", b"kept");
+    f.write(".cortex-workspace.json", b"{}");
+    for i in 0..600 {
+        f.write(&format!("target/many/{i:04}"), b"");
+    }
+    fs::create_dir(f.base.join("outside")).unwrap();
+    fs::write(f.base.join("outside/secret"), b"secret").unwrap();
+    symlink(f.base.join("outside"), f.repo.join("dir-link")).unwrap();
+    // The snapshot tree and the Git page stay what Git reports: nothing ignored is in them.
+    let s = f.snapshot().await;
+    let tree = s["tree"].as_array().unwrap();
+    assert!(
+        tree.iter().all(|p| {
+            let p = p.as_str().unwrap();
+            p != ".env" && !p.starts_with("target/")
+        }),
+        "{tree:?}"
+    );
+    let changed = s["checkouts"][0]["files"].as_array().unwrap();
+    assert!(
+        changed
+            .iter()
+            .all(|c| c["path"] != ".env" && !c["path"].as_str().unwrap().starts_with("target")),
+        "{changed:?}"
+    );
+    // The checkout's own folder: dot-files and ignored entries alike, marked; one level only.
+    let r = f
+        .ok("repo.list", json!({"dirs":[""],"overview":true}))
+        .await;
+    let root = listed(&r["folders"][0]);
+    let names: Vec<_> = root.iter().map(|(n, _)| n.as_str()).collect();
+    for want in [
+        ".env",
+        ".env.local",
+        ".gitignore",
+        ".hidden",
+        "a.txt",
+        "dir-link",
+        "sub",
+        "target",
+    ] {
+        assert!(names.contains(&want), "{want} missing from {names:?}");
+    }
+    for private in [".git", ".cortex", ".cortex-dev", ".cortex-workspace.json"] {
+        assert!(!names.contains(&private), "{private} listed");
+    }
+    assert!(!names.iter().any(|n| n.contains('/')), "{names:?}");
+    let mark = |name: &str| root.iter().find(|(n, _)| n == name).unwrap().1.clone();
+    assert_eq!(mark(".env"), true);
+    assert_eq!(mark("target"), true);
+    assert_eq!(mark(".env.local"), false);
+    assert_eq!(mark("a.txt"), false);
+    let entry = |name: &str| {
+        r["folders"][0]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        (
+            entry("target")["dir"].clone(),
+            entry("dir-link")["dir"].clone(),
+            entry("dir-link")["link"].clone()
+        ),
+        (json!(true), json!(false), json!(true))
+    );
+    assert_eq!(r["folders"][0]["more"], 0);
+    // The overview names what the snapshot leaves out, collapsed: the ignored folder, not its files.
+    let overview: Vec<_> = r["overview"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        overview.contains(&".env".into()) && overview.contains(&"target".into()),
+        "{overview:?}"
+    );
+    assert!(
+        overview.iter().all(|p| !p.starts_with("target/")
+            && !p.starts_with(".cortex")
+            && !p.starts_with(".git/")),
+        "{overview:?}"
+    );
+    // A folder read is one level: `target` shows `debug` and `many`, never what is below them.
+    let r = f
+        .ok(
+            "repo.list",
+            json!({"dirs":["target", "target/debug", "sub"]}),
+        )
+        .await;
+    assert_eq!(
+        listed(&r["folders"][0]),
+        vec![("debug".into(), json!(true)), ("many".into(), json!(true))]
+    );
+    assert_eq!(listed(&r["folders"][1]), vec![("deep".into(), json!(true))]);
+    assert_eq!(
+        listed(&r["folders"][2]),
+        vec![("kept.txt".into(), json!(false))],
+        "a nested repository's .git stays out"
+    );
+    assert_eq!(r["overview"], Value::Null);
+    // Git cannot judge a path inside a submodule: that folder's marks are unknown, the others' are kept.
+    let head = f.git(&["rev-parse", "HEAD"]);
+    f.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{head},module"),
+    ]);
+    f.write("module/inner.txt", b"x");
+    let r = f
+        .ok("repo.list", json!({"dirs":["module", "target"]}))
+        .await;
+    assert_eq!(
+        listed(&r["folders"][0]),
+        vec![("inner.txt".into(), Value::Null)]
+    );
+    assert_eq!(
+        listed(&r["folders"][1]),
+        vec![("debug".into(), json!(true)), ("many".into(), json!(true))]
+    );
+    f.git(&["rm", "-q", "-f", "--cached", "module"]);
+    // Bounded: the first 500 names, and how many more there are.
+    let r = f.ok("repo.list", json!({"dirs":["target/many"]})).await;
+    assert_eq!(r["folders"][0]["entries"].as_array().unwrap().len(), 500);
+    assert_eq!(
+        (
+            r["folders"][0]["more"].clone(),
+            r["folders"][0]["exact"].clone()
+        ),
+        (json!(100), json!(true))
+    );
+    assert_eq!(r["folders"][0]["entries"][0]["name"], "0000");
+    let many: Vec<String> = (0..33).map(|i| format!("d{i}")).collect();
+    assert_eq!(
+        f.call("repo.list", json!({"dirs":many})).await["code"],
+        "invalid_request"
+    );
+    // Nothing outside the folder or private is read: escapes and private names are refused,
+    // and a linked folder is not followed.
+    for bad in [
+        "..",
+        "../outside",
+        "/etc",
+        "a/../..",
+        ".git",
+        "sub/.git",
+        ".cortex",
+        ".cortex-dev",
+    ] {
+        assert_eq!(
+            f.call("repo.list", json!({"dirs":[bad]})).await["code"],
+            "invalid_path",
+            "{bad}"
+        );
+    }
+    let r = f
+        .ok("repo.list", json!({"dirs":["dir-link", "gone"]}))
+        .await;
+    assert_eq!(r["folders"][0]["code"], "symlink_refused");
+    assert!(r["folders"][0].get("entries").is_none());
+    assert_eq!(r["folders"][1]["code"], "folder_missing");
+    // `.env` opens and saves like any other file, with the same hash check.
+    let read = f.ok("repo.file", json!({"file":".env"})).await;
+    assert_eq!(read["text"], "API_KEY=fake-fixture-value\n");
+    assert_eq!(read["readOnly"], Value::Null);
+    let stale = f
+        .call(
+            "repo.file.save",
+            json!({"file":".env","text":"x","revision":"0".repeat(64)}),
+        )
+        .await;
+    assert_eq!(stale["result"]["outcome"], "conflict");
+    let saved = f
+        .ok(
+            "repo.file.save",
+            json!({"file":".env","text":"API_KEY=other-fake\n","revision":read["revision"]}),
+        )
+        .await;
+    assert_eq!(saved["outcome"], "saved");
+    assert_eq!(
+        fs::read(f.repo.join(".env")).unwrap(),
+        b"API_KEY=other-fake\n"
+    );
+    assert_eq!(
+        f.ok("repo.file", json!({"file":"target/debug/deep/x.o"}))
+            .await["text"],
+        "obj"
+    );
+    // Cortex's private names stay refused for reads and saves.
+    for private in [".cortex-workspace.json", ".git/config", "sub/.git/config"] {
+        assert_eq!(
+            f.call("repo.file", json!({"file":private})).await["code"],
+            "invalid_path",
+            "{private}"
+        );
+        assert_eq!(
+            f.call(
+                "repo.file.save",
+                json!({"file":private,"text":"x","revision":null})
+            )
+            .await["code"],
+            "invalid_path",
+            "{private}"
+        );
+    }
+    f.stop().await;
+}
+#[tokio::test]
+async fn code_tree_of_a_folder_without_git_lists_its_unwalked_folders_on_demand() {
+    let f = Fixture::new().await;
+    fs::remove_dir_all(f.repo.join(".git")).unwrap();
+    f.write(".env", b"X=fake\n");
+    f.write("node_modules/pkg/index.js", b"x");
+    f.write("app/__pycache__/m.pyc", b"x");
+    let s = f.snapshot().await;
+    assert!(s["tree"].as_array().unwrap().contains(&json!(".env")));
+    let r = f
+        .ok(
+            "repo.list",
+            json!({"dirs":["", "node_modules"],"overview":true}),
+        )
+        .await;
+    let overview: Vec<_> = r["overview"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| (e["path"].as_str().unwrap().to_owned(), e["ignored"].clone()))
+        .collect();
+    assert_eq!(
+        overview,
+        vec![
+            ("app/__pycache__".into(), json!(true)),
+            ("node_modules".into(), json!(true))
+        ]
+    );
+    let root = listed(&r["folders"][0]);
+    assert!(
+        root.contains(&(".env".into(), json!(false)))
+            && root.contains(&("node_modules".into(), json!(true))),
+        "{root:?}"
+    );
+    assert_eq!(listed(&r["folders"][1]), vec![("pkg".into(), json!(true))]);
     f.stop().await;
 }

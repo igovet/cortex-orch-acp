@@ -1,6 +1,6 @@
 # CW-C09: Sprint planning and scheduler contract
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: sprint planning, linked tasks, dependency order and the manual and automatic queue run in the service ([local task execution](../local-task-execution.md)); no-paid checks only · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Sprint planning and scheduler contract.

@@ -1,6 +1,6 @@
 # Self-hosted relay and push gateway via Docker Compose
 
-**Status: planned; supersedes [ADR 0010](0010-push-gateway-cloudflare.md); no implementation or qualification is implied.**
+**Status: planned; supersedes [ADR 0010](0010-push-gateway-cloudflare.md). Not implemented: no relay or push gateway exists.**
 
 ## Context
 

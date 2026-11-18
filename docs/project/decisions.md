@@ -1,6 +1,88 @@
 # Decisions
 
 > Historical record. Module, test and script paths in this page that name `.py` files, `src/`, `tests/test_*.py` or the former Python scripts refer to the former Python runtime, which was removed on 2026-11-16; they are kept as dated history, no longer exist in the checkout and are not current commands. The behavior statements are unverified against the Rust runtime unless a Rust source path is given.
+## 2026-11-18 Queued messages are sent by the service; denials can be lifted; delivery is confirmed
+
+The owner decided four follow-ups to the entry below. A desktop Queue message for a
+working task is sent by the Workspace service (window open or closed) at the next
+boundary of the coordinator's work, in queue order; it stays editable, movable and
+removable until the service takes it (`sending`, then `message_taken` on change);
+Send now still records it at once. A message to a task whose worker asked the owner a
+question is a boundary message too: the question stays open and answerable, and only
+a question of the coordinator itself keeps the restart delivery. The owner lifts their
+own `deny-write` denial with `allow-write: <path>` or with Remove on the task's Write
+denials list; a lift removes exactly that recorded path and grants nothing else. The
+desktop lists the denials in force and shows each owner message as taken from the
+queue, waiting for the coordinator's next step, or delivered with its time, from
+runtime facts read on the task's events.
+
+A message was recorded delivered when it was handed to a coordinator turn, so a
+service death before the engine's reply left it only in the capsule. It is now
+`STEERING_HANDED` at the hand-over and `STEERING_DELIVERED` once the engine's reply to
+the coordinator's prompt (`NATIVE_TURN_SETTLED`) is observed; an unconfirmed message
+is handed to the next coordinator turn again, marked repeated. Every message reaches at
+least one answered coordinator prompt and is recorded delivered once; it can reach the
+engine twice only when the engine received a prompt whose reply the service never saw.
+
+## 2026-11-17 An owner message never discards running work; deny-write is recorded again
+
+The former Python runtime queued an owner message (`policy.steer`) and applied it at
+the next planning boundary (`policy.apply_pending_steering`) while workers, review
+and verification kept running. The Rust desktop and incoming ACP path
+(`admit_input` in `crates/cortex-core/src/workspace_control.rs`) instead recorded the
+message and then called `domain::interrupt_tx`, which cancelled every running node,
+wait and channel and moved the task to RECOVERING: any message to a working task
+discarded in-flight worker work, review or verification. The same admission wrote
+the steering payload as text, request and attachments only, so the denial readers
+(scheduler access policy, plan admission, scope requests, project writes and
+commands) never saw an owner `deny-write:` path.
+
+The owner decided that a message must not discard running work. A message to a
+working task (planning, a plan not yet started, execution, review, verification,
+reconciliation, with nothing open for the owner) is recorded with
+`"delivery":"boundary"` and interrupts nothing; `lifecycle::steering`
+(`crates/cortex-core/src/lifecycle/steering.rs`) applies it at the next boundary of
+the coordinator's work (`STEERING_APPLIED`, Python's event) and hands it to exactly
+one coordinator turn (`STEERING_DELIVERED`), in order, across restarts. The native
+host runs one coordinator turn at a time and never beside running workers, so a
+message sent while workers run reaches the coordinator when the runtime next runs
+it (normally reconciliation after verification). Stopping work stays an explicit
+owner action. A message to a task that waits for the owner, is held, paused or
+finished keeps the previous restart delivery. The desktop's Queue holds a message
+in the machine's queue until the owner sends it; that is unchanged.
+
+`deny-write:` parsing is Python's `parse_denials` (explicit directive, quoted or
+bare, wildcards skipped, normalized path parts, a path outside the project or a
+private path refuses the message with `gateway_path_denied`). The paths are stored
+in the steering event's `deny_write` field, the shape the readers already expected.
+Python's `denied_paths` counted a denial only once its message was applied at the
+boundary; by owner decision a denial now applies at once to every write not yet
+made, including later writes of workers already running. Python offered no way to
+lift a denial; on 2026-11-18 the owner decided to add one: `allow-write: <path>` in a
+message, or Remove on the task's Write denials list, lifts exactly that recorded denial
+and nothing else.
+
+## 2026-11-17 every coordinator chunk is recorded around its question
+
+In a Cortex Workspace conversation a coordinator message stopped mid-sentence.
+The stored message ended 4 ms before its question rows were committed, and no
+later chunk of it existed. The question's own tool-call rows were recorded about
+3 s after the question committed: the service records each display update in its
+own write transaction and fell behind the engine's stream, while the question
+committed over the MCP channel. The rest of the message was processed after the
+commit. The display recorder (`record` in `crates/workspace-service/src/native_activity.rs`) dropped
+every coordinator chunk while that coordinator channel had a
+`USER_QUESTION_REQUESTED` event newer than its last `COORDINATOR_ANSWER_CLAIMED`,
+which is the 2026-09-29 withholding rule below. That rule's stated trade-off
+(pre-question text delivered after the commit is omitted too) was the cause.
+
+The owner decided that the runtime does not hide or stop the coordinator's text
+around questions; the coordinator's instructions are the only mechanism against
+a rewrite after the question. The 2026-09-29 withholding rule is removed on both
+surfaces: the Workspace display session (`cortex-native`) and the incoming ACP
+host session (`cortex-rust-acp`, used from Paseo or Zed) record every chunk the
+engine emits, in order, before and after the question commit.
+
 ## 2026-10-14 orchestration audit decisions
 
 An owner-approved audit of the orchestration prompts and logic produced these

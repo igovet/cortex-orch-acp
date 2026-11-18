@@ -521,3 +521,64 @@ async fn private_index_sees_non_ascii_helper_names() {
         "private_index"
     );
 }
+
+/// One Git-changing integration per repository: a second one, of another task, is
+/// refused at once while the first is in Git, and the first completes correctly.
+#[tokio::test]
+async fn a_second_integration_in_the_same_repository_is_refused_at_once() {
+    let env = Env::new("serial");
+    let target = env.base.join("target");
+    git(
+        &env.root,
+        &["worktree", "add", target.to_str().unwrap(), "main"],
+    );
+    // A slow commit hook keeps the first integration inside Git.
+    let hooks = env.base.join("hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    fs::write(hooks.join("pre-commit"), "#!/bin/sh\nsleep 2\n").unwrap();
+    fs::set_permissions(
+        hooks.join("pre-commit"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    git(
+        &env.root,
+        &["config", "core.hooksPath", hooks.to_str().unwrap()],
+    );
+    fs::write(env.root.join("a.txt"), "edited by task\n").unwrap();
+    let digest = env.evidence(&[]).await;
+    let mut product = json!({"tasks":{},"sprints":[],"drafts":{},"messages":[],"comments":{}});
+    product["tasks"]["t1"] = record(&env, &digest, json!({}));
+    product["tasks"]["t2"] = record(&env, &digest, json!({}));
+    settings::write_json(&product_path(&env.state, "p1").unwrap(), &product).unwrap();
+    let second = async {
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        let started = std::time::Instant::now();
+        let mut g = Git::new();
+        let mut p = squash(&digest);
+        p["taskId"] = json!("t2");
+        p["requestId"] = json!("two");
+        let refused = super::run(&env.root, "p1", &env.state, &p, &mut g)
+            .await
+            .unwrap_err();
+        (refused, started.elapsed())
+    };
+    let (first, (refused, waited)) = tokio::join!(env.run(squash(&digest)), second);
+    assert_eq!(first.unwrap(), json!({"done":true}));
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        ("integration_in_progress", REPO_BUSY)
+    );
+    assert!(waited < std::time::Duration::from_secs(1), "{waited:?}");
+    // Exactly one squash landed, with only the first task's change, and nothing is left staged.
+    assert_eq!(git(&target, &["rev-list", "--count", "main"]), "2");
+    assert_eq!(
+        fs::read_to_string(target.join("a.txt")).unwrap(),
+        "edited by task\n"
+    );
+    assert_clean(&target);
+    assert_clean(&env.root);
+    let saved = super::super::native::product(&env.state, "p1").unwrap();
+    assert_eq!(saved["tasks"]["t1"]["status"], "done");
+    assert_eq!(saved["tasks"]["t2"]["status"], "ready_to_merge");
+}

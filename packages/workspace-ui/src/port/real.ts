@@ -1,7 +1,7 @@
 import { wireAttachments as checkedAttachments } from "../attachments";
 import { capabilities as localCapabilities, decodeResponse, negotiate, PROTOCOL, validate } from "@cortex/workspace-contract";
 import type { Answer as WireAnswer, Decision as WireDecision, Receipt as WireReceipt, Result as WireResult, Task as WireTask, HistoryRow, WireTypes } from "@cortex/workspace-contract";
-import { ACCESS_MODES, capabilityOf, checksPassed, DomainError, effortLabel, ENGINE_KEYS, engineLabel, FEATURES, LANGUAGES, LOCAL_MACHINE_ID, MACHINE_COMMANDS, mapProjectSlice, readableCheckReason, emptySession, overlayTask, runOrder, sprintTaskCheckout, validatePlan, WIRE_OPERATIONS } from "@cortex/workspace-domain";
+import { ACCESS_MODES, readRemoteStatus, capabilityOf, checksPassed, DomainError, effortLabel, ENGINE_KEYS, engineLabel, FEATURES, LANGUAGES, LOCAL_MACHINE_ID, MACHINE_COMMANDS, mapProjectSlice, readableCheckReason, emptySession, overlayTask, runOrder, sprintTaskCheckout, validatePlan, WIRE_OPERATIONS } from "@cortex/workspace-domain";
 import { nativeDelta, nativeVersion } from "./native";
 import { applyNativeTaskDelta, weeklyUsage } from "@cortex/workspace-domain";
 import type { NativeTaskDelta, NativeTaskSnapshot } from "@cortex/workspace-domain";
@@ -9,7 +9,10 @@ import { conversationOf } from "./history";
 import { same } from "../stable";
 import { readBoards, writeBoards, type BoardStorage, type CachedBoard } from "./board-cache";
 import { liveMembers, presentSprint, unreadMembers, type SavedSprint } from "./sprint-members";
-import type { CatalogueState, CommandEnvelope, CommandReceipt, DirectorySearch, EngineConnection, EngineWeeklyUsage, FileDiff, FileRead, FileSaveResult, Machine, MachineConfig, MachineFacts, Message, PlanItem, PortCapabilities, PortUpdate, ProjectFacts, ProjectionUpdate, ProjectRepo, ProjectSlice, QueryOperation, QueryParameters, QueryResults, SessionOptions, Sprint, TaskChanges, TaskOverlay, Worker, WorkspaceCommand, WorkspacePort } from "@cortex/workspace-domain";
+import type { Attachment, AttachmentRef, CatalogueState, CommandEnvelope, CommandReceipt, DirectorySearch, GitInterest, EngineConnection, EngineWeeklyUsage, FileDiff, FileRead, FileSaveResult, FolderListing, Machine, MachineConfig, MachineFacts, Message, PlanItem, PortCapabilities, PortUpdate, ProjectFacts, ProjectionUpdate, ProjectRepo, ProjectSkills, ProjectSlice, QueryOperation, QueryParameters, QueryResults, SessionOptions, Sprint, TaskChanges, TaskOverlay, Worker, WorkspaceCommand, WorkspacePort } from "@cortex/workspace-domain";
+
+/** Whether two facts reads say the same thing: their place in the read order is not part of what they say. */
+const sameFacts = (a: ProjectFacts | undefined, b: ProjectFacts) => !!a && same({ ...a, readOrder: undefined }, { ...b, readOrder: undefined });
 
 /** How the native bridge reaches the machine service. The bridge owns the socket; this side only ever sees typed messages. */
 export type TransportEvent = { type: "connection"; state: "connecting" | "connected" | "disconnected" | "unavailable"; reason?: string } | { type: "invalidated"; projectId: string; source?: "runtime" } | { type: "refresh" } | ({ type: "native_delta" } & NativeTaskDelta) | { type: "native_resync"; projectId: string };
@@ -19,14 +22,38 @@ export type RealTransport = {
 };
 /** One project the service has registered. Listing them is the service's; here they arrive already resolved. */
 export type ProjectLocator = { projectId: string; name: string; repository: string; openBranch: string; defaultBranch: string; activated?: boolean };
-export type RealPortOptions = { transport: RealTransport; actorId: string; projects?: ProjectLocator[]; registry?: boolean; boardStorage?: BoardStorage };
+export type RealPortOptions = { transport: RealTransport; actorId: string; projects?: ProjectLocator[]; registry?: boolean; boardStorage?: BoardStorage;
+  /** Least time between the end of one streamed facts read of a project and the start of the next (default `STREAM_FACTS_MS`). */
+  streamFactsMs?: number };
+/** While a task streams updates, the facts of a project on screen are reread at most this often. */
+export const STREAM_FACTS_MS = 5_000;
 
 /** For a build with no bridge yet. It fails every call, so the screen says so instead of showing anything. */
 export function unavailableTransport(): RealTransport {
   return { request: () => Promise.reject(new Error("The machine service is not connected")), subscribe: () => () => {} };
 }
 
+/**
+ * Every `executions.control` action and `machine.call` operation this port sends. `control` and `machine` below take only
+ * these, so a new one is added here on purpose; the desktop bridge policy test (`every_request_the_real_port_sends_is_allowed`
+ * in apps/cortex-workspace-desktop/src-tauri/tests/policy.rs) reads both lists and checks that the bridge accepts each one
+ * with a representative message, so a request the bridge would refuse fails a test instead of the owner's click.
+ */
+export const CONTROL_ACTIONS = ["pause", "resume", "retry", "worker_message", "worker_stop", "allow_write", "command_stop", "rerun_check", "task_settings", "close_task"] as const;
+export const MACHINE_OPS = ["overview", "logs.folder", "maintenance", "workflow.describe", "engine.connection", "machine.update", "diagnostics.run", "cleanup.run", "config.read", "config.save", "config.action", "config.mcp.discover",
+  "project.config.read", "project.config.save", "repo.snapshot", "repo.file", "repo.file.save", "repo.list", "repo.skills", "git", "workers",
+  "product.read", "product.board", "product.facts", "product.task", "product.integrate", "product.sprint", "product.message", "product.comment", "product.attachment"] as const;
+type ControlAction = typeof CONTROL_ACTIONS[number];
+type MachineOp = typeof MACHINE_OPS[number];
+
 const PAGE_LIMIT = 200;
+/** How long one conversation page may take, the first retry delay after a failed conversation read, and the pause between
+ *  rereads of a conversation that keeps changing. */
+const HISTORY_PAGE_MS = 60_000, HISTORY_RETRY_MS = 3_000, HISTORY_AGAIN_MS = 120;
+/** A conversation opens on its latest part: read from its end backwards, at most `HISTORY_FIRST_PAGES` pages or until
+ *  `HISTORY_FIRST_ROWS` rows are held. Each further part the reader asks for is at most `HISTORY_EARLIER_PAGES` pages or
+ *  `HISTORY_EARLIER_ROWS` rows. */
+const HISTORY_FIRST_PAGES = 4, HISTORY_FIRST_ROWS = 150, HISTORY_EARLIER_PAGES = 3, HISTORY_EARLIER_ROWS = 150;
 const request = (projectId: string, operation: string, extra: Record<string, unknown> = {}) => validate("Query", { protocol: { ...PROTOCOL }, requestId: `read-${operation}-${projectId}`, projectId, operation, ...extra });
 const OUTCOME_WORDS: Record<string, string> = {
   recorded: "Recorded", already_resolved: "Already recorded", stale_version: "This changed on the machine. Look again and retry.", stale_epoch: "Another owner took over this task.",
@@ -62,17 +89,21 @@ const refusalOf = (requestId: string, error: unknown): CommandReceipt => {
 const unsupported = (requestId: string): CommandReceipt => ({ requestId, ok: false, outcome: "unsupported", message: OUTCOME_WORDS.unsupported });
 
 /**
- * How often a visible app rereads what moves without telling it. Task progress and the service's own writes are pushed.
- * What is left is outside Git and config: a quiet round waits longer, and returning to the window reads at once.
+ * Nothing is read on a blind timer for what is not on screen. A project's facts are read when a screen showing them opens
+ * (`interest`), when its events say it changed, and when the window comes back after `FOCUS_STALE_MS`. Its Git data is read
+ * only while a screen showing it is on view: on open, after the owner's own Git action, on the manual refresh, on return to
+ * the window after `FOCUS_STALE_MS`, and every `GIT_VISIBLE_REFRESH_MS` while that screen is on view and the window focused,
+ * because files can change outside the app without any event. A Git status line (`status`, the title band's Git button) is read
+ * the same way but never on that timer. `MACHINE_POLL_MS` is the plain machine settings poll.
  */
-export const FACTS_POLL_MS = 30_000, FACTS_POLL_MAX_MS = 120_000, MACHINE_POLL_MS = 300_000;
-/** First retry delay of a failed repository read; doubles per failure up to FACTS_POLL_MS. */
-export const REPO_RETRY_MS = 3_000;
+export const GIT_VISIBLE_REFRESH_MS = 30_000, FOCUS_STALE_MS = 10_000, MACHINE_POLL_MS = 300_000;
+/** First retry delay of a failed repository read; doubles per failure up to `REPO_RETRY_MAX_MS`, while a Git screen is on view. */
+export const REPO_RETRY_MS = 3_000, REPO_RETRY_MAX_MS = 30_000;
 /**
- * The service reads each connection's engine limits at most every five minutes, in background passes 15 seconds apart
- * (`usage_refresh.rs`), and only while settings are being read. A machine read lands `USAGE_GRACE_MS` after the next
- * snapshot is due, so what the sidebar shows is never older than `USAGE_REFRESH_MS + USAGE_GRACE_MS` while the window
- * is visible. Two unaligned five-minute timers in a row had let it reach twenty minutes.
+ * The service reads each connection's engine limits at most every five minutes, and only when a settings read asks for it
+ * (`usage_refresh.rs`): nothing reads them while no window does. A machine read lands `USAGE_GRACE_MS` after the next
+ * snapshot is due and starts that refresh; the read `USAGE_RETRY_MS` later shows it, so what the sidebar shows is never
+ * older than about `USAGE_REFRESH_MS + USAGE_GRACE_MS + USAGE_RETRY_MS` while the window is visible. Two unaligned five-minute timers in a row had let it reach twenty minutes.
  */
 export const USAGE_REFRESH_MS = 300_000, USAGE_GRACE_MS = 45_000, USAGE_RETRY_MS = 30_000, USAGE_LATE_MS = 120_000;
 /**
@@ -109,6 +140,14 @@ function readCause(error: unknown) {
   const code = (error as { code?: unknown })?.code, message = error instanceof Error ? error.message : String(error);
   const line = `${typeof code === "string" && code && !message.startsWith(code) ? code + ": " : ""}${message}`.replace(/\s+/g, " ").trim();
   return line.length > 300 ? line.slice(0, 299) + "…" : line;
+}
+/** A copy for the schema check only: each file reference shown as an empty inline body of the same name and type. */
+function referencesAsBodies(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(referencesAsBodies);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, v]) => [key, key === "attachments" && Array.isArray(v)
+    ? v.map(f => f && typeof f === "object" && "sha256" in f ? { name: (f as { name: unknown }).name, mimeType: (f as { mimeType: unknown }).mimeType, data: "" } : f)
+    : referencesAsBodies(v)]));
 }
 function wireAttachments(files: Message["attachments"] = []) {
   try { return checkedAttachments(files); }
@@ -180,6 +219,8 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   const projectConfigTokens = new Map<string, Record<string, unknown>>();
   const projectConfigBases = new Map<string, Record<string, unknown>>();
   let attachmentSupport = false, presentationRead = 0;
+  // Every facts read is numbered as it begins (`ProjectFacts.readOrder`).
+  let factsBegun = 0;
   // The facts each project's screens last received, by the coherent read or the poll. A poll sends only what differs.
   const sent = new Map<string, ProjectFacts>();
   const sprintProjects = new Map<string, string>();
@@ -189,9 +230,32 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   };
   /** Projects whose events arrived since the last refresh; the next refresh reads these and leaves the rest. */
   let invalidated = new Set<string>(), readScope = new Set<string>();
+  /** What the screens on view show, per project: `facts` (workers, reviews, queued messages) or `git` (the repository too).
+   *  Background reads go only to projects some screen holds interest in. */
+  const interests = new Map<string, number>();
+  const hasInterest = (projectId: string, kind: GitInterest) => (interests.get(`${projectId}|${kind}`) ?? 0) > 0;
+  /** A Git screen: its Git is also reread on the visible refresh. */
+  const wantsGit = (projectId: string) => hasInterest(projectId, "git");
+  /** Git shown at all, a Git screen or a status line: read with the facts on events, on return and after an own action, never on a timer. */
+  const showsGit = (projectId: string) => wantsGit(projectId) || hasInterest(projectId, "status");
+  const watched = (projectId: string) => hasInterest(projectId, "facts") || showsGit(projectId);
+  /** The tasks the screens on view show, per project, counted. A watched project's facts carry worker rows only for these:
+   *  a worker row holds its whole recent activity, and the finished workers of every other task are not on screen. */
+  const shownTasks = new Map<string, Map<string, number>>();
+  /** The tasks whose workers a facts read of this project carries: every started one for a project no screen shows (an
+   *  explicit read), only the shown ones for a project on view. */
+  const workerScope = (projectId: string, started: string[]) => {
+    if (!watched(projectId)) return started;
+    const shown = shownTasks.get(projectId);
+    return started.filter(id => (shown?.get(id) ?? 0) > 0);
+  };
+  /** Screens showing the machine overview. It is reread on the machine poll only while one is on view. */
+  let overviewWatchers = 0;
+  /** A Git screen came on view: its periodic refresh starts (see `subscribe`). */
+  const gitShown = new Set<() => void>();
   let offered: string[] = [], serviceMethods: string[] = [], machineOn = false, taskWorktrees = true, configTokens: Record<string, unknown> = {}, configRead: ConfigRead | null = null;
 
-  async function machine<T>(op: string, projectId?: string, params?: unknown): Promise<T> {
+  async function machine<T>(op: MachineOp, projectId?: string, params?: unknown): Promise<T> {
     const reply = await transport.request("machine.call", { op, ...(projectId ? { projectId } : {}), ...(params === undefined ? {} : { params }) }) as { ok?: boolean; result?: T; code?: string; message?: string };
     if (reply?.ok !== true) throw new Refusal(reply?.code ?? "refused", reply?.message ?? OUTCOME_WORDS.unsupported);
     if (projectId && ["git", "git_init", "repo.file.save", "product.task", "product.integrate"].includes(op)) {
@@ -205,6 +269,26 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   }
   const projectOfCheckout = (checkoutId: string) => checkoutId.split(":")[0];
   const projectOfTask = (taskId: string) => tasks.get(taskId)?.projectId ?? null;
+  /**
+   * One short model text on the machine: the job is started, then read until it is written or a minute has passed.
+   * It changes no repository, so it does not drop the repository cache, and a lost reply is just no text.
+   */
+  async function shortText(projectId: string, params: { action: string; taskId: string } & Record<string, unknown>): Promise<Record<string, unknown> | null> {
+    const call = async (p: Record<string, unknown>) => {
+      const reply = await transport.request("machine.call", { op: "product.task", projectId, params: p }) as { ok?: boolean; result?: Record<string, unknown> };
+      return reply?.ok === true ? reply.result ?? null : null;
+    };
+    const started = await call(params).catch(() => null);
+    const jobId = typeof started?.jobId === "string" ? started.jobId : null;
+    if (!jobId) return null;
+    for (const until = Date.now() + 60_000; Date.now() < until;) {
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      const read = await call({ action: "short_text_poll", taskId: params.taskId, jobId }).catch(() => null);
+      if (!read) return null;
+      if (read.state === "done") return read;
+    }
+    return null;
+  }
   const projectOfSprint = async (sprintId: string) => {
     const id = sprintProjects.get(sprintId);
     if (id) return id;
@@ -234,18 +318,18 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   type RepoRead = ProjectRepo & { openBranch: string; defaultBranch: string; taskDiffs?: Record<string,{files:FileDiff[];reason?:string}> };
   const repoReads = new Map<string, { at: number; pending: Promise<RepoRead | null>; running: boolean; value: RepoRead | null; error: boolean; reason?: string }>();
   /** A failed repository read is retried on its own, soon and then less often, while a screen
-   *  is open: a cause fixed outside the app (a folder's permissions, a Git lock) clears without
-   *  waiting for the slow facts poll, an unrelated event or a restart. */
+   *  showing that project's Git is on view: a cause fixed outside the app (a folder's permissions,
+   *  a Git lock) clears without an unrelated event or a restart. No screen, no retry. */
   const repoRetries = new Map<string, { timer?: ReturnType<typeof setTimeout>; failures: number }>();
   function retryRepository(id: string) {
     const retry = repoRetries.get(id) ?? { failures: 0 };
     retry.failures++;
     repoRetries.set(id, retry);
-    if (retry.timer !== undefined || !observers.size) return;
+    if (retry.timer !== undefined || !observers.size || !wantsGit(id)) return;
     retry.timer = setTimeout(() => {
       retry.timer = undefined;
-      if (observers.size && projects.some(p => p.projectId === id)) void repositoryFacts(id, true, true);
-    }, Math.min(REPO_RETRY_MS * 2 ** (retry.failures - 1), FACTS_POLL_MS));
+      if (observers.size && wantsGit(id) && projects.some(p => p.projectId === id)) void repositoryFacts(id, true, true);
+    }, Math.min(REPO_RETRY_MS * 2 ** (retry.failures - 1), REPO_RETRY_MAX_MS));
   }
   async function repositoryFacts(id: string, fresh = false, publish = false) {
     let entry = repoReads.get(id);
@@ -286,16 +370,27 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     return entry;
   }
 
-  async function factsOf(project: ProjectLocator, fresh = false): Promise<ProjectFacts> {
+  /** `git` false keeps the repository last read (no Git work at all), except for a project never read, whose branches are
+   *  read once so its header and task branches can show. */
+  /** `settle` false (every read but `settleFacts`) asks the machine not to wait for its slow parts: a task in Ready to
+   *  merge whose files are still being checked, or a result whose check against the project folder has not finished, comes
+   *  marked pending, and one settling read follows (`settleFacts`). */
+  async function factsOf(project: ProjectLocator, fresh = false, git = true, settle = false): Promise<ProjectFacts> {
     const id = project.projectId;
     if (serviceMethods.includes("native.board")) await presentations.get(id);
+    const readOrder = ++factsBegun;
     const started = [...tasks].filter(([, t]) => t.projectId === id && t.executionId).map(([taskId]) => taskId);
+    const cachedRepo = repoReads.get(id);
     // Independent reads overlap; neither Git nor workers delays sending the product read.
     const [bundle, repository] = await Promise.all([
-      machine<{ product: Product; workers: Worker[] }>("product.facts", id, { taskIds: project.activated === false ? [] : started }),
-      repositoryFacts(id, fresh),
+      machine<{ product: Product; workers: Worker[] }>("product.facts", id, { taskIds: project.activated === false ? [] : workerScope(id, started), ...(settle ? {} : { defer: true }) }),
+      git || !cachedRepo ? repositoryFacts(id, fresh) : cachedRepo,
     ]);
-    const { product, workers } = bundle;
+    const unsettledRead = !settle && unsettled(bundle.product);
+    const { workers } = bundle;
+    // A deferring read answers a result it is still checking in a pending shape (no check notes, warnings or digest).
+    // About the same result that is no news: the last settled facts stay until a settled answer or another version comes.
+    const product = keepSettled(bundle.product, sent.get(id));
     factsReadAt.set(id, Date.now());
     // Polls and explicit facts reads must obey the same membership fence as the first board.
     if (serviceMethods.includes("native.board")) {
@@ -330,8 +425,11 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     };
     const reviewed = (taskId: string) => product.tasks[taskId]?.status !== "done" || (product.tasks[taskId]?.closedAs === "as_is" && (!!repo?.taskDiffs?.[taskId] || recorded(taskId).size > 0));
     const reviews: TaskChanges[] = started.filter(reviewed).map(taskId => ({ taskId, sha: "", unavailableReason: repo?.taskDiffs?.[taskId]?.reason ?? (!repo || repository.error ? (repository.error && repository.reason) || "Repository details are updating or unavailable. Refresh Code or inspect Git before reviewing changes." : undefined), files: repo?.taskDiffs?.[taskId]?.files ?? (product.tasks[taskId]?.status === "done" ? keptFiles(taskId) : changesOf(repo, taskId, product.tasks[taskId])), scopes: [], comments: product.comments?.[taskId] ?? [] }));
-    return { projectId: id, hasGit: product.hasGit, issue: await issueOf(project), openBranch: repo?.openBranch ?? "", defaultBranch: repo?.defaultBranch ?? "", repo, workers, reviews, overlays: product.tasks, sprints: product.sprints.map(s => withPlanning(presentSprint(product.tasks, s))), messages: messages.filter(m => tasks.get(m.taskId)?.projectId === id),
-      heldAnswers: Object.fromEntries([...held.values()].flatMap(batch => [...batch].filter(([decisionId]) => decisions.get(decisionId)?.projectId === id).map(([decisionId, answer]) => [decisionId, answer.answer.text]))) };
+    const issue = await issueOf(project);
+    // After this read is published: a settling read of the same project follows it (`settleFacts`).
+    if (unsettledRead) queueMicrotask(() => settleFacts(project));
+    return { projectId: id, hasGit: product.hasGit, issue, openBranch: repo?.openBranch ?? "", defaultBranch: repo?.defaultBranch ?? "", repo, workers, reviews, overlays: product.tasks, sprints: product.sprints.map(s => withPlanning(presentSprint(product.tasks, s))), messages: messages.filter(m => tasks.get(m.taskId)?.projectId === id),
+      heldAnswers: Object.fromEntries([...held.values()].flatMap(batch => [...batch].filter(([decisionId]) => decisions.get(decisionId)?.projectId === id).map(([decisionId, answer]) => [decisionId, answer.answer.text]))), readOrder };
   }
 
   const configBases = new Map<string, Record<string, unknown>>();
@@ -366,10 +464,9 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     }
     return { machineId: LOCAL_MACHINE_ID, engineUsage: weeklyUsage(currentRead.usage ?? []), options: sessionOptions(currentRead.config), catalogue: currentRead.catalogueRefresh, patch: { config: currentRead.config, connections: currentRead.connections, lastConfirmedAt: new Date().toISOString() } };
   }
-  /** Read when a screen that shows storage, retention, worktrees, the version or GitHub CLI opens. Once asked for, the machine poll keeps it current. */
-  let overviewAsked = false;
+  /** Read when a screen that shows storage, retention, worktrees, the version or GitHub CLI opens. While one is on view
+   *  (`watchOverview`), the machine poll keeps it current; with none on view it is not read again. */
   async function machineOverview(): Promise<MachineFacts> {
-    overviewAsked = true;
     const { name, retentionDays, autoArchiveDays, worktreeRoot, defaultWorktreeRoot, version, diskMb, storage, cleanup, diagnostics, ghAvailable, reclamationFailures } = await machine<MachineRead>("overview");
     return { machineId: LOCAL_MACHINE_ID, patch: { ghAvailable, reclamationFailures, name, retentionDays, autoArchiveDays, worktreeRoot, defaultWorktreeRoot, version, diskMb, storage, cleanup, diagnostics } };
   }
@@ -415,7 +512,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     const shared = negotiate(localCapabilities("workspace-ui", "0", remote.operations), remote);
     offered = shared.operations;
     attachmentSupport = remote.attachments === true;
-    return { everything: false, operations: [...(attachmentSupport ? ["workspace.attachments"] : []), ...WIRE_OPERATIONS.filter(operation => offered.includes(operation)), ...(serviceMethods.includes("native.pick_folder") ? ["workspace.pick_folder"] : []), ...(serviceMethods.includes("directories.search") ? ["workspace.search_folders"] : []), ...(serviceMethods.includes("projects.register") ? ["workspace.add_project"] : []), ...(serviceMethods.includes("projects.rename") ? ["workspace.rename_project"] : []), ...(serviceMethods.includes("projects.activate") ? ["workspace.activate_project"] : []), ...(serviceMethods.includes("projects.remove") ? ["workspace.remove_project"] : []), ...(serviceMethods.includes("native.open_editor") ? ["workspace.open_editor"] : []), ...(serviceMethods.includes("native.open_editor.vscode") ? ["workspace.open_vscode"] : []), ...(serviceMethods.includes("native.open_logs") ? ["workspace.open_logs"] : []), ...(machineOn ? [...MACHINE_COMMANDS.map(capabilityOf), FEATURES.editFiles, "workspace.worker_messages", ...(serviceMethods.includes("native.query") ? [] : [FEATURES.workerAttachments]), ...(taskWorktrees ? ["workspace.task_worktrees"] : []), "workspace.task_route"] : [])] };
+    return { everything: false, operations: [...(attachmentSupport ? ["workspace.attachments"] : []), ...WIRE_OPERATIONS.filter(operation => offered.includes(operation)), ...(serviceMethods.includes("native.pick_folder") ? ["workspace.pick_folder"] : []), ...(serviceMethods.includes("directories.search") ? ["workspace.search_folders"] : []), ...(serviceMethods.includes("projects.register") ? ["workspace.add_project"] : []), ...(serviceMethods.includes("projects.rename") ? ["workspace.rename_project"] : []), ...(serviceMethods.includes("projects.activate") ? ["workspace.activate_project"] : []), ...(serviceMethods.includes("projects.remove") ? ["workspace.remove_project"] : []), ...(serviceMethods.includes("native.open_editor") ? ["workspace.open_editor"] : []), ...(serviceMethods.includes("native.open_editor.vscode") ? ["workspace.open_vscode"] : []), ...(serviceMethods.includes("native.open_logs") ? ["workspace.open_logs"] : []), ...(serviceMethods.includes("remote.status") ? [FEATURES.remoteAccess] : []), ...(machineOn ? [...MACHINE_COMMANDS.map(capabilityOf), FEATURES.editFiles, "workspace.worker_messages", ...(serviceMethods.includes("native.query") ? [] : [FEATURES.workerAttachments]), ...(taskWorktrees ? ["workspace.task_worktrees"] : []), "workspace.task_route"] : [])] };
   }
 
   async function projectTasks(project: ProjectLocator, cached = false) {
@@ -492,7 +589,10 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     }));
   }
   // Task versions alone do not reliably describe conversation changes.
-  const historyReads = new Map<string, { projectId: string; version: string; executionId: string; rows: HistoryRow[] }>();
+  // `tail` is where a later read continues: the service's forward cursor past the rows held (null when it offers none).
+  // `earlier` is where the rows before the held ones are read (a backward cursor): absent or null, the held rows start at the
+  // conversation's beginning.
+  const historyReads = new Map<string, { projectId: string; version: string; executionId: string; rows: HistoryRow[]; tail?: string | null; earlier?: string | null }>();
   // A change makes a held conversation due for a reread, never unread. A board read, which reads no conversation, keeps the
   // rows already confirmed until the details read that follows it replaces them: dropping them would empty a running task's
   // page on every event and redraw all of it a moment later. The mark is the change's turn, so a read already under way
@@ -501,6 +601,194 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   let historyTurn = 0;
   const historyChanged = (taskId: string) => { historyDue.set(taskId, ++historyTurn); };
   const historyPositions = new Map<string, { watermark: string; cursor: string | null }>();
+  /** One task's retained conversation, page by page: all of it, or with `from` (a forward cursor) only the rows written
+   *  after the ones already held. `tail` is the forward cursor of the last page, null from a service that offers none. A
+   *  page that does not answer within `HISTORY_PAGE_MS` fails the read. */
+  async function readHistory(projectId: string, taskId: string, from: string | null = null) {
+    const rows: HistoryRow[] = [];
+    let cursor: string | null = from, tail: string | null = null;
+    // A conversation has no page budget: a long task's history is read to its end. Only a service that stops moving
+    // forward (the same cursor twice) fails the read.
+    for (;;) {
+      const asked = cursor;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("The conversation read did not answer within a minute")), HISTORY_PAGE_MS); });
+      try {
+        const next: WireTypes["HistoryPage"] = await Promise.race([read("HistoryPage", "history.page", request(projectId, "history.page", {target:taskId,cursor})), late]);
+        rows.push(...next.items); cursor = next.nextCursor;
+        const forward = (next as { tailCursor?: unknown }).tailCursor;
+        tail = typeof forward === "string" ? forward : null;
+      } finally { clearTimeout(timer); }
+      if (cursor === null) break;
+      if (cursor === asked) throw new Error("The conversation read stopped moving forward");
+    }
+    return { rows, tail };
+  }
+  /** Whether conversations are read from their end (`history.earlier`): a native service that refuses the operation does not. */
+  let readsBack = true;
+  const backward = () => readsBack && serviceMethods.includes("native.query");
+  /** One task's conversation read from its end backwards: from `from` (a backward cursor; null: its newest rows) until
+   *  `enough` rows are held, `pages` pages were read or its beginning is reached. `tail` is the forward cursor the newest
+   *  page names (null after `from`), `earlier` where the rows before these are read (null: these start at the beginning). */
+  async function readBack(projectId: string, taskId: string, from: string | null, pages: number, enough: number) {
+    const rows: HistoryRow[] = [];
+    let cursor: string | null = from, tail: string | null = null;
+    for (let page = 0; page < pages; page++) {
+      const asked = cursor;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("The conversation read did not answer within a minute")), HISTORY_PAGE_MS); });
+      try {
+        const reply = await Promise.race([nativeRead(projectId, "history.earlier", {target:taskId, cursor, limit:100}), late]);
+        if (reply.data.type !== "history") throw new Error("Native read type mismatch");
+        const next = decodeResponse("HistoryPage", reply.data.value).value as WireTypes["HistoryPage"] & { tailCursor?: unknown; prevCursor?: unknown };
+        rows.unshift(...next.items);
+        if (page === 0 && from === null) tail = typeof next.tailCursor === "string" ? next.tailCursor : null;
+        cursor = typeof next.prevCursor === "string" ? next.prevCursor : null;
+      } finally { clearTimeout(timer); }
+      if (cursor === null || rows.length >= enough) break;
+      if (cursor === asked) throw new Error("The conversation read stopped moving back");
+    }
+    return { rows, tail, earlier: cursor };
+  }
+  /** A conversation read afresh: its latest part from a service that reads backwards, else all of it. */
+  async function readLatest(projectId: string, taskId: string): Promise<{ rows: HistoryRow[]; tail: string | null; earlier: string | null }> {
+    if (backward()) {
+      try { return await readBack(projectId, taskId, null, HISTORY_FIRST_PAGES, HISTORY_FIRST_ROWS); }
+      catch (error) {
+        // An older service does not know the operation: it is read forward from the beginning, as before.
+        if (!(error instanceof Error && /invalid_request|unsupported_operation/.test(error.message))) throw error;
+        readsBack = false;
+      }
+    }
+    return { ...await readHistory(projectId, taskId), earlier: null };
+  }
+  /** The service could not continue from a held position: the history was reset, or the position belongs to another session. */
+  const historyMoved = (error: unknown) => error instanceof Error && /history_reset|invalid_cursor/.test(error.message);
+  /** The rows held, then the ones read after them. A row already held (the same identity) is never added twice. */
+  const appended = (held: HistoryRow[], rows: HistoryRow[]) => {
+    const seen = new Set(held.map(r => r.historyId));
+    return rows.some(r => !seen.has(r.historyId)) ? [...held, ...rows.filter(r => !seen.has(r.historyId))] : held;
+  };
+  /** One conversation brought up to date: only what was written after the rows held when the service can read forward
+   *  from them, else the whole of it again (the first read, another execution, a history that was reset). */
+  async function updateHistory(projectId: string, task: WireTask) {
+    const held = historyReads.get(task.taskId);
+    if (held?.tail && held.executionId === task.executionId && held.projectId === projectId) {
+      try {
+        const { rows, tail } = await readHistory(projectId, task.taskId, held.tail);
+        // A whole read that replaced the held rows meanwhile already holds these. Older rows read meanwhile are on `held`.
+        if (historyReads.get(task.taskId) === held) return {rows:appended(held.rows, rows), tail, earlier:held.earlier ?? null};
+      } catch (error) { if (!historyMoved(error)) throw error; }
+    }
+    return readLatest(projectId, task.taskId);
+  }
+  /** Whether a conversation is read in the background: its task is on view (`interest`). With no screen declaring what it
+   *  shows (a headless store), every conversation is. Another conversation is read when it is opened, from where it was. */
+  const conversationShown = (projectId: string, taskId: string) => !interests.size || (shownTasks.get(projectId)?.get(taskId) ?? 0) > 0;
+  // With a native board, conversations are read per task, beside the board and its details and never inside their consistency
+  // window: a running task moves the watermark every moment, and a whole-project read that had to finish without it moving
+  // was discarded again and again, so no conversation was ever shown. Each task's read is published as soon as it completes,
+  // a failed one says so on that task and is retried, and rows already confirmed stay shown while a newer read runs.
+  const historyIssues = new Map<string, { executionId: string; reason: string }>();
+  const historyFailures = new Map<string, number>();
+  const historyRetries = new Map<string, ReturnType<typeof setTimeout>>();
+  const historyWork = new Map<string, Promise<void>>();
+  const historyAgain = new Set<string>();
+  const perTaskHistory = () => serviceMethods.includes("native.board") && offered.includes("history.page");
+  function historyStale(task: WireTask) {
+    const held = historyReads.get(task.taskId);
+    return !held || held.executionId !== task.executionId || held.version !== task.version || historyDue.has(task.taskId);
+  }
+  function queueHistories(project: ProjectLocator) {
+    if (!perTaskHistory() || !observers.size) return;
+    if (historyWork.has(project.projectId)) { historyAgain.add(project.projectId); return; }
+    const work = (async () => {
+      do {
+        historyAgain.delete(project.projectId);
+        const snapshot = nativeSnapshots.get(project.projectId);
+        if (!snapshot) return;
+        // A conversation never read comes first, then the most recently active ones.
+        const unread = (t: WireTask) => historyReads.get(t.taskId)?.executionId === t.executionId ? 1 : 0;
+        const started = Date.now();
+        const wanted = snapshot.items.filter(t => t.executionId !== null && !historyRetries.has(t.taskId) && conversationShown(project.projectId, t.taskId) && historyStale(t))
+          .sort((a, b) => unread(a) - unread(b) || String(b.lastConfirmedAt ?? "").localeCompare(String(a.lastConfirmedAt ?? "")));
+        for (const task of wanted) {
+          if (!observers.size) return;
+          const current = nativeSnapshots.get(project.projectId)?.items.find(t => t.taskId === task.taskId) ?? task;
+          if (current.executionId !== task.executionId) continue;
+          const due = historyDue.get(task.taskId);
+          try {
+            const before = historyReads.get(task.taskId)?.rows;
+            const { rows, tail, earlier } = await updateHistory(project.projectId, task);
+            // A fresh read starts from another position: a failed read of the older part before it no longer applies.
+            if (historyReads.get(task.taskId)?.earlier !== earlier && earlierReads.get(task.taskId)?.state === "failed") earlierReads.delete(task.taskId);
+            historyReads.set(task.taskId, {projectId:project.projectId, version:task.version, executionId:task.executionId!, rows, tail, earlier});
+            if (historyDue.get(task.taskId) === due) historyDue.delete(task.taskId);
+            const failed = historyIssues.delete(task.taskId); historyFailures.delete(task.taskId);
+            // Nothing new on a forward read (a worker's rows, a hidden update): the page on screen stays as it is.
+            if (rows === before && !failed) continue;
+          } catch (error) {
+            const failures = (historyFailures.get(task.taskId) ?? 0) + 1;
+            historyFailures.set(task.taskId, failures);
+            historyIssues.set(task.taskId, {executionId:task.executionId!, reason:readCause(error)});
+            historyRetries.set(task.taskId, setTimeout(() => { historyRetries.delete(task.taskId); queueHistories(project); }, Math.min(HISTORY_RETRY_MS * 2 ** (failures - 1), 30_000)));
+          }
+          if (!observers.size) return;
+          await publishHistory(project);
+        }
+        // Changes that arrived during this round are read right after it, and never sooner than `HISTORY_AGAIN_MS` after it
+        // began: one read in flight per project, the events of a streaming task collapsing into the next one.
+        if (historyAgain.has(project.projectId)) await new Promise(resolve => setTimeout(resolve, Math.max(0, HISTORY_AGAIN_MS - (Date.now() - started))));
+      } while (historyAgain.has(project.projectId) && observers.size);
+    })().catch(() => {}).finally(() => {
+      historyWork.delete(project.projectId);
+      if (historyAgain.has(project.projectId)) queueHistories(project);
+    });
+    historyWork.set(project.projectId, work);
+  }
+  /** What the conversation on screen now holds, published as an update of its project. */
+  async function publishHistory(project: ProjectLocator) {
+    const update = await snapshotOf(project, new Set()).catch(() => null);
+    if (update && observers.size) for (const notify of observers) notify({kind:"enrichment", update});
+  }
+  /** The reading of a conversation's older part the reader asked for: under way, or failed with its reason. */
+  const earlierReads = new Map<string, { state: "loading" } | { state: "failed"; reason: string }>();
+  /** Reads the part of a conversation before the rows held and puts it before them. Only one such read per conversation
+   *  runs; one that finds the held rows replaced meanwhile (another execution, a fresh read) is dropped. A position the
+   *  service no longer continues from (`history_reset`) has the conversation read afresh. */
+  function loadEarlierHistory(taskId: string) {
+    const held = historyReads.get(taskId), project = projects.find(p => p.projectId === held?.projectId);
+    if (!held || !project || typeof held.earlier !== "string" || earlierReads.get(taskId)?.state === "loading") return;
+    const from = held.earlier, executionId = held.executionId;
+    earlierReads.set(taskId, {state:"loading"});
+    void (async () => {
+      await publishHistory(project);
+      try {
+        const { rows, earlier } = await readBack(project.projectId, taskId, from, HISTORY_EARLIER_PAGES, HISTORY_EARLIER_ROWS);
+        const current = historyReads.get(taskId);
+        if (current && current.executionId === executionId && current.earlier === from) {
+          const seen = new Set(current.rows.map(r => r.historyId));
+          current.rows = [...rows.filter(r => !seen.has(r.historyId)), ...current.rows];
+          current.earlier = earlier;
+        }
+        earlierReads.delete(taskId);
+      } catch (error) {
+        if (historyMoved(error)) {
+          earlierReads.delete(taskId);
+          const current = historyReads.get(taskId);
+          if (current?.executionId === executionId) { current.tail = null; historyChanged(taskId); queueHistories(project); }
+        } else earlierReads.set(taskId, {state:"failed", reason:readCause(error)});
+      }
+      if (observers.size) await publishHistory(project);
+    })();
+  }
+  function retryHistory(taskId: string) {
+    clearTimeout(historyRetries.get(taskId)); historyRetries.delete(taskId);
+    const projectId = projectOfTask(taskId), project = projects.find(p => p.projectId === projectId);
+    if (!project) return;
+    historyChanged(taskId);
+    queueHistories(project);
+  }
   async function readSnapshot(project: ProjectLocator, changed?: Set<string>, details = false): Promise<ProjectionUpdate> {
     const boardOnly = serviceMethods.includes("native.board") && !details;
     // A project whose Cortex is away still has a page, with its reason on it. A store keeps what it
@@ -535,36 +823,33 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     const results = [...(!boardOnly && changed ? (wireResults.get(project.projectId) ?? []).filter(r => unchangedExecutions.has(r.executionId)) : []), ...freshResults];
 
     const histories = new Map<string, HistoryRow[]>();
-    for (const [id, held] of historyReads) if (held.projectId === project.projectId && !items.some(t => t.taskId === id && t.executionId !== null)) { historyReads.delete(id); historyDue.delete(id); }
+    for (const [id, held] of historyReads) if (held.projectId === project.projectId && !items.some(t => t.taskId === id && t.executionId !== null)) { historyReads.delete(id); historyDue.delete(id); historyIssues.delete(id); earlierReads.delete(id); }
     for (const task of items) { const held = historyReads.get(task.taskId); if (held?.executionId === task.executionId) histories.set(task.taskId, held.rows); }
-    if (!boardOnly && offered.includes("history.page")) for (const task of items.filter(t => t.executionId !== null)) {
+    // With a native board each conversation is read on its own (`queueHistories`); here it is only what was confirmed.
+    if (!boardOnly && !perTaskHistory() && offered.includes("history.page")) for (const task of items.filter(t => t.executionId !== null)) {
       const held = historyReads.get(task.taskId), due = historyDue.get(task.taskId);
       if (due === undefined && held?.projectId === project.projectId && held.version === task.version && held.executionId === task.executionId) {
         histories.set(task.taskId, held.rows);
         continue;
       }
-      const rows: HistoryRow[] = [];
-      let cursor: string | null = null;
-      for (let page = 0; page < PAGE_LIMIT; page++) {
-        const next: WireTypes["HistoryPage"] = await read("HistoryPage", "history.page", request(project.projectId, "history.page", {target:task.taskId,cursor}));
-        rows.push(...next.items); cursor = next.nextCursor;
-        if (cursor === null) break;
-      }
-      if (cursor !== null) throw new Error("Conversation exceeds the read budget");
+      const { rows } = await readHistory(project.projectId, task.taskId);
       histories.set(task.taskId, rows);
       historyReads.set(task.taskId, {projectId:project.projectId, version:task.version, executionId:task.executionId!, rows});
       if (historyDue.get(task.taskId) === due) historyDue.delete(task.taskId);
     }
-    if (details && nativeSnapshots.get(project.projectId)?.highWatermark !== watermark) throw new DetailsSuperseded("Native snapshot changed during details read");
+    // Questions and results read here are at least as new as the snapshot they were read for, so they are kept even when a
+    // newer snapshot supersedes this details read. A running task moves the watermark all the time: discarding them made an
+    // answered question stay "Needs you" on the board and in the sidebar for as long as the task kept streaming.
     wireDecisions.set(project.projectId, asked); wireResults.set(project.projectId, results);
+    for (const [key, value] of decisions) if (value.projectId === project.projectId) decisions.delete(key);
+    for (const wire of asked) decisions.set(wire.decisionId, { projectId: project.projectId, wire });
+    if (details && nativeSnapshots.get(project.projectId)?.highWatermark !== watermark) throw new DetailsSuperseded("Native snapshot changed during details read");
     for (const wire of items) {
       // An older read may settle after a mutation acknowledged its newer version.
       const current = tasks.get(wire.taskId);
       if (!current || BigInt(wire.version) >= BigInt(current.version)) tasks.set(wire.taskId, { projectId: project.projectId, version: wire.version, executionId: wire.executionId });
     }
     confirmedProjects.add(project.projectId); recheckConfirmations();
-    for (const [key, value] of decisions) if (value.projectId === project.projectId) decisions.delete(key);
-    for (const wire of asked) decisions.set(wire.decisionId, { projectId: project.projectId, wire });
     const { projectId: id, name, repository, openBranch, defaultBranch } = project;
     const stamps = [...items.map(t => t.lastConfirmedAt), ...asked.map(d => d.createdAt), ...[...histories.values()].flatMap(rows => rows.map(r => r.recordedAt))]
       .filter((s): s is string => typeof s === "string").map(Date.parse).filter(Number.isFinite);
@@ -574,11 +859,24 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       let session = slice.sessions.find(s => s.taskId === task.taskId);
       if (!session) { session = emptySession(task.taskId); slice.sessions.push(session); }
       const own = asked.filter(d => d.executionId === task.executionId);
+      // Only the latest part of the conversation is held: `since` is when its first row was recorded. A question asked before
+      // it, already settled, reads among the rows not read yet, not at the top of these; an answer given before it is not
+      // looked for among these rows (it would hide a later message of the same words). An open question always reads.
+      const held = historyReads.get(task.taskId), rows = histories.get(task.taskId) ?? [];
+      const partial = held?.executionId === task.executionId && typeof held.earlier === "string";
+      const first = partial ? Date.parse(rows.find(r => typeof r.recordedAt === "string")?.recordedAt ?? "") : NaN, since = Number.isFinite(first) ? first : null;
+      const before = (at: unknown) => since !== null && typeof at === "string" && Date.parse(at) < since;
       const dated = [
-        ...conversationOf(histories.get(task.taskId) ?? [], { description: task.description, answers: own.flatMap(d => typeof d.answerText === "string" ? [d.answerText.trim()] : []) }),
-        ...own.map(d => ({at:typeof d.createdAt === "string" ? d.createdAt : "",entry:{id:`decision:${d.decisionId}`,kind:"decision" as const,decisionId:d.decisionId}})),
+        ...conversationOf(rows, { description: task.description, partial, answers: own.flatMap(d => typeof d.answerText === "string" && !before(d.answeredAt ?? d.createdAt) ? [d.answerText.trim()] : []) }),
+        ...own.filter(d => d.status === "pending" || !before(d.createdAt)).map(d => ({at:typeof d.createdAt === "string" ? d.createdAt : "",entry:{id:`decision:${d.decisionId}`,kind:"decision" as const,decisionId:d.decisionId}})),
       ];
       session.timeline = dated.sort((a,b) => a.at.localeCompare(b.at)).map(d => d.entry);
+      if (task.executionId !== null && perTaskHistory()) {
+        const issue = historyIssues.get(task.taskId);
+        if (issue?.executionId === task.executionId) session.historyRead = {state:"failed", reason:issue.reason};
+        else if (!histories.has(task.taskId)) session.historyRead = {state:"loading"};
+        if (partial) session.historyEarlier = {...(earlierReads.get(task.taskId) ?? {state:"available" as const}), since};
+      }
     }
     slices.set(project.projectId, slice);
     return { kind: "projection", version, scope: "project", slice };
@@ -610,6 +908,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   }
   // Bound only presentation waiting, not the read itself. Late verified results are
   // delivered once; failures retain the prior records and belong to that project.
+  const lateReads = new Set<Promise<void>>();
   async function projectReads<T>(wanted: ProjectLocator[], scope: string, read: (p: ProjectLocator) => Promise<T>, publish: (value: T) => PortUpdate): Promise<T[]> {
     if (!options.registry) return Promise.all(wanted.map(read));
     const epoch = commandEpoch;
@@ -640,15 +939,20 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     deferred = true;
     // A pending read is not a project failure. Retain the confirmed board silently.
     clearTimeout(timer);
+    // What is still under way delivers itself as updates; `presented` settles once it has.
+    if (pending.size) { const late = Promise.all(work).then(() => {}); lateReads.add(late); void late.finally(() => lateReads.delete(late)); }
     return values;
   }
   const factReads = new Map<string, Promise<ProjectFacts>>();
-  function factsRead(project: ProjectLocator, fresh?: boolean) {
-    const current = factReads.get(project.projectId);
+  function factsRead(project: ProjectLocator, fresh?: boolean, git = true) {
+    // A read with Git also answers one without it; one without Git never stands in for a Git read.
+    // The tasks shown are part of what is read: a read begun for other tasks does not stand in for this one.
+    const scope = [...(shownTasks.get(project.projectId)?.keys() ?? [])].sort().join(",");
+    const key = `${project.projectId}|${git}|${scope}`, current = factReads.get(`${project.projectId}|true|${scope}`) ?? factReads.get(key);
     if (current) return current;
-    const next = factsOf(project, fresh);
-    factReads.set(project.projectId, next);
-    void next.finally(() => { if (factReads.get(project.projectId) === next) factReads.delete(project.projectId); }).catch(() => {});
+    const next = factsOf(project, fresh, git);
+    factReads.set(key, next);
+    void next.finally(() => { if (factReads.get(key) === next) factReads.delete(key); }).catch(() => {});
     return next;
   }
   async function boardFacts(project: ProjectLocator): Promise<ProjectFacts> {
@@ -661,11 +965,29 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     const shown = {...product, sprints: product.sprints.map(s => presentSprint(product.tasks, s))};
     if (snapshot) {cachedBoards.set(project.projectId,{project,items:snapshot.items,product:shown});writeBoards(options.boardStorage,actorId,[...cachedBoards.values()]);}
     const previous = sent.get(project.projectId);
+    // The board read carries each task's saved record, not what only a facts read knows (its result, review, integration
+    // facts). Like the workers, those stay as last confirmed until the next facts read: dropping them hid the result card of a
+    // task in review after every board read, until a facts read brought it back.
+    const overlays = Object.fromEntries(Object.entries(product.tasks).map(([id, saved]) => {
+      const known = previous?.overlays[id];
+      if (!known) return [id, saved];
+      // `workspaceDigest` rides in the machine's overlay beside the result (it is not one of the saved fields).
+      const { result, reviewActions, integrationFacts } = known, workspaceDigest = (known as { workspaceDigest?: unknown }).workspaceDigest;
+      return [id, { ...(result !== undefined ? { result } : {}), ...(reviewActions !== undefined ? { reviewActions } : {}),
+        ...(workspaceDigest !== undefined ? { workspaceDigest } : {}), ...(integrationFacts !== undefined ? { integrationFacts } : {}), ...saved }];
+    }));
     return {...previous,projectId:project.projectId,openBranch:previous?.openBranch ?? "",defaultBranch:previous?.defaultBranch ?? "",
       repo:previous?.repo ?? null,workers:previous?.workers ?? [],reviews:previous?.reviews ?? [],
-      overlays:product.tasks,sprints:shown.sprints.map(withPlanning)};
+      overlays,sprints:shown.sprints.map(withPlanning),
+      // Workers, results and Git are the last facts read's, carried over: so is its place in the read order. A full facts read
+      // that began before this board read still replaces it.
+      readOrder:previous?.readOrder ?? 0};
   }
   function queueEnrichment(project: ProjectLocator) {
+    queueHistories(project);
+    // Git and machine facts follow on their own throttle (`streamFacts`); the details never wait for them, and a details read
+    // already in flight does not hold back the facts of a task whose state just moved.
+    if (machineOn) streamFacts(project);
     if (enrichments.has(project.projectId)) return;
     const epoch = commandEpoch, base = nativeSnapshots.get(project.projectId);
     // A running task moves the watermark continuously. Requests made while this read
@@ -673,15 +995,11 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     let superseded = false;
     // Run after the coherent board has had an opportunity to paint. Detail reads
     // have their own lifetime and cannot hold sprint membership or task placement.
-    const work = new Promise<void>(resolve => setTimeout(resolve, 0)).then(async () => {
-      const [update, facts] = await Promise.all([
-        readSnapshot(project, new Set(base?.items.map(t => t.taskId)), true),
-        machineOn ? factsRead(project) : Promise.resolve(undefined),
-      ]);
+    const work =new Promise<void>(resolve => setTimeout(resolve, 0)).then(async () => {
+      const update = await readSnapshot(project, new Set(base?.items.map(t => t.taskId)), true);
       const current = nativeSnapshots.get(project.projectId);
       if (!observers.size || epoch !== commandEpoch) return;
       if (current?.generation !== base?.generation || current?.highWatermark !== base?.highWatermark) { superseded = true; return; }
-      if (facts) {sent.set(project.projectId,facts); for (const notify of observers) notify({kind:"facts",facts});}
       for (const notify of observers) notify({kind:"enrichment",update});
       readFailures.delete(project.projectId+":details");
       projectState(project,"details",null);
@@ -700,6 +1018,94 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       if (superseded && observers.size && epoch === commandEpoch && nativeSnapshots.has(project.projectId)) queueEnrichment(project);
     });
     enrichments.set(project.projectId,work);
+  }
+  /** Facts reads asked for by a streaming task, only for a project a screen on view shows (`interest`): one in flight per
+   *  project, the next no sooner than `streamFactsMs` after the last one ended (requests in between collapse into one
+   *  trailing read), none while the window is hidden. A project no screen shows reads nothing here: its board and
+   *  questions come from its events. Streamed text moves no task's state; a task whose state did move (a worker started or
+   *  finished, a question came) reads its facts at once, or right after the read in flight, so its workers arrive with the
+   *  state that shows them instead of an interval later. The repository is read again only with a Git screen on view, and
+   *  then only when a task's state moved or the owner's own Git action made it stale, never for streamed text alone. */
+  const streamFactsMs = options.streamFactsMs ?? STREAM_FACTS_MS;
+  const factsThrottle = new Map<string, { ended: number; timer?: ReturnType<typeof setTimeout>; running: boolean; mark?: string }>();
+  /** Parts of a facts read the machine was still checking when it answered (it never waits for them, `factsOf`). */
+  const unsettled = (product: Product) => Object.values(product.tasks).some(t => t?.reviewActions?.pending === true || t?.integrationFacts?.pending === true || t?.integrationFacts?.refreshing === true);
+  /** The settled result facts of a task whose deferring read came back pending about the same result (same version and
+   *  summary): its checks, warnings, digest, review actions and merge facts stay as last confirmed. `unsettled` still sees
+   *  the pending read, so one settling read follows. A different version, or no earlier settled facts, shows as it came. */
+  const keepSettled = (product: Product, previous: ProjectFacts | undefined): Product => {
+    if (!previous) return product;
+    let tasks = product.tasks;
+    for (const [taskId, now] of Object.entries(product.tasks)) {
+      const was = previous.overlays[taskId];
+      if (!now || !was) continue;
+      const patch: Record<string, unknown> = {};
+      const same = !!now.result && !!was.result && was.result.version === now.result.version && was.result.summary === now.result.summary
+        && (now.result.sourceVersion === undefined || now.result.sourceVersion === was.result.sourceVersion);
+      if (now.reviewActions?.pending === true && was.reviewActions && was.reviewActions.pending !== true && was.result?.digest && same) {
+        patch.result = { ...now.result, ...was.result };
+        patch.reviewActions = was.reviewActions;
+        patch.workspaceDigest = (was as { workspaceDigest?: unknown }).workspaceDigest;
+      }
+      if (now.integrationFacts?.pending === true && was.integrationFacts && was.integrationFacts.pending !== true && same) {
+        patch.integrationFacts = { ...was.integrationFacts, refreshing: true };
+      }
+      if (Object.keys(patch).length) tasks = { ...tasks, [taskId]: { ...now, ...patch } };
+    }
+    return tasks === product.tasks ? product : { ...product, tasks };
+  };
+  /** One settling read per project after a read that came with pending parts: the machine answers it once what it was
+   *  checking is known, and its facts replace the pending ones. There is no timer: a pending read that arrives while one
+   *  runs is settled once more after it. Only for a project some screen on view shows. */
+  const settling = new Map<string, { again: boolean }>();
+  function settleFacts(project: ProjectLocator) {
+    const id = project.projectId;
+    if (!observers.size || !machineOn || !watched(id)) return;
+    const running = settling.get(id);
+    if (running) { running.again = true; return; }
+    const gate = { again: false }, epoch = commandEpoch;
+    settling.set(id, gate);
+    void factsOf(project, false, false, true).then(facts => {
+      if (!observers.size || epoch !== commandEpoch) return;
+      sent.set(id, facts); for (const notify of observers) notify({ kind: "facts", facts });
+    }).catch(() => {}).finally(() => {
+      settling.delete(id);
+      if (gate.again) settleFacts(project);
+    });
+  }
+  /** The board states a project's worker facts follow. */
+  const workMark = (projectId: string) => (nativeSnapshots.get(projectId)?.items ?? []).filter(t => !shownTasks.get(projectId)?.size || shownTasks.get(projectId)!.has(t.taskId))
+    .map(t => [t.taskId, t.executionId, t.phase, t.runtimeState, t.executionState, t.waitReason].join("\u0000")).join("\u0001");
+  /** The owner's own Git action (or a merge) made this project's repository stale. */
+  const repoStale = (id: string) => repoReads.get(id)?.at === -Infinity;
+  function streamFacts(project: ProjectLocator) {
+    const id = project.projectId;
+    if (!watched(id)) return;
+    // A board with no task on view needs no worker rows: its cards come from the board and its events.
+    if (!showsGit(id) && !shownTasks.get(id)?.size) return;
+    const gate = factsThrottle.get(id) ?? { ended: 0, running: false };
+    factsThrottle.set(id, gate);
+    const run = () => {
+      gate.timer = undefined;
+      if (!observers.size || !machineOn || !watched(id) || (typeof document !== "undefined" && document.hidden)) return;
+      if (gate.running) { gate.timer = setTimeout(run, streamFactsMs); return; }
+      gate.running = true;
+      const moved = gate.mark !== workMark(id);
+      gate.mark = workMark(id);
+      const epoch = commandEpoch;
+      void factsRead(project, false, showsGit(id) && (moved || repoStale(id))).then(facts => {
+        if (!observers.size || epoch !== commandEpoch) { gate.mark = undefined; return; }
+        sent.set(id, facts); for (const notify of observers) notify({ kind: "facts", facts });
+      }).catch(() => {}).finally(() => {
+        gate.running = false; gate.ended = Date.now();
+        // A state that moved while this read ran may not be in it: read again now.
+        if (gate.mark !== workMark(id) && observers.size) { clearTimeout(gate.timer); run(); }
+      });
+    };
+    if (!gate.running && (gate.mark !== workMark(id) || (showsGit(id) && repoStale(id)))) { clearTimeout(gate.timer); run(); return; }
+    if (gate.timer !== undefined) return;
+    const due = gate.running ? streamFactsMs : Math.max(0, gate.ended + streamFactsMs - Date.now());
+    if (due === 0) run(); else gate.timer = setTimeout(run, due);
   }
   const reads = new Map<string, Promise<ProjectionUpdate>>();
   function snapshotOf(project: ProjectLocator, changed?: Set<string>): Promise<ProjectionUpdate> {
@@ -725,12 +1131,27 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     if (command.type === "answer_decision") {
       const decision = decisions.get(command.decisionId);
       if (!decision || !decision.wire.allowedOperations.includes("decisions.answer") || decision.wire.status !== "pending") return null;
-      const { wire } = decision, option = command.optionId === undefined ? wire.options.find(o => o.label === command.answer) : wire.options.find(o => o.optionId === command.optionId);
-      if (command.optionId && !option) return null;
-      const answer: WireAnswer = { ...(command.attachments?.length ? { attachments: wireAttachments(command.attachments) } : {}), decisionId: wire.decisionId, expectedVersion: wire.version, questionId: wire.questionId, optionId: option?.optionId ?? null, text: command.answer };
+      const { wire } = decision;
+      const wireAnswer = (d: WireDecision, text: string, optionId: string | null | undefined, attachments: Message["attachments"]): WireAnswer | null => {
+        const option = optionId === undefined ? d.options.find(o => o.label === text) : d.options.find(o => o.optionId === optionId);
+        if (optionId && !option) return null;
+        // References on the wire; the machine reads the bodies (the generated type still names the inline form).
+        return { ...(attachments?.length ? { attachments: wireAttachments(attachments) as WireAnswer["attachments"] } : {}), decisionId: d.decisionId, expectedVersion: d.version, questionId: d.questionId, optionId: option?.optionId ?? null, text };
+      };
+      const answer = wireAnswer(wire, command.answer, command.optionId, command.attachments);
+      if (!answer) return null;
       const members = wire.batchId === null ? [] : [...decisions.values()].filter(d => d.wire.batchId === wire.batchId && d.wire.executionId === wire.executionId);
       let answers = [answer];
-      if (wire.batchId !== null && members.length > 1) {
+      if (wire.batchId !== null && members.length > 1 && command.answers) {
+        // The owner's one action carries every answer of the batch, so nothing waits in the app. The batch the machine
+        // asked must be exactly the batch answered: a question added, missing or closed since refuses the whole send.
+        held.delete(wire.batchId);
+        const given = command.answers;
+        if (given.length !== members.length || new Set(given.map(a => a.decisionId)).size !== given.length) return null;
+        const built = members.map(d => { const a = given.find(x => x.decisionId === d.wire.decisionId); return a && d.wire.status === "pending" && d.wire.allowedOperations.includes("decisions.answer") ? wireAnswer(d.wire, a.answer, a.optionId, a.attachments) : null; });
+        if (built.some(a => !a)) return null;
+        answers = built as WireAnswer[];
+      } else if (wire.batchId !== null && members.length > 1) {
         const batch = held.get(wire.batchId) ?? new Map<string, { answer: WireAnswer; identity: string }>();
         if (members.some(d => { const prior=batch.get(d.wire.decisionId); return prior && prior.identity !== answerIdentity(d.wire); })) {
           held.delete(wire.batchId);
@@ -755,6 +1176,25 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
   const profileCall = (verb: string, fields: Record<string, unknown>) => machine("config.action", undefined, { action: "profile", verb, expected_revision: configTokens.routing_profiles, ...fields });
   const connectionCall = (connection_id: string, operation: string, fields: Record<string, unknown> = {}) => machine("config.action", undefined, { action: "connection_update", expected_revision: configTokens.connections, connection_id, operation, ...fields });
 
+  /** A command names files by reference only. Bytes still in a command (a file attached by an older path) are uploaded here, once, and replaced. */
+  async function referenced(envelope: CommandEnvelope): Promise<CommandEnvelope> {
+    const walk = async (value: unknown): Promise<unknown> => {
+      if (Array.isArray(value)) return Promise.all(value.map(walk));
+      if (!value || typeof value !== "object") return value;
+      const out: Record<string, unknown> = {};
+      for (const [key, v] of Object.entries(value)) {
+        if (key === "attachments" && Array.isArray(v) && v.some(f => f && typeof f === "object" && "data" in f)) {
+          const inline = v.filter((f): f is Attachment => !!f && typeof f === "object" && "data" in f);
+          const refs = await machine<AttachmentRef[]>("product.attachment", undefined, {action:"upload", files:wireAttachments(inline)});
+          if (!Array.isArray(refs) || refs.length !== inline.length) throw new Refusal("attachments_unavailable", "Attachments could not be saved. Choose the files again.");
+          let next = 0;
+          out[key] = v.map(f => f && typeof f === "object" && "data" in f ? refs[next++] : f);
+        } else out[key] = await walk(v);
+      }
+      return out;
+    };
+    return { ...envelope, payload: await walk(envelope.payload) as WorkspaceCommand };
+  }
   /** Everything past the wire. Each case is one real effect on the machine; a command with no case stays unsupported. */
   async function machineCommand(envelope: CommandEnvelope): Promise<CommandReceipt | null> {
     const { requestId } = envelope, command = envelope.payload;
@@ -768,7 +1208,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     };
     const execution = (taskId: string) => { const e = tasks.get(taskId)?.executionId; if (!e) throw new Refusal("not_started", "This task has not started."); return e; };
     const prompt = async (taskId: string, text: string, key = requestId, attachments?: Message["attachments"]) => { historyChanged(taskId); const r = await transport.request("executions.prompt", { projectId: task(taskId), executionId: execution(taskId), text, requestId:key, ...(attachments?.length ? {attachments:wireAttachments(attachments)} : {}) }) as {outcome?:string}; if (r.outcome !== "recorded") throw new Refusal("unknown_outcome", OUTCOME_WORDS.unknown_outcome); return ok(); };
-    const control = async (taskId: string, params: Record<string, unknown>) => { historyChanged(taskId); const reply = await transport.request("executions.control", {projectId:task(taskId), executionId:execution(taskId), requestId, ...params}) as {outcome?:string;message?:string}; if (reply.outcome && !RECORDED.has(reply.outcome) && reply.outcome !== "stop_requested") throw new Refusal(reply.outcome, reply.message ?? OUTCOME_WORDS[reply.outcome] ?? "The action could not run. Refresh and try again."); return ok(); };
+    const control = async (taskId: string, params: { action: ControlAction } & Record<string, unknown>) => { historyChanged(taskId); const reply = await transport.request("executions.control", {projectId:task(taskId), executionId:execution(taskId), requestId, ...params}) as {outcome?:string;message?:string}; if (reply.outcome && !RECORDED.has(reply.outcome) && reply.outcome !== "stop_requested") throw new Refusal(reply.outcome, reply.message ?? OUTCOME_WORDS[reply.outcome] ?? "The action could not run. Refresh and try again."); return ok(); };
     const messageCall = async (taskId: string, params: Record<string, unknown>) => { await machine("product.message", task(taskId), params); return ok(); };
     const workerTask = (workerId: string) => { const id = workerTasks.get(workerId); if (!id) throw new Refusal("worker_unavailable", "This worker is not available."); return id; };
     const note = (taskId: string, text: string, delivery: "queued" | "recorded", attachments?: Message["attachments"]) => messageCall(taskId, {action:"add",message:{ id: requestId, taskId, workerId: null, text, mode: "queue", delivery, at: Date.now(), deliveredAt: null, failure: null, ...(attachments?.length ? { attachments: wireAttachments(attachments) } : {}) }});
@@ -799,6 +1239,8 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         if (command.workerId) return control(command.taskId, {action:"worker_message",workerId:command.workerId,text:command.text,attachments:wireAttachments(command.attachments)});
         return command.mode === "queue" ? note(command.taskId, command.text, "queued", command.attachments) : say(command.taskId, command.text, command.attachments);
       case "stop_worker": return control(workerTask(command.workerId), {action:"worker_stop",workerId:command.workerId,reason:command.reason});
+      // Lifts exactly one of the owner's own write denials; it grants nothing else.
+      case "allow_write": return control(command.taskId, {action:"allow_write",path:command.path});
       case "stop_command": {
         const taskId = workerTask(command.workerId), worker = (await machine<Worker[]>("workers", task(taskId), {taskIds:[taskId]})).find(w => w.id === command.workerId);
         const ref = worker?.activity.find(a => a.sequence === command.sequence)?.toolCallRef;
@@ -895,8 +1337,18 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         if (current && nativeVersion(reply.version) && BigInt(reply.version!) > BigInt(current.version)) tasks.set(command.taskId, {...current,version:reply.version!});
         return ok();
       }
+      case "generate_title": {
+        // The task is already saved under its description label; the machine names it in the background.
+        const id = task(command.taskId);
+        void shortText(id, { action: "generate_title", taskId: command.taskId }).then(written => {
+          if (!written) return;
+          invalidated.add(id);
+          for (const notify of observers) notify({ kind: "refresh" });
+        });
+        return ok();
+      }
       case "archive_task": await taskCall(task(command.taskId), { action: "archive", taskId: command.taskId }); return ok();
-      case "answer_archive": await taskCall(task(command.taskId), { action: "answer_archive", taskId: command.taskId, discard: command.discard }); return ok();
+      case "confirm_discard": await taskCall(task(command.taskId), { action: "confirm_discard", taskId: command.taskId }); return ok();
       case "restore_task": await taskCall(task(command.taskId), { action: "restore", taskId: command.taskId }); return ok();
       case "purge_task": await taskCall(task(command.taskId), { action: "purge", taskId: command.taskId, confirmed: command.confirmed }); return ok();
       case "clear_old": {
@@ -1037,12 +1489,15 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         }
         const execution = tasks.get(taskId)?.executionId;
         if (command.type === "answer_planning") {
-          // The owner answers the tab in front of them, and a batch may be answered in any order or changed before it goes.
+          // The owner answers the questions named on the form; a planning question without a record answers the open one.
           const named = command.decisionId ? decisions.get(command.decisionId) : undefined;
           const asked = named?.wire.status === "pending" && named.wire.executionId === execution ? named : command.decisionId ? undefined : [...decisions.values()].find(d => d.wire.status === "pending" && !isHeld(d.wire) && d.wire.executionId === execution);
           if (!asked) throw new Refusal("superseded", "This question is no longer open. Refresh before answering.");
-          const receipt = await send({ requestId, operation: "answer_decision", expectedVersion: null, payload: { type: "answer_decision", taskId, decisionId: asked.wire.decisionId, answer: text, attachments: command.attachments, ...(command.optionId === undefined ? {} : { optionId: command.optionId }) } });
-          if (receipt.ok) await machine("product.sprint", id, {action:"note",sprintId:command.sprintId,kind:"answer",text,attachments:wireAttachments(command.attachments)});
+          // Questions asked together go as one answer of their batch, from the one owner action that answered them all.
+          const batch = command.answers && command.answers.length > 1 ? command.answers : undefined;
+          const receipt = await send({ requestId, operation: "answer_decision", expectedVersion: null, payload: { type: "answer_decision", taskId, decisionId: asked.wire.decisionId, answer: text, attachments: command.attachments, ...(command.optionId === undefined ? {} : { optionId: command.optionId }), ...(batch ? { answers: batch } : {}) } });
+          // The machine has the answers by now: a conversation copy that cannot be saved must not turn them into a failed send.
+          if (receipt.ok) for (const a of batch ?? [{ answer: text, attachments: command.attachments }]) await machine("product.sprint", id, {action:"note",sprintId:command.sprintId,kind:"answer",text:a.answer,attachments:wireAttachments(a.attachments)}).catch(() => undefined);
           return {...receipt,requestId};
         }
         await machine("product.sprint", id, {action:"note",sprintId:command.sprintId,kind:"message",text,attachments:wireAttachments(command.attachments)});
@@ -1057,7 +1512,9 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     if (envelope.payload.type === "answer_decision") historyChanged(envelope.payload.taskId);
     if (!wire) return unsupported(envelope.requestId);
     if (wire === "held") return done(envelope.requestId);
-    validate("Command", wire.message);
+    // The wire names files by reference; the machine checks each reference and reads its body before its own
+    // schema check. Here the rest of the command is checked with each reference standing in as an empty body.
+    validate("Command", referencesAsBodies(wire.message));
     // Whatever the machine says, a batch was sent, so its questions read as themselves again until a projection says otherwise.
     const sentBatch = (wire.message as { payload?: { batchId?: string | null } }).payload?.batchId;
     if (sentBatch) held.delete(sentBatch);
@@ -1069,6 +1526,18 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     const result = toReceipt(envelope.requestId, receipt, wire.operation);
     // A task just created can be started before its first projection, so its version is kept from the receipt.
     if (result.ok && envelope.payload.type === "create_task") tasks.set(receipt.target, { projectId: envelope.payload.projectId, version: receipt.entityVersion });
+    // The machine recorded these answers: the questions read as answered at once, so the board, the sidebar and the Inbox
+    // stop saying "Needs you" with the reconciling read that follows every command, not when a details read next completes.
+    if (result.ok && wire.operation === "decisions.answer") {
+      const { projectId, payload } = wire.message as { projectId: string; payload: { answers: WireAnswer[] } };
+      const answered = new Map(payload.answers.map(a => [a.decisionId, a.text]));
+      // The files each answer carried read with it at once, as the machine's next read reports them.
+      const files = new Map(payload.answers.map(a => [a.decisionId, a.attachments?.length ? a.attachments : undefined]));
+      const at = new Date().toISOString();
+      const mark = (d: WireDecision): WireDecision => answered.has(d.decisionId) && d.status === "pending" ? { ...d, status: "answered", answerText: answered.get(d.decisionId), answeredAt: at, ...(files.get(d.decisionId) ? { answerAttachments: files.get(d.decisionId) } : {}) } : d;
+      wireDecisions.set(projectId, (wireDecisions.get(projectId) ?? []).map(mark));
+      for (const [id, held] of decisions) if (answered.has(id)) decisions.set(id, { ...held, wire: mark(held.wire) });
+    }
     return result;
   }
   const toReceipt = (requestId: string, wire: WireReceipt, operation: string): CommandReceipt => ({
@@ -1096,7 +1565,8 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
           }
           const prepared = presentationFacts.get(p.projectId);
           presentationFacts.delete(p.projectId);
-          return prepared && !(parameters as QueryParameters["project.facts"]).fresh ? Promise.resolve(prepared) : factsRead(p, (parameters as QueryParameters["project.facts"]).fresh);
+          const { fresh, git } = parameters as QueryParameters["project.facts"];
+          return prepared && !fresh ? Promise.resolve(prepared) : factsRead(p, fresh, git !== false);
         }, facts => ({kind:"facts",facts})) : Promise.resolve([]);
         if (!projectId) readScope = new Set();
         return facts.then(all => { for (const f of all) sent.set(f.projectId, f); return all; }).finally(() => { presentationRead++; }) as Promise<QueryResults[O]>;
@@ -1107,7 +1577,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         const update = await snapshotOf(p);
         // Do not expose planning/purged rows without their owner overlays.
         if (machineOn) {
-          const facts = serviceMethods.includes("native.board") ? await boardFacts(p) : await factsRead(p);
+          const facts = serviceMethods.includes("native.board") ? await boardFacts(p) : await factsRead(p, false, showsGit(p.projectId));
           if (epoch === commandEpoch) presentationFacts.set(p.projectId, facts);
         }
         if (serviceMethods.includes("native.board")) {
@@ -1128,9 +1598,14 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       }) as Promise<QueryResults[O]>;
     },
     async command(envelope) {
-      commandEpoch++;
-      presentationFacts.clear();
-      factReads.clear();
+      // A title job only starts here and changes nothing yet: reads under way stay current. Its end rereads the project.
+      if (envelope.payload.type !== "generate_title") {
+        commandEpoch++;
+        presentationFacts.clear();
+        factReads.clear();
+      }
+      try { envelope = await referenced(envelope); }
+      catch (error) { return error instanceof Refusal ? { requestId: envelope.requestId, ok: false, outcome: error.code, message: error.message } : refusalOf(envelope.requestId, error); }
       const command = envelope.payload;
       if (options.registry && (command.type === "add_project" || command.type === "activate_project")) {
         const operation = command.type === "add_project" ? "projects.register" : "projects.activate";
@@ -1171,9 +1646,20 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       if (!machineOn) return {ok:false,code:"offline",message:"The machine service is unavailable."};
       return machine("config.mcp.discover", undefined, {server});
     },
+    async draftIntegrationText(request) {
+      const id = machineOn ? projectOfTask(request.taskId) : null;
+      if (!id) return null;
+      const written = await shortText(id, { action: "draft_integration_text", taskId: request.taskId, method: request.method, targetBranch: request.targetBranch,
+        ...(request.paths ? { paths: request.paths } : {}), ...(request.summary ? { summary: request.summary } : {}) });
+      const text = written?.text as { message?: unknown; title?: unknown; body?: unknown } | undefined;
+      if (!written || !text || typeof text !== "object") return null;
+      const str = (v: unknown) => typeof v === "string" && v.trim() ? v : undefined;
+      const route = written.route as { model?: unknown } | null | undefined;
+      return { source: written.source === "model" ? "model" : "fallback", message: str(text.message), title: str(text.title), body: str(text.body), model: str(route?.model) };
+    },
     async takeDroppedFiles() {
       if (!serviceMethods.includes("native.take_dropped_files")) return [];
-      return wireAttachments(await transport.request("native.take_dropped_files", {}) as Message["attachments"]);
+      return wireAttachments(await transport.request("native.take_dropped_files", {}) as Message["attachments"]) as Attachment[];
     },
     async pickFolder() {
       if (!serviceMethods.includes("native.pick_folder")) return null;
@@ -1215,13 +1701,66 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       if (!Array.isArray(files)) throw new Refusal("attachments_unavailable", "Saved attachments could not be read. Refresh or update the service before editing.");
       return wireAttachments(files);
     },
+    async uploadAttachments(files) {
+      const refs = await machine<AttachmentRef[]>("product.attachment", undefined, {action:"upload", files:wireAttachments(files)});
+      if (!Array.isArray(refs) || refs.length !== files.length) throw new Refusal("attachments_unavailable", "Attachments could not be saved. Choose the files again.");
+      return wireAttachments(refs) as AttachmentRef[];
+    },
+    // Bounded by the machine: one saved body by its digest, checked against the reference.
+    async readAttachment(file) {
+      const read = await machine<{data?: unknown; size?: unknown}>("product.attachment", undefined, {action:"read", sha256:file.sha256});
+      if (typeof read?.data !== "string" || read.size !== file.size) throw new Refusal("attachment_unavailable", "This file is no longer saved here.");
+      return {name:file.name, mimeType:file.mimeType, data:read.data};
+    },
     async saveAttachment(file) {
       if (!serviceMethods.includes("native.save_attachment")) throw new Refusal("unsupported", "Saving a copy needs the desktop app.");
       return await transport.request("native.save_attachment", {name:file.name, data:file.data}) as {path:string|null};
     },
     async readClipboardImage() {
       if (!serviceMethods.includes("native.clipboard_image")) return [];
-      return wireAttachments(await transport.request("native.clipboard_image", {}) as Message["attachments"]);
+      return wireAttachments(await transport.request("native.clipboard_image", {}) as Message["attachments"]) as Attachment[];
+    },
+    retryHistory,
+    loadEarlierHistory,
+    interest(projectId, kind, taskId) {
+      const key = `${projectId}|${kind}`;
+      interests.set(key, (interests.get(key) ?? 0) + 1);
+      if (taskId) { const shown = shownTasks.get(projectId) ?? new Map<string, number>(); shownTasks.set(projectId, shown.set(taskId, (shown.get(taskId) ?? 0) + 1)); }
+      if (kind === "git") for (const plan of gitShown) plan();
+      // A conversation comes on view: it is read now, or continued from the rows already held.
+      const opened = taskId ? projects.find(p => p.projectId === projectId) : undefined;
+      if (opened) queueHistories(opened);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const left = (interests.get(key) ?? 1) - 1;
+        if (left > 0) interests.set(key, left); else interests.delete(key);
+        const shown = taskId ? shownTasks.get(projectId) : undefined;
+        if (shown && taskId) {
+          const n = (shown.get(taskId) ?? 1) - 1;
+          if (n > 0) shown.set(taskId, n); else shown.delete(taskId);
+          if (!shown.size) shownTasks.delete(projectId);
+        }
+        if (kind === "git") for (const plan of gitShown) plan();
+      };
+    },
+    remoteAccess: {
+      // The local machine's own remote access. An older service has none, and says nothing it cannot do.
+      async call(operation, message) {
+        if (!serviceMethods.includes("remote.status")) throw new Refusal("unsupported", "Remote access is not available in this build.");
+        let reply: unknown;
+        try { reply = await transport.request(operation, message); }
+        catch (error) { const text = error instanceof Error ? error.message : String(error); throw new Refusal("refused", text.startsWith(REFUSED) ? text.slice(REFUSED.length) : text); }
+        return readRemoteStatus(reply);
+      },
+      watch: listener => transport.subscribe(event => { if (event.type === "refresh") listener(); }),
+    },
+    presented: () => Promise.all([...lateReads]).then(() => {}),
+    watchOverview() {
+      overviewWatchers++;
+      let released = false;
+      return () => { if (!released) { released = true; overviewWatchers--; } };
     },
     async readWorkerActivity(taskId, workerId, cursor) {
       const projectId = projectOfTask(taskId);
@@ -1249,6 +1788,18 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       if (!machineOn) return { text: null };
       return machine<FileRead>("repo.file", projectOfCheckout(checkoutId), { checkoutId, file });
     },
+    async readMedia(checkoutId, file) {
+      if (!machineOn) return { text: null };
+      return machine<FileRead>("repo.file", projectOfCheckout(checkoutId), { checkoutId, file, media: true });
+    },
+    async listProjectSkills(projectId) {
+      if (!machineOn) return { skills: [], omitted: 0 };
+      return machine<ProjectSkills>("repo.skills", projectId, {});
+    },
+    async listFolders(checkoutId, request) {
+      if (!machineOn) return { overview: null, folders: [] };
+      return machine<FolderListing>("repo.list", projectOfCheckout(checkoutId), { checkoutId, dirs: request.dirs, overview: !!request.overview });
+    },
     async saveFile(checkoutId, file, text, revision) {
       // Only the machine's own answer says what happened. Anything else may be a write whose reply never came.
       try { return await machine<FileSaveResult>("repo.file.save", projectOfCheckout(checkoutId), { checkoutId, file, text, revision }); }
@@ -1264,29 +1815,34 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
           workers:[],reviews:[],overlays:cached.product.tasks,sprints:cached.product.sprints};
         listener({kind:"preview",slice,facts});
       }
-      let active = true, wait = FACTS_POLL_MS, timer: ReturnType<typeof setTimeout> | undefined;
+      // No project is polled. A project on screen is read when its screen opens (`interest`), on its events and on return to
+      // the window; its Git, while a Git screen is on view and the window focused, also every GIT_VISIBLE_REFRESH_MS.
+      let active = true, focused = true, gitTimer: ReturnType<typeof setTimeout> | undefined;
       // The machine has its own timer, lined up with the service's limits snapshots (machineReadDelay), never behind a slow repository.
       let machineTimer: ReturnType<typeof setTimeout> | undefined, machineDue = Date.now() + MACHINE_POLL_MS, catchUp = true, overviewRead = Date.now();
-      // A slow repository must not stack reads behind itself: the next round starts when this one ended.
+      // A slow repository must not stack reads behind itself: the next read starts when this one ended.
       const running = new Set<string>();
       const once = (key: string, read: () => Promise<void>) => { if (running.has(key)) return Promise.resolve(); running.add(key); return read().catch(() => {}).finally(() => { running.delete(key); }); };
       const hidden = () => typeof document !== "undefined" && document.hidden;
-      const plan = () => { clearTimeout(timer); timer = active && !hidden() ? setTimeout(round, wait) : undefined; };
-      const round = (fresh = false) => {
-        if (!active || hidden()) return;
-        if (!machineOn) { plan(); return; }
-        let moved = false;
-        const reads = projects.map(project => once(project.projectId, () => {
-          const generation = presentationRead;
-          return factsOf(project, fresh).then(facts => {
-            if (!active || generation !== presentationRead || same(sent.get(project.projectId), facts)) return;
-            sent.set(project.projectId, facts);
-            moved = true;
-            listener({ kind: "facts", facts });
-          });
-        }));
-        void Promise.all(reads).then(() => { wait = moved ? FACTS_POLL_MS : Math.min(wait * 2, FACTS_POLL_MAX_MS); plan(); });
+      /** One facts read of a project on screen, with a fresh repository when `git`; sent only when something differs. */
+      const readShown = (project: ProjectLocator, git: boolean) => once(project.projectId, () => {
+        const generation = presentationRead;
+        return factsOf(project, git, git).then(facts => {
+          if (!active || generation !== presentationRead || sameFacts(sent.get(project.projectId), facts)) return;
+          sent.set(project.projectId, facts);
+          listener({ kind: "facts", facts });
+        });
+      });
+      const planGit = () => {
+        clearTimeout(gitTimer); gitTimer = undefined;
+        if (!active || hidden() || !focused || !projects.some(p => wantsGit(p.projectId))) return;
+        gitTimer = setTimeout(() => {
+          gitTimer = undefined;
+          if (!active || hidden() || !focused || !machineOn) return;
+          void Promise.all(projects.filter(p => wantsGit(p.projectId)).map(p => readShown(p, true))).then(planGit);
+        }, GIT_VISIBLE_REFRESH_MS);
       };
+      gitShown.add(planGit);
       const planMachine = () => { clearTimeout(machineTimer); machineTimer = active && !hidden() ? setTimeout(machineRound, Math.max(0, machineDue - Date.now())) : undefined; };
       // Any settings read, this poll's or one after an action, sets when the next one is due.
       const machineRead = (observed: number[]) => {
@@ -1302,18 +1858,28 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         const retry = () => { if (machineDue <= Date.now()) machineDue = Date.now() + MACHINE_POLL_MS; planMachine(); };
         if (!machineOn) { retry(); return; }
         void once("machine", () => machineFacts().then(facts => { if (active) listener({ kind: "machine", facts }); })).then(retry);
-        if (overviewAsked && Date.now() - overviewRead >= MACHINE_POLL_MS) { overviewRead = Date.now(); void once("overview", () => machineOverview().then(facts => { if (active) listener({ kind: "machine", facts }); })); }
+        if (overviewWatchers > 0 && Date.now() - overviewRead >= MACHINE_POLL_MS) { overviewRead = Date.now(); void once("overview", () => machineOverview().then(facts => { if (active) listener({ kind: "machine", facts }); })); }
       };
-      // Coming back from another window is exactly when Git may have moved, and when the limits shown may be old.
-      const back = () => {
-        if (hidden()) { plan(); planMachine(); return; }
-        wait = FACTS_POLL_MS; round(true);
+      // Coming back from another window is exactly when Git may have moved, and when the limits shown may be old. Only the
+      // projects on screen are read, and only what is older than FOCUS_STALE_MS.
+      const back = (event?: Event) => {
+        if (event?.type === "focus") focused = true;
+        if (hidden()) { planGit(); planMachine(); return; }
+        if (machineOn) for (const project of projects.filter(p => watched(p.projectId))) {
+          const id = project.projectId, old = (at: number | undefined) => at === undefined || Date.now() - at >= FOCUS_STALE_MS;
+          const git = showsGit(id) && old(repoReads.get(id)?.at);
+          if (git || old(factsReadAt.get(id))) void readShown(project, git);
+        }
+        planGit();
         if (machineDue <= Date.now()) { catchUp = true; machineRound(); } else planMachine();
       };
+      // A window in the background is not looked at: its Git screen's periodic refresh waits for focus.
+      const away = () => { focused = false; planGit(); };
       const page = typeof document !== "undefined" ? document : undefined, screen = typeof window !== "undefined" ? window : undefined;
       page?.addEventListener("visibilitychange", back);
       screen?.addEventListener("focus", back);
-      plan();
+      screen?.addEventListener("blur", away);
+      planGit();
       // The startup read usually came first: line up with what it showed.
       if (lastObserved) machineRead(lastObserved); else planMachine();
       const stop = transport.subscribe(event => {
@@ -1371,7 +1937,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         invalidated.add(project.projectId);
         listener({ kind: "refresh" });
       });
-      return () => { observers.delete(listener); if (!observers.size) { for (const retry of projectRetries.values()) clearTimeout(retry); projectRetries.clear(); } active = false; clearTimeout(timer); clearTimeout(machineTimer); machineReads.delete(machineRead); page?.removeEventListener("visibilitychange", back); screen?.removeEventListener("focus", back); stop(); };
+      return () => { observers.delete(listener); if (!observers.size) { for (const retry of [...projectRetries.values(), ...historyRetries.values()]) clearTimeout(retry); projectRetries.clear(); historyRetries.clear(); } active = false; clearTimeout(gitTimer); gitShown.delete(planGit); clearTimeout(machineTimer); machineReads.delete(machineRead); page?.removeEventListener("visibilitychange", back); screen?.removeEventListener("focus", back); screen?.removeEventListener("blur", away); stop(); };
     },
   };
 }

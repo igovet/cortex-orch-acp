@@ -1,6 +1,6 @@
 import { checkAcceptanceBlocker } from "@cortex/workspace-domain";
 import { repoOf, taskCheckout, worktreeWork } from "@cortex/workspace-domain";
-import type { Check, ConflictFile, DiffHunk, DiffLine, FileDiff, MergeState, ProjectRepo, RepoCheckout, Task, TaskChanges, WorkspaceState } from "@cortex/workspace-domain";
+import type { Check, ConflictFile, DiffHunk, DiffLine, FileDiff, FolderEntry, FolderOverview, MergeState, ProjectRepo, RepoCheckout, Task, TaskChanges, WorkspaceState } from "@cortex/workspace-domain";
 import { checkCounts, type ProjectSummary, type TaskView, type WorkspaceIndex } from "./selectors";
 
 /** Read models for review, merge, Code and Git. Every count on those screens comes from here; nothing here changes state. */
@@ -16,6 +16,10 @@ export function checksLine(checks: Check[]) {
 }
 export const openChecks = (checks: Check[]) => checks.filter(c => c.kind !== "manual" && c.outcome !== "passed");
 export const needsOverride = (checks: Check[]) => checks.length === 0 || openChecks(checks).length > 0;
+/** Accepting takes the owner's tick: the machine asks for it, or the result itself shows checks that did not pass. The machine
+ *  may ask while every listed check passed (a worker's check that policy kept from running), so its word comes first. */
+export const acceptNeedsTick = (task: Task) => task.reviewActions?.acknowledgeOpenChecks === true
+  || (!!task.result && needsOverride(task.result.checks) && !(task.result.kind === "answer" && task.result.acceptanceAvailable && task.result.checks.length === 0));
 
 export const stale = (task: Task) => !!task.result && (task.workspaceDigest !== task.result.digest || task.result.warnings?.includes("workspace_drift") === true);
 /** Why the owner cannot accept this version now, or null when they can. */
@@ -23,7 +27,7 @@ export function acceptBlocked(task: Task): string | null {
   if (!task.result) return "Available once a result is published";
   if (stale(task)) return `This version no longer matches the worktree. Request a new result`;
   if (task.conflict !== "none") return "Resolve the conflict first";
-  if (task.acceptance) return `You accepted v${task.acceptance.version}`;
+  if (task.acceptance) return task.acceptance.automatic ? `Automatically accepted v${task.acceptance.version}` : `You accepted v${task.acceptance.version}`;
   if (task.status === "done") return "This task is closed";
   if (task.reviewActions?.accept === false) return task.reviewActions.reason ?? "Refresh this result before accepting";
   // A task that has not finished has no acceptable result yet; that, not missing evidence, is why Accept is off.
@@ -54,6 +58,8 @@ export const noCommitReason = (task: Task) => `Which files this task changed in 
  * records it for exactly this version first, so the only blockers are the ones that would refuse that acceptance.
  */
 export function finishBlocked(task: Task): string | null {
+  // Its files are still being checked against the target branch: nothing is offered from facts not yet known.
+  if (task.integrationFacts?.pending) return task.integrationFacts.reason ?? "Checking this task’s files against its target branch…";
   if (task.integrationFacts?.alreadyInTarget) return `Already in ${task.integrationFacts.targetBranch}. Close the task instead.`;
   if (task.integrationFacts?.sameBranch) {
     if (!task.integrationFacts.commitAvailable) return task.integrationFacts.reason ?? noCommitReason(task);
@@ -142,20 +148,85 @@ export function sourceOf(repo: ProjectRepo, checkout: RepoCheckout, diffs: FileD
   const last = Math.max(...known.keys());
   return { lines: Array.from({ length: last }, (_, i) => known.get(i + 1) ?? ""), partial: true };
 }
-export type TreeRow = { kind: "dir" | "file"; path: string; name: string; depth: number };
-export function treeRows(paths: string[], collapsed: Set<string>): TreeRow[] {
-  const rows: TreeRow[] = [], seen = new Set<string>();
-  for (const path of paths) {
-    const parts = path.split("/");
-    let hidden = false;
-    for (let d = 0; d < parts.length - 1; d++) {
-      const dir = parts.slice(0, d + 1).join("/");
-      if (!hidden && !seen.has(dir)) { seen.add(dir); rows.push({ kind: "dir", path: dir, name: parts[d], depth: d }); }
-      if (collapsed.has(dir)) hidden = true;
+/** A `more` row stands under a listed folder: how many entries were not shown, why it could not be read, or that it is being read. */
+export type TreeRow = { kind: "dir" | "file" | "more"; path: string; name: string; depth: number; ignored?: boolean; lazy?: boolean; link?: boolean };
+/**
+ * What Code's tree knows beyond the repository snapshot: `items` are every path to show, sorted, a folder ending in `/`;
+ * a `lazy` folder's entries are read only when the owner opens it; `notes` stand under a folder ("" is the top).
+ */
+export type CodeTree = { items: string[]; ignored: ReadonlySet<string>; lazy: ReadonlySet<string>; links: ReadonlySet<string>; notes: ReadonlyMap<string, string> };
+/** One listed folder: its read, the machine's refusal, or still being read. */
+export type FolderView = { entries: FolderEntry[]; more: number; exact: boolean } | { error: string } | { loading: true };
+const joinPath = (dir: string, name: string) => dir ? `${dir}/${name}` : name;
+export const moreWords = (more: number, exact: boolean) => `${exact ? "" : "At least "}${more.toLocaleString("en-US")} more not shown`;
+/**
+ * The snapshot's files with what the machine listed on demand: the overview (ignored files and top-most ignored or
+ * untracked folders the snapshot leaves out) and each listed folder. A folder no snapshot file is under is lazy.
+ */
+export function codeTree(paths: string[], overview: FolderOverview | null, folders: ReadonlyMap<string, FolderView>): CodeTree {
+  const items = new Set(paths), ignored = new Set<string>(), folderPaths = new Set<string>(), links = new Set<string>(), notes = new Map<string, string>();
+  const add = (path: string, dir: boolean, mark: boolean | null | undefined) => {
+    items.add(dir ? `${path}/` : path);
+    if (dir) folderPaths.add(path);
+    if (mark) ignored.add(path);
+  };
+  for (const e of overview?.entries ?? []) add(e.path, e.dir, e.ignored);
+  if (overview?.truncated) notes.set("", "Some ignored files are not listed");
+  for (const [dir, view] of folders) {
+    if ("loading" in view) notes.set(dir, "Reading…");
+    else if ("error" in view) notes.set(dir, view.error);
+    else {
+      for (const e of view.entries) { add(joinPath(dir, e.name), e.dir, e.ignored); if (e.link) links.add(joinPath(dir, e.name)); }
+      if (view.more > 0) notes.set(dir, moreWords(view.more, view.exact));
     }
-    if (!hidden) rows.push({ kind: "file", path, name: parts.at(-1)!, depth: parts.length - 1 });
   }
-  return rows;
+  const known = new Set(allDirs(paths));
+  const lazy = new Set([...folderPaths].filter(d => !known.has(d)));
+  return { items: [...items].sort(), ignored, lazy, links, notes };
+}
+export function treeRows(paths: string[], collapsed: Set<string>, tree?: CodeTree): TreeRow[] {
+  const rows: TreeRow[] = [], seen = new Set<string>();
+  const closed = (dir: string) => collapsed.has(dir);
+  // Anything under an ignored folder is ignored too.
+  const ignoredUnder = new Set<string>();
+  const isIgnored = (path: string, parent: string) => !!tree && (tree.ignored.has(path) || ignoredUnder.has(parent));
+  for (const item of tree?.items ?? paths) {
+    const folder = item.endsWith("/"), path = folder ? item.slice(0, -1) : item, parts = path.split("/");
+    const dirs = folder ? parts.length : parts.length - 1;
+    let hidden = false;
+    for (let d = 0; d < dirs; d++) {
+      const dir = parts.slice(0, d + 1).join("/");
+      if (!hidden && !seen.has(dir)) {
+        seen.add(dir);
+        const ignored = isIgnored(dir, parts.slice(0, d).join("/"));
+        if (ignored) ignoredUnder.add(dir);
+        rows.push({ kind: "dir", path: dir, name: parts[d], depth: d, ...(ignored ? { ignored } : {}), ...(tree?.lazy.has(dir) ? { lazy: true } : {}) });
+      }
+      if (closed(dir)) hidden = true;
+    }
+    if (!folder && !hidden) {
+      const ignored = isIgnored(path, dirName(path));
+      rows.push({ kind: "file", path, name: parts.at(-1)!, depth: parts.length - 1, ...(ignored ? { ignored } : {}), ...(tree?.links.has(path) ? { link: true } : {}) });
+    }
+  }
+  if (!tree?.notes.size) return rows;
+  // Each note follows the last row inside its folder, while that folder is open.
+  const out: TreeRow[] = [], open: string[] = [];
+  const close = (until: (dir: string) => boolean) => {
+    while (open.length && until(open.at(-1)!)) {
+      const dir = open.pop()!, note = tree.notes.get(dir);
+      if (note) out.push({ kind: "more", path: dir, name: note, depth: dir.split("/").length });
+    }
+  };
+  for (const row of rows) {
+    close(dir => !row.path.startsWith(`${dir}/`));
+    out.push(row);
+    if (row.kind === "dir" && !closed(row.path)) open.push(row.path);
+  }
+  close(() => true);
+  const top = tree.notes.get("");
+  if (top) out.push({ kind: "more", path: "", name: top, depth: 0 });
+  return out;
 }
 export const allDirs = (paths: string[]) => [...new Set(paths.flatMap(p => { const parts = p.split("/"); return parts.slice(0, -1).map((_, i) => parts.slice(0, i + 1).join("/")); }))];
 

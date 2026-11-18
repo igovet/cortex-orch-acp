@@ -1,6 +1,6 @@
 # Testing and acceptance
 
-**Status: planned; the local slice checks below are built, and no release qualification is implied.**
+**Status: the no-paid checks below run and pass for the implemented desktop. Not verified live: paid model runs, a real Ubuntu desktop session and GPU, a real microphone and a published GitHub release. No release qualification is implied.**
 
 Gate D passed on 2026-11-05 for the clickable browser prototype, recorded in [desktop approval](design/desktop-approval.md). Desktop implementation proceeds through the local vertical slice in the [roadmap](roadmap.md), and no desktop item waits for mobile. Gate M follows Gate D and requires mobile concepts, owner selection and recorded accessibility and offline scenarios. It gates only mobile and Android implementation. Mock evidence and the browser prototype are not production qualification.
 

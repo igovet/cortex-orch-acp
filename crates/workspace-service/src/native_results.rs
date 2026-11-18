@@ -29,8 +29,13 @@ fn validate_result(
         return Err(CoreError::Refused("worker_required"));
     }
     let report = text(args, "report")?;
-    if report.trim().is_empty() || report.contains("Cortex draft ID:") || report.contains("<!--") {
+    if report.trim().is_empty() || report.contains("Cortex draft ID:") {
         return Err(CoreError::Refused("native_inline_report_required"));
+    }
+    // Only a report template's own guidance comment is left-over guidance; any other
+    // HTML comment (quoted markup under review, for example) is ordinary content.
+    if cortex_core::assignment_brief::guidance_remaining(report) {
+        return Err(CoreError::Refused("draft_guidance_remaining"));
     }
     if text(args, "summary")?.trim().is_empty() {
         return Err(CoreError::Refused("native_summary_required"));
@@ -107,11 +112,14 @@ fn validate_result(
     }) {
         return Err(CoreError::Refused("omitted_failed_check"));
     }
-    // A reviewer requesting changes may cite an open failed check as its finding.
+    // A reviewer that does not approve (REQUEST_CHANGES, BLOCK or INCOMPLETE) may cite
+    // an open failed check as evidence for its verdict; only APPROVE cannot.
     let review_requests_changes = i.stage.as_deref() == Some("review")
-        && args["verdict"]
-            .as_str()
-            .is_some_and(|v| v.eq_ignore_ascii_case("REQUEST_CHANGES"));
+        && args["verdict"].as_str().is_some_and(|v| {
+            ["REQUEST_CHANGES", "BLOCK", "INCOMPLETE"]
+                .iter()
+                .any(|x| v.eq_ignore_ascii_case(x))
+        });
     for check in &checks {
         if check["outcome"] == "failed"
             && !worker_checks::resolved(check)
@@ -154,9 +162,18 @@ mod evidence_tests {
             OpenMode::Initialize,
         )
         .unwrap();
-        let owner = TaskMachine::new(&store).create("t", "checks", "owner").unwrap();
+        let owner = TaskMachine::new(&store)
+            .create("t", "checks", "owner")
+            .unwrap();
         TaskMachine::new(&store)
-            .transition("t", &owner, "planning", TaskState::Planning, None, &FoundationGuards)
+            .transition(
+                "t",
+                &owner,
+                "planning",
+                TaskState::Planning,
+                None,
+                &FoundationGuards,
+            )
             .unwrap();
         let c = store
             .write(|db| channels::issue_tx(db, "t", &owner, channels::Principal::Coordinator))
@@ -184,14 +201,41 @@ mod evidence_tests {
             .unwrap();
         assert_eq!(rows.len(), 2);
         let first: Value = serde_json::from_str(&rows[0]).unwrap();
-        assert_eq!(first, json!({"channel_id":c.channel_id,"attempt":"xa_fixture","assignment_ref":"a","code":"open_failed_check"}));
+        assert_eq!(
+            first,
+            json!({"channel_id":c.channel_id,"attempt":"xa_fixture","assignment_ref":"a","code":"open_failed_check"})
+        );
         assert!(correctable("open_failed_check") && correctable("invalid_arguments"));
         assert!(!correctable("channel_identity_changed") && !correctable("worker_required"));
-        let reply = refusal_reply("open_failed_check");
+        let reply = refusal_reply_with("open_failed_check", None);
         assert_eq!(reply["isError"], true);
         assert_eq!(reply["structuredContent"]["code"], "open_failed_check");
+        assert_eq!(reply["structuredContent"]["field"], "checks");
         assert_eq!(reply["structuredContent"]["recorded"], false);
-        assert!(reply["structuredContent"]["message"].as_str().unwrap().contains("rerun the exact same command"));
+        assert!(reply["structuredContent"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("rerun the exact same command"));
+        // A structural refusal names exactly the missing headings and is correctable.
+        let reply = refusal_reply_with("report_sections_missing", Some(vec!["## Changes".into()]));
+        assert_eq!(reply["structuredContent"]["missing"], json!(["## Changes"]));
+        assert_eq!(reply["structuredContent"]["field"], "report");
+        for code in [
+            "report_sections_missing",
+            "draft_guidance_remaining",
+            "review_resubmit_required",
+            "review_project_revision_changed",
+            "review_project_revision_unstable",
+        ] {
+            assert!(correctable(code), "{code}");
+            assert!(
+                !refusal_reply_with(code, None)["structuredContent"]["hint"]
+                    .as_str()
+                    .unwrap()
+                    .is_empty(),
+                "{code}"
+            );
+        }
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -408,12 +452,96 @@ pub(super) fn correctable(code: &str) -> bool {
             | "result_report_not_owned"
             | "request_key_reused"
             | "invalid_arguments"
+            | "draft_guidance_remaining"
+            | "report_sections_missing"
+            | "review_project_revision_changed"
+            | "review_project_revision_unstable"
+            | "review_resubmit_required"
     )
+}
+/// The report text a submission names: the inline Markdown, or the complete body of
+/// a report published in this task (read page by page). `None` when the id names no
+/// report of this task; ownership is refused later with `result_report_not_owned`.
+fn submitted_report(store: &Store, i: &Identity, args: &Value) -> CoreResult<Option<String>> {
+    let report = text(args, "report")?;
+    if !is_report_id(report) {
+        return Ok(Some(report.to_owned()));
+    }
+    // Only this principal's own publication is read, exactly as the result binds it.
+    let owned: bool = store.read(|db| {
+        Ok(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reports r JOIN drafts d ON d.published_report_id=r.id
+             WHERE r.id=? AND r.task_id=? AND d.owner_thread_id=? AND r.kind='report')",
+            (report, &i.task, &i.principal),
+            |r| r.get(0),
+        )?)
+    })?;
+    if !owned {
+        return Err(CoreError::Refused("result_report_not_owned"));
+    }
+    let publisher = Publisher::new(store);
+    let (mut body, mut cursor) = (String::new(), None::<String>);
+    for _ in 0..256 {
+        let page = match publisher.read_report(&i.task, report, cursor.as_deref(), 4000) {
+            Ok(page) => page,
+            Err(e) if e.code() == "not_found" => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        body.push_str(&page.markdown);
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return Ok(Some(body)),
+        }
+    }
+    Ok(Some(body))
+}
+/// The required report sections this submission lacks, in template order.
+pub(super) fn missing_sections(store: &Store, i: &Identity, args: &Value) -> Vec<String> {
+    match submitted_report(store, i, args) {
+        Ok(Some(report)) => cortex_core::assignment_brief::missing_sections(
+            &report,
+            i.profile.as_deref().unwrap_or(""),
+            i.stage.as_deref().unwrap_or("execution"),
+        ),
+        _ => Vec::new(),
+    }
+}
+/// Presence check of the runtime-selected template's required `##` sections. A report
+/// lacking one is refused (correctable) up to `STRUCTURE_REFUSALS` times per attempt;
+/// after that it is accepted and the result carries `REPORT_STRUCTURE_INCOMPLETE`.
+fn report_structure(store: &Store, i: &Identity, args: &Value) -> CoreResult<Option<Value>> {
+    use cortex_core::assignment_brief::{
+        SECTIONS_MISSING, STRUCTURE_INCOMPLETE, STRUCTURE_REFUSALS,
+    };
+    let missing = missing_sections(store, i, args);
+    if missing.is_empty() {
+        return Ok(None);
+    }
+    let refused: i64 = store.read(|db| {
+        Ok(db.query_row(
+            "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='WORKER_RESULT_REFUSED'
+             AND json_extract(payload_json,'$.attempt')=? AND json_extract(payload_json,'$.code')=?",
+            (&i.task, &i.attempt, SECTIONS_MISSING),
+            |r| r.get(0),
+        )?)
+    })?;
+    if refused < STRUCTURE_REFUSALS {
+        return Err(CoreError::Refused(SECTIONS_MISSING));
+    }
+    Ok(Some(
+        json!({"status":STRUCTURE_INCOMPLETE,"missing":missing,"refusals":refused}),
+    ))
 }
 /// The worker-facing reply to a correctable refusal: its code and what to change.
 /// Nothing was recorded or published; the channel stays active.
-pub(super) fn refusal_reply(code: &str) -> Value {
+/// `missing` names the exact missing sections for `report_sections_missing`.
+pub(super) fn refusal_reply_with(code: &str, missing: Option<Vec<String>>) -> Value {
     let hint = match code {
+        "draft_guidance_remaining" => "The report still contains a report template's guidance comment line (<!-- ... -->). Replace it with the content it asks for.",
+        "report_sections_missing" => "The report lacks required sections of its template (listed in missing). Add each as a level-two heading with its exact English text, keep the rest, and submit again; the request_key may stay the same.",
+        "review_project_revision_changed" => "The project changed while you reviewed it; the review is now bound to the current state. Re-read what changed, then submit with a fresh request_key.",
+        "review_project_revision_unstable" => "The project kept changing during the review. Re-read the current state and submit with a fresh request_key once it is stable, or report the instability.",
+        "review_resubmit_required" => "This request_key belongs to a refused submission of this review. Submit again with a fresh request_key.",
         "open_failed_check" => "A cited check failed and is still open. Fix the cause and rerun the exact same command so a later passing run closes it, or submit with assignment_outcome \"failed\".",
         "omitted_failed_check" => "A failed check run that an earlier submission cited is missing. Cite it again as passed (after an exact passing rerun) or failed, or submit with assignment_outcome \"failed\".",
         "check_blocker_required" => "Every not_run or unverified check needs a concrete blocker.",
@@ -426,8 +554,32 @@ pub(super) fn refusal_reply(code: &str) -> Value {
         "invalid_arguments" => "The arguments do not match the advertised result_submit schema.",
         _ => "",
     };
-    let value = json!({"code":code,"recorded":false,
+    let mut value = json!({"code":code,"recorded":false,"hint":hint,
         "message":format!("No result was recorded ({code}). {hint} Correct the result and submit it again.")});
+    let field = match code {
+        "draft_guidance_remaining"
+        | "report_sections_missing"
+        | "native_inline_report_required"
+        | "result_report_not_owned" => Some("report"),
+        "review_project_revision_changed"
+        | "review_project_revision_unstable"
+        | "review_resubmit_required"
+        | "request_key_reused" => Some("request_key"),
+        "native_summary_required" => Some("summary"),
+        "invalid_publication" => Some("report_title"),
+        "open_failed_check"
+        | "omitted_failed_check"
+        | "check_blocker_required"
+        | "invalid_check_retraction"
+        | "invalid_check_supersession" => Some("checks"),
+        _ => None,
+    };
+    if let Some(field) = field {
+        value["field"] = json!(field);
+    }
+    if let Some(missing) = missing.filter(|m| !m.is_empty()) {
+        value["missing"] = json!(missing);
+    }
     json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value,"isError":true})
 }
 /// Retains why an authenticated worker's `result_submit` was refused: the refusal
@@ -516,8 +668,22 @@ pub(super) fn submit(
         }
         lifecycle::review::preflight_result_tx(db, &i.task, assignment, key, &evidence)
     })? {
-        return Ok(refusal);
+        // The re-binding is committed; the worker gets a structured, correctable error
+        // (re-check the changed project, submit with a fresh request_key).
+        return Err(CoreError::Refused(match refusal["error"].as_str() {
+            Some("review_project_revision_changed") => "review_project_revision_changed",
+            Some("review_project_revision_unstable") => "review_project_revision_unstable",
+            _ => "review_resubmit_required",
+        }));
     }
+    // The required report sections are checked once the assignment may record a result
+    // (an open question still refuses first) and before the payload binds the key, so a
+    // corrected resubmission with the same request_key is a new payload, not a conflict.
+    store.write(|db| {
+        channels::authenticate(db, &credential.channel_id, credential.secret(), true)?;
+        waits::check_mutation_tx(db, &i.task, assignment)
+    })?;
+    let structure = report_structure(store, &i, args)?;
     let source_revision = store.write(|db| {
         channels::authenticate(db, &credential.channel_id, credential.secret(), true)?;
         waits::check_mutation_tx(db, &i.task, assignment)?;
@@ -578,7 +744,12 @@ pub(super) fn submit(
                 .map_err(|_| CoreError::Refused("result_report_not_owned"))?)
         })?
     } else {
-        let draft = publisher.create_draft(&i.task, &i.principal, "implementation", key)?;
+        // The runtime, not the model, selects the report template for the role and stage.
+        let template = cortex_core::assignment_brief::template_for(
+            i.profile.as_deref().unwrap_or(""),
+            i.stage.as_deref().unwrap_or("execution"),
+        );
+        let draft = publisher.create_draft(&i.task, &i.principal, template, key)?;
         let published: bool = store.read(|db| Ok(db.query_row(
         "SELECT published_report_id IS NOT NULL FROM drafts WHERE id=? AND task_id=? AND owner_thread_id=?",
         (&draft.draft_id, &i.task, &i.principal), |r| r.get(0),
@@ -636,6 +807,12 @@ pub(super) fn submit(
     if let Some(verdict) = result["verdict"].as_str() {
         result["verdict"] = json!(verdict.to_ascii_uppercase());
     }
+    let mut bound = json!({"report_ref":report.report_id,"attempt_id":i.attempt,"checks":checks});
+    if let Some(structure) = &structure {
+        // Visible to the reviewer and the coordinator with the result itself.
+        result["report_structure"] = structure.clone();
+        bound["report_structure"] = structure.clone();
+    }
     store.write(|db| {
         let current = channels::authenticate(db, &credential.channel_id, credential.secret(), true)?;
         if current != i {
@@ -647,11 +824,15 @@ pub(super) fn submit(
                 "INSERT INTO task_events(task_id,event_type,assignment_ref,dedup_key,payload_json,origin,created_at)
                  VALUES (?,'worker_result',?,?,?,'native-runtime',?)",
                 (&i.task, assignment, format!("native-result:{}:{key}", credential.channel_id),
-                    json!({"report_ref":report.report_id,"attempt_id":i.attempt,"checks":checks}).to_string(), cortex_core::now()),
+                    bound.to_string(), cortex_core::now()),
             )?;
             completion::record_result_tx(db, &i.task, assignment, &result, &evidence)?;
-            Ok(json!({"outcome":"recorded","report_ref":report.report_id,"assignment_ref":assignment,
-                "certified":false}))
+            let mut receipt = json!({"outcome":"recorded","report_ref":report.report_id,"assignment_ref":assignment,
+                "certified":false});
+            if let Some(structure) = &structure {
+                receipt["report_structure"] = structure.clone();
+            }
+            Ok(receipt)
         })
     })
 }

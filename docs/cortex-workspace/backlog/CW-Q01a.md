@@ -1,6 +1,6 @@
 # CW-Q01a: Deterministic fake-ACP desktop scenario
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Partly implemented: a no-paid native journey runs against fake engines in a container ([platforms](../platforms.md)); the complete scenario record is not confirmed · **Phase:** 3+ · **Size:** M
 
 Split from [CW-Q01](CW-Q01.md) for the Ubuntu desktop. The phone leg is in [CW-Q01b](CW-Q01b.md).
 

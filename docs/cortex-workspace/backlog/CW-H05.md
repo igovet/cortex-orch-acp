@@ -1,6 +1,6 @@
 # CW-H05: Machine registry and connector
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: the phone keeps a registry of paired machines and connects through the remote tunnel; the desktop's own machine registry and connector are not implemented and its Add remote machine control stays disabled; not verified on a device · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Machine registry and connector.

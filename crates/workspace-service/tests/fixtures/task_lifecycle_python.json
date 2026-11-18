@@ -7444,7 +7444,11 @@
       "after": {
         "tasks": {
           "t1": {
-            "archiveQuestion": true,
+            "archive": {
+              "at": 1700000000000,
+              "previousStatus": "done"
+            },
+            "archiveQuestion": false,
             "keep": "untouched",
             "status": "done",
             "work": null
@@ -7593,7 +7597,11 @@
       "after": {
         "tasks": {
           "t1": {
-            "archiveQuestion": true,
+            "archive": {
+              "at": 1700000000000,
+              "previousStatus": "done"
+            },
+            "archiveQuestion": false,
             "keep": "untouched",
             "status": "done",
             "work": "unmerged"
@@ -7774,7 +7782,11 @@
       "after": {
         "tasks": {
           "t1": {
-            "archiveQuestion": true,
+            "archive": {
+              "at": 1700000000000,
+              "previousStatus": "done"
+            },
+            "archiveQuestion": false,
             "integration": {
               "sourceHead": "db08d8700ae1850e83f37ddfe5c29cc1ade34bb8"
             },
@@ -7885,7 +7897,11 @@
       "after": {
         "tasks": {
           "t1": {
-            "archiveQuestion": true,
+            "archive": {
+              "at": 1700000000000,
+              "previousStatus": "done"
+            },
+            "archiveQuestion": false,
             "integration": {
               "sourceHead": "old"
             },
@@ -8111,7 +8127,11 @@
       "after": {
         "tasks": {
           "t1": {
-            "archiveQuestion": true,
+            "archive": {
+              "at": 1700000000000,
+              "previousStatus": "done"
+            },
+            "archiveQuestion": false,
             "integration": {
               "sourceHead": 123
             },
@@ -8454,7 +8474,11 @@
       "after": {
         "tasks": {
           "t1": {
-            "archiveQuestion": true,
+            "archive": {
+              "at": 1700000000000,
+              "previousStatus": "done"
+            },
+            "archiveQuestion": false,
             "integration": {
               "sourceHead": {
                 "legacy": true
@@ -8519,7 +8543,7 @@
       ]
     },
     {
-      "name": "archive-missing-worktree",
+      "name": "archive-missing-worktree-kept",
       "params": {
         "action": "archive",
         "taskId": "t1"
@@ -8560,13 +8584,26 @@
         ]
       ],
       "expected": {
-        "ok": false,
-        "code": "unknown_checkout",
-        "message": "The task worktree is missing or its branch changed."
+        "ok": true,
+        "result": {
+          "done": true,
+          "reclamation": null
+        }
       },
       "after": {
+        "comments": {},
+        "drafts": {},
+        "ghAvailable": "$GH_AVAILABLE",
+        "hasGit": true,
+        "messages": [],
+        "sprints": [],
         "tasks": {
           "t1": {
+            "archive": {
+              "at": 1700000000000,
+              "previousStatus": "done"
+            },
+            "archiveQuestion": false,
             "checkout": {
               "branch": "task",
               "kind": "worktree",
@@ -8576,11 +8613,7 @@
             "status": "done",
             "work": "merged"
           }
-        },
-        "sprints": [],
-        "drafts": {},
-        "messages": [],
-        "comments": {}
+        }
       },
       "observed": {
         "tasks": [

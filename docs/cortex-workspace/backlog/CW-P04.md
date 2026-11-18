@@ -1,6 +1,6 @@
 # CW-P04: No-GMS-device detection and explicit "push unavailable" UX state; documented limitation
 
-**Status:** planned · **Phase:** 3+ · **Size:** S
+**Status:** Not implemented; no Android client exists · **Phase:** 3+ · **Size:** S
 
 ## Goal
 Detect whether Google Play Services and FCM are usable on the phone. Show an explicit "push unavailable" state with the cause, and document the limitation. Foreground and on-open sync keep working.

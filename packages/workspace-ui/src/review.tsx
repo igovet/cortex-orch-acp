@@ -2,7 +2,7 @@ import { createEffect, createMemo, createSignal, createUniqueId, For, Match, on,
 import type { Check, FileDiff, GitFile } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { Counts, Diff, GitLetter, type HunkActions } from "./diff";
-import { A, I, MenuItem, Pop } from "./kit";
+import { A, I, Keyed, MenuItem, Pop } from "./kit";
 import { ActionBar, Page, Region, Row, SectionHead, Strip, Toolbar, Whole } from "./layout";
 import type { Route } from "./router";
 import { checkCounts, clock, readyStep, sameBranch } from "./selectors";
@@ -10,6 +10,7 @@ import { acceptBlocked, acceptOffered, changesOffered, checksLine, firstChanged,
 import type { SessionModel } from "./session-model";
 import { CHECK_ICON } from "./worker";
 import { ResultText } from "./result-text";
+import { CopySource } from "./message-copy";
 
 type TaskRoute = Extract<Route, { name: "task" }>;
 const sourceLabel = (c: Check, none: string) => c.source === "runtime" ? "Recorded by runtime" : c.source === "worker" ? "Reported by worker" : none;
@@ -46,24 +47,28 @@ export function CheckRows(props: { checks: Check[]; taskId?: string; all?: boole
   const manual = () => props.checks.filter(c => c.kind === "manual");
   const open = () => [...openChecks(props.checks)].sort((a, b) => (a.outcome === "failed" ? 0 : 1) - (b.outcome === "failed" ? 0 : 1));
   const passed = () => props.checks.filter(c => c.kind !== "manual" && c.outcome === "passed" && (props.all || !!c.output));
+  // A check has no id: its name, numbered when two share one, names it across reads, so a background read that changes a check
+  // updates its row in place and an opened output or detail stays open.
+  const keys = createMemo(() => { const seen = new Map<string, number>(); return new Map(props.checks.map(c => { const n = (seen.get(c.name) ?? 0) + 1; seen.set(c.name, n); return [c, n === 1 ? c.name : `${c.name}#${n}`] as const; })); });
+  const key = (c: Check) => keys().get(c) ?? c.name;
   const icon = (c: Check) => <I n={CHECK_ICON[c.outcome].icon} s={14} class={CHECK_ICON[c.outcome].tone} />;
   const detail = (c: Check) => c.detail || c.technicalReason ? <>{c.detail}<Show when={c.technicalReason}>{c.detail ? " " : ""}{c.kind === "policy" ? "Not run: " : "Could not check: "}{c.technicalReason}</Show></> : undefined;
   const source = (c: Check) => `${OUTCOME_WORD[c.outcome]}, ${sourceLabel(c, ws.t("unsourcedCheck")).toLowerCase()}`;
   return <>
     <Show when={manual().length > 0}><section class="rv-checks" aria-label="Check manually"><SectionHead title="Check manually" count={manual().length} />
-      <For each={manual()}>{c => <Row lead={<I n="eye" s={14} class="faint" />} title={c.name} detail={c.detail || "Needs a person’s judgement. Not counted as passed or failed; does not block Accept."} />}</For>
+      <Keyed each={manual()} by={key}>{c => <Row lead={<I n="eye" s={14} class="faint" />} title={c().name} detail={c().detail || "Needs a person’s judgement. Not counted as passed or failed; does not block Accept."} />}</Keyed>
     </section></Show>
     <Show when={open().length > 0}><section class="rv-checks" aria-label="Not passed"><SectionHead title="Not passed" count={open().length} />
-      <For each={open()}>{c => <>
-        <Row lead={icon(c)} title={c.name} detail={detail(c)} end={<>
-          <Show when={props.taskId}>{id => <RerunCheck taskId={id()} check={c} />}</Show>
-          <Show when={c.outcome === "failed" && props.onAsk} fallback={<span>{source(c)}</span>}><button class="btn btn-line btn-sm" {...ws.needs("request_changes")} onClick={() => props.onAsk!(c)}>Ask to fix</button></Show>
+      <Keyed each={open()} by={key}>{c => <>
+        <Row lead={icon(c())} title={c().name} detail={detail(c())} end={<>
+          <Show when={props.taskId}>{id => <RerunCheck taskId={id()} check={c()} />}</Show>
+          <Show when={c().outcome === "failed" && props.onAsk} fallback={<span>{source(c())}</span>}><button class="btn btn-line btn-sm" {...ws.needs("request_changes")} onClick={() => props.onAsk!(c())}>Ask to fix</button></Show>
         </>} />
-        <CommandOutput c={c} />
-      </>}</For>
+        <CommandOutput c={c()} />
+      </>}</Keyed>
     </section></Show>
     <Show when={passed().length > 0}><section class="rv-checks" aria-label="Passed"><SectionHead title="Passed" count={passed().length} />
-      <For each={passed()}>{c => <><Row lead={icon(c)} title={c.name} detail={c.detail || undefined} end={<span>{sourceLabel(c, ws.t("unsourcedCheck"))}</span>} /><CommandOutput c={c} /></>}</For>
+      <Keyed each={passed()} by={key}>{c => <><Row lead={icon(c())} title={c().name} detail={c().detail || undefined} end={<span>{sourceLabel(c(), ws.t("unsourcedCheck"))}</span>} /><CommandOutput c={c()} /></>}</Keyed>
     </section></Show>
   </>;
 }
@@ -96,6 +101,8 @@ export function AcceptBlocker(props: { m: SessionModel; id?: string }) {
     <Show when={ws.store.acceptanceIssue()?.taskId === t().id && !t().acceptance && ws.store.acceptanceIssue()}>{issue => <Strip class="rv-accept-error" tone="fail" role="alert" icon={<I n="alert" s={14} class="st-bad" />}
       action={<button class="btn btn-line btn-sm" onClick={() => void ws.store.reload()}>Refresh result</button>}>{issue().message} Acceptance was not confirmed. Refresh the result before trying again.</Strip>}</Show>
     <Show when={reason()}>{why => <Strip id={props.id} class="rv-why" tone="warn" role="status" icon={<I n="alert" s={14} class="st-warn" />} action={<Switch>
+      {/* Still being checked against the project: nothing to do yet, and nothing is offered. */}
+      <Match when={t().reviewActions?.pending === true}>{null}</Match>
       <Match when={stale(t())}><button class="btn btn-line btn-sm" {...ws.needs("request_changes")} onClick={() => ws.open({ kind: "changes", taskId: t().id, text: "The files changed after this version. Please check the work again and publish a fresh result." })}>Request a new result…</button></Match>
       <Match when={t().conflict !== "none"}><A class="btn btn-line btn-sm" to={conflict()}>Open the conflict</A></Match>
       <Match when={checks().length === 0}><button class="btn btn-line btn-sm" {...ws.needs("request_changes")} onClick={() => void ask("No checks were reported for this result. Run the checks this work needs and publish the result again.")}>Ask to run checks</button></Match>
@@ -120,7 +127,7 @@ export function ReviewBar(props: { m: SessionModel }) {
   const reviewing = () => changesOffered(t());
   // The same step the header names: a project-folder task (or one without Git) is finished in place, never merged.
   const step = () => readyStep(t(), props.m.view.target, props.m.view.project.hasGit);
-  const hint = () => t().status === "ready_to_merge" ? `${t().acceptance ? `You accepted v${t().acceptance!.version}.` : "Checks passed."} ${step() === "Ready to finish" ? "The task waits for your confirmation." : "The task waits in Ready to merge."}`
+  const hint = () => t().status === "ready_to_merge" ? `${t().acceptance ? `${t().acceptance!.automatic ? "Automatically accepted" : "You accepted"} v${t().acceptance!.version}.` : "Checks passed."} ${step() === "Ready to finish" ? "The task waits for your confirmation." : "The task waits in Ready to merge."}`
     : t().status === "done" ? "This task is closed." : `Accept moves the task to ${step()}. Request changes reopens it.`;
   const describedBy = () => acceptStripShown(props.m) ? why : undefined;
   return <section class="rv-bar" aria-label="Review this result">
@@ -164,7 +171,7 @@ export function ResultCard(props: { m: SessionModel }) {
   const ready = (): Route => ({ name: "task", machine: props.m.view.machine.id, task: t().id, tab: "changes" });
   const describedBy = () => acceptStripShown(props.m) ? why : undefined;
   return <div class="rcard">
-    <div class="rcard-h"><I n={t().status === "done" ? "check-circle" : "eye"} s={14} class="faint" />Result v{r().version}<span class="r">{r().at != null ? `${clock(r().at!)}, ` : ""}{t().acceptance ? `accepted by you${t().acceptance!.at != null ? ` ${clock(t().acceptance!.at!)}` : ""}` : ws.store.mode === "real" ? "Runtime result" : "reviewed and checked"}</span></div>
+    <div class="rcard-h"><I n={t().status === "done" ? "check-circle" : "eye"} s={14} class="faint" />Result v{r().version}<span class="r">{r().at != null ? `${clock(r().at!)}, ` : ""}{t().acceptance ? `accepted ${t().acceptance!.automatic ? "automatically" : "by you"}${t().acceptance!.at != null ? ` ${clock(t().acceptance!.at!)}` : ""}` : ws.store.mode === "real" ? "Runtime result" : "reviewed and checked"}</span><Show when={r().summary}><CopySource text={r().summary} label="Copy the result as Markdown" /></Show></div>
     <div class="rcard-b"><ResultText text={r().summary} /></div>
     <Show when={r().checks.length} fallback={<div class="rcard-note cap muted">No checks reported</div>}><Outcomes checks={r().checks} /></Show>
     <For each={r().warnings}>{warning => <div class="rcard-note cap st-warn">{warning}</div>}</For>
@@ -252,7 +259,8 @@ export function ChangesPanel(props: { m: SessionModel; route: TaskRoute }) {
   const tools = () => <Toolbar small class="chg-tools" label="Diff view" start={<>
     <button class="pick ws-pick" popovertarget="m-diff-scope"><span class="faint">Show</span>{active().label}<I n="chevron-down" s={12} /></button>
     <Pop id="m-diff-scope" class="pop-anchor" align="left" label="Which changes to show" style={{ width: "240px" }}>
-      <For each={scopes()}>{s => <MenuItem label={s.label} sub={s.sub} check={s.id === active().id} onSelect={() => setScope(s.id)} />}</For>
+      {/* Kept by id: the first view is rebuilt on every read, and an open menu must not redraw its rows. */}
+      <Keyed each={scopes()} by={s => s.id}>{s => <MenuItem label={s().label} sub={s().sub} check={s().id === active().id} onSelect={() => setScope(s().id)} />}</Keyed>
     </Pop>
     <div class="seg" role="group" aria-label="Diff layout">
       <button aria-current={layout() === "unified" ? "true" : "false"} onClick={() => setLayout("unified")}>Unified</button>
@@ -268,7 +276,7 @@ export function ChangesPanel(props: { m: SessionModel; route: TaskRoute }) {
       head={<Show when={t().result}><ReviewBar m={props.m} /></Show>}
       foot={<Show when={!noGit()}><ActionBar class="rv-foot" label="Review comments" start={<>
         <span class="cap muted">{drafts() ? `${drafts()} comment${drafts() === 1 ? "" : "s"}` : "No comments"}</span>
-        <button class="btn btn-line" aria-disabled={drafts() ? undefined : "true"} data-why={drafts() ? undefined : "Add a comment on a line first"} {...ws.needs("send_comments")} onClick={send}>Send<span class="key">Ctrl+Enter</span></button>
+        <button class="btn btn-line" aria-disabled={drafts() ? undefined : "true"} data-why={drafts() ? undefined : "Add a comment on a line first"} {...ws.needs("send_comments")} onClick={send}>Send<Show when={ws.keys("Ctrl+Enter")}>{k => <span class="key">{k()}</span>}</Show></button>
       </>}>
         {/* A closed task has nothing left to commit from its review. */}
         <Show when={t().status !== "done"}><Show when={checkout()} fallback={<button class="btn btn-line" aria-disabled="true" data-why={ws.t("noCheckoutRecord")}>Commit…</button>}><A class="btn btn-line" to={commitTo()}>Commit…</A></Show></Show>
@@ -282,11 +290,12 @@ export function ChangesPanel(props: { m: SessionModel; route: TaskRoute }) {
         <Region class="rv-top">{top()}</Region>
         {tools()}
         <div class="chg-body">
-          <div class="flist"><For each={files()}>{f => <button class="fitem" aria-current={current() === f.path ? "true" : undefined} onClick={() => pick(f.path)}><GitLetter status={f.status} /><span class="trunc">{f.path}</span><span class="r"><Counts add={f.add} del={f.del} /></span></button>}</For></div>
-          <div class="dview"><For each={files()}>{f => <div id={`diff-${f.path}`}>
-            <FileHead file={f} working={working(f.path)} onOpen={() => go(f)} onStage={() => { const c = checkout(), w = working(f.path); if (c && w) ws.run({ type: "git_stage", checkoutId: c.id, path: f.path, staged: w.stage !== "staged" }); }} onRevert={() => { const c = checkout(); if (c) ws.open({ kind: "revert", checkoutId: c.id, path: f.path }); }} />
-            <Diff file={f} layout={layout()} hideSpace={hideSpace()} actions={hunkActions(f.path)} taskId={t().id} comments={review()?.comments.filter(c => c.path === f.path)} />
-          </div>}</For></div>
+          <div class="flist"><Keyed each={files()} by={f => f.path}>{f => <button class="fitem" aria-current={current() === f().path ? "true" : undefined} onClick={() => pick(f().path)}><GitLetter status={f().status} /><span class="trunc">{f().path}</span><span class="r"><Counts add={f().add} del={f().del} /></span></button>}</Keyed></div>
+          {/* Keyed by path: a background read that changes one file's diff redraws only that diff, and a comment being written stays. */}
+          <div class="dview"><Keyed each={files()} by={f => f.path}>{f => <div id={`diff-${f().path}`}>
+            <FileHead file={f()} working={working(f().path)} onOpen={() => go(f())} onStage={() => { const c = checkout(), w = working(f().path); if (c && w) ws.run({ type: "git_stage", checkoutId: c.id, path: f().path, staged: w.stage !== "staged" }); }} onRevert={() => { const c = checkout(); if (c) ws.open({ kind: "revert", checkoutId: c.id, path: f().path }); }} />
+            <Diff file={f()} layout={layout()} hideSpace={hideSpace()} actions={hunkActions(f().path)} taskId={t().id} comments={review()?.comments.filter(c => c.path === f().path)} />
+          </div>}</Keyed></div>
         </div>
       </Show>
     </Page>

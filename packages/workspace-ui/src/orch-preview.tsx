@@ -4,6 +4,7 @@ import { useWs } from "./ctx";
 import { I } from "./kit";
 import { Bar, Shell, SourceStrips, useRouting } from "./orch-shared";
 import { Adv, Lock, Pick, Seg, SetH, Srow } from "./settings-kit";
+import { share } from "./stable";
 
 const COMPLEXITIES = [{ id: "low", label: "Low" }, { id: "normal", label: "Normal" }, { id: "high", label: "High" }] as const;
 /** Answers "what would run this?" from the rules alone, for saved rules or the draft before it is saved. */
@@ -19,8 +20,9 @@ export function RoutePreview() {
   const [view, setView] = createSignal<"one" | "all">("one");
   const rules = (): RoutingRules | undefined => d.dirty() && using() === "draft" ? d.value() : undefined;
   const ctx = createMemo(() => previewContext(m(), scope(), rules()));
-  const result = createMemo(() => previewRoute({ role: role(), kind: kind(), complexity: complexity(), attempt: attempt() }, ctx()));
-  const grid = createMemo(() => view() === "all" ? previewGrid(attempt(), ctx()) : []);
+  // A machine read (usage, a check) rebuilds the answer: equal parts stay the old objects, so the rows and the focused cell stay.
+  const result = createMemo<ReturnType<typeof previewRoute>>(prev => share(prev!, previewRoute({ role: role(), kind: kind(), complexity: complexity(), attempt: attempt() }, ctx())));
+  const grid = createMemo<ReturnType<typeof previewGrid>>(prev => share(prev, view() === "all" ? previewGrid(attempt(), ctx()) : []), []);
   const pickRole = (id: string) => { setRole(id); setKind(ROLE_CATALOG.find(r => r.id === id)?.kind ?? kind()); };
   const open = (id: string, c: Complexity) => { pickRole(id); setComplexity(c); setView("one"); };
   return <Shell scoped wide title="Route preview" lead="What would run this work, and why the other routes are out. Read-only." bar={<Bar d={d} />}>

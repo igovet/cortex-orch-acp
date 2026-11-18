@@ -1,7 +1,7 @@
 import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js";
 import { taskRoute } from "./board";
 import { useWs } from "./ctx";
-import { I, Modal } from "./kit";
+import { I, Keyed, Modal } from "./kit";
 import { rowIcon, sprintRoute, sprintTitle } from "./selectors";
 import { closeBlocked, sessionModel } from "./session-model";
 
@@ -9,11 +9,16 @@ type Entry = { id: string; group: string; label: string; sub?: string; icon: str
 const RESULT_LIMIT = 8;
 
 /** One field for tasks, projects and sprints; ">" lists actions. It launches the same actions the buttons run, never a text command. */
+/** What a phone never offers from the palette: the sidebar and inspector toggles of a desktop, a terminal, adding another
+ *  desktop, and the keyboard help. */
+const PHONE_HIDDEN = new Set(["a:side", "a:ins", "a:term", "a:machine", "a:help"]);
 export function Palette(props: { open: boolean; onClose: () => void }) {
   const ws = useWs();
   const [text, setText] = createSignal("");
-  const [active, setActive] = createSignal(0);
-  createEffect(on(() => props.open, open => { if (open) { setText(""); setActive(0); } }));
+  // The highlighted entry, by its id: a background read rebuilds every entry, and the highlight stays on the one it was on.
+  // None is the first.
+  const [activeId, setActiveId] = createSignal<string | null>(null);
+  createEffect(on(() => props.open, open => { if (open) { setText(""); setActiveId(null); } }));
   const m = () => ws.machine().id;
   const taskActions = (): Entry[] => {
     const r = ws.router.route(), model = r.name === "task" ? sessionModel(ws.store.index(), r.task) : null;
@@ -47,13 +52,13 @@ export function Palette(props: { open: boolean; onClose: () => void }) {
     { id: "a:side", group: "Actions", label: ws.panels.sidebarShown() ? "Hide sidebar" : "Show sidebar", icon: "panel-left", keys: "Ctrl+B", run: () => ws.panels.toggleSidebar() },
     { id: "a:ins", group: "Actions", label: ws.panels.inspectorVisible() ? "Hide inspector" : "Show inspector", icon: "panel-right", keys: "Ctrl+Alt+B", disabled: ws.inspectable() ? undefined : "This screen has no inspector", run: () => ws.panels.toggleInspector() },
     { id: "a:term", group: "Actions", label: ws.panels.terminalOpen() ? "Hide terminal" : "Show terminal", icon: "panel-bottom", keys: "Ctrl+J", disabled: ws.terminalAvailable() ? undefined : "Open a project or task to use a terminal", run: () => ws.toggleTerminal() },
-    { id: "a:settings", group: "Actions", label: "Open settings", icon: "settings", keys: "Ctrl+,", run: () => ws.go({ name: "settings", section: "appearance", machine: null }) },
+    { id: "a:settings", group: "Actions", label: "Open settings", icon: "settings", keys: "Ctrl+,", run: () => ws.shell.kind === "phone" ? ws.shell.openSettings() : ws.go({ name: "settings", section: "appearance", machine: null }) },
     { id: "a:orch", group: "Actions", label: "Orchestration settings", icon: "sliders", run: () => ws.go({ name: "settings", section: "orchestration", machine: m() }) },
     { id: "a:clean", group: "Actions", label: "Run cleanup now", icon: "archive", disabled: ws.machine().connection === "connected" ? ws.gate("run_cleanup") : `${ws.machine().name} is offline`, run: () => ws.run({ type: "run_cleanup", machineId: m(), now: ws.store.clock() }) },
     { id: "a:machine", group: "Actions", label: "Add remote machine", icon: "server", disabled: ws.gate("pair_machine"), run: () => ws.open({ kind: "add-machine" }) },
     { id: "a:project", group: "Actions", label: "Add project", icon: "folder-plus", disabled: ws.gate("add_project"), run: () => ws.open({ kind: "add-project" }) },
     { id: "a:help", group: "Actions", label: "Help and shortcuts", icon: "help", keys: "?", run: () => ws.openHelp() },
-  ]);
+  ].filter(entry => ws.shell.kind !== "phone" || !PHONE_HIDDEN.has(entry.id)));
   const found = createMemo((): { entries: Entry[]; hidden: number } => {
     const raw = text().trim(), index = ws.store.index();
     if (raw.startsWith(">")) {
@@ -77,7 +82,10 @@ export function Palette(props: { open: boolean; onClose: () => void }) {
       ],
     };
   });
-  createEffect(on(found, () => setActive(0)));
+  const active = () => { const id = activeId(), at = id === null ? -1 : found().entries.findIndex(e => e.id === id); return at < 0 ? 0 : at; };
+  const setActive = (to: number | ((at: number) => number)) => setActiveId(found().entries[typeof to === "function" ? to(active()) : to]?.id ?? null);
+  // What is typed starts the list again from its first entry.
+  createEffect(on(text, () => setActiveId(null), { defer: true }));
   const pick = (entry: Entry | undefined) => {
     if (!entry || entry.disabled) return;
     props.onClose();
@@ -99,14 +107,15 @@ export function Palette(props: { open: boolean; onClose: () => void }) {
     </div>
     <div id="ws-pal-list" class="ws-pal-b" role="listbox" aria-label="Results">
       <Show when={found().entries.length > 0} fallback={<p class="ws-pal-none">No matches</p>}>
-        <For each={found().entries}>{(entry, i) => <>
-          <Show when={i() === 0 || found().entries[i() - 1].group !== entry.group}><div class="mi-h" role="presentation">{entry.group}</div></Show>
-          <div id={optionId(i())} class="mi ws-pal-o" role="option" aria-selected={active() === i()} aria-disabled={entry.disabled ? "true" : undefined} data-why={entry.disabled}
-            onMouseMove={() => setActive(i())} onClick={() => pick(entry)}>
-            <I n={entry.icon} /><span class="grow trunc">{entry.label}<Show when={entry.sub}><span class="sub trunc">{entry.sub}</span></Show><Show when={entry.disabled}>{why => <span class="sub ws-pal-why">{why()}</span>}</Show></span>
-            <Show when={entry.keys}><span class="kbd">{entry.keys}</span></Show>
+        {/* Kept by id, so a background read (a task moving on, another task changing) leaves the rows, the scroll and the highlight in place. */}
+        <Keyed each={found().entries} by={e => e.id}>{(entry, i) => <>
+          <Show when={i() === 0 || found().entries[i() - 1]?.group !== entry().group}><div class="mi-h" role="presentation">{entry().group}</div></Show>
+          <div id={optionId(i())} class="mi ws-pal-o" role="option" aria-selected={active() === i()} aria-disabled={entry().disabled ? "true" : undefined} data-why={entry().disabled}
+            onMouseMove={() => setActive(i())} onClick={() => pick(entry())}>
+            <I n={entry().icon} /><span class="grow trunc">{entry().label}<Show when={entry().sub}><span class="sub trunc">{entry().sub}</span></Show><Show when={entry().disabled}>{why => <span class="sub ws-pal-why">{why()}</span>}</Show></span>
+            <Show when={entry().keys && ws.keys(entry().keys!)}>{k => <span class="kbd">{k()}</span>}</Show>
           </div>
-        </>}</For>
+        </>}</Keyed>
         <Show when={found().hidden > 0}><p class="ws-pal-none">{found().hidden} more tasks match. Keep typing to narrow them.</p></Show>
       </Show>
     </div>
@@ -116,7 +125,7 @@ export function Palette(props: { open: boolean; onClose: () => void }) {
 const KEYS: [string, string][] = [
   ["Ctrl+K", "Search and actions"], ["Ctrl+N", "New task"], ["Ctrl+Shift+N", "New sprint"], ["Ctrl+I", "Inbox"],
   ["Ctrl+B", "Sidebar"], ["Ctrl+Alt+B", "Inspector"], ["Ctrl+J", "Terminal"], ["Ctrl+\\", "Worker pane"], ["Ctrl+,", "Settings"],
-  ["Enter", "Send, as Send now or Queue beside the send button shows"], ["Shift+Enter", "New line in a message"], ["Ctrl+.", "Stop the task"], ["1 to 8", "Choose an answer to the open question; the send button sends it"],
+  ["Enter", "Send, or queue while Queue beside the send button is on"], ["Shift+Enter", "New line in a message"], ["Ctrl+.", "Stop the task"], ["1 to 8", "Choose an answer to the open question; the send button sends it"],
   ["/", "Filter the board or list"], ["Space", "Preview a card in the Inspector"], ["Enter", "Open"], ["Arrow keys", "Move between cards and columns"],
   ["Ctrl+P", "Go to file, in Code"], ["Ctrl+Shift+F", "Search in files, in Code"], ["Ctrl+Enter", "Commit, or send diff comments"],
   ["Ctrl+T", "New tab"], ["Ctrl+W", "Close tab"], ["Ctrl+Tab, Ctrl+Shift+Tab", "Next and previous tab"], ["Ctrl+1 to Ctrl+9", "Go to tab; 9 is the last"],

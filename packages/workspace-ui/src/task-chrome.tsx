@@ -1,13 +1,13 @@
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
-import { capabilityOf, taskEditable, taskRenamable } from "@cortex/workspace-domain";
+import { createEffect, createMemo, createSignal, For, on, Show, type JSX } from "solid-js";
+import { capabilityOf, taskRenamable } from "@cortex/workspace-domain";
 import { asOf, checkCounts, clock, dayClock, engineLimits, nothingToCommit, sameBranch, windowTitle, sprintTitle, type TaskView } from "./selectors";
 import { useWs } from "./ctx";
 import { FieldEdit } from "./field-edit";
 import { onScreen } from "./freshness";
-import { A, FactLine, I, Modal, Pop } from "./kit";
+import { A, FactLine, I, Keyed, Modal, Pop } from "./kit";
 import { ActionBar, revealWhenCut } from "./layout";
 import { behindTarget, conflictLine, finishBlocked, taskCheckout } from "./review-model";
-import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, languageLabel, modeLabel, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, usesMachineRoute, workerFace, workersOutcome, type SessionModel } from "./session-model";
+import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, languageLabel, modeLabel, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, usesMachineRoute, workerFace, workerModel, workersOutcome, type SessionModel } from "./session-model";
 import { CHECK_ICON, VERIFICATION } from "./worker";
 
 const useModel = (id: () => string) => {
@@ -60,12 +60,15 @@ export function titleBlock(m: SessionModel): string | null {
   return m.mode === "paused" ? closeBlocked(m) : null;
 }
 
-/** State, the one primary action, Stop and the task menu. Offline and unconfirmed tasks offer nothing that could mislead. */
-export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) => void }) {
+/**
+ * The task's one next step that is not on the screen already (Answer, Review changes, a closing in Ready to merge, Continue),
+ * the Git controls and the task menu. Its state reads in the strip under the tabs, the sidebar and the composer; Start, Stop
+ * and Resume are the composer's action button and stay in the menu. Offline and unconfirmed tasks offer nothing that could mislead.
+ */
+export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) => void; git?: JSX.Element }) {
   const ws = useWs();
   const m = useModel(() => props.view.id);
   const why = () => taskWhyId(props.view.id);
-  const chip = () => m() ? stateChip(m()!) : null;
   const go = () => {
     const task = props.view.id, tab = ws.router.route();
     if (tab.name === "task" && (tab.tab || tab.live)) ws.go({ name: "task", machine: tab.machine, task });
@@ -74,37 +77,39 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
   const mode = () => m()?.mode;
   const blocked = () => m() ? closeBlocked(m()!) : null;
   return <>
-    <Show when={chip()}>{c => <span class="chip tb-state"><I n={c().icon} s={12} class={`${c().spin ? "spin " : ""}${c().tone}`} /><span style={{ color: "var(--fg)" }}>{c().text}<Show when={c().wide}><span class="w-wide">{c().wide}</span></Show></span>
-      <Show when={c().next}><I n="chevron-right" s={12} class="faint w-wide" /><span class="w-wide">{c().next}</span></Show></span>}</Show>
-    <Show when={taskEditable(props.view.task)}><button class="btn btn-line tb-fold" {...ws.needs("edit_task")} onClick={() => ws.open({kind:"edit-task",taskId:props.view.id})}>Edit task…</button></Show>
     <Show when={mode() === "live" && props.view.task.conflict === "none" && ((m()?.open.length ?? 0) > 0 || (props.view.column === "needs" && props.view.task.observedPhase !== "recovery"))}><button class="btn btn-primary" onClick={go}>Answer</button></Show>
     <Show when={props.view.task.status === "review" && mode() === "review"}><A class="btn btn-primary" to={{ name: "task", machine: props.view.machine.id, task: props.view.id, tab: "changes", sub: "diff" }}>Review changes</A></Show>
     <Show when={props.view.task.status === "ready_to_merge" && mode() === "review"}>
+      {/* Merge… and Commit to the target… are the Git button's primary action in this state; only closing stays here. */}
       <Show when={!props.view.task.integrationFacts?.alreadyInTarget} fallback={<button class="btn btn-primary" {...ws.needs("close_task")} onClick={() => ws.closeTask(props.view.id, "already_in_target")}>Close task…</button>}>
-      <Show when={sameBranch(props.view.task, props.view.target)}>
-        <Show when={props.view.task.integrationFacts?.commitAvailable} fallback={<button class="btn btn-primary" {...ws.needs("close_task")} onClick={() => ws.closeTask(props.view.id)}>{nothingToCommit(props.view.task) ? "Close task…" : "Close as is…"}</button>}>
-          <button class="btn btn-primary" aria-describedby={finishBlocked(props.view.task) ? why() : undefined} aria-disabled={finishBlocked(props.view.task) ? "true" : undefined} data-why={finishBlocked(props.view.task)} {...ws.needs("integrate")} onClick={() => { if (!finishBlocked(props.view.task)) ws.open({ kind: "merge", taskId: props.view.id, how: "squash" }); }}>Commit to <span class="l-branch">{props.view.target}</span>…</button>
-        </Show>
+      <Show when={sameBranch(props.view.task, props.view.target) && !props.view.task.integrationFacts?.commitAvailable}>
+        <button class="btn btn-primary" {...ws.needs("close_task")} onClick={() => ws.closeTask(props.view.id)}>{nothingToCommit(props.view.task) ? "Close task…" : "Close as is…"}</button>
       </Show>
-      <Show when={!sameBranch(props.view.task, props.view.target)}>
-      <Show when={props.view.project.hasGit !== false} fallback={<button class="btn btn-primary" aria-describedby={blocked() ? why() : undefined} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("close_task")} onClick={() => { if (!blocked()) ws.closeTask(props.view.id); }}>Close as is…</button>}>
-        <button class="btn btn-primary" aria-describedby={finishBlocked(props.view.task) ? why() : undefined} aria-disabled={finishBlocked(props.view.task) ? "true" : undefined} data-why={finishBlocked(props.view.task)} {...ws.needs("integrate")} onClick={() => { if (!finishBlocked(props.view.task)) ws.open({ kind: "merge", taskId: props.view.id, how: "squash" }); }}>{props.view.task.acceptance ? "Merge…" : "Review and merge…"}</button>
-      </Show>
+      <Show when={!sameBranch(props.view.task, props.view.target) && props.view.project.hasGit === false}>
+        <button class="btn btn-primary" aria-describedby={blocked() ? why() : undefined} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("close_task")} onClick={() => { if (!blocked()) ws.closeTask(props.view.id); }}>Close as is…</button>
       </Show>
       </Show>
     </Show>
     {/* A held task waits for the owner: say what is expected with one concrete action, not only a message box. */}
     <Show when={mode() === "live" && props.view.task.observedPhase === "recovery" && props.view.task.conflict === "none"}><button class="btn btn-primary" {...ws.needs("retry_task")} onClick={() => ws.run({ type: "retry_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Continue</button></Show>
-    <Show when={mode() === "live"}><button class="btn btn-line" {...ws.needs("stop_task")} onClick={() => ws.stopTask(props.view.id)}><I n="stop" s={12} class="st-bad" />{stopLabel(ws.can(capabilityOf("continue_task")))}</button></Show>
-    <Show when={mode() === "paused"}><button class="btn btn-primary" {...ws.needs("continue_task")} onClick={() => ws.run({ type: "continue_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Resume</button></Show>
-    <Show when={mode() === "paused" || mode() === "stopping"}><button class="btn btn-line" aria-describedby={blocked() ? why() : undefined} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("close_task")} onClick={() => { if (!blocked()) ws.closeTask(props.view.id); }}>Close task…</button></Show>
-    <Show when={mode() === "draft"}><button class="btn btn-primary" {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Start</button></Show>
+    {/* Start, Stop and Resume are the composer's action button. Where this machine offers no message composer, they stay here. */}
+    <Show when={!ws.can(capabilityOf("send_message"))}>
+      <Show when={mode() === "live" && props.view.task.status === "working"}><button class="btn btn-line" {...ws.needs("stop_task")} onClick={() => ws.stopTask(props.view.id)}><I n="stop" s={12} class="st-bad" />{stopLabel(ws.can(capabilityOf("continue_task")))}</button></Show>
+      <Show when={mode() === "paused"}><button class="btn btn-primary" {...ws.needs("continue_task")} onClick={() => ws.run({ type: "continue_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Resume</button></Show>
+      <Show when={mode() === "draft"}><button class="btn btn-primary" {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Start</button></Show>
+    </Show>
+    {props.git}
     <button class="ib" aria-label="Task actions" onClick={e => props.onMenu(e.currentTarget)}><I n="more" /></button>
   </>;
 }
 
 /** A row with nothing to say is left out, never shown as an empty line. */
-const Kv = (props: { rows: [string, string, boolean?][] }) => <dl class="kv"><For each={props.rows.filter(r => r[1])}>{r => <><dt>{r[0]}</dt><dd class={r[2] ? "mono" : undefined}>{r[1]}</dd></>}</For></dl>;
+// Keyed by each row's label: the rows are built afresh on every read, and a row rebuilt for nothing drops the text the owner selected in it.
+const Kv = (props: { rows: [string, string, boolean?][] }) => {
+  // A label shown twice (two engines' windows of one name) keeps one row each.
+  const rows = () => { const seen = new Map<string, number>(); return props.rows.filter(r => r[1]).map(r => { const n = seen.get(r[0]) ?? 0; seen.set(r[0], n + 1); return { key: `${r[0]}#${n}`, r }; }); };
+  return <dl class="kv"><Keyed each={rows()} by={x => x.key}>{x => <><dt>{x().r[0]}</dt><dd class={x().r[2] ? "mono" : undefined}>{x().r[1]}</dd></>}</Keyed></dl>;
+};
 function SessionPanel(props: { m: SessionModel; pick: string | null }) {
   const ws = useWs();
   const m = () => props.m;
@@ -148,7 +153,9 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
   return <>
     <div class="ins-sec">
       <div class="ins-h"><span>State</span></div>
-      <div class={`st ${chip().tone}`} style={{ "margin-bottom": "6px" }}><I n={chip().icon} s={14} class={chip().spin ? "spin" : undefined} />{chip().text}{chip().wide ?? ""}</div>
+      <div class={`st ${chip().tone}`} style={{ "margin-bottom": "6px" }}><I n={chip().icon} s={14} class={chip().spin ? "spin" : undefined} />{chip().text}{chip().wide ?? ""}
+        {/* The next step, which the title band no longer shows, unless the note below already names it. */}
+        <Show when={chip().next && !String(note() ?? "").includes(chip().next!)}><I n="chevron-right" s={12} class="faint" /><span class="muted">{chip().next}</span></Show></div>
       <Show when={note()}><div class="cap muted">{note()}</div></Show>
       <Show when={!note() && !m().view.unknown && m().view.fact.text !== chip().text + (chip().wide ?? "")}><div class="cap muted"><FactLine fact={m().view.fact} /></div></Show>
     </div>
@@ -157,7 +164,7 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
         <Kv rows={[["Workers", `Stopped${stoppedAt(m()) === null ? "" : ` at ${clock(stoppedAt(m()))}`}`], ["Checkout", "Untouched"], ["Decisions", open() ? `${open()} still open` : "None open"], ["Queue", `${m().queue.length} kept`]]} /></div>
     </Show>
     <Show when={selected()}>{w => <div class="ins-sec"><div class="ins-h"><span>Selected worker</span></div>
-      <Kv rows={[["Worker", w().role], ["State", workerFace(w().status).label], ...(w().scope.length ? [["Scope", w().scope.join(", "), true] as [string, string, boolean]] : []), ["Edited", `${editedFiles(w()).files} files, +${editedFiles(w()).add} −${editedFiles(w()).del}`], ["Commands", `${w().activity.filter(a => a.command).length} run`]]} /></div>}</Show>
+      <Kv rows={[["Worker", w().role], ["State", workerFace(w().status).label], ["Model", workerModel(w(), ws.route)], ...(w().scope.length ? [["Scope", w().scope.join(", "), true] as [string, string, boolean]] : []), ["Edited", `${editedFiles(w()).files} files, +${editedFiles(w()).add} −${editedFiles(w()).del}`], ["Commands", `${w().activity.filter(a => a.command).length} run`]]} /></div>}</Show>
     <div class="ins-sec">
       <div class="ins-h"><span>{t().checkout.kind === "worktree" ? "Worktree" : "Checkout"}</span></div>
       <Kv rows={[...(t().checkout.kind === "worktree" ? [["Path", (t().checkout as { path: string }).path, true] as [string, string, boolean]] : []), ["Branch", t().checkout.branch, true], ...base(), [sameBranch(t(), m().view.target) ? "Target branch" : "Merge into", m().view.target, true], ...uncommitted(), ["Conflicts", t().merge && t().conflict !== "none" ? conflictLine(t().merge!) : "None"]]} />
@@ -179,11 +186,11 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
     </Show>
     <Show when={m().workers.length > 0}>
       <div class="ins-sec"><div class="ins-h"><span>Workers</span><span>{workersOutcome(m().workers, m().active.length)}</span></div>
-        <For each={m().workers}>{w => { const f = () => workerFace(w.status); return <A class="wins ws-wins" to={{ name: "task", machine: m().view.machine.id, task: m().view.id, tab: "workers", worker: w.id }}><I n={f().icon} s={14} class={`${f().spin ? "spin " : ""}${f().tone === "st-idle" ? "faint" : f().tone}`} /><span class="trunc">{w.role}</span><span class={`st ${f().tone}`}>{f().label}</span></A>; }}</For>
+        <Keyed each={m().workers} by={w => w.id}>{w => { const f = () => workerFace(w().status); return <A class="wins ws-wins" to={{ name: "task", machine: m().view.machine.id, task: m().view.id, tab: "workers", worker: w().id }}><I n={f().icon} s={14} class={`${f().spin ? "spin " : ""}${f().tone === "st-idle" ? "faint" : f().tone}`} /><span class="trunc">{w().role}</span><span class={`st ${f().tone}`}>{f().label}</span></A>; }}</Keyed>
       </div>
     </Show>
     <div class="ins-sec"><div class="ins-h"><span>Route and access</span></div>
-      <Kv rows={[["Model", ws.route(settings()) ?? ""], ...(ws.store.state().options.modes.length ? [["Access", modeLabel(settings().mode)] as [string, string]] : []), ...(ws.store.state().options.languages.length ? [["Language", languageLabel(settings().language)] as [string, string]] : [])]} />
+      <Kv rows={[["Coordinator model", ws.route(settings()) ?? ""], ...(ws.store.state().options.modes.length ? [["Access", modeLabel(settings().mode)] as [string, string]] : []), ...(ws.store.state().options.languages.length ? [["Language", languageLabel(settings().language)] as [string, string]] : [])]} />
       <Show when={usesMachineRoute(m()) && ws.route(settings())}><div class="cap faint">What this machine sets for every task.</div></Show></div>
     <Show when={usage().length > 0}>
       <div class="ins-sec"><div class="ins-h"><span>Usage</span></div><Kv rows={usage()} /></div>
@@ -226,7 +233,9 @@ export function CloseDialog(props: { taskId: string | null; onClose: () => void 
   const ws = useWs();
   const [choice, setChoice] = createSignal<"as_is" | "cancel">("as_is");
   const m = createMemo(() => props.taskId ? sessionModel(ws.store.index(), props.taskId) : null);
-  createEffect(() => { if (props.taskId) setChoice("as_is"); });
+  // A memo of the id: a refresh that replaces the task record must not reset the owner's choice.
+  const openedTask = createMemo(() => props.taskId);
+  createEffect(on(openedTask, id => { if (id) setChoice("as_is"); }));
   const paused = () => m()?.mode === "paused";
   const close = () => {
     const id = props.taskId!;
@@ -236,7 +245,7 @@ export function CloseDialog(props: { taskId: string | null; onClose: () => void 
     <Show when={m()}>{model => <>
       <div class="dlg-h"><h2>Close “{model().view.task.title}”?</h2><button class="ib" aria-label="Keep working" onClick={() => props.onClose()}><I n="x" /></button></div>
       <div class="dlg-b">
-        <ul class="conseq"><For each={closeConsequences(model())}>{l => <li><I n={l.icon} s={14} /><span>{l.text}</span></li>}</For></ul>
+        <ul class="conseq"><Keyed each={closeConsequences(model())} by={l => `${l.icon}:${l.text}`}>{l => <li><I n={l().icon} s={14} /><span>{l().text}</span></li>}</Keyed></ul>
         <div style={{ display: "grid", gap: "6px" }}>
           <label class="rc"><input type="radio" name="close-choice" checked={choice() === "as_is"} onChange={() => setChoice("as_is")} /><span><span class="t">Close as is</span><span class="d">{checkedResult(model()) ? "Keep what was done. The checked result and its evidence stay on record, and the task moves to Done." : "Keep what was done and decide about merging later. The result carries a lasting Not verified warning."}</span></span></label>
           <label class="rc danger"><input type="radio" name="close-choice" checked={choice() === "cancel"} onChange={() => setChoice("cancel")} /><span><span class="t">Cancel task</span><span class="d">Nothing from this task is needed. The task moves to Done as Cancelled. The checkout stays until you delete it.</span></span></label>
@@ -245,7 +254,7 @@ export function CloseDialog(props: { taskId: string | null; onClose: () => void 
           <div class="note-box plain"><I n="pause" s={14} /><span>Only want to pause? This task is already stopped, and Resume picks it up again.</span></div>
         </Show>
       </div>
-      <ActionBar place="dialog" hint="Deleting unmerged work is a separate question at archive time.">
+      <ActionBar place="dialog" hint="Closing keeps the work. Deleting it is a separate, explicit step in the Archive.">
         <button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>{paused() ? "Keep it paused" : "Keep working"}</button>
         <Show when={choice() === "as_is"} fallback={<button class="btn btn-danger btn-lg" onClick={close}>Cancel task</button>}><button class="btn btn-primary btn-lg" onClick={close}>Close task</button></Show>
       </ActionBar>

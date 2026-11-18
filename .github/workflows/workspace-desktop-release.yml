@@ -1,5 +1,5 @@
 {
-  "name": "Workspace desktop release",
+  "name": "Workspace release",
   "on": {
     "workflow_dispatch": {}
   },
@@ -61,8 +61,72 @@
         "PACKAGE": "${{ github.ref == 'refs/heads/main' && 'cortex-workspace' || 'cortex-workspace-dev' }}"
       }
     },
+    "android": {
+      "if": "github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')",
+      "runs-on": "ubuntu-24.04",
+      "timeout-minutes": 60,
+      "permissions": {
+        "contents": "read"
+      },
+      "steps": [
+        {
+          "uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+          "with": {
+            "ref": "${{ github.sha }}",
+            "persist-credentials": false
+          }
+        },
+        {
+          "uses": "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1",
+          "with": {
+            "node-version": "24"
+          }
+        },
+        {
+          "name": "Install the pinned Rust toolchain with the Android target",
+          "run": "rustup show active-toolchain\nrustup target add aarch64-linux-android"
+        },
+        {
+          "name": "Restore the signing keystore (fail closed without it)",
+          "env": {
+            "ANDROID_KEYSTORE_BASE64": "${{ secrets.ANDROID_KEYSTORE_BASE64 }}",
+            "ANDROID_KEYSTORE_PASSWORD": "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}"
+          },
+          "run": "[ -n \"$ANDROID_KEYSTORE_BASE64\" ] && [ -n \"$ANDROID_KEYSTORE_PASSWORD\" ] || { echo \"Android signing secrets are not set: ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD (and optionally ANDROID_KEY_ALIAS). Create the keystore with scripts/build-android-apk.sh --init-signing.\" >&2; exit 1; }\numask 077\nprintf \"%s\" \"$ANDROID_KEYSTORE_BASE64\" | base64 -d > \"$RUNNER_TEMP/release.jks\"\n[ -s \"$RUNNER_TEMP/release.jks\" ]"
+        },
+        {
+          "name": "Build and sign the APK for the selected channel",
+          "env": {
+            "CORTEX_ANDROID_KEYSTORE_PASSWORD": "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}",
+            "CORTEX_ANDROID_KEY_ALIAS": "${{ secrets.ANDROID_KEY_ALIAS || cortex-workspace }}"
+          },
+          "run": "case \"$GITHUB_REF\" in\n  refs/heads/main) channel_flag=--release ;;\n  refs/heads/dev) channel_flag= ;;\n  *) exit 1 ;;\nesac\n[ -n \"${JAVA_HOME_17_X64:-}\" ] || { echo \"JDK 17 is not available on this runner\" >&2; exit 1; }\nexport JAVA_HOME=\"$JAVA_HOME_17_X64\"\nexport NDK_HOME=\"${ANDROID_NDK_LATEST_HOME:-}\"\nexport CORTEX_ANDROID_KEYSTORE=\"$RUNNER_TEMP/release.jks\"\nscripts/build-android-apk.sh $channel_flag"
+        },
+        {
+          "name": "Remove the keystore",
+          "if": "always()",
+          "run": "rm -f \"$RUNNER_TEMP/release.jks\""
+        },
+        {
+          "name": "Gather the APK",
+          "run": "mkdir android-artifacts\ncp .workspace-build/android/*.apk .workspace-build/android/*.apk.sha256 android-artifacts/\nset -- android-artifacts/*.apk\n[ \"$#\" -eq 1 ]\n(cd android-artifacts && sha256sum -c ./*.sha256)"
+        },
+        {
+          "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+          "with": {
+            "name": "workspace-android-release",
+            "path": "android-artifacts/",
+            "if-no-files-found": "error",
+            "retention-days": 14
+          }
+        }
+      ]
+    },
     "publish": {
-      "needs": "build",
+      "needs": [
+        "build",
+        "android"
+      ],
       "if": "github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev')",
       "runs-on": "ubuntu-24.04",
       "timeout-minutes": 10,
@@ -75,6 +139,13 @@
           "with": {
             "name": "workspace-desktop-release",
             "path": "release-artifacts"
+          }
+        },
+        {
+          "uses": "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+          "with": {
+            "name": "workspace-android-release",
+            "path": "android-artifacts"
           }
         },
         {
@@ -94,7 +165,7 @@
             "VERSION": "${{ needs.build.outputs.version }}",
             "GH_REPO": "${{ github.repository }}"
           },
-          "run": "case \"$GITHUB_REF\" in\n  refs/heads/main)\n    title=\"Cortex Workspace $VERSION\"\n    notes=\"Ubuntu desktop package. Installation and service activation are explicit owner actions.\"\n    flags=(--latest)\n    ;;\n  refs/heads/dev)\n    title=\"Cortex Workspace Dev $VERSION\"\n    notes=\"Development build. Install the dev .deb manually; dev has no in-app updates.\"\n    flags=(--prerelease --latest=false)\n    ;;\n  *) exit 1 ;;\nesac\ngh release create \"$TAG_PREFIX$VERSION\" release-artifacts/*.deb release-artifacts/*.deb.sha256 \\\n  --target \"$GITHUB_SHA\" --title \"$title\" --notes \"$notes\" \"${flags[@]}\""
+          "run": "case \"$GITHUB_REF\" in\n  refs/heads/main)\n    title=\"Cortex Workspace $VERSION\"\n    notes=\"Ubuntu desktop package and Android APK. Installation and service activation are explicit owner actions. The phone app connects only to machines paired from the desktop.\"\n    flags=(--latest)\n    ;;\n  refs/heads/dev)\n    title=\"Cortex Workspace Dev $VERSION\"\n    notes=\"Development build. Install the dev .deb and the dev APK manually; dev has no in-app updates.\"\n    flags=(--prerelease --latest=false)\n    ;;\n  *) exit 1 ;;\nesac\ngh release create \"$TAG_PREFIX$VERSION\" release-artifacts/*.deb release-artifacts/*.deb.sha256 \\\n  android-artifacts/*.apk android-artifacts/*.apk.sha256 \\\n  --target \"$GITHUB_SHA\" --title \"$title\" --notes \"$notes\" \"${flags[@]}\""
         }
       ],
       "env": {

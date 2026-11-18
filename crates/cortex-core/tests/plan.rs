@@ -168,9 +168,17 @@ fn a_plan_whose_verification_checks_nothing_is_refused() {
     ] {
         let mut p = base.clone();
         p["verification"] = json!([argv]);
-        assert_eq!(plan::validate(&p).unwrap_err().code(), "verification_trivial_command", "{argv}");
+        assert_eq!(
+            plan::validate(&p).unwrap_err().code(),
+            "verification_trivial_command",
+            "{argv}"
+        );
         // One real command does not excuse another that checks nothing.
         p["verification"] = json!([["cargo", "test"], argv]);
-        assert_eq!(plan::validate(&p).unwrap_err().code(), "verification_trivial_command", "{argv}");
+        assert_eq!(
+            plan::validate(&p).unwrap_err().code(),
+            "verification_trivial_command",
+            "{argv}"
+        );
     }
 }

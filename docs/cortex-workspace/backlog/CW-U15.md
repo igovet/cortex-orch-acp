@@ -1,6 +1,6 @@
 # CW-U15: Machine dictation service
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies; speech provider is an open decision · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: a local on-device dictation worker (sherpa-onnx, Russian) with a streaming read protocol; no OpenAI-compatible provider is confirmed in code ([maintenance and controls](../maintenance-and-controls.md)) · **Phase:** 3+ · **Size:** L
 
 ## Goal
 

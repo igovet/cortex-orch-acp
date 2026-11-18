@@ -1,6 +1,6 @@
 # CW-G01: Git read projection through git2-rs
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Partly implemented: Git status, diff and history are read through the `git` CLI, not `git2-rs` ([IDE and Git](../ide-and-git.md)); no-paid checks only · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Provide the status, diff, log and blame projections for the registered worktree, in process through git2-rs. This replaces per-call Git CLI spawns on read paths. The reported worktree identity must equal the path the runtime reports.

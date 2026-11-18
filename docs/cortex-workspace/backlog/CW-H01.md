@@ -1,6 +1,6 @@
 # CW-H01: Single machine-service instance and ACP child ownership independent of UI
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: one machine service per user owns the project and ACP children and keeps running when the window closes ([architecture](../architecture.md)); the different-OS-user connection is not verified · **Phase:** 3+ · **Size:** L
 
 ## Goal
 

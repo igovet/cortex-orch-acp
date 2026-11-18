@@ -37,7 +37,7 @@ function fold(run: Steps): Dated | null {
  * call is several. Text joins back into the message it was, tool events fold into one line per turn, and a machine identifier
  * or a display update is never shown. Nothing here invents an event: every entry comes from the rows it replaces.
  */
-export function conversationOf(rows: FeedRow[], known: { description: string; answers: string[] }): Dated[] {
+export function conversationOf(rows: FeedRow[], known: { description: string; answers: string[]; partial?: boolean }): Dated[] {
   // Split ACP updates have one call id. Merge fields without losing the initial input.
   const calls = new Map<string, FeedRow>(), ordered: FeedRow[] = [];
   for (const row of rows) {
@@ -52,15 +52,20 @@ export function conversationOf(rows: FeedRow[], known: { description: string; an
   }
   const out: Dated[] = [], answers = [...known.answers];
   let text: { row: FeedRow; parts: string[] } | null = null, steps: Steps | null = null;
+  // With only the latest part of the conversation read (`partial`), its first message or turn of steps may have begun among
+  // the rows not read: its text would read cut at its start and its fold would count only part of that work. It is left out
+  // until the rows before it are read. An owner's message or an unreadable row ends that first part.
+  let leading = known.partial === true;
   const endText = () => {
-    if (text) { const body = text.parts.join("").trim(); if (body) out.push({ at: text.row.recordedAt ?? "", entry: { id: `history:${text.row.historyId}:${text.row.revision}`, kind: "cortex", text: body } }); }
+    if (text && leading) leading = false;
+    else if (text) { const body = text.parts.join("").trim(); if (body) out.push({ at: text.row.recordedAt ?? "", entry: { id: `history:${text.row.historyId}:${text.row.revision}`, kind: "cortex", text: body } }); }
     text = null;
   };
-  const endSteps = () => { if (steps) { const entry = fold(steps); if (entry) out.push(entry); } steps = null; };
+  const endSteps = () => { if (steps && leading) leading = false; else if (steps) { const entry = fold(steps); if (entry) out.push(entry); } steps = null; };
   for (const row of ordered) {
     const body = row.text ?? "";
     if (row.kind === "user" && row.text != null) {
-      endText(); endSteps();
+      endText(); endSteps(); leading = false;
       const said = body.trim(), answered = answers.indexOf(said);
       // The task's own description heads the page, and an answer reads with its question.
       if (answered >= 0) answers.splice(answered, 1);
@@ -81,7 +86,7 @@ export function conversationOf(rows: FeedRow[], known: { description: string; an
       endSteps();
       (text ??= { row, parts: [] }).parts.push(body);
     } else {
-      endText(); endSteps();
+      endText(); endSteps(); leading = false;
       out.push({ at: row.recordedAt ?? "", entry: { id: `history:${row.historyId}:${row.revision}`, kind: "line", icon: "help", text: "Part of this conversation could not be read", at: null, rule: false } });
     }
   }

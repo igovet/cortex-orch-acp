@@ -4,6 +4,7 @@ import { AttachChips, createAttachments, createDictation, MessageComposer } from
 import { useWs } from "./ctx";
 import { createUnsent } from "./freshness";
 import { highlight } from "./highlight";
+import { Keyed } from "./kit";
 import { ResultText } from "./result-text";
 import { partialDiff, splitRows, withoutSpace } from "./review-model";
 
@@ -14,8 +15,10 @@ export const Counts = (props: { add: number; del: number }) => <span class="tnum
 export const STATUS_WORD: Record<string, string> = { M: "Modified", A: "Added", D: "Deleted", U: "Untracked", C: "Conflict" };
 export const GitLetter = (props: { status: string }) => <span class={`gs gs-${props.status.toLowerCase()}`}>{props.status}</span>;
 
-function CommentForm(props: { value: string; files?: AttachmentInput[]; onSave: (text: string, attachments: AttachmentInput[]) => void; onCancel: () => void }) {
-  const [text, setText] = createSignal(props.value);
+/** `draft` and `onDraft` keep what is being written outside the form, so a line redrawn by a background read gives it back. */
+function CommentForm(props: { value: string; files?: AttachmentInput[]; draft?: string; onDraft?: (text: string) => void; onSave: (text: string, attachments: AttachmentInput[]) => void; onCancel: () => void }) {
+  const [text, setTextNow] = createSignal(props.draft ?? props.value);
+  const setText = (value: string) => { setTextNow(value); props.onDraft?.(value); };
   const files = createAttachments(), mic = createDictation();
   files.set(props.files ?? []);
   createUnsent(() => text().trim() !== props.value.trim());
@@ -43,16 +46,18 @@ const lineOf = (l: DiffLine) => l.new ?? l.old!;
 export function Diff(props: { file: FileDiff; layout: "unified" | "split"; hideSpace?: boolean; actions?: HunkActions; taskId?: string; comments?: ReviewComment[] }) {
   const ws = useWs();
   const [adding, setAdding] = createSignal<number | null>(null);
+  // The new comment being written, by line: a line rebuilt when a background read changes this file keeps its words.
+  const drafts = new Map<number, string>();
   const hunks = createMemo(() => props.hideSpace ? props.file.hunks.map(withoutSpace) : props.file.hunks);
   const at = (line: number) => (props.comments ?? []).filter(c => c.line === line);
   const head = (h: DiffHunk, i: number) => <div class="dl hunk"><span>{h.header}</span>
     <Show when={props.actions}>{a => <span class="hact">
       <button class="btn btn-sm" aria-disabled={a().reason ? "true" : undefined} data-why={a().reason} aria-pressed={a().staged(i)} onClick={() => { if (!a().reason) a().stage(i); }}>{a().staged(i) ? "Unstage hunk" : "Stage hunk"}</button>
       <button class="btn btn-sm" aria-disabled={a().reason ? "true" : undefined} data-why={a().reason} onClick={() => { if (!a().reason) a().revert(i); }}>Revert hunk</button></span>}</Show></div>;
-  const save = (text: string, attachments: AttachmentInput[], line: number) => { if (props.taskId) ws.ok({ type: "add_comment", taskId: props.taskId, path: props.file.path, line, text, attachments }, () => { setAdding(null); }); };
+  const save = (text: string, attachments: AttachmentInput[], line: number) => { if (props.taskId) ws.ok({ type: "add_comment", taskId: props.taskId, path: props.file.path, line, text, attachments }, () => { drafts.delete(line); setAdding(null); }); };
   const below = (l: DiffLine) => <Show when={props.taskId}>
-    <For each={at(lineOf(l))}>{c => <Comment taskId={props.taskId!} c={c} />}</For>
-    <Show when={adding() === lineOf(l)}><CommentForm value="" onCancel={() => setAdding(null)} onSave={(text, attachments) => save(text, attachments, lineOf(l))} /></Show>
+    <Keyed each={at(lineOf(l))} by={c => c.id}>{c => <Comment taskId={props.taskId!} c={c()} />}</Keyed>
+    <Show when={adding() === lineOf(l)}><CommentForm value="" draft={drafts.get(lineOf(l))} onDraft={text => drafts.set(lineOf(l), text)} onCancel={() => { drafts.delete(lineOf(l)); setAdding(null); }} onSave={(text, attachments) => save(text, attachments, lineOf(l))} /></Show>
   </Show>;
   const mark = (l: DiffLine) => l.kind === "add" ? "+" : l.kind === "del" ? "−" : "";
   return <>

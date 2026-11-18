@@ -11,12 +11,14 @@ use serde_json::{json, Value};
 pub mod completion;
 pub mod domain;
 pub mod plan;
-pub mod progress;
 mod probe_correction;
+pub mod progress;
 pub mod reconciliation;
 pub mod review;
 pub mod runtime;
 pub mod skill_proposals;
+pub mod steering;
+pub mod stop_notice;
 pub mod waits;
 pub mod worker_checks;
 

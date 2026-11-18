@@ -2,7 +2,7 @@ import { render } from "solid-js/web";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { emptyWorkspace, LOCAL_MACHINE_ID, type GitFile, type ProjectRepo } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
-import { createRealPort, FACTS_POLL_MAX_MS } from "../src/port/real";
+import { createRealPort, FOCUS_STALE_MS, GIT_VISIBLE_REFRESH_MS } from "../src/port/real";
 import { capabilitiesWire, scriptedTransport } from "./support";
 
 let dispose = () => {};
@@ -11,7 +11,7 @@ afterEach(() => { dispose(); document.body.innerHTML = ""; vi.useRealTimers(); }
 const settled = () => vi.advanceTimersByTimeAsync(0);
 const HOME = `/m/${LOCAL_MACHINE_ID}`, GIT = `${HOME}/p/p/git`;
 
-it("refreshes cached Git on open, parked-tab return, focus and periodic reads without a manual action", async () => {
+it("refreshes cached Git on open, parked-tab return, return to the window and periodic reads while on view, without a manual action", async () => {
   const repo: ProjectRepo & { openBranch: string; defaultBranch: string } = {
     projectId: "p", remote: "", tree: [], sources: {}, commits: [], branches: [], fetchedAt: null,
     openBranch: "main", defaultBranch: "main",
@@ -68,14 +68,18 @@ it("refreshes cached Git on open, parked-tab return, focus and periodic reads wi
   expect(shown()).toContain("external.txt");
 
   files.push(add("focus.txt"));
+  // Back to the window after a while in another one: Git is read again. Nothing is read while away.
+  window.dispatchEvent(new Event("blur"));
+  await vi.advanceTimersByTimeAsync(FOCUS_STALE_MS);
+  expect(reads).toBe(3);
   window.dispatchEvent(new Event("focus")); await settled();
   expect(reads).toBe(4);
   finish!(fresh()); await settled();
   expect(shown()).toContain("focus.txt");
 
   files.push(add("periodic.txt"));
-  // Periodic reads use the same single-flight snapshot and publish its eventual reply.
-  await vi.advanceTimersByTimeAsync(FACTS_POLL_MAX_MS);
+  // While the Git page is on view and the window focused, periodic reads use the same single-flight snapshot and publish its eventual reply.
+  await vi.advanceTimersByTimeAsync(GIT_VISIBLE_REFRESH_MS);
   expect(reads).toBeGreaterThan(4);
   const pendingReads = reads;
   finish!(fresh()); await settled();

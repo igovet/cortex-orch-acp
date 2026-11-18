@@ -1,14 +1,16 @@
-import { createMemo, createSignal, For, Show, type JSX } from "solid-js";
-import type { Attachment } from "@cortex/workspace-domain";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, type JSX } from "solid-js";
+import { capabilityOf, type Attachment } from "@cortex/workspace-domain";
 import { attachmentPreview } from "./attachments";
 import { autoGrow } from "./autogrow";
 import { EditTask } from "./task-edit";
+import { CommitDialog } from "./git-actions";
 import { createAttachments, createDictation, MessageComposer } from "./composer";
 import { useWs } from "./ctx";
 import { I, MenuItem, Modal, Pop, useWantOverview } from "./kit";
 import { ActionBar, Row, Whole } from "./layout";
 import { behindTarget, checksLine, conflictFacts, fileName, needsOverride, openChecks, repoOf, targetOptions, taskCheckout, worktreeWork } from "./review-model";
 import { clock, sameBranch } from "./selectors";
+import { same as sameData } from "./stable";
 import { acceptBlocked } from "./review-model";
 import { CHECK_ICON } from "./worker";
 
@@ -20,6 +22,7 @@ export type WsDialog =
   | { kind: "merge"; taskId: string; how: "squash" | "pr" }
   | { kind: "delete"; checkoutId: string }
   | { kind: "push"; checkoutId: string }
+  | { kind: "commit"; checkoutId: string; taskId?: string }
   | { kind: "revert"; checkoutId: string; path: string; hunk?: number }
   | { kind: "revert-commit"; checkoutId: string; sha: string; message: string }
   | { kind: "amend"; checkoutId: string; message: string; pushed: boolean }
@@ -30,7 +33,6 @@ export type WsDialog =
   /** A description of work, written in the shared composer: the plane creates the task, nothing starts it. */
   | { kind: "describe"; title: string; label: string; placeholder: string; effect: string; send: string; optional?: boolean; settings: Parameters<ReturnType<typeof useWs>["route"]>[0]; go: (text: string) => boolean | Promise<boolean> }
   | { kind: "add-machine" } | { kind: "add-project" } | { kind: "add-connection" } | { kind: "clear-old" }
-  | { kind: "unmerged"; taskId: string }
   | { kind: "attachment"; file: Attachment };
 type Of<K extends WsDialog["kind"]> = Extract<WsDialog, { kind: K }>;
 
@@ -48,6 +50,7 @@ function Accept(props: { d: Of<"accept">; onClose: () => void }) {
     <Head title={`Accept v${r().version} with open checks?`} close="Keep reviewing" onClose={props.onClose} />
     <div class="dlg-b">
       <div class="lab">{checksLine(r().checks)}</div>
+      <Show when={r().checks.length > 0 && openChecks(r().checks).length === 0}><div class="cap muted">A worker's own check was not run for a recorded technical reason, such as a paid or forbidden step. The result lists it under what was not verified.</div></Show>
       <Show when={r().checks.length > 0} fallback={<div class="cap muted">No checks were reported for this version.</div>}>
         <div class="pre ws-rows"><For each={openChecks(r().checks)}>{c => <Row lead={<I n={CHECK_ICON[c.outcome].icon} s={14} class={CHECK_ICON[c.outcome].tone} />} title={c.name} detail={<>{c.detail ? `${c.detail} ` : ""}Technical blocker: {c.technicalReason}</>} />}</For></div>
       </Show>
@@ -74,7 +77,8 @@ function Changes(props: { d: Of<"changes">; onClose: () => void }) {
   return <>
     <Head title={`Request changes to v${view().task.result?.version ?? ""}`} close="Cancel" onClose={props.onClose} />
     <div class="dlg-b">
-      <MessageComposer class="mc-inline" label="What should change" placeholder="Say what should change…" text={text()} onText={setText} files={files} mic={mic} autofocus
+      <MessageComposer class="mc-inline" label="What should change" placeholder="Say what should change. Tag @files or use /skills." text={text()} onText={setText} files={files} mic={mic} autofocus
+        suggest={{ projectId: view().task.projectId, taskId: props.d.taskId, skills: true }}
         effect="Sending reopens this task. Any acceptance of this version goes away." route={<TaskRoute settings={view().task.settings} />}
         send={{ label: "Send and reopen", needs: "request_changes", why: text().trim() ? files.busy() ? "Wait for the files to finish attaching" : undefined : "Say what should change", go: send }} />
     </div>
@@ -89,7 +93,11 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
   const t = () => view().task;
   const state = () => ws.store.state();
   const checkout = createMemo(() => taskCheckout(state(), t()));
+  // Equal choices stay the same objects, so an open target menu keeps its rows on a background read.
+  const targets = createMemo(() => targetOptions(state(), view()), undefined, { equals: sameData });
   const isWorktree = () => t().checkout.kind === "worktree";
+  // The target branches and the remote shown here are Git data: read once as the dialog opens, and kept current while it is open.
+  onCleanup(ws.store.interest(t().projectId, "git"));
   const remote = () => !!repoOf(state(), t().projectId)?.remote.trim();
   const [choice, setHow] = createSignal(props.d.how);
   // A pull request needs GitHub CLI, which the machine's overview reports. Until it has, the choice says it is being checked.
@@ -106,17 +114,35 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
   const [draft, setDraft] = createSignal(false);
   const target = () => view().target;
   const same = () => sameBranch(t(), target());
+  // The machine writes these texts from the task's real changes, in the background. Text the owner typed is never replaced.
+  const edited = new Set<"message" | "title" | "body">();
+  const [writer, setWriter] = createSignal<"writing" | "model" | "fallback" | null>(null);
+  const asked = new Set<string>();
+  createEffect(on(() => [same() ? "commit" as const : how(), target()] as const, ([method, branch]) => {
+    const key = `${method}:${branch}`;
+    if (asked.has(key)) return;
+    asked.add(key);
+    setWriter("writing");
+    void ws.store.draftIntegrationText({ taskId: t().id, method, targetBranch: branch, paths: method === "commit" ? t().integrationFacts?.pendingPaths : undefined, summary: t().result?.summary }).then(text => {
+      if (!text) { setWriter(null); return; }
+      if (text.message && !edited.has("message")) setMessage(text.message);
+      if (text.title && !edited.has("title")) setTitle(text.title);
+      if (text.body && !edited.has("body")) setBody(`${text.body}\n\nChecks: ${checksLine(t().result?.checks ?? [])}.`);
+      setWriter(text.source);
+    });
+  }));
+  const written = (fallback: string) => writer() === "writing" ? "Writing from the changes…" : writer() === "model" ? "Written from the changes, you can edit it" : writer() === "fallback" ? "Listed from the changed files, you can edit it" : fallback;
   const def = () => view().project.defaultBranch;
   const setTarget = (branch: string) => ws.run({ type: "set_target", taskId: t().id, branch: branch === def() ? null : branch });
   const behind = () => behindTarget(checkout(), target());
   const update = () => {
     ws.ok({ type: "update_from_target", taskId: t().id, now: ws.store.clock() }, () => { props.onClose(); ws.go({ name: "task", machine: view().machine.id, task: t().id, tab: "changes" }); });
   };
-  // An automatic task arrives here without an acceptance. Confirming records it for exactly this version first, then merges;
+  // A result without acceptance is accepted for exactly this version on confirmation, then merged;
   // a refused merge leaves the acceptance on record and the dialog open, and nothing is resent by itself.
   const pending = () => !t().acceptance;
   const [sure, setSure] = createSignal(false);
-  const overrides = () => pending() && needsOverride(t().result?.checks ?? []);
+  const overrides = () => pending() && (needsOverride(t().result?.checks ?? []) || t().reviewActions?.acknowledgeOpenChecks === true);
   const why = () => same() && !t().integrationFacts?.commitAvailable ? t().integrationFacts?.reason ?? "Refresh the task before committing." : pending() ? acceptBlocked(t()) ?? (overrides() && !sure() ? "Tick the box about the open checks first" : null) : null;
   // The target is the one part of the label that can be long, so only it shortens; the whole label stays the button's name.
   const label = () => same() ? `Confirm commit to ${target()}` : pending() ? `Accept v${t().result?.version} and ${how() === "squash" ? `merge into ${target()}` : "create PR"}` : how() === "squash" ? `Confirm merge into ${target()}` : ws.store.mode === "demo" ? "Push and create PR" : "Create PR (no push)";
@@ -157,7 +183,7 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
           <button class="pick wide mono" popovertarget="m-merge-target" aria-label={`Merge into ${target()}`}><I n="branch" s={14} class="faint" /><span class="l-whole">{target()}</span><I n="chevron-down" s={12} /></button>
           <Pop id="m-merge-target" class="pop-anchor" align="left" label="Merge into" style={{ width: "300px" }}>
             <div class="mi-h">Merge into</div>
-            <For each={targetOptions(state(), view())}>{o => <MenuItem label={<span class="mono">{o.name}</span>} sub={o.sub} check={o.name === target()} needs="set_target" onSelect={() => setTarget(o.name)} />}</For>
+            <For each={targets()}>{o => <MenuItem label={<span class="mono">{o.name}</span>} sub={o.sub} check={o.name === target()} needs="set_target" onSelect={() => setTarget(o.name)} />}</For>
             <div class="mi-sep"></div>
             <MenuItem label="Other branch…" onSelect={() => setOther("")} />
           </Pop>
@@ -172,12 +198,13 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
       </Show>
       <div class="pre">
         <Show when={!pending()} fallback={<div class="chk"><I n="eye" s={14} class="faint" /><span>Result v{t().result?.version} is accepted as your decision when you confirm</span><span class="src">Not accepted yet</span></div>}>
-          <div class="chk"><I n="check-circle" s={14} class={hasOpen() ? "st-warn" : "st-ok"} /><span>Result v{a()?.version} accepted by you{hasOpen() ? ", with open checks" : ""}</span><span class="src">{a()?.at != null ? clock(a()!.at!) : ""}</span></div>
+          <div class="chk"><I n="check-circle" s={14} class={hasOpen() ? "st-warn" : "st-ok"} /><span>Result v{a()?.version} accepted {a()?.automatic ? "automatically" : "by you"}{hasOpen() ? ", with open checks" : ""}</span><span class="src">{a()?.at != null ? clock(a()!.at!) : ""}</span></div>
         </Show>
         <Show when={!same()}>
         <Show when={behind() !== null} fallback={<div class="chk"><I n="help" s={14} class="faint" /><span>Not compared with <span class="mono">{target()}</span> yet</span></div>}>
           <div class="chk"><I n={behind() ? "alert" : "check-circle"} s={14} class={behind() ? "st-warn" : "st-ok"} /><span>{behind() ? <>Behind <span class="mono">{target()}</span> by {behind()} commit{behind() === 1 ? "" : "s"}</> : <>Up to date with <span class="mono">{target()}</span></>}</span>
-            <Show when={behind()}><span class="src"><button class="btn btn-line btn-sm ws-pre-btn" onClick={update}>Update from {target()}</button></span></Show></div>
+            {/* Only where the machine offers it: the native service has no such operation, and a control that always fails is not shown. */}
+            <Show when={behind() && ws.can(capabilityOf("update_from_target"))}><span class="src"><button class="btn btn-line btn-sm ws-pre-btn" onClick={update}>Update from {target()}</button></span></Show></div>
         </Show>
         <Show when={files() !== null} fallback={<div class="chk"><I n="help" s={14} class="faint" /><span>{ws.t("noCheckoutState")}</span></div>}>
           <div class="chk"><I n={files() ? "alert" : "check-circle"} s={14} class={files() ? "st-warn" : "st-ok"} /><span>{isWorktree() ? "Worktree" : "Project folder"} {files() ? `has ${files()} uncommitted file${files() === 1 ? "" : "s"}` : "is clean"}</span><span class="src">{files() ? (ws.store.mode === "demo" ? "Not part of this merge" : "Will be committed after confirmation") : "No uncommitted files"}</span></div>
@@ -187,12 +214,12 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
       </div>
       <Show when={overrides()}><label class="ck"><input type="checkbox" checked={sure()} onChange={e => setSure(e.currentTarget.checked)} /><span>I accept v{t().result?.version} knowing these checks did not pass<span class="hint ws-block">{checksLine(t().result?.checks ?? [])}. They stay on the record.</span></span></label></Show>
       <Show when={same() || how() === "squash"} fallback={<div class="ws-fields">
-        <label class="fld"><span class="lab">Title</span><input class="inp" value={title()} onInput={e => setTitle(e.currentTarget.value)} /></label>
-        <label class="fld"><span class="lab">Description <span class="faint">Generated from Result v{a()?.version}, with its checks</span></span><textarea class="inp" rows="3" ref={el => autoGrow(el, body)} value={body()} onInput={e => setBody(e.currentTarget.value)} /></label>
+        <label class="fld"><span class="lab">Title <span class="faint">{written("")}</span></span><input class="inp" value={title()} onInput={e => { edited.add("title"); setTitle(e.currentTarget.value); }} /></label>
+        <label class="fld"><span class="lab">Description <span class="faint">{written(`Generated from Result v${a()?.version}, with its checks`)}</span></span><textarea class="inp" rows="3" ref={el => autoGrow(el, body)} value={body()} onInput={e => { edited.add("body"); setBody(e.currentTarget.value); }} /></label>
         <label class="ck"><input type="checkbox" checked={draft()} onChange={e => setDraft(e.currentTarget.checked)} /><span>Open as a draft pull request</span></label>
       </div>}>
         <div class="ws-fields">
-          <label class="fld"><span class="lab">Commit message <span class="faint">Generated, you can edit it</span></span><textarea class="inp" rows="3" ref={el => autoGrow(el, message)} value={message()} onInput={e => setMessage(e.currentTarget.value)} /></label>
+          <label class="fld"><span class="lab">Commit message <span class="faint">{written("Generated, you can edit it")}</span></span><textarea class="inp" rows="3" ref={el => autoGrow(el, message)} value={message()} onInput={e => { edited.add("message"); setMessage(e.currentTarget.value); }} /></label>
           <Show when={isWorktree() && !same()}><label class="ck"><input type="checkbox" checked={drop()} onChange={e => setDrop(e.currentTarget.checked)} /><span>Delete the worktree after merging<span class="hint ws-block">Never removes unmerged or uncommitted work.</span></span></label></Show>
         </div>
       </Show>
@@ -219,11 +246,11 @@ function AttachmentView(props: { d: Of<"attachment">; onClose: () => void }) {
   return <>
     <Head title={props.d.file.name} close="Close" onClose={props.onClose} />
     <div class="dlg-b">
-      <Show when={preview()} fallback={<div class="cap muted">There is no preview for this kind of file. Save a copy to open it.</div>}>{src => <img class="ws-att-big" src={src()} alt={props.d.file.name} />}</Show>
+      <Show when={preview()} fallback={<div class="cap muted">{ws.store.canSaveAttachment() ? "There is no preview for this kind of file. Save a copy to open it." : "There is no preview for this kind of file."}</div>}>{src => <img class="ws-att-big" src={src()} alt={props.d.file.name} />}</Show>
       <Show when={saved()}><div class="cap muted" role="status">{saved()}</div></Show>
       <Show when={failure()}><div class="cap st-warn" role="alert">{failure()}</div></Show>
     </div>
-    <ActionBar place="dialog"><button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>Close</button><button class="btn btn-primary btn-lg" aria-disabled={saving() ? "true" : undefined} data-why={saving() ? "Saving this file" : undefined} onClick={() => void save()}>Save a copy</button></ActionBar>
+    <ActionBar place="dialog"><button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>Close</button><Show when={ws.store.canSaveAttachment()}><button class="btn btn-primary btn-lg" aria-disabled={saving() ? "true" : undefined} data-why={saving() ? "Saving this file" : undefined} onClick={() => void save()}>Save a copy</button></Show></ActionBar>
   </>;
 }
 
@@ -359,6 +386,7 @@ export function ReviewDialogs() {
     <Modal open={open("cortex")} onClose={close} label="Resolve automatically"><Show when={of("cortex")} keyed>{x => <AutoResolve d={x} onClose={close} />}</Show></Modal>
     <Modal open={open("delete")} onClose={close} label="Delete worktree"><Show when={of("delete")} keyed>{x => <DeleteWorktree d={x} onClose={close} />}</Show></Modal>
     <Modal open={open("branch")} onClose={close} label="Create a branch"><Show when={of("branch")} keyed>{x => <NewBranch d={x} onClose={close} />}</Show></Modal>
+    <Modal open={open("commit")} onClose={close} label="Commit"><Show when={of("commit")} keyed>{x => <CommitDialog checkoutId={x.checkoutId} taskId={x.taskId} onClose={close} />}</Show></Modal>
     <Modal open={open("push")} onClose={close} label="Push"><Show when={of("push")} keyed>{x => {
       const found = () => { for (const r of ws.store.state().repos) { const c = r.checkouts.find(k => k.id === x.checkoutId); if (c) return { remote: r.remote, branch: c.branch }; } return null; };
       return <Confirm title={`Push ${found()?.branch} to ${found()?.remote}?`} note={ws.t("pushNote")} action="Push" onClose={close} onGo={() => run({ type: "git_push", checkoutId: x.checkoutId, remote: found()!.remote, branch: found()!.branch, confirmed: true })} />;

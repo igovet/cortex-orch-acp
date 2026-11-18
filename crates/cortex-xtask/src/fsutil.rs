@@ -11,7 +11,8 @@ pub fn read_bytes(path: &Path) -> Res<Vec<u8>> {
 
 /// `Path.read_text()`: UTF-8 with universal newlines (`\r\n` and lone `\r` become `\n`).
 pub fn read_text(path: &Path) -> Res<String> {
-    let text = String::from_utf8(read_bytes(path)?).map_err(|_| format!("not UTF-8: {}", path.display()))?;
+    let text = String::from_utf8(read_bytes(path)?)
+        .map_err(|_| format!("not UTF-8: {}", path.display()))?;
     Ok(universal_newlines(&text))
 }
 
@@ -28,7 +29,8 @@ pub fn write_text(path: &Path, content: &str) -> Res<()> {
 
 pub fn write_bytes(path: &Path, content: &[u8]) -> Res<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
     fs::write(path, content).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
@@ -68,14 +70,26 @@ pub fn py_splitlines(text: &str) -> Vec<&str> {
         let (pos, c) = bytes[i];
         let is_break = matches!(
             c,
-            '\n' | '\r' | '\u{b}' | '\u{c}' | '\u{1c}' | '\u{1d}' | '\u{1e}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+            '\n' | '\r'
+                | '\u{b}'
+                | '\u{c}'
+                | '\u{1c}'
+                | '\u{1d}'
+                | '\u{1e}'
+                | '\u{85}'
+                | '\u{2028}'
+                | '\u{2029}'
         );
         if is_break {
             lines.push(&text[start..pos]);
             if c == '\r' && i + 1 < bytes.len() && bytes[i + 1].1 == '\n' {
                 i += 1;
             }
-            start = if i + 1 < bytes.len() { bytes[i + 1].0 } else { text.len() };
+            start = if i + 1 < bytes.len() {
+                bytes[i + 1].0
+            } else {
+                text.len()
+            };
         }
         i += 1;
     }
@@ -101,7 +115,8 @@ pub fn walk_files(root: &Path, excluded: &[&str]) -> Res<Vec<PathBuf>> {
             let path = entry.path();
             let meta = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            let points_to_dir = meta.file_type().is_symlink() && fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
+            let points_to_dir = meta.file_type().is_symlink()
+                && fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
             if meta.is_dir() {
                 if !excluded.contains(&name.as_str()) {
                     stack.push(path);
@@ -120,7 +135,10 @@ mod tests {
 
     #[test]
     fn splitlines_matches_python() {
-        assert_eq!(py_splitlines("a\nb\r\nc\rd\u{2028}e"), vec!["a", "b", "c", "d", "e"]);
+        assert_eq!(
+            py_splitlines("a\nb\r\nc\rd\u{2028}e"),
+            vec!["a", "b", "c", "d", "e"]
+        );
         assert_eq!(py_splitlines("a\n\nb\n"), vec!["a", "", "b"]);
         assert_eq!(py_splitlines(""), Vec::<&str>::new());
         assert_eq!(py_splitlines("\n"), vec![""]);

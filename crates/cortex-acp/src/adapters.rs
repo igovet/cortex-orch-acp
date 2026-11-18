@@ -552,7 +552,9 @@ mod tests {
         assert!(qualified("codex-acp", "2.6.0") && !qualified("codex-acp", "2.6.1"));
         assert!(qualified("claude-agent-acp", "0.97.0"));
         assert!(qualified("claude-agent-acp", "0.107.0"));
-        assert!(!qualified("claude-agent-acp", "0.107.1") && !qualified("claude-agent-acp", "0.107.2"));
+        assert!(
+            !qualified("claude-agent-acp", "0.107.1") && !qualified("claude-agent-acp", "0.107.2")
+        );
         assert!(!qualified("claude-agent-acp", "*"));
     }
 

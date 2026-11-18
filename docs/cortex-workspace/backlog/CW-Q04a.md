@@ -1,6 +1,6 @@
 # CW-Q04a: Ubuntu installer, service and file/RPC authorization checks
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: installer, user-service and real-input gates run in disposable containers ([platforms](../platforms.md)); the different-OS-user connection and a real host session are not verified · **Phase:** 3+ · **Size:** L
 
 Split from [CW-Q04](CW-Q04.md) for the Ubuntu platform.
 

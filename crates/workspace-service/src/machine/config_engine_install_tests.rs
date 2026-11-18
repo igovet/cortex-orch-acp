@@ -301,7 +301,10 @@ fn npm_is_killed_at_its_bound_and_leaves_staging_for_the_next_pass() {
         }
         taken
     });
-    assert!(free, "the install lock stayed held for 5 s after the failed install");
+    assert!(
+        free,
+        "the install lock stayed held for 5 s after the failed install"
+    );
     drop(lock);
     // An exhausted request must not launch even if the executable would succeed.
     fs::remove_file(base.join("npm-pid")).unwrap();

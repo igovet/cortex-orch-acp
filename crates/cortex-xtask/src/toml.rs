@@ -19,7 +19,9 @@ pub fn parse(text: &str) -> Res<Value> {
         }
         let at = |message: &str| format!("TOML line {}: {message}", number + 1);
         if let Some(header) = line.strip_prefix("[[") {
-            let name = header.strip_suffix("]]").ok_or_else(|| at("unterminated table header"))?;
+            let name = header
+                .strip_suffix("]]")
+                .ok_or_else(|| at("unterminated table header"))?;
             path = split_key(name).map_err(|e| at(&e))?;
             let table = descend(&mut root, &path[..path.len() - 1], true).map_err(|e| at(&e))?;
             let last = &path[path.len() - 1];
@@ -35,7 +37,9 @@ pub fn parse(text: &str) -> Res<Value> {
             continue;
         }
         if let Some(header) = line.strip_prefix('[') {
-            let name = header.strip_suffix(']').ok_or_else(|| at("unterminated table header"))?;
+            let name = header
+                .strip_suffix(']')
+                .ok_or_else(|| at("unterminated table header"))?;
             path = split_key(name).map_err(|e| at(&e))?;
             descend(&mut root, &path, true).map_err(|e| at(&e))?;
             continue;
@@ -237,7 +241,8 @@ fn value(text: &str) -> Res<(Value, &str)> {
             if let Some(tail) = rest.strip_prefix('}') {
                 return Ok((table, tail));
             }
-            let (key, tail) = split_assignment(rest).ok_or("expected key = value in inline table")?;
+            let (key, tail) =
+                split_assignment(rest).ok_or("expected key = value in inline table")?;
             let keys = split_key(key)?;
             let (item, tail) = value(tail)?;
             let target = descend(&mut table, &keys[..keys.len() - 1], true)?;
@@ -255,7 +260,10 @@ fn value(text: &str) -> Res<(Value, &str)> {
     match word {
         "true" => Ok((Value::Bool(true), rest)),
         "false" => Ok((Value::Bool(false), rest)),
-        w if !w.is_empty() && w.chars().all(|c| c.is_ascii_digit() || c == '_' || c == '-' || c == '+') => {
+        w if !w.is_empty()
+            && w.chars()
+                .all(|c| c.is_ascii_digit() || c == '_' || c == '-' || c == '+') =>
+        {
             Ok((Value::Num(w.replace('_', "")), rest))
         }
         _ => Err(format!("unsupported TOML value {word:?}")),
@@ -274,11 +282,44 @@ mod tests {
              [target.'cfg(unix)'.dependencies]\nq = \"=3.0.0\"\n[[package]]\nname = \"n\"\n[[package]]\nname = \"m\"\n",
         )
         .unwrap();
-        assert_eq!(doc.get("workspace").unwrap().get("members").unwrap().as_arr().unwrap().len(), 2);
-        assert_eq!(doc.get("dependencies").unwrap().get("y").unwrap().get("package").unwrap().as_str(), Some("z"));
-        assert_eq!(doc.get("dependencies").unwrap().get("w").unwrap().get("workspace"), Some(&Value::Bool(true)));
+        assert_eq!(
+            doc.get("workspace")
+                .unwrap()
+                .get("members")
+                .unwrap()
+                .as_arr()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            doc.get("dependencies")
+                .unwrap()
+                .get("y")
+                .unwrap()
+                .get("package")
+                .unwrap()
+                .as_str(),
+            Some("z")
+        );
+        assert_eq!(
+            doc.get("dependencies")
+                .unwrap()
+                .get("w")
+                .unwrap()
+                .get("workspace"),
+            Some(&Value::Bool(true))
+        );
         let target = doc.get("target").unwrap().get("cfg(unix)").unwrap();
-        assert_eq!(target.get("dependencies").unwrap().get("q").unwrap().as_str(), Some("=3.0.0"));
+        assert_eq!(
+            target
+                .get("dependencies")
+                .unwrap()
+                .get("q")
+                .unwrap()
+                .as_str(),
+            Some("=3.0.0")
+        );
         assert_eq!(doc.get("package").unwrap().as_arr().unwrap().len(), 2);
     }
 

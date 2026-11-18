@@ -636,7 +636,7 @@ frozen golden files described above.
 ## Known limits
 
 Audio, attachment-bearing queued messages, unconfigured client-supplied stdio
-MCP servers, the full worker-tool catalogue and confirmed `/cortex-clear`
+MCP servers and confirmed `/cortex-clear`
 deletion are not implemented. Native attachments remain unavailable on the
 native host (a documented limit). The native routing implementation below is
 tested against retained consent cases, but is not an installed-client gate.
@@ -644,6 +644,10 @@ Unsupported content refuses before task admission. Image and embedded-context
 capabilities describe initial prompt admission, not full legacy attachment or
 engine-capability coverage. A schema-valid exchange is not proof of smoke
 capability, rendered client behavior, live accounts or release readiness.
+
+Token usage is unavailable: the Rust runtime writes no `usage_records` rows (the
+table remains in the store schema and is only read and cleaned up), so per-task
+and per-attempt token counts are not recorded and readers of that table find none.
 
 ### Launch status
 
@@ -693,8 +697,15 @@ Busy sessions).
   `session/new` and `session/load` with `external_mcp_server_unconfigured` for
   such an entry, so a client that sends one cannot open a session. Forwarding
   them needs a containment and tool-grant policy for unconfigured executables.
-- The complete worker-tool surface of the former runtime is not implemented;
-  native workers receive the native catalogue only.
+- Every catalogued Cortex tool has a native handler. `read_diagnostics` is no
+  longer catalogued: the former runtime's diagnostics summary has no native
+  implementation. A worker's batched `ask_question` keeps each member's `topic`
+  in its wait record; the desktop decision and the incoming ACP batch question
+  form carry it. `read_report` and `list_reports` return the attachment
+  descriptors of the document's newest source revision as `source_attachments`,
+  as the former runtime did; only captured user input has a source revision, so
+  for an ordinary report or the pipeline the list is empty (captured attachments
+  are read with `list_sources`/`read_source`).
 - A confirmed `/cortex-clear` that would delete something refuses and writes
   nothing; dry-run previews work.
 - Native-contract differences that are not host limits and still await an
@@ -704,7 +715,7 @@ Busy sessions).
   no queueing behind background continuations; atomic question batches; the
   10 MiB per-task attachment total; tool-card shape; Codex per-model effort
   observation; less strict snapshot-envelope deserialization; replayed option
-  updates; steering that interrupts running workers.
+  updates.
 
 #### Accepted fail-closed limits
 
@@ -762,10 +773,17 @@ Busy sessions).
   recorded option updates. Writable legacy ownership/adoption, linked-worktree
   ingress and concurrent daemon ownership still require the explicit existing
   boundaries, not fallback.
-- Prompts/tools: unconfigured client stdio MCP and the complete worker-tool
-  surface of the former runtime are not implemented. A steering message
-  (including one sent after a held Paseo cancel) interrupts the task's running
-  workers and replans. Follow-up attachments are retained, but a task's
+- Prompts/tools: unconfigured client stdio MCP and the former
+  runtime's `read_diagnostics` summary are not implemented. As in the former runtime,
+  a steering message (including one sent after a held Paseo cancel, and a
+  `cortex_queued_message`) to a working task interrupts nothing: its workers,
+  review and verification keep running, and the coordinator receives the message
+  once at its next boundary; the prompt that carried it then follows the task
+  like any prompt. A worker's open question does not change that; a message to a task whose
+  coordinator waits for the owner, is held in
+  recovery or is paused still restarts its coordinator. A prompt sent while
+  another prompt of the session runs is handled as before (a typed answer to the
+  open question, else busy). Follow-up attachments are retained, but a task's
   attachments are capped at 10 MiB in total, and a batch member cannot be
   answered alone from a busy session. Confirmed `/cortex-clear` deletion
   refuses. A refused first prompt creates no task, so later commands on that
@@ -782,10 +800,10 @@ Busy sessions).
   content. Rust answers claude-agent-acp requests itself with an offered allow
   option for MCP tools, subagents, native questions and deletions (deletions are
   titled `Removal blocked pending confirmation: ...` and accept any offered allow
-  kind), but without an engine jail Guarded approves only reads, searches,
-  fetches and in-project unprotected edits and forwards other requests to the
-  client. Codex and OpenCode requests outside Auto are forwarded unchanged
-  (session id replaced) and accept only an offered `allow_once`/`reject_once`.
+  kind), but without an engine jail Guarded approves only in-project reads,
+  searches and unprotected edits and forwards other requests (including a web
+  fetch) to the client. Rust answers codex-acp requests the same way; OpenCode requests outside
+  Auto are forwarded unchanged (session id replaced) and accept only an offered `allow_once`/`reject_once`.
 - Qualification: the no-paid binary tests run without a paid engine, so they do
   not exercise live active-engine cancellation/settlement, permission cards,
   busy-session answers, follow-up attachments or full execution/review/completion
@@ -810,16 +828,27 @@ the existing session-default table and bind atomically with Start. Task changes
 are append-only native runtime events, with origin and revision; no storage
 format change or user-wide setting rewrite is involved.
 
-Every engine session confirms its observed mode after the model switch.
-Codex uses agent, Claude default and OpenCode cortex as the ordinary floor.
-An Auto worker chooses the most permissive actually offered mode from the
-retained engine-specific preference order; an unoffered or unconfirmed mode
-refuses startup and settles the owned process. Existing sessions are not silently
+Every engine session confirms its observed mode after the model switch. The
+mode follows the channel's capability, never the access mode: Claude always runs
+in `default`; Codex runs a read-only channel (coordinator, read-only profile or
+review-stage session) in `read-only` and a writing worker in `workspace-write`; OpenCode runs
+in `cortex`. No session gets `bypassPermissions` or `agent-full-access`. An
+unoffered mode refuses startup with `restricted_mode_unavailable`, an unconfirmed
+one refuses startup too, and both settle the owned process. Every Claude session
+also starts without native shell, edit, subagent, hook, plugin or
+owner-configured MCP tools (see
+[native engine tools](../../SECURITY.md#native-engine-tools)). Existing sessions are not silently
 reconfigured by a later access switch. Permission requests re-read access and
 recheck channel/session authority after consent; a concurrent mode change refuses
 the pending decision. Auto chooses an offered allow-once option, falling back
-to an offered standing allow option. Read-only channels cannot approve a
-non-read/search native request; Cortex gateway and attached external MCP tools
+to an offered standing allow option. Other native requests follow the access mode's
+decision table ([native engine tools](../../SECURITY.md#native-engine-tools)):
+Cortex private state is refused in every mode, Auto allows and records the rest,
+and Development and Guarded ask the owner for writes outside the project,
+credential and key material, Git control and engine/Cortex configuration writes
+and deletions (Guarded also for reads outside the project) with an `Owner
+decision: ...` card whose answer is recorded with the owner as decider. Read-only channels
+cannot approve a non-read/search native request; Cortex gateway and attached external MCP tools
 still pass because their own channel checks apply. See the
 [permission contract](../../SECURITY.md#current-acp-boundary-106).
 
@@ -840,8 +869,8 @@ Outside commands supervise their process group and cancel on authority loss.
 Their native output is bounded to 64 KiB; excess output reports incomplete and
 truncated, never a verified pass. They do not yet provide the retained runtime's
 large-output paging or worker passed-check receipt qualification. Ordinary
-command_run/project-file tools and the retained engine jail/adapter patches
-remain separate, unfinished native domains. Engine mode confirmation alone is
+command_run/project-file tools and the adapter patches remain separate native
+domains; no engine process is sandboxed. Engine mode confirmation alone is
 not filesystem containment, interception of unrequested native actions, or full
 permission-policy parity.
 
@@ -972,13 +1001,92 @@ Responses with advertised output schemas are validated before returning.
 
 Discovery returns complete effective schema records or bounded summary pages.
 Its cursor binds the principal, attempt, epoch and catalogue revision; it cannot
-discover a filtered-out tool. read_batch is not yet served; command/Git output is
+discover a filtered-out tool. read_batch runs its members through their own handlers; command/Git output is
 retained separately for read_large_output. Oversized authorized schema/catalogue
 JSON is retained whole with a deferred large_output_id, not clipped into a
 purported complete response.
-Nonempty redact_values also refuses until native user-input redaction exists.
+The document tools advertise no redact_values field: the former runtime's
+redaction of newly captured native user messages has no native capture path to
+apply to, so the field could never succeed and is not offered.
 Source-capture metadata reports not_attempted for these tools; prompt admission,
 not a tool read, is the existing native capture boundary.
+`read_report` without `report_id` and cursor starts at the newest beginning of
+the task's pipeline. The runtime publishes that pipeline itself (below); a task
+created before it did, which has not reached a new driver boundary since, still
+answers the `pipeline_missing` tool error, which points to `list_reports`.
+
+Each task has one runtime-owned `pipeline.md` (`<project>/.cortex/<task>/`,
+metadata in the store's `reports`/`editions` rows), published through the same
+journaled, hash-checked publication path as ordinary reports, newest edition
+first with older editions below a `---` separator. The native driver publishes
+it at its boundaries, for desktop and incoming ACP tasks alike: before each
+coordinator turn and at each step of the task loop
+(`cortex_core::pipeline::sync`, called from `native_runtime.rs`). The first
+edition is "Initial pipeline", the report template filled with the owner's
+request (first 3,600 characters) and the coordinator route; each later edition
+("Runtime <STATE>") is published when the plan revision, state, review cycle or
+number of open questions differs from the newest edition, and lists the
+original objective, each assignment's status, dependencies and report, open
+questions, a review waiver, runtime verification, synthesis and blocker. The
+edition is derived from durable state rather than written in the transition's
+transaction: a crash after a transition and before its edition is repaired at
+the next boundary, and deterministic request keys replay a half-finished
+publication instead of duplicating it. A state passed between two boundaries
+gets no edition of its own, as in the former runtime. The file is never
+trimmed; reads are by bounded cursor. A failed publication never blocks the
+task and is recorded as `PIPELINE_PUBLICATION_FAILED` with its code. Tasks
+created before this keep no back-filled history: their first edition is the one
+their next boundary publishes. `create_draft` does not offer the pipeline
+template; the store still refuses it (`runtime_owned_operation`).
+
+Worker results (`native_results.rs`): the runtime chooses the report template
+from the profile and stage (`cortex_core::assignment_brief::template_for`) and
+publishes an inline report under it. Before the payload binds its request key,
+and after an open question's wait refuses, `result_submit` checks that the
+required `##` sections of that structure are present; a missing one is the
+correctable `report_sections_missing` with `missing`, and after two such
+refusals in one attempt the report is accepted with `report_structure`
+`REPORT_STRUCTURE_INCOMPLETE` on the result, its `worker_result` event and its
+receipt. Only a report template's own guidance comment line is refused
+(`draft_guidance_remaining`). A review whose verdict is REQUEST_CHANGES, BLOCK or
+INCOMPLETE may cite an open failed check; only APPROVE cannot. A review whose
+project changed during review gets `review_project_revision_changed` (or
+`review_project_revision_unstable`, or `review_resubmit_required` for a refused
+key) as a correctable tool error with a hint to resubmit with a fresh key, after
+the re-binding is committed. The assignment brief, its delivery record and the
+language rule are described in
+[roles and delegation](../features/roles-and-delegation/index.md) and the
+[unified system prompt](../features/unified-system-prompt/index.md).
+
+Tool failures are reported by their stable code. Once the channel is
+authenticated, a handler failure is an `isError` result whose structured content
+holds `code`, the offending `field` when one is known and a short `hint` (for
+example `request_key_conflict`, `payload_conflict`, `gateway_write_conflict`,
+`invalid_scope`, `replan_limit_requires_user_input`, `pipeline_missing`), so the
+model can correct the call. Authority failures stay JSON-RPC `-32001` refusals
+whose message is `authority_refused: <code>` and whose `data` holds the same
+`code`, `retryable: false` and a hint: a channel that is no longer current, a tool
+not offered to the role or stage (`tool_not_offered`), a read-only role, an
+owner-protected path (`write_denied`) and a missing owner confirmation
+(`deletion_not_confirmed`, `outside_action_not_confirmed`,
+`skill_link_replace_not_confirmed`). `result_submit` keeps its own split: its
+correctable refusals are tool errors and the rest stay named refusals. Schema-invalid
+arguments are `-32602 invalid_arguments` with a pointer to the live schema.
+Enforcement is the same in every case; messages never carry another task's data,
+a path outside the project or a credential.
+
+Native handlers also serve `task_get_context` (coordinator; the bounded
+retained-state context, with a compact receipt for an unchanged repeat read),
+`read_capsule` (every channel, its own capsule only; `at_revision` bounds the
+captured `sources` section), `check_preflight` (the same program probe plan and
+verification admission use; never test evidence), and the writing-worker
+operations `project_mkdir`, `project_delete` and `project_skill_link`. Those three
+use `project_write`'s authority check (writing role and stage, no open question,
+owner deny-write paths, private storage) and `command_run`'s deletion consent:
+outside Auto the owner confirms every deletion and every replacement of a
+different skill link, and without a confirmation route nothing happens. A durable
+started receipt precedes each effect, and a refused confirmation is retained so
+an identical retry does not ask again.
 
 The model, effort and language slash commands use the same validation and
 configuration serialization as ACP selectors and publish config_option_update.
@@ -1353,7 +1461,16 @@ the recovery snapshot's source list carries each block's name, URI and MIME type
 as for re-resolution. An answer typed while a turn runs (`steer_busy`) keeps its
 attached images and resources: they are retained as the task's next source revision
 (`USER_ANSWER_ATTACHMENTS`, no steering and no interruption) and reach the engine in the
-prompt that delivers the answer; the answer itself is the typed text only. A failed admission can leave private,
+prompt that delivers the answer; the answer itself is the typed text only. A Workspace
+answer (`decisions.answer`) retains its files in the answer's own transaction; the
+`USER_ANSWER_ATTACHMENTS` event names, file by file, the question whose answer carried
+it, and `decisions.list` reports each answered question's own files as
+`answerAttachments` (`{name, mimeType, size, sha256}`). An older event without those
+names is shown only for a lone, non-batch question answered in the same transaction.
+An option answer's `text` is the option's label, optionally followed by a blank line
+and the owner's own words, and is recorded exactly so; the runtime's stop question and
+a skill proposal (`optionsOnly`) refuse added words (`option_comment_unavailable`), and
+a permission takes its option alone. A failed admission can leave private,
 unreferenced files; these are not successful input or permission evidence.
 Incoming client lines are bounded at 15 MiB; engine-side native NDJSON
 frames keep a 16 MiB budget. Inbound buffering is four frames.

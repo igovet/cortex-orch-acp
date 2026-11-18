@@ -1,0 +1,32 @@
+[package]
+name = "cortex-workspace-android"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Cortex Workspace phone shell: the shared interface over paired remote machines"
+
+[lib]
+name = "cortex_workspace_android"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.5.6", features = [] }
+
+[dependencies]
+workspace-client = { path = "../../../crates/workspace-client", features = ["remote"] }
+workspace-remote = { path = "../../../crates/workspace-remote" }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+tokio = { version = "=1.54.1", features = ["rt", "macros", "sync", "time"] }
+
+# The web view exists only in the Android build. Everything else in this crate (machine
+# selection, pairing and the state the interface reads) builds and is tested on the host.
+[target.'cfg(target_os = "android")'.dependencies]
+tauri = { version = "=2.10.1", features = [] }
+tauri-plugin-barcode-scanner = "=2.4.4"
+
+[dev-dependencies]
+workspace-service = { path = "../../../crates/workspace-service" }
+libc = "=0.2.191"
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "sync", "time"] }

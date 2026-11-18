@@ -21,12 +21,13 @@ export function OverviewShown(props: { children: JSX.Element; inline?: boolean }
   return <Show when={!wait()} fallback={props.inline ? <span class="cap muted" role="status">{wait()}</span> : <Loading text={wait()!} />}>{props.children}</Show>;
 }
 /**
- * Asks for the machine's overview (`wantOverview`) once the screen that shows its fields is on view and `visible` holds:
- * never for a kept-alive tab in the background or a hidden inspector, so nothing reads it merely because the app started.
+ * Asks for the machine's overview (`wantOverview`) while the screen that shows its fields is on view and `visible` holds:
+ * never for a kept-alive tab in the background or a hidden inspector, so nothing reads it merely because the app started,
+ * and nothing keeps rereading it once that screen is gone.
  */
 export function useWantOverview(visible: () => unknown = () => true) {
   const ws = useWs(), shown = useContext(ScreenActive);
-  createEffect(() => { if (shown() && visible()) ws.store.wantOverview(); });
+  createEffect(() => { if (!shown() || !visible()) return; const release = ws.store.wantOverview(); if (release) onCleanup(release); });
 }
 /** The words for machine details still on their way, or null once they are in. For a description that cannot hold a component. */
 export function useOverviewWait() {
@@ -133,7 +134,7 @@ export function Pop(props: { id: string; class?: string; align?: Align; label?: 
   onMount(() => { name(); el.addEventListener("beforetoggle", onBefore); el.addEventListener("toggle", onToggle); });
   return <div ref={r => { el = r; props.ref?.(r); }} popover="auto" id={props.id} class={props.class} style={props.style} role={props.role} aria-label={props.label}>{props.children}</div>;
 }
-export function MenuItem(props: { icon?: string; label: JSX.Element; sub?: string; keys?: string; check?: boolean; danger?: boolean; disabled?: string; needs?: WorkspaceCommand["type"]; onSelect?: () => void }) {
+export function MenuItem(props: { icon?: string; label: JSX.Element; sub?: string; keys?: string; count?: string; check?: boolean; danger?: boolean; disabled?: string; needs?: WorkspaceCommand["type"]; onSelect?: () => void }) {
   const ws = useWs();
   // Read through a memo: a conditional prop read in a click handler would otherwise build a computation with no owner.
   const disabled = createMemo(() => props.disabled ?? (props.needs ? ws.gate(props.needs) : undefined));
@@ -141,7 +142,8 @@ export function MenuItem(props: { icon?: string; label: JSX.Element; sub?: strin
     onClick={e => { const at = e.currentTarget; if (disabled()) return; closePop(at); props.onSelect?.(); }}>
     <Show when={props.icon}><I n={props.icon!} /></Show>
     <span class="grow">{props.label}<Show when={props.sub}><span class="sub">{props.sub}</span></Show><Show when={disabled()}>{why => <span class="sub">{why()}</span>}</Show></span>
-    <Show when={props.keys}><span class="kbd">{props.keys}</span></Show>
+    <Show when={props.keys && ws.keys(props.keys)}>{keys => <span class="kbd">{keys()}</span>}</Show>
+    <Show when={props.count}><span class="kbd">{props.count}</span></Show>
     <Show when={props.check}><I n="check" s={14} /></Show>
   </button>;
 }

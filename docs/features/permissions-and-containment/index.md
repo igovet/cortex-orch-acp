@@ -3,9 +3,10 @@
 > Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
-The runtime owns action authority. Each engine process runs in an OS jail that
-bounds its native tools; drafts, commands claimed as checks and external MCP calls
-go through a channel-bound gateway.
+The runtime owns action authority. Engine processes are not sandboxed; the engine
+session mode, its disabled native tools and the runtime's answer to each native
+permission request bound native tools (see [Native engines](#native-engines)); drafts,
+commands claimed as checks and external MCP calls go through a channel-bound gateway.
 A plan proposes scopes; it cannot grant privileges, choose a model or create a
 session. Coordinator and consultant are read-only. Reviewers cannot edit source.
 Database-architect and performance-engineer are read-only specialists too.
@@ -28,45 +29,114 @@ reads keep their existing behavior. No evaluator or new containment claim follow
 
 ## Native engines
 
-Every channel-bound engine process runs in the engine jail
-(`engine_jail`, Linux `bwrap`). The host is mounted read-only, except the host's real `/tmp`, which is
-explicitly writable for owner/process interoperability. `/run/user` remains
-visible inside the engine jail, including user-session sockets; it is not an
-isolation boundary. `/var/tmp` is instead a private, writable, per-run
-directory. `TMPDIR`/`TMP`/`TEMP` use private per-process scratch;
-Cortex keeps that scratch and its other temporary files under the host's
-`/var/tmp`, not in a RAM-backed `/tmp`. The private
-`/var/tmp` is mounted before the scratch, so the scratch stays visible inside the
-sandbox while the other Cortex scratch directories there stay hidden.
-The verified engine install the process launches from (Node binary, the
-adapter's `node_modules` tree, Codex's bundled binary and Cortex's private Codex
-adapter and launcher, `_jail_launch_inputs`) is mounted read-only
-over itself, so an owned engine root under `/var/tmp` (an `XDG_DATA_HOME` there)
-stays launchable instead of failing ACP `initialize`;
-HOME is the owner's real read-only home with selected writable caches. See
-[SECURITY.md](../../../SECURITY.md#tool-access-and-containment). The project is
-read-only for the coordinator, reviewers and read-only roles. Writing workers
-receive a whole-project writable mount; their declared scopes coordinate parallel
-work but do not restrict the gateway's project write paths.
-`.cortex` is hidden; the project's `.codex` and `.claude` are ordinary project
-paths, writable for a writing worker; `.git` is
-read-only except what git itself needs for a writing worker (see
-[Git and tool state](#git-and-tool-state)); HOME is read-only apart from its
-tool caches. The engine's own state directory stays writable except its session
-configuration (settings, hooks, instructions, skills, agents, commands, rules),
-which is read-only and created neutral when absent; installed plugins are hidden.
-The host's real `/tmp` and the engine state directory are intentionally
-writable surfaces; the project gateway does not mediate native writes there.
-This boundary, including visibility of `/run/user`, is an accepted owner
-decision, not a claim that those paths are permission-card protected.
-A revoked or expired channel terminates the process. Engines therefore keep their
-native tools, `AGENTS.md`/`CLAUDE.md` loading and skills. The one bounded
-exception is a worker channel revoked by acceptance of that attempt's own current
-(non-superseded) result: the 1 s authority watchdog
+No engine process runs in an OS jail: Claude Code, codex-acp and Codex App Server
+run as the owner with the launch environment's `HOME` and the connection's native
+directory, can read what the owner can read, and share the host network. What
+bounds a model's native tools is the engine session's mode and tool
+configuration, set in `crates/workspace-service/src/native_engine_policy.rs`, and
+the runtime's answer to each permission request the engine sends
+(`classify` in `crates/cortex-engine/src/permission.rs`). Project changes and
+commands are meant to go through the scoped Cortex tools (`command_run`,
+`project_write`, `project_edit`, `project_delete`, `outside_write`,
+`outside_command`), which check role, assignment, deny-write paths, deletion
+consent and protected targets and record receipts. See
+[SECURITY.md](../../../SECURITY.md#native-engine-tools).
 
-lets the in-flight turn end for at most 20 seconds, so its final token report can
-arrive, before it terminates the engine. The post-result settlement normally
-tears the engine down as soon as the turn ends and within 15 seconds (see
+**Engine session mode.** The mode depends on the channel's capability, never on
+the access mode, and no session gets `bypassPermissions` or `agent-full-access`:
+
+| Channel | Claude (claude-agent-acp) | Codex (codex-acp) | OpenCode |
+| --- | --- | --- | --- |
+| Coordinator, consultant, read-only profile, any review-stage session | `default` | `read-only` | `cortex` |
+| Writing worker (any access mode) | `default` | `workspace-write` | `cortex` |
+
+A read-only session whose adapter offers no such mode does not start; the
+`NATIVE_SESSION_START_FAILED` event records `restricted_mode_unavailable`. The
+chosen mode is recorded as `NATIVE_ACCESS_MODE_CONFIRMED`.
+
+**Claude.** Every Claude session Cortex starts (coordinator, workers, reviewers,
+sprint planning and short model texts) passes `session/new`
+`_meta.claudeCode.options`: `disallowedTools` removes native `Bash`,
+`BashOutput`, `KillShell`, `PowerShell`, `Edit`, `MultiEdit`, `Write`,
+`NotebookEdit`, `Skill`, the subagent, scheduling, worktree, plan-mode,
+task-stop and outward notification tools from the model's context;
+`allowDangerouslySkipPermissions: false` makes bypass unavailable;
+`strictMcpConfig: true` keeps only the MCP servers Cortex attaches (the `cortex`
+relay and the owner-registered external servers attached to that channel);
+`plugins` and `skills` are empty; hooks and auto-memory are off. Native `Read`,
+`Grep`, `Glob`, `WebFetch` and `WebSearch` remain. Claude Code reads and searches
+inside the project without asking; session deny rules keep `.cortex/**`,
+`.cortex-dev/**` and the dev state files out of those reads. Every other native
+request reaches the runtime.
+
+**Codex.** The native Codex launcher forces `shell_tool` and `view_image` off,
+with subagents, plugins, hooks and apps, verified with `codex features list`
+before App Server starts, and codex-acp's thread config carries the same
+switches, so Codex runs commands and reads images only through Cortex tools.
+Native `apply_patch` stays on (Codex has no supported switch for it); Codex has
+no native read tool. In `read-only` every `apply_patch` asks and is refused. In
+`workspace-write` (a sandbox whose writable root is the project, with approvals
+sent to Cortex rather than to Codex's automatic reviewer as in `agent`)
+`apply_patch` edits inside the project without asking, and every escalation it
+asks for (a write outside the writable root, an additional sandbox permission) is
+answered by the runtime. codex-acp offers no way to exclude a path from the
+writable root, so an in-project `apply_patch` into `.cortex`, `.cortex-dev`, a
+credential file or a Git control file gets no runtime decision and is not
+prevented. Codex's `unified_exec` feature stays listed as enabled: no supported
+switch of Codex CLI 0.166.0 changes it, and whether it offers an exec path while
+`shell_tool` is off is not established without a live check.
+
+**Runtime answers.** Cortex gateway and attached external MCP tools pass for
+every channel, because the gateway or relay re-checks the channel and operation.
+Native subagent and question tools, and every non-Cortex tool of the consultant,
+are refused. Every other native request of Claude and Codex is decided by this
+table (`classify` in `crates/cortex-engine/src/permission.rs`, path classes in
+`native_engine_policy.rs`):
+
+| Target | Guarded | Development | Auto |
+| --- | --- | --- | --- |
+| Read or search inside the project | allow | allow | allow |
+| Read or search outside the project | ask the owner | allow, recorded | allow, recorded |
+| Write or edit inside the project (writing workers) | allow | allow | allow |
+| Write or edit outside the project (writing workers) | ask the owner | ask the owner | allow, recorded |
+| Deletion | ask the owner | ask the owner | allow, recorded |
+| Credential and key material anywhere, read or write | ask the owner | ask the owner | allow, recorded (`auto_credential`) |
+| Git control files, engine and Cortex configuration, write | ask the owner | ask the owner | allow, recorded (`auto_control`) |
+| Cortex private state (`.cortex`, `.cortex-dev`, dev owner files, service state), read or write | refused | refused | refused |
+| Web fetch | ask the owner | allow | allow |
+
+Read-only roles and review-stage sessions get only the read rows: their native
+write, delete and execute requests are refused in every mode under the
+`read_only` rule. The table narrows native engine tools only; a `command_run`
+command can still read anywhere the owner can. "Ask the owner" opens a card on the
+connected owner client titled `Owner decision: <role> wants to <operation>
+<paths> because <reason>` with only Allow once and Deny; the engine's request
+waits until the owner answers, and a denial goes back as the engine's reject
+option. Each answer is a `NATIVE_PERMISSION_DECIDED` or
+`NATIVE_PERMISSION_CANCELLED` event with its rule and decider (`owner`,
+`mode:<access mode>`, `runtime`, `withdrawn:<reason>` or `no_owner_client`) and an
+owner-decided one also leaves a `permission_receipts` row. An incoming ACP client
+(Paseo, Zed) shows the card itself; in a native Workspace task it is an owner
+decision of kind `permission` in the task's Conversation ("Asked by <role>", the
+paths, why, Allow once and Deny), counted as needing the owner and raised as a
+desktop question notification. A pause, stop or ended session withdraws it and
+cancels the engine's request, and a service start withdraws any left open. Neither
+engine adapter limits how long a permission request may wait. Cortex's own
+`outside_write` and `outside_command` use the same table and card. OpenCode requests outside Auto that
+the table does not settle keep the client route. Which cells each engine can
+enforce is listed in [SECURITY.md](../../../SECURITY.md#native-engine-tools).
+Display titles and raw argument text are never an authority. Channeled engine
+sessions cannot enable ACP filesystem or terminal bridges.
+
+The project is read-only through Cortex tools for the coordinator, reviewers and
+read-only roles. Writing workers' declared scopes coordinate parallel work but do
+not restrict the gateway's project write paths. A revoked or expired channel
+terminates the process. The one bounded exception is a worker channel revoked by
+acceptance of that attempt's own current (non-superseded) result: the 1 s
+authority watchdog lets the in-flight turn end for at most 20 seconds, so its
+final token report can arrive, before it terminates the engine. The post-result
+settlement normally tears the engine down as soon as the turn ends and within 15
+seconds (see
 [token coverage](../token-and-plan-usage/index.md#coverage-and-interrupted-turns)).
 Native tools can still act in that window; late project changes invalidate the
 digest-bound review, verification or completion gate. Any other revocation, an
@@ -87,52 +157,13 @@ ssh prompts then appear on the owner's desktop and the answers bypass the model.
 See [SECURITY.md](../../../SECURITY.md#optional-ssh-password-dialog).
 
 The pinned Codex adapter is codex-acp 2.6.0 (`@openai/codex` `^0.166.0`);
-codex-acp 1.12.0, 1.13.0, 2.0.1, 2.1.1 and 2.3.0 remain qualified. A verified private
-adapter and per-process launcher disable native agents, multi-agent, plugin,
-hook and app features and each inherited MCP server; only session-specific
-brokered servers are re-enabled. The same two layers also force Codex's own
-`shell_tool` and `view_image` features off (`-c features.shell_tool=false -c
-features.view_image=false` at process launch, and the same two keys forced
-false again in every generated session config, since App Server's
-thread/start config can otherwise override the process-level flags) --
-verified against the installed Codex CLI 0.154.0's own `features list`. Codex then runs
-shell commands and reads images only through the scoped Cortex `command_run`/
-`project_read`/`read_source` tools, the same boundary Claude's own gateway-
-alternative policy already uses for its own disallowed Bash/Read. Native
-`apply_patch` stays on for file edits: the installed
-Codex CLI 0.154.0 exposes no supported off switch for it (it is not even
-listed by `features list`). A separate `unified_exec` feature was also found
-still enabled after this change; neither `-c features.unified_exec=false` nor
-`--disable unified_exec` had any observed effect against the same installed
-binary (both silently left it reporting `true`), so there is currently no
-supported channel to turn it off either, and whether it still offers Codex any
-exec/read path once `shell_tool` is off is not established without a live
-qualification check. Every turn runs with `dangerFullAccess`
-(Codex's own sandbox cannot start in the jail's user namespace, and the jail is
-the boundary) and approval `untrusted`, pinned by the adapter patch in
-the runtime, so each command still reaches the permission bridge. The user's account configuration and credentials
-are not rewritten.
+codex-acp 1.12.0, 1.13.0, 2.0.1, 2.1.1 and 2.3.0 remain qualified. A session with
+role instructions also receives the [unified system prompt](../unified-system-prompt/index.md).
+The owner's account configuration and credentials are not rewritten.
 
-Claude ACP 0.78.0 keeps its `settingSources` default and receives
-`strictMcpConfig: true`, empty `plugins`, disabled hooks, and disallowed
-`Agent`, `Task`, `Workflow` and agent-team tools -- but not its native file/
-shell tools: adapter-level `disallowedTools` also disallows native `Bash`,
-`Read`, `Edit`, `Write`, `Grep`, `Glob`, `NotebookEdit` and (outside native-
-skills mode) `Skill`, so Claude reaches files and commands only through the
-scoped Cortex gateway, the same boundary Codex's `shell_tool`/`view_image`
-feature switches above now approximate. A session with role
-instructions also receives the [unified system prompt](../unified-system-prompt/index.md)
-in place of Claude Code's preset, with `skills: []` and attribution and git
-instructions switched off. The native adapter options are shared, while role-
-specific prompts and offered Cortex tools differ.
-
-The optional OpenCode v2 engine runs in the same jail with three additions
-(`engine_jail(isolate_processes=, masked=, data_files=)`):
-
-- its own user, PID and IPC namespaces, so no sibling jail can read its
-  control server's credential from `/proc`;
-- the owner's `~/.config/opencode` hidden behind an empty private tmpfs;
-- its role prompt mounted read-only from memory.
+The optional OpenCode v2 engine is described on the
+[OpenCode adapter](../opencode-engine/index.md) page; its `cortex` agent asks for
+every tool.
 
 Cortex supplies its whole configuration: one `cortex` agent with
 `"*": "ask"` and subagents, questions and skills denied, and OpenCode's built-in
@@ -150,21 +181,7 @@ and auto-update are off, and the data directory's `bin` is read-only. MCP tools,
 including the Cortex gateway, are reached through its `execute` (Code Mode)
 tool: one permission request per `execute` call, with each Cortex MCP call still
 checked by the gateway. A refused permission ends OpenCode's turn as
-`cancelled`; the runtime continues the session after its own refusal. See the
-[OpenCode adapter](../opencode-engine/index.md).
-
-ACP permission requests for native tools are allowed, since the jail bounds them,
-except a deletion, which the user confirms in Guarded and Development modes (see
-[Access mode](#access-mode-guarded-and-auto)); a native subagent request is
-refused. Offered MCP allow options are used and the
-gateway then checks the actual channel and operation. Display titles and raw
-argument text are never an authority. The native Rust runtime has no engine jail;
-it answers claude-agent-acp requests itself (MCP tools pass, read-only channels
-stay read/search-only, Guarded approves only reads and in-project edits, deletions
-wait for the owner outside Auto) and keeps the client route for Codex and
-OpenCode; see [SECURITY.md](../../../SECURITY.md#current-acp-boundary-106). Channeled engine sessions cannot enable ACP
-filesystem or terminal bridges, which would act outside the jail. The trusted
-engine binary runs as the local user and can read what that user can read.
+`cancelled`; the runtime continues the session after its own refusal.
 
 <a id="access-mode-guarded-and-auto"></a>
 ## Access mode: Development, Guarded and Auto
@@ -190,12 +207,13 @@ work, and whether a deletion waits for the user.
 | --- | --- | --- | --- |
 | Where a writing worker works | the project | the whole computer | the whole computer |
 | Writing-worker `command_run` | restricted mounts; cwd inside the task tree | host-writable masks, any existing cwd, no card | same as Development |
-| `outside_write` | consent card | no card, except a protected control-plane path (consent card) | runtime answers the card itself |
+| `outside_write` | consent card | consent card | runtime answers the card itself (Cortex private state refused in every mode) |
 | `outside_command` (no sandbox) | consent card | consent card | runtime answers the card itself |
 | Declared deletion (`project_delete`, `command_delete`, native delete) | consent card | consent card | runtime answers the card itself |
+| Reads by any `command_run` command (every role, every mode) | anywhere the owner's account can read, no card (the sandbox masks only Cortex private state) | same | same |
 | Read-only/reviewer `command_run` (every read-only role, every mode) | read-only profile (`read_only`); cwd inside the task tree | read-only profile (`read_only`); any existing cwd | same as Development |
 | Automatic runtime verification | read-only profile (`read_only`); git-ignored directories writable, other project writes discarded with the check | same read-only profile | same read-only profile |
-| Engine jail and worker mode floor | unchanged | unchanged | jail unchanged; most permissive offered worker mode |
+| Engine session mode (see [Native engines](#native-engines)) | by role, not by mode | by role, not by mode | by role, not by mode; no bypass or full access |
 | Channel, role, revocation, owner deny, review and completion gates | retained | retained | retained |
 
 Automatic runtime verification mounts the project as a private overlay (upper layer on disk in
@@ -286,9 +304,9 @@ Shell text remains lexical matching, not complete shell interpretation. The
 classifier is not a semantic firewall for interpreters, scripts or Docker effects.
 Auto uses the same host-writable `development_command` profile as
 Development (receipts name it `development`) and keeps its automatic approval
-and engine-mode confirmation. Development does not select Claude
-bypassPermissions; no mode re-enables the native Claude or Codex shells, so
-outside-project work always goes through the brokered gateway tools.
+and engine-mode confirmation. No access mode selects Claude `bypassPermissions` or
+Codex `agent-full-access`, and no Cortex Claude or Codex session has a native
+shell, so commands go through the brokered gateway tools.
 
 Commands retain cwd/profile/policy provenance. An observed change of the task's access
 policy (a mode switch) or of its write denials terminates a host-writable (Development or
@@ -389,8 +407,9 @@ and user deny-write checks passed for the full path, and a file or symlink
 component is refused with `gateway_parent_not_directory` naming it. A non-`absent`
 `expected_sha256` under a missing parent is a `gateway_write_conflict` (field
 `expected_sha256`, expected `absent`) and creates nothing. `project_mkdir` also
-creates missing parents; an existing real directory returns `created: false`, and
-a file or symlink at the path is `gateway_path_exists`.
+creates missing parents; an existing real directory returns `created: false`, a
+file at the path or at a parent component is `gateway_path_exists`, and a symlink
+component is `symlink_refused` (never followed).
 
 `project_write` replaces the whole content of one file and never appends. An
 existing file requires `expected_sha256` equal to `full_content_sha256` from
@@ -468,11 +487,13 @@ creating a directory or asking for deletion confirmation. Different payloads
 are different actions; an intentional repeat of the same payload after other
 changes needs a fresh explicit key. A pending/unknown receipt still refuses replay.
 `project_delete` requires the exact existing SHA-256, supports binary files and
-checks their raw-byte SHA-256 before unlinking. A refusal before any
-possible side effect keeps its TOOL_REJECTED event but not a replayable auto-key
-receipt, so an identical keyless retry can succeed after correction. An explicit
-key retains the refusal with its full structured field/expected/correction; use a
-new explicit key for the corrected action. File operations use no-follow directory descriptors and
+checks their raw-byte SHA-256 before unlinking, again after the owner's
+confirmation. A refusal before any possible side effect keeps no replayable
+auto-key receipt, so an identical keyless retry can succeed after correction. An
+explicit key retains the refusal with its structured code, field and hint; use a
+new explicit key for the corrected action. A declined or unavailable deletion
+confirmation (`deletion_not_confirmed`) is retained under either key, so an
+identical retry is refused again without asking twice. File operations use no-follow directory descriptors and
 reject symlinks, hardlinks and private components `.cortex` and `.git`. The
 project's `.claude` and `.codex` follow ordinary project file rules. A private path is refused before anything else, so a deletion there
 never asks the user first. `draft_write` accepts only the exact owned, unpublished
@@ -513,8 +534,11 @@ in the shared `.agents/skills` directory.
   stays, so it is not a deletion and asks no confirmation.
 - Git: the link text is relative and inside the project, so Git stores it as
   a symlink (mode 120000) that resolves in every clone. A `link` result carries
-  `git.link_ignored`/`git.source_ignored` from a read-only sandboxed
-  `git check-ignore`, or `null` outside a checkout. The operation never edits
+  `git.link_ignored`/`git.source_ignored` from a read-only
+  `git check-ignore --no-index` run with a cleared environment and the owner's
+  global and system Git configuration disabled (so it reads the project's own
+  `.gitignore` files and `.git/info/exclude`, not a global `core.excludesFile`),
+  or `null` outside a checkout or when Git cannot run. The operation never edits
   `.gitignore`, stages or commits; `project_git` status/diff show the link.
 - Receipts: like every gateway mutation it has a durable started receipt; a
   failure after a directory or link may have been created is an uncertain
@@ -535,6 +559,17 @@ masked, including nested ones; `.codex` and `.claude` are ordinary project paths
 the project's `.git` is visible
 (see below). A command runs until it exits unless it sets `timeout_seconds`, and
 is killed when authority is revoked. There is no unsandboxed fallback.
+
+A bare program name is looked up on the project's `.venv/bin`, `venv/bin` and
+`node_modules/.bin`, then on the owner's
+[tool search path](../../cortex-workspace/maintenance-and-controls.md#tool-search-path):
+the `PATH` the Workspace service reads from the owner's login shell plus folders
+the owner added, validated as [SECURITY.md](../../../SECURITY.md) describes. Any
+other search entry inside the project is dropped. No mount is added for these
+folders: every profile already shows the host filesystem (with private stores
+masked), so a tool folder and its symlink targets are readable with exactly the
+write access the profile already gives, read-only for the verifier and read-only
+roles. The final verifier and the program-availability check use the same list.
 
 An owner can also request stopping one exact running brokered worker command
 with a reason, through `/cortex-kill`, the Paseo worker-panel control, or the
@@ -570,8 +605,8 @@ A host-writable pass never closes a gap once the task is Guarded.
 
 ### Git and tool state
 
-Git run by a writing worker -- through `command_run` or its native shell in the
-engine jail -- updates the project's own repository, so commit, branch, switch, stash,
+Git run by a writing worker through `command_run` (no Cortex engine session has a
+native shell) updates the project's own repository, so commit, branch, switch, stash,
 merge and other operations that change only repository data work (the tests
 cover commit, switch, stash and merge; fetch/push additionally need the owner's
 network credentials and are not covered). This applies only when the project root
@@ -591,7 +626,7 @@ and supplies `core.hooksPath=/dev/null` and `core.fsmonitor=false` through inher
 Git command configuration. These are defaults, not protection against arbitrary
 owner code or an explicit command-line override. Engine/Guarded behavior is unchanged:
 
-| Path | `command_run` / native shell (writing worker) | `project_read` / `project_write` / `project_edit` / `project_delete` |
+| Path | `command_run` (writing worker) | `project_read` / `project_write` / `project_edit` / `project_delete` |
 | --- | --- | --- |
 | `.git` data: objects, refs, logs, index, HEAD, packed-refs, locks, merge/rebase/stash state | writable | denied |
 | `info/` | read-only in Development/Auto; writable in engine/Guarded writing grants | denied |

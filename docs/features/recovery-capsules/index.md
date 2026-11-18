@@ -21,10 +21,18 @@ bounded by construction and never stops a task for size:
   verification list; `PLAN_ACCEPTED` and `WORKER_COMPLETED`/`WORKER_FAILED`
   decision rows are reduced to ids, and results live only in `current_nodes`.
 - `current_nodes` keeps every node's id, role, status, stage and assignment
-  exactly. Objectives, scopes, dependency lists and results fall back through
-  shorter previews (with `size_chars` and `sha256`) until the whole list fits
-  its budget, which is guaranteed for the 64-node, 8,000-character plan
-  admission maximum. The recipient worker's own objective is always complete.
+  exactly, and beside its result the result's `report_ref`, `verdict`,
+  `assignment_outcome` and report-structure marker, so clipping never cuts an
+  identifier. Objectives, scopes, dependency lists and results fall back through
+  shorter previews (with `size_chars` and `sha256`); at the last tier the result
+  prose is omitted (`result_omitted`, read the report by its `report_ref`) until
+  the whole list fits its budget, which is guaranteed for the 64-node,
+  8,000-character plan admission maximum. The recipient worker's own objective
+  is always complete.
+- `constraints` lists the owner's messages to a working task (`owner_steering`
+  rows, id `steering:<n>`, with their `deny_write`/`allow_write` paths and
+  delivery), newest first, together with any constraint rows a store of the
+  former runtime carries.
 - A follow-up owner message is written to both the internal `native_*` session
   and the ACP session so both histories display it; the capsule lists it once
   (an internal copy is skipped when an identical ACP copy exists at the same
@@ -347,21 +355,22 @@ at the paginated `list_events`/`list_sources` tools for the rest.
 
 A shared, read-only operation with one optional `at_revision` field — no task id,
 recipient selector, role, or assignment id is ever accepted as an
-argument. The recipient is always derived from the channel's own already-
-resolved identity (`ChannelContext.task_id`/`.role`/`.assignment_id`/
-`.attempt_id` — see `trusted_channel.resolve_channel`), so a channel can
-never read another task's or another role's/assignment's capsule; this is
-a structural refusal (the schema has no field to abuse), not a runtime
-check (`test_read_capsule_schema_accepts_no_task_or_recipient_selector`).
-A worker channel whose own `delegation_provisioning` row does not exist
-yet (assignment id not yet recorded) gets an explicit
-`capsule_unavailable` error rather than a wrong/empty capsule.
+argument. The recipient is always the authenticated channel itself (its task,
+role, stage, assignment and attempt), so a channel can never read another
+task's or another role's/assignment's capsule; the schema has no field to abuse.
+The native handler returns the same bounded capsule that prompt delivery builds
+(`recovery_context::snapshot_for`), plus `recipient` and the names of the tools
+served on that channel (`role_and_tool_access.tools`). A worker channel without a
+recorded assignment gets the `capsule_unavailable` tool error rather than a
+wrong or empty capsule. `at_revision` above the task's current source revision is
+the `at_revision_out_of_range` tool error. A capsule larger than one tool reply is
+returned whole through a `read_large_output` reference.
 
 ## Deferred work
 
 - Using a capsule to actually resume/deliver a coordinator or worker turn
   (full engine-context delivery) is covered by [context generations](../context-generations/index.md), not by the capsule itself.
-- `at_revision` only bounds the `constraints` section to a point in time;
+- `at_revision` only bounds the captured `sources` section to a point in time;
   every other section always reflects current durable state (a full
   point-in-time snapshot across every section is not implemented — this
   is a documented, not silent, limitation).

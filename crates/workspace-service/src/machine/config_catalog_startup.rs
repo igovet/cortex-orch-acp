@@ -135,7 +135,10 @@ pub(crate) fn ensure(config: &crate::Config) -> Value {
         // The channel's own state root may not exist before anything was ever saved; admission needs it.
         if !env.state.exists() {
             use std::os::unix::fs::DirBuilderExt;
-            let _ = fs::DirBuilder::new().recursive(true).mode(0o700).create(&env.state);
+            let _ = fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&env.state);
         }
         let now = SystemTime::now();
         let mut planned = vec![];

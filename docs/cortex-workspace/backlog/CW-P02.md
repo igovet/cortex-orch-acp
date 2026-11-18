@@ -1,6 +1,6 @@
 # CW-P02: Android FirebaseMessagingService integration: high-priority data-message handling, on-open E2EE content fetch via N03's session, token registration/rotation flow
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Not implemented; no Android client exists · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Receive high-priority data messages on Android. Register and rotate FCM tokens through the authenticated desktop channel. On open, fetch the actual content over the paired iroh session. Notification text is built only from fetched content, never from the push payload.

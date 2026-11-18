@@ -1,10 +1,19 @@
 //! Private Workspace conversation/sprint JSON only. Runtime task edits and acceptance stay Core-owned.
 use super::{
+    attachment_files as files,
     native::*,
     settings::{self, Lock},
 };
 use serde_json::{json, Value};
 use std::path::Path;
+/// A sprint's saved files together: at most 8 references totaling 4 MiB.
+fn saved_total(items: &[Value]) -> Result<()> {
+    let size: u64 = items.iter().map(|i| i["size"].as_u64().unwrap_or(0)).sum();
+    if items.len() > 8 || size > files::MAX_BYTES as u64 {
+        return Err(invalid_attachments());
+    }
+    Ok(())
+}
 fn invalid_attachments() -> Refused {
     refuse("invalid_attachments","Choose valid files: at most 8 files totaling 4 MiB, with readable contents and simple filenames.")
 }
@@ -121,9 +130,17 @@ fn trim_retained(product: &mut Value, limit: usize) {
         }
     }
 }
-fn persist(state: &Path, project: &str, product: &mut Value) -> Result<()> {
+/// Saves under the held machine lock; bodies the save stopped referencing are swept.
+fn persist(
+    state: &Path,
+    project: &str,
+    product: &mut Value,
+    before: &std::collections::HashSet<String>,
+) -> Result<()> {
     trim_retained(product, FRAME_BUDGET);
-    settings::write_json(&product_path(state, project)?, product)
+    settings::write_json(&product_path(state, project)?, product)?;
+    files::release(state, before, product);
+    Ok(())
 }
 #[cfg(test)]
 mod tests {
@@ -142,10 +159,90 @@ mod tests {
         assert!(p["messages"][2]["attachments"][0].is_object());
         assert!(p.to_string().len() <= limit);
     }
+    /// The service takes queued messages in order; a taken one is no longer the owner's
+    /// to edit, move or remove; a take repeated after a stop returns it again; settling
+    /// removes it, puts it back in the queue, or marks it failed.
+    #[test]
+    fn queued_messages_are_taken_in_order_and_locked_once_taken() {
+        use std::os::unix::fs::DirBuilderExt;
+        let state = std::env::temp_dir().join(format!("cw-queue-take-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&state)
+            .unwrap();
+        let add = |id: &str, task: &str| {
+            conversation(&state, "p", &json!({"action":"add","message":{"id":id,"taskId":task,"workerId":null,"text":format!("Text {id}"),
+                "mode":"queue","delivery":"queued","at":1,"deliveredAt":null,"failure":null}}), false).unwrap();
+        };
+        add("m1", "t");
+        add("other", "u");
+        add("m2", "t");
+        conversation(
+            &state,
+            "p",
+            &json!({"action":"move","messageId":"m2","before":"m1"}),
+            false,
+        )
+        .unwrap();
+        let taken = take_queued(&state, "p", "t").unwrap();
+        let ids: Vec<_> = taken.iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["m2", "m1"], "queue order, this task only");
+        for action in [
+            json!({"action":"edit","messageId":"m1","text":"changed"}),
+            json!({"action":"move","messageId":"m1","before":null}),
+            json!({"action":"remove","messageId":"m1"}),
+        ] {
+            assert_eq!(
+                conversation(&state, "p", &action, false).unwrap_err().code,
+                "message_taken"
+            );
+        }
+        // Not settled (the service stopped): the next take returns both again, nothing new.
+        assert_eq!(take_queued(&state, "p", "t").unwrap().len(), 2);
+        settle_taken(&state, "p", "m2", Ok(())).unwrap();
+        settle_taken(
+            &state,
+            "p",
+            "m1",
+            Err("queued_message_not_at_boundary".into()),
+        )
+        .unwrap();
+        let rows = product(&state, "p").unwrap()["messages"].clone();
+        assert!(
+            !rows.as_array().unwrap().iter().any(|m| m["id"] == "m2"),
+            "{rows}"
+        );
+        assert_eq!(
+            rows.as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["id"] == "m1")
+                .unwrap()["delivery"],
+            "queued"
+        );
+        take_queued(&state, "p", "t").unwrap();
+        settle_taken(&state, "p", "m1", Err("invalid_message".into())).unwrap();
+        let rows = product(&state, "p").unwrap()["messages"].clone();
+        let m1 = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "m1")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (m1["delivery"].as_str(), m1["failure"].as_str()),
+            (Some("failed"), Some("Not delivered: invalid_message"))
+        );
+        let _ = std::fs::remove_dir_all(&state);
+    }
 }
 pub fn conversation(state: &Path, project: &str, p: &Value, comments: bool) -> Result<Value> {
     let _lock = Lock::new(state, "machine.lock")?;
     let mut product = product(state, project)?;
+    let before = files::held(&product);
     let task = if comments {
         string(p, "taskId").map_err(|_| refuse("unknown_task", "Unknown task."))?
     } else {
@@ -184,7 +281,7 @@ pub fn conversation(state: &Path, project: &str, p: &Value, comments: bool) -> R
                 "Write a message first, up to 32000 characters.",
             ));
         }
-        attachments(item.get("attachments").unwrap_or(&json!([])))?;
+        files::checked_references(state, item.get("attachments").unwrap_or(&json!([])))?;
         if let Some(old) = rows.iter().find(|r| r["id"] == item["id"]) {
             if old != item {
                 return Err(refuse(
@@ -211,6 +308,17 @@ pub fn conversation(state: &Path, project: &str, p: &Value, comments: bool) -> R
             .ok_or_else(|| refuse("unknown_message", "This item is no longer here."))?;
         if comments && rows[index]["sent"] == true {
             return Err(refuse("already_sent", "Sent comments cannot be changed."));
+        }
+        // A queued message is the owner's to change until the service takes it for
+        // delivery (`sending`); from then on it is the runtime's record.
+        if !comments
+            && (rows[index]["delivery"] == "sending"
+                || action != "remove" && rows[index]["delivery"] != "queued")
+        {
+            return Err(refuse(
+                "message_taken",
+                "This message was already taken for delivery and can no longer be changed.",
+            ));
         }
         match action {
             "remove" => {
@@ -244,7 +352,7 @@ pub fn conversation(state: &Path, project: &str, p: &Value, comments: bool) -> R
                     .filter(|s| !s.trim().is_empty() && s.chars().count() <= 32000)
                     .ok_or_else(|| refuse("unsupported_action", "This action is not available."))?;
                 if let Some(items) = p.get("attachments") {
-                    attachments(items)?;
+                    files::checked_references(state, items)?;
                     rows[index]["attachments"] = items.clone();
                 }
                 rows[index]["text"] = json!(text);
@@ -257,16 +365,90 @@ pub fn conversation(state: &Path, project: &str, p: &Value, comments: bool) -> R
             }
         }
     }
-    persist(state, project, &mut product)?;
+    persist(state, project, &mut product, &before)?;
     Ok(if comments {
         product["comments"][task].clone()
     } else {
         product["messages"].clone()
     })
 }
+/// The service takes the owner's queued messages of one task for delivery, in queue
+/// order: each becomes `sending` (no longer editable, movable or removable) and is
+/// returned. Messages a previous take left `sending` (the service stopped before
+/// settling them) are returned again first; delivery is idempotent on the message id.
+pub fn take_queued(state: &Path, project: &str, task: &str) -> Result<Vec<Value>> {
+    let _lock = Lock::new(state, "machine.lock")?;
+    let mut product = product(state, project)?;
+    let before = files::held(&product);
+    let Some(rows) = product["messages"].as_array_mut() else {
+        return Ok(Vec::new());
+    };
+    let mine = |r: &Value| r["taskId"] == task && r["workerId"].is_null();
+    let mut taken: Vec<Value> = rows
+        .iter()
+        .filter(|r| mine(r) && r["delivery"] == "sending")
+        .cloned()
+        .collect();
+    let mut changed = false;
+    for row in rows
+        .iter_mut()
+        .filter(|r| mine(r) && r["delivery"] == "queued")
+    {
+        row["delivery"] = json!("sending");
+        changed = true;
+        taken.push(row.clone());
+    }
+    if changed {
+        persist(state, project, &mut product, &before)?;
+    }
+    Ok(taken)
+}
+/// Settle one taken message: recorded by the runtime (kept only when it carries files,
+/// whose chips the conversation shows, as after Send now), put back in the queue when
+/// the task had left its boundary, or failed with the runtime's refusal.
+pub fn settle_taken(
+    state: &Path,
+    project: &str,
+    id: &str,
+    outcome: std::result::Result<(), String>,
+) -> Result<()> {
+    let _lock = Lock::new(state, "machine.lock")?;
+    let mut product = product(state, project)?;
+    let before = files::held(&product);
+    let Some(rows) = product["messages"].as_array_mut() else {
+        return Ok(());
+    };
+    let Some(index) = rows
+        .iter()
+        .position(|r| r["id"] == id && r["delivery"] == "sending")
+    else {
+        return Ok(());
+    };
+    match outcome {
+        Ok(())
+            if rows[index]["attachments"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty()) =>
+        {
+            rows[index]["delivery"] = json!("recorded");
+        }
+        Ok(()) => {
+            rows.remove(index);
+        }
+        Err(code) if code == "queued_message_not_at_boundary" => {
+            rows[index]["delivery"] = json!("queued");
+        }
+        Err(code) => {
+            rows[index]["delivery"] = json!("failed");
+            rows[index]["failure"] = json!(format!("Not delivered: {code}"));
+        }
+    }
+    persist(state, project, &mut product, &before)
+}
 pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
     let _lock = Lock::new(state, "machine.lock")?;
     let mut product = product(state, project)?;
+    let before = files::held(&product);
     let action = string(p, "action")?;
     if action == "create" {
         let description = p["description"]
@@ -303,12 +485,12 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
             )
             .map_err(|_| refuse("invalid_sprint", "Invalid sprint settings."))?;
         }
-        attachments(&sprint["attachments"])?;
+        files::checked_references(state, &sprint["attachments"])?;
         product["sprints"]
             .as_array_mut()
             .ok_or_else(|| refuse("state_unreadable", "Invalid sprint state."))?
             .push(sprint);
-        persist(state, project, &mut product)?;
+        persist(state, project, &mut product, &before)?;
         return Ok(json!({"sprintId":id}));
     }
     let sprints = product["sprints"]
@@ -333,7 +515,7 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
                 sprint.as_object_mut().unwrap().remove(key);
             }
         }
-        persist(state, project, &mut product)?;
+        persist(state, project, &mut product, &before)?;
         return Ok(json!({"done":true}));
     }
     if !sprint["archivedAt"].is_null() {
@@ -369,6 +551,10 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
                 "That sprint change is not supported.",
             ));
         }
+        if patch.contains_key("runMode") {
+            // A mode switch re-evaluates every waiting result of the project.
+            super::task_review::forget_refusals(state, project);
+        }
         if let Some(settings) = patch.get("settings").filter(|v| !v.is_null()) {
             workspace_protocol::validate(
                 "CreatePayload",
@@ -392,7 +578,7 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
         target = patch.get("targetBranch").cloned();
     } else if action == "note" {
         let items = p.get("attachments").cloned().unwrap_or_else(|| json!([]));
-        attachments(&items)?;
+        files::checked_references(state, &items)?;
         let mut note = json!({
             "kind":p.get("kind").cloned().unwrap_or_else(||json!("note")),"text":p["text"].as_str().unwrap_or("").chars().take(32000).collect::<String>(),
             "at":now_ms(),"attachments":items});
@@ -429,7 +615,7 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
     for note in sprint["conversation"].as_array().into_iter().flatten() {
         combined.extend(note["attachments"].as_array().cloned().unwrap_or_default());
     }
-    attachments(&json!(combined))?;
+    saved_total(&combined)?;
     if let Some(target) = target {
         for record in product["tasks"]
             .as_object_mut()
@@ -441,6 +627,6 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
             }
         }
     }
-    persist(state, project, &mut product)?;
+    persist(state, project, &mut product, &before)?;
     Ok(json!({"done":true}))
 }

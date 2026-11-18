@@ -197,20 +197,15 @@ state; it does not rebuild the full context for each delta. A full
 `TaskMachine.context()` read uses one SQLite read transaction, and assignment
 attempt lookups for result checks are batched.
 
-The same state read withholds the coordinator's text after its own question.
-Once `user_question_request` has committed `WAITING_USER`, the controller drops
-further coordinator deltas observed in that engine turn. No tool lifecycle
-callback releases them: even the question's first callback can arrive after a
-post-question rewrite, so a new id is not evidence of pre-question ordering.
-Text received before the commit (including its buffered redactor tail) and text
-in later turns after the answer are still shown. The runtime renders the question
-itself. The conservative boundary can also omit genuine pre-question details
-that the adapter delivers only after the commit; the callbacks cannot distinguish
-them from a rewrite. Final-only turn text is likewise withheld when the question
-was observed or the task is still `WAITING_USER`, rather than replayed unsplit.
-This is display filtering, not engine cancellation or a history rewrite. The coordinator's
-question receipt also carries a `next` hint telling the model to end the turn without
-further text; like the plan and context hints, that hint is advisory.
+Coordinator text around the coordinator's own question is never withheld. Every
+display session, the Cortex Workspace session and the incoming ACP host session
+(`cortex-acp` used from another client), records every message chunk the engine
+emits, in order, including chunks the service processes after
+`user_question_request` committed `WAITING_USER`: a message is never cut short at
+the question. Avoiding a restatement after the question is left entirely to the
+coordinator's instructions; the coordinator's question receipt carries a `next`
+hint telling the model to end the turn without further text, and like the plan
+and context hints that hint is advisory.
 
 While workers run, an unchanged database change fingerprint skips the expensive
 scheduler pass. Worker completion and runtime notifications can wake it sooner;
@@ -275,7 +270,7 @@ verification of the current revision passed on the unchanged folder, a worker's 
 reviewer's self-reported `unverified` or `not_run` check is a visible note on the result,
 not an open check: it needs no acknowledgement and does not block Accept. Self-reported
 `failed` checks, policy-blocked checks, failed or missing runtime verification and a
-missing approval still block (`crates/workspace-service/src/machine/task_facts_work.rs`).
+missing approval still block (`crates/workspace-service/src/machine/task_facts_work.rs`). A withdrawn probe that completion accepted is omitted again when its withdrawal is re-derived from the run's recorded output (kept under the channel that ran it, its stored file still hashing to the recorded digest), and a check that still blocks is named in the reason.
 A project-folder sprint task's "unchanged" is judged on the files it recorded writing,
 because the later tasks of its sprint write the same folder. Independently of routes, a reviewer attempt
 that is also an execution attempt of the task is refused as `review_not_independent`.
@@ -297,7 +292,9 @@ edited the same checkout, `result_submit` refuses the verdict with
 `refused_request_key`). The reviewer re-checks the changes and submits with a new
 request_key. The refused request_key never records a verdict
 (`review_resubmit_required`). After `MAX_REVIEW_REBINDS` (3) re-bindings, a further
-change is refused as `review_project_revision_unstable`. Before this, the binding
+change is refused as `review_project_revision_unstable`. Each of these reaches the
+reviewer as a correctable `isError` result naming the code, `field` `request_key`
+and a hint to re-check the change and resubmit with a fresh key. Before this, the binding
 was never refreshed, so one change refused every later submission of that review.
 The refusal names the other Cortex task when one of that project's writing workers
 made the change.
@@ -320,7 +317,23 @@ prompt tells it to read the review report and plan fixes by the roles that own t
 affected files. Blind fixes once sent application code to a devops task.
 APPROVE proceeds
 to verification; REQUEST_CHANGES creates fix nodes followed by a fresh reviewer;
-BLOCK stops acceptance. Three unsuccessful review cycles block further automatic
+BLOCK, which names the confirmed problems as findings, stops acceptance and goes
+back to the coordinator to address them. INCOMPLETE, which names in `not_covered`
+each part of the change the review did not cover and why, is neither an approval
+nor a block: the runtime schedules a fresh review of the same revision
+(`REVIEW_RERUN` with the reason and the uncovered parts; same dependencies and
+routing) whose brief lists exactly those parts, at most
+`MAX_INCOMPLETE_REVIEW_RERUNS` (2) times per revision, and then asks the owner
+(`review_incomplete`) with what stayed uncovered. A BLOCK that names no finding
+counts as INCOMPLETE (`block_without_findings`). Every reviewer's assignment
+carries a `review_packet`: the files the reviewed work changed (path, change kind,
+the plan node that wrote it; at most 200, the rest counted by folder), built from
+the difference between the execution baseline's per-file manifest and the folder
+now plus the writes the sessions recorded, never from Git alone, with
+`complete: false` when only recorded writes were available; the predecessor
+reports with their size and page count; and the review's read scope, checked to
+cover every changed file.
+Three unsuccessful review cycles block further automatic
 work. The loop never treats an ordinary final model message as a worker result.
 
 ### Reviewer handoff

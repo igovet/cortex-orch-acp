@@ -5,6 +5,226 @@ use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::path::Path;
 
+/// The sprint's current run mode settles results automatically. Unknown or
+/// closed sprints never do.
+pub(crate) fn automatic_mode(sprint: &Value) -> bool {
+    sprint["runMode"] == "automatic" && sprint["archivedAt"].is_null()
+}
+
+/// Refused or failed automatic settles, by (state, project, task): what the outcome
+/// depended on, when, and the outcome. A memo only ever repeats a refusal; an
+/// acceptance always runs the full validator. It holds while its inputs (runtime
+/// evidence position, saved task record, folder change signal) are unchanged: for
+/// `RECENT` with a folder signal, for `UNSIGNALLED` without one (or when the settle
+/// failed before its inputs were read). A run-mode switch of the project drops it.
+type Key = (std::path::PathBuf, String, String);
+struct Memo {
+    inputs: Option<String>,
+    signalled: bool,
+    at: std::time::Instant,
+    outcome: Value,
+}
+static REFUSED: std::sync::LazyLock<std::sync::Mutex<std::collections::BTreeMap<Key, Memo>>> =
+    std::sync::LazyLock::new(Default::default);
+const UNSIGNALLED: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) fn forget_refusals(state: &Path, project: &str) {
+    if let Ok(mut memo) = REFUSED.lock() {
+        memo.retain(|(s, p, _), _| !(s == state && p == project));
+    }
+}
+/// The remembered outcome if it still holds for `inputs` (None: before they are read).
+fn remembered(key: &Key, inputs: Option<&str>) -> Option<Value> {
+    let memo = REFUSED.lock().ok()?;
+    let m = memo.get(key)?;
+    let fresh = m.at.elapsed()
+        < if m.signalled {
+            task_facts::RECENT
+        } else {
+            UNSIGNALLED
+        };
+    (fresh && m.inputs.as_deref() == inputs).then(|| m.outcome.clone())
+}
+fn remember(key: Key, inputs: Option<String>, signalled: bool, outcome: Value) -> Value {
+    if let Ok(mut memo) = REFUSED.lock() {
+        memo.retain(|_, m| m.at.elapsed() < task_facts::RECENT);
+        memo.insert(
+            key,
+            Memo {
+                inputs,
+                signalled,
+                at: std::time::Instant::now(),
+                outcome: outcome.clone(),
+            },
+        );
+    }
+    outcome
+}
+
+/// Accepts a finished sprint result exactly as manual Accept would, marked
+/// automatic, while the sprint's current run mode is Automatic. The caller holds the
+/// machine lock, so the mode checked here is the one in force when the acceptance is
+/// written: switching to Manual stops every acceptance not yet written, and switching
+/// to Automatic settles results that are still waiting. Automatic acceptance also
+/// needs the runtime's passed verification and no owner resolution of the task.
+/// A settle that cannot complete answers `accepted:false` with `failed`/`reason`;
+/// it never fails the background pass.
+pub async fn automatic(
+    root: &Path,
+    project: &str,
+    task: &str,
+    state: &Path,
+    product: &mut Value,
+    git: &mut Git,
+) -> Result<Value> {
+    if product["tasks"][task]["acceptance"].is_object() {
+        return Ok(json!({"accepted":true}));
+    }
+    if product["tasks"][task]["status"] == "done" || product["tasks"][task]["purged"] == true {
+        return Ok(json!({"accepted":false}));
+    }
+    // The cheap mode check comes first: a Manual result never pays for the
+    // folder observation.
+    let current = product["sprints"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|s| s["id"].is_string() && s["id"] == product["tasks"][task]["sprintId"]);
+    if !current.is_some_and(automatic_mode) {
+        return Ok(json!({"accepted":false}));
+    }
+    let key = (state.to_owned(), project.to_owned(), task.to_owned());
+    if let Some(outcome) = remembered(&key, None) {
+        return Ok(outcome);
+    }
+    let mut inputs = None;
+    let mut signalled = false;
+    match settle(
+        root,
+        project,
+        task,
+        state,
+        product,
+        git,
+        &key,
+        &mut inputs,
+        &mut signalled,
+    )
+    .await
+    {
+        Ok(Some(outcome)) => Ok(outcome),
+        Ok(None) => {
+            if let Ok(mut memo) = REFUSED.lock() {
+                memo.remove(&key);
+            }
+            Ok(json!({"accepted":true}))
+        }
+        Err(e) => Ok(remember(
+            key,
+            inputs,
+            signalled,
+            json!({"accepted":false,"failed":e.code,"reason":e.message}),
+        )),
+    }
+}
+/// None once accepted; otherwise the (remembered) refusal.
+#[allow(clippy::too_many_arguments)]
+async fn settle(
+    root: &Path,
+    project: &str,
+    task: &str,
+    state: &Path,
+    product: &mut Value,
+    git: &mut Git,
+    key: &Key,
+    inputs: &mut Option<String>,
+    signalled: &mut bool,
+) -> Result<Option<Value>> {
+    let refusal = || json!({"accepted":false});
+    let store = context::open(root, OpenMode::RuntimeValidate)?.ok_or_else(unavailable)?;
+    let record = product["tasks"][task].clone();
+    let finished: Option<(String, String, bool)> = store.read(|db| Ok(db.query_row(
+        "SELECT e.execution_id, json_array(e.execution_id, r.revision, r.state,
+            (SELECT max(id) FROM runtime_events v WHERE v.task_id=r.task_id),
+            (SELECT max(rowid) FROM runtime_nodes n WHERE n.task_id=r.task_id)),
+            EXISTS(SELECT 1 FROM runtime_events v WHERE v.task_id=r.task_id AND v.type='VERIFICATION_PASSED')
+            AND NOT EXISTS(SELECT 1 FROM runtime_events o WHERE o.task_id=r.task_id AND o.type='OWNER_TASK_RESOLVED')
+         FROM workspace_tasks w JOIN workspace_executions e ON e.execution_id=w.execution_id JOIN runtime_tasks r ON r.task_id=e.runtime_task_id WHERE w.project_id=? AND w.task_id=? AND r.state='COMPLETED'",
+        (project,task), |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?)).map_err(context::core)?;
+    let Some((execution, evidence, verified)) = finished else {
+        return Ok(Some(refusal()));
+    };
+    // Only a result the runtime verified, with no owner resolution, settles itself.
+    if !verified {
+        return Ok(Some(refusal()));
+    }
+    // An unchanged refusal is not repeated on every background pass.
+    let probe = root.to_owned();
+    let signal = tokio::task::spawn_blocking(move || task_facts::folder_signal(&probe))
+        .await
+        .ok()
+        .flatten();
+    *signalled = signal.is_some();
+    *inputs = Some(json!([evidence, record, signal]).to_string());
+    if let Some(outcome) = remembered(key, inputs.as_deref()) {
+        return Ok(Some(outcome));
+    }
+    let native = task_facts::native_observation(root).await;
+    let candidate = store
+        .read(|db| {
+            let (actions, _, warnings, counts) = match task_facts::result_evidence_db(
+                db,
+                &store,
+                root,
+                project,
+                &execution,
+                native.as_deref(),
+                task_facts::own_writes(&record),
+            ) {
+                Ok(evidence) => evidence,
+                Err(cortex_core::CoreError::Refused("result_unavailable")) => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            if warnings || actions["accept"] != true || counts != [0, 0, 0] {
+                return Ok(None);
+            }
+            Ok(Some(
+                json!({"version":actions["version"],"digest":actions["digest"]}),
+            ))
+        })
+        .map_err(context::core)?;
+    let Some(p) = candidate else {
+        return Ok(Some(remember(
+            key.clone(),
+            inputs.clone(),
+            *signalled,
+            refusal(),
+        )));
+    };
+    // The ordinary validator is repeated under the write transaction. No owner
+    // acknowledgement is manufactured for open checks.
+    match accept_inner(root, project, task, state, product, &p, git, true).await {
+        Ok(_) => Ok(None),
+        Err(e)
+            if matches!(
+                e.code,
+                "stale_result"
+                    | "checks_required"
+                    | "review_required"
+                    | "acknowledgement_required"
+                    | "result_unavailable"
+            ) =>
+        {
+            Ok(Some(remember(
+                key.clone(),
+                inputs.clone(),
+                *signalled,
+                refusal(),
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn unavailable() -> Refused {
     refuse(
         "result_unavailable",
@@ -35,7 +255,13 @@ fn validate(
         (project, task, root.to_string_lossy().as_ref()), |r| r.get::<_, String>(0))
         .optional().map_err(|e| context::core(e.into()))?.ok_or_else(unavailable)?;
     let (actions, _, warnings, counts) = task_facts::result_evidence_db(
-        db, store, root, project, &execution, native, task_facts::own_writes(record),
+        db,
+        store,
+        root,
+        project,
+        &execution,
+        native,
+        task_facts::own_writes(record),
     )
     .map_err(|e| {
         if e.code() == "result_unavailable" {
@@ -89,6 +315,18 @@ pub async fn accept(
     p: &Value,
     git: &mut Git,
 ) -> Result<Value> {
+    accept_inner(root, project, task, state, product, p, git, false).await
+}
+async fn accept_inner(
+    root: &Path,
+    project: &str,
+    task: &str,
+    state: &Path,
+    product: &mut Value,
+    p: &Value,
+    git: &mut Git,
+    automatic: bool,
+) -> Result<Value> {
     let store = context::open(root, OpenMode::RuntimeValidate)?.ok_or_else(|| {
         refuse(
             "result_unavailable",
@@ -119,63 +357,36 @@ pub async fn accept(
         record["status"] = json!("ready_to_merge");
         record["acceptance"] = json!({"version":p["version"],"digest":p["digest"],"at":now_ms(),
             "open":{"failed":counts[0],"not_run":counts[1],"unverified":counts[2]}});
+        if automatic {
+            record["acceptance"]["automatic"] = json!(true);
+        }
         // No retained-provider error may be returned after this mutation boundary.
         settings::write_json(&product_path(state, project)?, product)?;
         Ok(json!({"done":true,"reclamation":product["tasks"][task]["reclamation"]}))
     })())).map_err(context::core)?
 }
-pub async fn answer_archive(
-    root: &Path,
-    state: &Path,
-    record: &mut Value,
-    p: &Value,
-    git: &mut Git,
-) -> Result<()> {
-    let at = now_ms();
-    if p["discard"] == true {
-        checkout_shape(record)?;
-        let path = super::retention::task_path(root, record, git).await?;
-        let observed = super::legacy_source::capture(&path)
-            .map_err(context::core)?
-            .ok_or_else(|| {
-                refuse(
-                    "workspace_unobservable",
-                    "The work could not be observed; no discard decision was recorded.",
-                )
-            })?;
-        record["discardRevision"] = json!(observed);
-        record["work"] = json!("discard_confirmed");
-        record["archive"] = json!({"at":at,"previousStatus":"done"});
-        record["archiveQuestion"] = json!(false);
-    } else {
-        let days = settings::machine(state)?["autoArchiveDays"].clone();
-        let until = if let Some(n) = days.as_i64().or_else(|| days.as_bool().map(i64::from)) {
-            let n = at as i128 + n as i128 * 86_400_000;
-            if let Ok(n) = i64::try_from(n) {
-                json!(n)
-            } else {
-                // Python would persist an unbounded integer; the saved presentation
-                // overlay cannot represent it, so no postponement is recorded.
-                return Err(refuse(
-                    "archive_interval_unsupported",
-                    "The configured archive interval is outside the supported range; no postponement was recorded.",
-                ));
-            }
-        } else if days.as_u64().is_some() {
-            return Err(refuse(
-                "archive_interval_unsupported",
-                "The configured archive interval is outside the supported range; no postponement was recorded.",
-            ));
-        } else if let Some(n) = days.as_f64() {
-            serde_json::Number::from_f64(at as f64 + n * 86_400_000.0)
-                .map(Value::Number)
-                .ok_or_else(|| refuse("machine_tool_failed", "ValueError"))?
-        } else {
-            return Err(refuse("machine_tool_failed", "TypeError"));
-        };
-        record["archiveQuestion"] = json!(false);
-        record["archiveAskAfter"] = until;
+/// The owner's explicit consent to delete an archived task's unmerged work when it is
+/// deleted. Nothing is deleted here and the task stays archived; archiving itself never asks.
+pub async fn confirm_discard(root: &Path, record: &mut Value, git: &mut Git) -> Result<()> {
+    if !super::workers::truthy(&record["archive"]) {
+        return Err(refuse(
+            "not_archived",
+            "Only an archived task's work can be marked for deletion.",
+        ));
     }
+    checkout_shape(record)?;
+    let path = super::retention::task_path(root, record, git).await?;
+    let observed = super::legacy_source::capture(&path)
+        .map_err(context::core)?
+        .ok_or_else(|| {
+            refuse(
+                "workspace_unobservable",
+                "The work could not be observed; no discard decision was recorded.",
+            )
+        })?;
+    record["discardRevision"] = json!(observed);
+    record["work"] = json!("discard_confirmed");
+    record["purgeBlocker"] = Value::Null;
     Ok(())
 }
 fn checkout_shape(record: &Value) -> Result<()> {
@@ -303,6 +514,513 @@ mod native_acceptance_tests {
         }).unwrap().await.unwrap().unwrap();
         (root, runtime, draft)
     }
+
+    fn sprint_product(draft: &str, mode: &str) -> Value {
+        let mut product = json!({"tasks":{},"messages":[],"sprints":[{"id":"sp","runMode":mode,"archivedAt":null}]});
+        product["tasks"][draft] = json!({"checkout":{"kind":"main"},"sprintId":"sp"});
+        product
+    }
+    fn automatic_state(root: &Path) -> std::path::PathBuf {
+        let state = root.join(".cortex-dev/automatic-state");
+        std::fs::create_dir(&state).unwrap();
+        state
+    }
+    #[tokio::test]
+    async fn automatic_acceptance_binds_the_result_and_follows_the_current_mode() {
+        // (mode while the task ran and finished, mode when the result is settled)
+        for (at_finish, at_settle, accepted) in [
+            ("automatic", "automatic", true),
+            ("manual", "automatic", true),
+            ("automatic", "manual", false),
+            ("manual", "manual", false),
+        ] {
+            let (root, runtime, draft) = completed().await;
+            let state = automatic_state(&root);
+            let mut product = sprint_product(&draft, at_finish);
+            settings::write_json(&product_path(&state, "project").unwrap(), &product).unwrap();
+            product["sprints"][0]["runMode"] = json!(at_settle);
+            let result = automatic(
+                &root,
+                "project",
+                &draft,
+                &state,
+                &mut product,
+                &mut Git::new(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["accepted"], accepted, "{at_finish} -> {at_settle}");
+            if accepted {
+                let acceptance = product["tasks"][&draft]["acceptance"].clone();
+                assert_eq!(acceptance["automatic"], true);
+                assert_eq!(
+                    acceptance["open"],
+                    json!({"failed":0,"not_run":0,"unverified":0})
+                );
+                assert_eq!(
+                    acceptance["digest"],
+                    presented(&runtime, &draft).await["result"]["digest"]
+                );
+                assert_eq!(product["tasks"][&draft]["status"], "ready_to_merge");
+                let projected = runtime
+                    .owner_facts("project", product.clone(), json!({}))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    projected["product"]["tasks"][&draft]["acceptance"]["automatic"],
+                    true
+                );
+                assert!(product["tasks"][&draft]["integration"].is_null());
+                automatic(
+                    &root,
+                    "project",
+                    &draft,
+                    &state,
+                    &mut product,
+                    &mut Git::new(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(product["tasks"][&draft]["acceptance"], acceptance);
+            } else {
+                assert!(product["tasks"][&draft]["acceptance"].is_null());
+                let task = presented(&runtime, &draft).await;
+                let p = json!({"version":task["result"]["sourceVersion"],"digest":task["result"]["digest"]});
+                accept(
+                    &root,
+                    "project",
+                    &draft,
+                    &state,
+                    &mut product,
+                    &p,
+                    &mut Git::new(),
+                )
+                .await
+                .unwrap();
+                assert!(product["tasks"][&draft]["acceptance"]["automatic"].is_null());
+            }
+            runtime.shutdown().await;
+            drop(runtime);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn a_switch_to_manual_before_settling_leaves_the_result_for_the_owner() {
+        let (root, runtime, draft) = completed().await;
+        let state = automatic_state(&root);
+        let mut product = sprint_product(&draft, "automatic");
+        settings::write_json(&product_path(&state, "project").unwrap(), &product).unwrap();
+        product["sprints"][0]["runMode"] = json!("manual");
+        let result = automatic(
+            &root,
+            "project",
+            &draft,
+            &state,
+            &mut product,
+            &mut Git::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["accepted"], false);
+        assert!(product["tasks"][&draft]["acceptance"].is_null());
+        assert!(product["tasks"][&draft]["status"].is_null());
+        let shown = runtime
+            .owner_facts("project", product.clone(), json!({}))
+            .await
+            .unwrap();
+        let task = &shown["product"]["tasks"][&draft];
+        assert_eq!(task["reviewActions"]["accept"], true, "{task}");
+        assert_eq!(task["result"]["acceptanceAvailable"], true, "{task}");
+        // Switching back to Automatic settles the same waiting result.
+        product["sprints"][0]["runMode"] = json!("automatic");
+        let result = automatic(
+            &root,
+            "project",
+            &draft,
+            &state,
+            &mut product,
+            &mut Git::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["accepted"], true);
+        assert_eq!(product["tasks"][&draft]["acceptance"]["automatic"], true);
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_held_machine_lock_defers_a_settle_without_waiting_or_failing() {
+        let (root, runtime, draft) = completed().await;
+        let state = automatic_state(&root);
+        let product = sprint_product(&draft, "automatic");
+        settings::write_json(&product_path(&state, "project").unwrap(), &product).unwrap();
+        let held = settings::Lock::new(&state, "machine.lock").unwrap();
+        let settle = json!({"taskId":draft,"action":"auto_ready"});
+        let started = std::time::Instant::now();
+        let deferred =
+            super::super::task_actions::run(&root, "project", &state, &settle, &mut Git::new())
+                .await
+                .unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(deferred, json!({"accepted":false,"deferred":true}));
+        // The runtime writer is never behind the machine lock.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            with_task(&runtime, |db, task| {
+                lifecycle::event_tx(db, task, "NATIVE_ROUTE_SELECTED", json!({"fixture":true}))?;
+                Ok(())
+            }),
+        )
+        .await
+        .expect("runtime writer waited for the machine lock");
+        drop(held);
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn automatic_acceptance_refuses_stale_or_open_checks_and_unsprinted_results() {
+        for outcome in [
+            "standalone",
+            "closed",
+            "missing",
+            "stale",
+            "failed",
+            "not_run",
+            "unverified",
+            "owner_resolved",
+            "no_runtime_verification",
+        ] {
+            let (root, runtime, draft) = completed().await;
+            let state = automatic_state(&root);
+            let mut product = sprint_product(&draft, "automatic");
+            if outcome == "standalone" {
+                product["tasks"][&draft]["sprintId"] = Value::Null;
+            }
+            if outcome == "closed" {
+                product["sprints"][0]["archivedAt"] = json!(1);
+            }
+            settings::write_json(&product_path(&state, "project").unwrap(), &product).unwrap();
+            if outcome == "missing" {
+                with_task(&runtime, |db, task| {
+                    db.execute(
+                        "UPDATE runtime_tasks SET synthesis=NULL WHERE task_id=?",
+                        [task],
+                    )?;
+                    Ok(())
+                })
+                .await;
+            }
+            if outcome == "stale" {
+                std::fs::write(root.join("work.txt"), "drift").unwrap();
+            }
+            // Automatic acceptance needs the runtime's passed verification and no owner
+            // resolution of the task.
+            if outcome == "owner_resolved" {
+                with_task(&runtime, |db, task| {
+                    lifecycle::event_tx(db, task, "OWNER_TASK_RESOLVED", json!({"fixture":true}))?;
+                    Ok(())
+                })
+                .await;
+            }
+            if outcome == "no_runtime_verification" {
+                with_task(&runtime, |db, task| {
+                    db.execute(
+                        "DELETE FROM runtime_events WHERE task_id=? AND type='VERIFICATION_PASSED'",
+                        [task],
+                    )?;
+                    Ok(())
+                })
+                .await;
+            }
+            if ["failed", "not_run", "unverified"].contains(&outcome) {
+                report_checks(&runtime,json!([{"name":"open","outcome":outcome,"command":["/bin/false"],"blocker":"Unavailable in fixture"}]),json!([])).await;
+                // A later successful runtime verification supersedes self-reported
+                // not-run checks. Keep this fixture genuinely unverified instead.
+                with_task(&runtime, |db, task| {
+                    lifecycle::event_tx(
+                        db,
+                        task,
+                        "VERIFICATION_FAILED",
+                        json!({"revision":0,"checks":[]}),
+                    )?;
+                    Ok(())
+                })
+                .await;
+            }
+            assert_eq!(
+                automatic(
+                    &root,
+                    "project",
+                    &draft,
+                    &state,
+                    &mut product,
+                    &mut Git::new()
+                )
+                .await
+                .unwrap()["accepted"],
+                false,
+                "{outcome}"
+            );
+            assert!(product["tasks"][&draft]["acceptance"].is_null());
+            runtime.shutdown().await;
+            drop(runtime);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_settle_that_cannot_finish_reports_why_and_is_not_retried_every_pass() {
+        let (root, runtime, draft) = completed().await;
+        let state = automatic_state(&root);
+        let mut product = sprint_product(&draft, "automatic");
+        // The acceptance cannot be written: its saved product is a directory.
+        let path = product_path(&state, "project").unwrap();
+        std::fs::create_dir_all(&path).unwrap();
+        let first = automatic(
+            &root,
+            "project",
+            &draft,
+            &state,
+            &mut product,
+            &mut Git::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["accepted"], false, "{first}");
+        assert!(
+            first["failed"].is_string() && first["reason"].is_string(),
+            "{first}"
+        );
+        // Remembered: the next pass gets the same answer without evaluating again.
+        let key = (state.clone(), "project".to_owned(), draft.clone());
+        let at = REFUSED.lock().unwrap().get(&key).map(|m| m.at).unwrap();
+        // Each call reads the saved product again; nothing was saved.
+        let mut product = sprint_product(&draft, "automatic");
+        let again = automatic(
+            &root,
+            "project",
+            &draft,
+            &state,
+            &mut product,
+            &mut Git::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(again, first);
+        assert_eq!(REFUSED.lock().unwrap().get(&key).map(|m| m.at), Some(at));
+        // Once writable and after a mode switch, it settles.
+        std::fs::remove_dir(&path).unwrap();
+        forget_refusals(&state, "project");
+        let mut product = sprint_product(&draft, "automatic");
+        assert_eq!(
+            automatic(
+                &root,
+                "project",
+                &draft,
+                &state,
+                &mut product,
+                &mut Git::new()
+            )
+            .await
+            .unwrap()["accepted"],
+            true
+        );
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_refusal_is_not_reevaluated_until_its_inputs_change() {
+        let (root, runtime, draft) = completed().await;
+        let state = automatic_state(&root);
+        let mut product = sprint_product(&draft, "automatic");
+        settings::write_json(&product_path(&state, "project").unwrap(), &product).unwrap();
+        // The folder signal needs a commit to read.
+        assert!(std::process::Command::new("/usr/bin/git")
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "fixture"
+            ])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        report_checks(&runtime,json!([{"name":"open","outcome":"failed","command":["/bin/false"],"blocker":"Unavailable in fixture"}]),json!([])).await;
+        with_task(&runtime, |db, task| {
+            lifecycle::event_tx(
+                db,
+                task,
+                "VERIFICATION_FAILED",
+                json!({"revision":0,"checks":[]}),
+            )?;
+            Ok(())
+        })
+        .await;
+        // The folder signal trusts no file written in the last two seconds.
+        tokio::time::sleep(std::time::Duration::from_millis(3100)).await;
+        let key = (state.clone(), "project".to_owned(), draft.clone());
+        let memo = || {
+            REFUSED
+                .lock()
+                .unwrap()
+                .get(&key)
+                .map(|m| (m.inputs.clone().unwrap_or_default(), m.at))
+        };
+        assert_eq!(
+            automatic(
+                &root,
+                "project",
+                &draft,
+                &state,
+                &mut product,
+                &mut Git::new()
+            )
+            .await
+            .unwrap()["accepted"],
+            false
+        );
+        let (inputs, at) = memo().expect("a refusal with a folder signal is remembered");
+        // Unchanged inputs: the refusal is returned without evaluating again.
+        assert_eq!(
+            automatic(
+                &root,
+                "project",
+                &draft,
+                &state,
+                &mut product,
+                &mut Git::new()
+            )
+            .await
+            .unwrap()["accepted"],
+            false
+        );
+        assert_eq!(memo(), Some((inputs.clone(), at)));
+        // New runtime evidence re-evaluates it.
+        with_task(&runtime, |db, task| {
+            lifecycle::event_tx(db, task, "NATIVE_ROUTE_SELECTED", json!({"fixture":true}))?;
+            Ok(())
+        })
+        .await;
+        assert_eq!(
+            automatic(
+                &root,
+                "project",
+                &draft,
+                &state,
+                &mut product,
+                &mut Git::new()
+            )
+            .await
+            .unwrap()["accepted"],
+            false
+        );
+        let (changed, again) = memo().unwrap();
+        assert_ne!(changed, inputs);
+        assert!(again > at);
+        // So does a change of the saved task record.
+        product["tasks"][&draft]["targetBranch"] = json!("main");
+        assert_eq!(
+            automatic(
+                &root,
+                "project",
+                &draft,
+                &state,
+                &mut product,
+                &mut Git::new()
+            )
+            .await
+            .unwrap()["accepted"],
+            false
+        );
+        assert_ne!(memo().unwrap().0, changed);
+        // A run-mode switch forgets every refusal of the project.
+        forget_refusals(&state, "project");
+        assert!(memo().is_none());
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[tokio::test]
+    async fn a_merging_task_refuses_its_other_actions_at_once_and_defers_its_settle() {
+        let (root, runtime, draft) = completed().await;
+        let state = automatic_state(&root);
+        let product = sprint_product(&draft, "automatic");
+        settings::write_json(&product_path(&state, "project").unwrap(), &product).unwrap();
+        let lock = settings::Lock::new(&state, "machine.lock").unwrap();
+        let claim = settings::claim(
+            &state,
+            "project",
+            &draft,
+            "This task is being merged. Wait for it to finish.",
+            &lock,
+        )
+        .unwrap();
+        drop(lock);
+        let started = std::time::Instant::now();
+        let refused = super::super::task_actions::run(
+            &root,
+            "project",
+            &state,
+            &json!({"taskId":draft,"action":"target","branch":"main"}),
+            &mut Git::new(),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(
+            (refused.code, refused.message.as_str()),
+            (
+                "operation_in_progress",
+                "This task is being merged. Wait for it to finish."
+            )
+        );
+        let deferred = super::super::task_actions::run(
+            &root,
+            "project",
+            &state,
+            &json!({"taskId":draft,"action":"auto_ready"}),
+            &mut Git::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(deferred, json!({"accepted":false,"deferred":true}));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        drop(claim);
+        let accepted = super::super::task_actions::run(
+            &root,
+            "project",
+            &state,
+            &json!({"taskId":draft,"action":"auto_ready"}),
+            &mut Git::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(accepted["accepted"], true);
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     async fn presented(runtime: &Runtime, draft: &str) -> Value {
         let facts = runtime
             .owner_facts(
@@ -323,7 +1041,10 @@ mod native_acceptance_tests {
         assert_eq!(task["result"]["kind"], "work");
         assert_eq!(task["result"]["digest"], task["workspaceDigest"]);
         // The same-model review is a visible note, not unavailable evidence.
-        assert_eq!(task["result"]["warnings"][0], "The reviewer runs on the same model as the work it reviews.");
+        assert_eq!(
+            task["result"]["warnings"][0],
+            "The reviewer runs on the same model as the work it reviews."
+        );
         assert!(task["reviewActions"]["workspaceChanged"].is_null());
         assert_eq!(task["result"]["checks"][0]["source"], "runtime");
         // Private store area: an empty directory elsewhere in the project is a
@@ -386,7 +1107,11 @@ mod native_acceptance_tests {
     async fn native_workers_report_their_edits_result_and_checks() {
         let (root, runtime, draft) = completed().await;
         let facts = runtime
-            .owner_facts("project", json!({"tasks":{},"sprints":[],"messages":[]}), json!({}))
+            .owner_facts(
+                "project",
+                json!({"tasks":{},"sprints":[],"messages":[]}),
+                json!({}),
+            )
             .await
             .unwrap();
         let workers = facts["workers"].as_array().unwrap();
@@ -395,19 +1120,37 @@ mod native_acceptance_tests {
         assert_eq!(work["result"]["summary"], "Wrote work.txt.");
         assert_eq!(work["result"]["reportId"], "r_work");
         assert_eq!(work["result"]["checks"][0]["source"], "worker");
-        assert_eq!(work["result"]["edits"], json!([{"path":"work.txt","add":5,"del":1}]));
-        let edits: Vec<_> = work["activity"].as_array().unwrap().iter().filter(|a| a["kind"] == "edit").collect();
+        assert_eq!(
+            work["result"]["edits"],
+            json!([{"path":"work.txt","add":5,"del":1}])
+        );
+        let edits: Vec<_> = work["activity"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["kind"] == "edit")
+            .collect();
         assert_eq!(edits.len(), 2);
         assert_eq!(edits[0]["code"], "work.txt");
         assert_eq!(edits[0]["diff"]["add"], 3);
         // The recorded write opens on its changed lines; a clipped record shows its counts only.
-        assert_eq!(edits[0]["diff"]["lines"], json!(["@@ -1,2 +1,4 @@", " a", "-b", "+B", "+c", "+d"]));
+        assert_eq!(
+            edits[0]["diff"]["lines"],
+            json!(["@@ -1,2 +1,4 @@", " a", "-b", "+B", "+c", "+d"])
+        );
         assert_eq!(edits[1]["diff"]["lines"], json!([]));
         assert_eq!(edits[1]["diff"]["add"], 2);
         // The reviewer made no edits.
-        let review = workers.iter().find(|w| w["role"] == "code-reviewer").unwrap();
+        let review = workers
+            .iter()
+            .find(|w| w["role"] == "code-reviewer")
+            .unwrap();
         assert_eq!(review["result"]["edits"], json!([]));
-        assert!(review["activity"].as_array().unwrap().iter().all(|a| a["kind"] != "edit"));
+        assert!(review["activity"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["kind"] != "edit"));
         runtime.shutdown().await;
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
@@ -441,13 +1184,23 @@ mod native_acceptance_tests {
             .unwrap()
             .unwrap();
         let facts = runtime
-            .owner_facts("project", json!({"tasks":{},"sprints":[],"messages":[]}), json!({}))
+            .owner_facts(
+                "project",
+                json!({"tasks":{},"sprints":[],"messages":[]}),
+                json!({}),
+            )
             .await
             .unwrap();
         let workers = facts["workers"].as_array().unwrap();
         let work = workers.iter().find(|w| w["role"] == "backend-dev").unwrap();
-        assert_eq!(work["resultRefusals"], json!({"count":2,"code":"omitted_failed_check"}));
-        let review = workers.iter().find(|w| w["role"] == "code-reviewer").unwrap();
+        assert_eq!(
+            work["resultRefusals"],
+            json!({"count":2,"code":"omitted_failed_check"})
+        );
+        let review = workers
+            .iter()
+            .find(|w| w["role"] == "code-reviewer")
+            .unwrap();
         assert!(review.get("resultRefusals").is_none());
         runtime.shutdown().await;
         drop(runtime);
@@ -455,7 +1208,10 @@ mod native_acceptance_tests {
     }
 
     /// Runs one write against the fixture's runtime task and its session.
-    async fn mutate(runtime: &Runtime, f: impl FnOnce(&Connection, &str, &str) -> cortex_core::CoreResult<()> + Send + 'static) {
+    async fn mutate(
+        runtime: &Runtime,
+        f: impl FnOnce(&Connection, &str, &str) -> cortex_core::CoreResult<()> + Send + 'static,
+    ) {
         runtime
             .host
             .executor
@@ -476,7 +1232,233 @@ mod native_acceptance_tests {
             .unwrap();
     }
     fn page_sequences(worker: &Value) -> Vec<i64> {
-        worker["activity"].as_array().unwrap().iter().map(|a| a["sequence"].as_i64().unwrap()).collect()
+        worker["activity"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["sequence"].as_i64().unwrap())
+            .collect()
+    }
+
+    /// The worker of the fixture reports, beside its passed check, two claims the runtime's
+    /// passing verification supersedes (one run before the last edit, one not run for a
+    /// recorded technical blocker) and a failed probe it withdrew. The withdrawn probe's
+    /// command ran on the worker's channel, whose output the native host keeps under the
+    /// channel's scope (`output`: the stored bytes, or None for a file that is gone).
+    async fn with_claims(runtime: &Runtime, output: Option<&'static [u8]>) {
+        runtime.host.executor.publication(move |store| {
+            let directory = store.key().directory();
+            store.write(|db| {
+                let task: String = db.query_row("SELECT runtime_task_id FROM workspace_executions LIMIT 1", [], |r| r.get(0))?;
+                let bytes: &[u8] = b"boom";
+                let folder = directory.join(&task).join(".native-output");
+                std::fs::create_dir_all(&folder)?;
+                if let Some(stored) = output {
+                    // Private, as the native host keeps it.
+                    std::fs::write(folder.join("lo_p.bin"), stored)?;
+                    std::fs::set_permissions(folder.join("lo_p.bin"), std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+                }
+                let sha = format!("{:x}", Sha256::digest(bytes));
+                db.execute("INSERT INTO runtime_requests VALUES (?,'kp','ch-work','command_run','d',?)", (&task,
+                    json!({"tool_call_ref":"native-command:p","argv":["/bin/false"],"cwd":"/fixture","profile":"development",
+                        "complete":true,"exit_code":1,"failure":null,"large_output_id":"lo_p","byte_count":4}).to_string()))?;
+                db.execute("INSERT INTO large_outputs VALUES ('lo_p',?,'ch-work','terminal',?,'lo_p.bin',4,0,1,NULL,NULL,'now')", (&task, &sha))?;
+                let raw: String = db.query_row("SELECT result_json FROM runtime_nodes WHERE task_id=? AND stage='execution'", [&task], |r| r.get(0))?;
+                let mut result: Value = serde_json::from_str(&raw)?;
+                for claim in [
+                    json!({"name":"early","outcome":"unverified","evidence_gap":"revision_mismatch","command":["/bin/true"]}),
+                    json!({"name":"deployed","outcome":"not_run","blocker":"No deployed environment is available."}),
+                    json!({"name":"probe","outcome":"failed","tool_call_ref":"native-command:p","probe_withdrawn":"The probe was withdrawn.","retracted_by":"probe_withdrawn"}),
+                ] {
+                    result["checks"].as_array_mut().unwrap().push(claim);
+                }
+                db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id=? AND stage='execution'", (result.to_string(), &task))?;
+                Ok(())
+            })?;
+            Ok(())
+        }).unwrap().await.unwrap().unwrap();
+    }
+    /// Owner report 2026-11-17: runtime verification passed and the review approved, the card
+    /// said the self-reported checks do not block acceptance, and Accept stayed off ("Run the
+    /// unpassed checks first"). The worker's withdrawn probe stayed a failed check because its
+    /// output, kept under the channel that ran it, was only looked for under the assignment.
+    #[tokio::test]
+    async fn a_withdrawn_probe_and_superseded_claims_leave_accept_available() {
+        let (root, runtime, draft) = completed().await;
+        with_claims(&runtime, Some(b"boom")).await;
+        let task = presented(&runtime, &draft).await;
+        assert_eq!(task["reviewActions"]["accept"], true, "{task}");
+        assert_eq!(
+            task["reviewActions"]["acknowledgeOpenChecks"], false,
+            "{task}"
+        );
+        let notes = task["result"]["warnings"].to_string();
+        assert!(
+            notes.contains("2 self-reported checks it does not cover are shown for information"),
+            "{notes}"
+        );
+        assert!(
+            notes.contains(
+                "\u{201c}deployed\u{201d}: not run: No deployed environment is available."
+            ),
+            "{notes}"
+        );
+        assert!(!notes.contains("probe"), "{notes}");
+        // Accept takes exactly this result; the validator observes the folder fresh.
+        let state = root.join(".cortex-dev/acceptance-state");
+        std::fs::create_dir(&state).unwrap();
+        let mut product = json!({"tasks":{},"sprints":[]});
+        product["tasks"][&draft] = json!({"checkout":{"kind":"main"}});
+        let p = json!({"action":"accept","taskId":draft,"digest":task["result"]["digest"],
+            "version":task["result"]["sourceVersion"],"acknowledgeOpenChecks":false});
+        accept(
+            &root,
+            "project",
+            &draft,
+            &state,
+            &mut product,
+            &p,
+            &mut Git::new(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{}: {}", e.code, e.message));
+        assert_eq!(product["tasks"][&draft]["status"], "ready_to_merge");
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// A verification the native runtime recorded is in the native digest domain only. When
+    /// the folder changed after it, the result is stale, and no legacy walk of the whole
+    /// folder runs to look for a match that cannot exist (it made every product read of a
+    /// project with stale results slow).
+    #[tokio::test]
+    async fn a_native_result_on_a_changed_folder_takes_no_legacy_capture() {
+        let (root, runtime, draft) = completed().await;
+        std::fs::write(root.join("work.txt"), "owner change").unwrap();
+        let task = presented(&runtime, &draft).await;
+        assert_eq!(task["reviewActions"]["workspaceChanged"], true, "{task}");
+        assert_eq!(task["reviewActions"]["accept"], false);
+        assert_eq!(crate::machine::legacy_source::scans(&root), 0);
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// A withdrawal that cannot be re-derived (the output the probe's run was bound to is gone)
+    /// keeps the probe a failed check. Accept stays off, and the reason names that check.
+    #[tokio::test]
+    async fn an_unconfirmed_withdrawal_blocks_accept_and_the_reason_names_the_check() {
+        let (root, runtime, draft) = completed().await;
+        with_claims(&runtime, None).await;
+        let task = presented(&runtime, &draft).await;
+        assert_eq!(task["reviewActions"]["accept"], false, "{task}");
+        assert_eq!(task["reviewActions"]["unblockAction"], "rerun_checks");
+        let reason = task["reviewActions"]["reason"].as_str().unwrap();
+        assert!(
+            reason.starts_with(
+                "Worker check \u{201c}probe\u{201d} failed. Rerun that check or request changes."
+            ),
+            "{reason}"
+        );
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// A changed stored output (its hash no longer matches what completion recorded) does not
+    /// count either: the withdrawal is re-derived only from the bytes completion saw.
+    #[tokio::test]
+    async fn a_changed_probe_output_does_not_confirm_its_withdrawal() {
+        let (root, runtime, draft) = completed().await;
+        with_claims(&runtime, Some(b"BOOM")).await;
+        let task = presented(&runtime, &draft).await;
+        assert_eq!(task["reviewActions"]["accept"], false, "{task}");
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// The task screen's first read (`defer`) does not wait for a slow folder observation: the
+    /// result's own record and the task's workers come at once, Accept is off with a pending
+    /// reason, and the read that follows has the settled review. Accept still observes fresh.
+    #[tokio::test]
+    async fn a_deferring_read_shows_the_result_while_the_folder_observation_runs() {
+        let (root, runtime, draft) = completed().await;
+        let observed = root.clone();
+        let slow = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            crate::machine::task_facts::recent_observation(observed).await
+        });
+        let began = std::time::Instant::now();
+        let facts = runtime
+            .owner_facts_observed(
+                "project",
+                json!({"tasks":{},"sprints":[],"messages":[]}),
+                json!({"defer":true,"taskIds":[draft]}),
+                slow,
+            )
+            .await
+            .unwrap();
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            began.elapsed()
+        );
+        let task = &facts["product"]["tasks"][&draft];
+        assert_eq!(task["result"]["summary"], "Fixture result.", "{task}");
+        assert_eq!(task["result"]["version"], 1);
+        assert_eq!(task["result"]["checks"][0]["source"], "runtime");
+        assert_eq!(task["reviewActions"]["pending"], true);
+        assert_eq!(task["reviewActions"]["accept"], false);
+        assert_eq!(
+            task["reviewActions"]["reason"],
+            crate::native_owner_controls::CHECKING_REASON
+        );
+        assert!(task["reviewActions"]["unblockAction"].is_null());
+        assert!(
+            facts["workers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|w| w["taskId"] == draft),
+            "{}",
+            facts["workers"]
+        );
+        // The next read settles: the same result, now acceptable.
+        let observing = tokio::spawn(crate::machine::task_facts::recent_observation(root.clone()));
+        let settled = runtime
+            .owner_facts_observed(
+                "project",
+                json!({"tasks":{},"sprints":[],"messages":[]}),
+                json!({"taskIds":[draft]}),
+                observing,
+            )
+            .await
+            .unwrap();
+        let task = &settled["product"]["tasks"][&draft];
+        assert_eq!(task["reviewActions"]["accept"], true, "{task}");
+        assert!(task["reviewActions"]["pending"].is_null());
+        assert_eq!(task["result"]["summary"], "Fixture result.");
+        // A file changed after that read: Accept of the presented identity is refused.
+        std::fs::write(root.join("work.txt"), "owner change").unwrap();
+        let state = root.join(".cortex-dev/acceptance-state");
+        std::fs::create_dir(&state).unwrap();
+        let mut product = json!({"tasks":{},"sprints":[]});
+        product["tasks"][&draft] = json!({"checkout":{"kind":"main"}});
+        let p = json!({"action":"accept","taskId":draft,"digest":task["result"]["digest"],
+            "version":task["result"]["sourceVersion"],"acknowledgeOpenChecks":false});
+        let refused = accept(
+            &root,
+            "project",
+            &draft,
+            &state,
+            &mut product,
+            &p,
+            &mut Git::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code, "stale_result");
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// Owner store 2026-11-17: a long native task (many commands, guidance messages, workers and
@@ -486,7 +1468,11 @@ mod native_acceptance_tests {
     #[tokio::test]
     async fn a_large_task_reads_in_pages_and_is_never_refused() {
         let (root, runtime, draft) = completed().await;
-        let digest = crate::native_effects::observe(root.clone()).await.unwrap().project_digest.unwrap();
+        let digest = crate::native_effects::observe(root.clone())
+            .await
+            .unwrap()
+            .project_digest
+            .unwrap();
         mutate(&runtime, move |db, task, _| {
             for i in 0..250 {
                 let reference = format!("native-command:l{i}");
@@ -506,12 +1492,25 @@ mod native_acceptance_tests {
             Ok(())
         })
         .await;
-        let facts = runtime.owner_facts("project", json!({"tasks":{},"sprints":[],"messages":[]}), json!({})).await.unwrap();
+        let facts = runtime
+            .owner_facts(
+                "project",
+                json!({"tasks":{},"sprints":[],"messages":[]}),
+                json!({}),
+            )
+            .await
+            .unwrap();
         // Every guidance message is present; the roster holds all 122 workers.
         assert_eq!(facts["product"]["messages"].as_array().unwrap().len(), 120);
         assert_eq!(facts["workers"].as_array().unwrap().len(), 122);
         assert!(facts["partial"]["messages"].is_null() && facts["partial"]["workers"].is_null());
-        let work = facts["workers"].as_array().unwrap().iter().find(|w| w["id"] == "a-work").unwrap().clone();
+        let work = facts["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["id"] == "a-work")
+            .unwrap()
+            .clone();
         assert_eq!(work["activity"].as_array().unwrap().len(), 200);
         assert_eq!(work["activityPartial"], true);
         // The pages together hold every command and both edits once, newest page first.
@@ -519,8 +1518,14 @@ mod native_acceptance_tests {
         let mut cursor = work["activityCursor"].as_str().map(str::to_owned);
         let mut pages = 1;
         while let Some(next) = cursor {
-            let page = runtime.owner_facts("project", json!({"tasks":{},"sprints":[],"messages":[]}),
-                json!({"taskIds":[draft],"workerId":"a-work","cursor":next})).await.unwrap();
+            let page = runtime
+                .owner_facts(
+                    "project",
+                    json!({"tasks":{},"sprints":[],"messages":[]}),
+                    json!({"taskIds":[draft],"workerId":"a-work","cursor":next}),
+                )
+                .await
+                .unwrap();
             let worker = page["workers"].as_array().unwrap()[0].clone();
             assert!(page_sequences(&worker).iter().all(|s| !all.contains(s)));
             all.extend(page_sequences(&worker));
@@ -537,7 +1542,11 @@ mod native_acceptance_tests {
         // The result's receipts are within the bound here, so Accept stays decided by the review.
         assert!(facts["product"]["tasks"][&draft]["result"]["checksPartial"].is_null());
         // More receipts than one read presents: marked, and Accept is unavailable with a reason.
-        let digest = crate::native_effects::observe(root.clone()).await.unwrap().project_digest.unwrap();
+        let digest = crate::native_effects::observe(root.clone())
+            .await
+            .unwrap()
+            .project_digest
+            .unwrap();
         mutate(&runtime, move |db, task, _| {
             for i in 0..1005 {
                 lifecycle::event_tx(db, task, "NATIVE_COMMAND_FINISHED", json!({"receipt":{"revision":0,"argv":["/bin/echo",format!("c{i}")],"revision_digest":digest,
@@ -546,12 +1555,22 @@ mod native_acceptance_tests {
             Ok(())
         })
         .await;
-        let facts = runtime.owner_facts("project", json!({"tasks":{},"sprints":[],"messages":[]}), json!({})).await.unwrap();
+        let facts = runtime
+            .owner_facts(
+                "project",
+                json!({"tasks":{},"sprints":[],"messages":[]}),
+                json!({}),
+            )
+            .await
+            .unwrap();
         let task = &facts["product"]["tasks"][&draft];
         assert_eq!(task["result"]["checksPartial"], true);
         assert_eq!(task["result"]["acceptanceAvailable"], false);
         assert_eq!(task["reviewActions"]["accept"], false);
-        assert!(task["reviewActions"]["reason"].as_str().unwrap().contains("check receipts"));
+        assert!(task["reviewActions"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("check receipts"));
         runtime.shutdown().await;
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
@@ -574,19 +1593,51 @@ mod native_acceptance_tests {
         .await;
         let read = |params: Value| {
             let runtime = runtime.clone();
-            async move { runtime.owner_facts("project", json!({"tasks":{},"sprints":[],"messages":[]}), params).await.unwrap() }
+            async move {
+                runtime
+                    .owner_facts(
+                        "project",
+                        json!({"tasks":{},"sprints":[],"messages":[]}),
+                        params,
+                    )
+                    .await
+                    .unwrap()
+            }
         };
         let first = read(json!({})).await;
-        let mut messages: Vec<String> = first["product"]["messages"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap().to_owned()).collect();
-        let mut worker = first["workers"].as_array().unwrap().iter().find(|w| w["id"] == "a-work").unwrap().clone();
+        let mut messages: Vec<String> = first["product"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_owned())
+            .collect();
+        let mut worker = first["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["id"] == "a-work")
+            .unwrap()
+            .clone();
         let (mut tools, mut notes) = (0, 0);
         let mut pages = 0;
         loop {
             for a in worker["activity"].as_array().unwrap() {
-                match a["kind"].as_str().unwrap() { "tool" => tools += 1, "note" => notes += 1, _ => {} }
+                match a["kind"].as_str().unwrap() {
+                    "tool" => tools += 1,
+                    "note" => notes += 1,
+                    _ => {}
+                }
             }
-            messages.extend(worker["messages"].as_array().into_iter().flatten().map(|m| m["id"].as_str().unwrap().to_owned()));
-            let Some(cursor) = worker["activityCursor"].as_str().map(str::to_owned) else { break };
+            messages.extend(
+                worker["messages"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|m| m["id"].as_str().unwrap().to_owned()),
+            );
+            let Some(cursor) = worker["activityCursor"].as_str().map(str::to_owned) else {
+                break;
+            };
             pages += 1;
             assert!(pages < 30, "paging must end");
             let page = read(json!({"taskIds":[draft],"workerId":"a-work","cursor":cursor})).await;
@@ -606,7 +1657,11 @@ mod native_acceptance_tests {
     #[tokio::test]
     async fn accept_refuses_a_partial_receipt_set_with_a_readable_reason() {
         let (root, runtime, draft) = completed().await;
-        let digest = crate::native_effects::observe(root.clone()).await.unwrap().project_digest.unwrap();
+        let digest = crate::native_effects::observe(root.clone())
+            .await
+            .unwrap()
+            .project_digest
+            .unwrap();
         mutate(&runtime, move |db, task, _| {
             for i in 0..1005 {
                 lifecycle::event_tx(db, task, "NATIVE_COMMAND_FINISHED", json!({"receipt":{"revision":0,"argv":["/bin/echo",format!("c{i}")],"revision_digest":digest,
@@ -623,8 +1678,23 @@ mod native_acceptance_tests {
         product["tasks"][&draft] = json!({"checkout":{"kind":"main"}});
         let p = json!({"action":"accept","taskId":draft,"digest":task["result"]["digest"],
             "version":task["result"]["sourceVersion"],"acknowledgeOpenChecks":false});
-        let refused = accept(&root, "project", &draft, &state, &mut product, &p, &mut Git::new()).await.unwrap_err();
-        assert!(refused.message.contains("check receipts"), "{}: {}", refused.code, refused.message);
+        let refused = accept(
+            &root,
+            "project",
+            &draft,
+            &state,
+            &mut product,
+            &p,
+            &mut Git::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            refused.message.contains("check receipts"),
+            "{}: {}",
+            refused.code,
+            refused.message
+        );
         runtime.shutdown().await;
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
@@ -663,11 +1733,27 @@ mod native_acceptance_tests {
         let mut pages = 0;
         loop {
             let (d, c) = (draft.clone(), cursor.clone());
-            let rows = runtime.host.executor.read(move |db| crate::machine::coordinator::read(db, "project", &json!({"taskIds":[d],"workerId":format!("coordinator:{d}"),"cursor":c})))
-                .unwrap().await.unwrap().unwrap();
+            let rows = runtime
+                .host
+                .executor
+                .read(move |db| {
+                    crate::machine::coordinator::read(
+                        db,
+                        "project",
+                        &json!({"taskIds":[d],"workerId":format!("coordinator:{d}"),"cursor":c}),
+                    )
+                })
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap();
             let page = &rows[0];
             for a in page["activity"].as_array().unwrap() {
-                texts.push(format!("{}|{}", a["text"].as_str().unwrap_or(""), a["toolCallRef"].as_str().unwrap_or("")));
+                texts.push(format!(
+                    "{}|{}",
+                    a["text"].as_str().unwrap_or(""),
+                    a["toolCallRef"].as_str().unwrap_or("")
+                ));
             }
             pages += 1;
             assert!(pages < 10);
@@ -676,18 +1762,50 @@ mod native_acceptance_tests {
                 None => break,
             }
         }
-        assert!(texts.iter().filter(|t| t.contains("coordinator note")).count() == 250);
-        assert!(texts.iter().all(|t| !t.contains("work note") && !t.contains("review note") && !t.contains("att-a-")));
+        assert!(
+            texts
+                .iter()
+                .filter(|t| t.contains("coordinator note"))
+                .count()
+                == 250
+        );
+        assert!(texts.iter().all(|t| !t.contains("work note")
+            && !t.contains("review note")
+            && !t.contains("att-a-")));
         assert!(texts.iter().any(|t| t.ends_with("att-coord:c1")));
         assert!(pages >= 3);
         // Each worker page: its own narration and calls, nothing of the coordinator or the other worker.
-        let facts = runtime.owner_facts("project", json!({"tasks":{},"sprints":[],"messages":[]}), json!({})).await.unwrap();
-        for (id, mine, other) in [("a-work", "work note", "review note"), ("a-review", "review note", "work note")] {
-            let worker = facts["workers"].as_array().unwrap().iter().find(|w| w["id"] == id).unwrap();
+        let facts = runtime
+            .owner_facts(
+                "project",
+                json!({"tasks":{},"sprints":[],"messages":[]}),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        for (id, mine, other) in [
+            ("a-work", "work note", "review note"),
+            ("a-review", "review note", "work note"),
+        ] {
+            let worker = facts["workers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|w| w["id"] == id)
+                .unwrap();
             let body = worker["activity"].to_string();
             assert!(body.contains(mine), "{id}");
-            assert!(!body.contains(other) && !body.contains("coordinator note") && !body.contains("att-coord:"), "{id}");
-            let other_attempt = if id == "a-work" { "att-a-review:" } else { "att-a-work:" };
+            assert!(
+                !body.contains(other)
+                    && !body.contains("coordinator note")
+                    && !body.contains("att-coord:"),
+                "{id}"
+            );
+            let other_attempt = if id == "a-work" {
+                "att-a-review:"
+            } else {
+                "att-a-work:"
+            };
             assert!(!body.contains(other_attempt), "{id}");
         }
         runtime.shutdown().await;
@@ -727,28 +1845,55 @@ mod native_acceptance_tests {
         .unwrap();
         set(
             "UPDATE runtime_nodes SET status='cancelled' WHERE assignment_ref='a-review'",
-            Some(("WORKER_STOPPED_BY_OWNER", json!({"assignment_ref":"a-review","reason":"stop"}))),
+            Some((
+                "WORKER_STOPPED_BY_OWNER",
+                json!({"assignment_ref":"a-review","reason":"stop"}),
+            )),
         )
         .await
         .unwrap()
         .unwrap();
-        let facts = || runtime.owner_facts("project", json!({"tasks":{},"sprints":[],"messages":[]}), json!({}));
+        let facts = || {
+            runtime.owner_facts(
+                "project",
+                json!({"tasks":{},"sprints":[],"messages":[]}),
+                json!({}),
+            )
+        };
         let all = facts().await.unwrap();
         let workers = all["workers"].as_array().unwrap();
         let work = workers.iter().find(|w| w["role"] == "backend-dev").unwrap();
         assert_eq!(work["status"], "failed");
         assert_eq!(work["result"]["outcome"], "failed");
         assert_eq!(work["result"]["reportId"], "r_a408f1d4976c");
-        assert_eq!(work["result"]["summary"], "The documentation update remains incomplete.");
+        assert_eq!(
+            work["result"]["summary"],
+            "The documentation update remains incomplete."
+        );
         assert_eq!(work["result"]["checks"], json!([]));
         assert!(work.get("endedReason").is_none());
-        let review = workers.iter().find(|w| w["role"] == "code-reviewer").unwrap();
+        let review = workers
+            .iter()
+            .find(|w| w["role"] == "code-reviewer")
+            .unwrap();
         assert!(review["result"].is_null());
         assert_eq!(review["endedReason"], "stopped_by_owner");
         // Without the owner-stop event the same cancelled node is the coordinator's doing.
-        set("DELETE FROM runtime_events WHERE type='WORKER_STOPPED_BY_OWNER'", None).await.unwrap().unwrap();
+        set(
+            "DELETE FROM runtime_events WHERE type='WORKER_STOPPED_BY_OWNER'",
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let all = facts().await.unwrap();
-        let review = all["workers"].as_array().unwrap().iter().find(|w| w["role"] == "code-reviewer").unwrap().clone();
+        let review = all["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["role"] == "code-reviewer")
+            .unwrap()
+            .clone();
         assert_eq!(review["endedReason"], "cancelled_by_coordinator");
         // A failed worker whose retry records a lost session.
         set(
@@ -759,7 +1904,13 @@ mod native_acceptance_tests {
         .unwrap()
         .unwrap();
         let all = facts().await.unwrap();
-        let review = all["workers"].as_array().unwrap().iter().find(|w| w["role"] == "code-reviewer").unwrap().clone();
+        let review = all["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["role"] == "code-reviewer")
+            .unwrap()
+            .clone();
         assert_eq!(review["endedReason"], "worker_lost");
         runtime.shutdown().await;
         drop(runtime);
@@ -777,7 +1928,10 @@ mod native_acceptance_tests {
             .publication(|store| {
                 store.write(|db| {
                     db.execute("DROP TRIGGER IF EXISTS runtime_events_no_delete", [])?;
-                    db.execute("DELETE FROM runtime_events WHERE type='VERIFICATION_PASSED'", [])?;
+                    db.execute(
+                        "DELETE FROM runtime_events WHERE type='VERIFICATION_PASSED'",
+                        [],
+                    )?;
                     Ok(())
                 })?;
                 Ok(())
@@ -787,7 +1941,13 @@ mod native_acceptance_tests {
             .unwrap()
             .unwrap();
         let task = presented(&runtime, &draft).await;
-        assert!(task["result"]["digest"].as_str().unwrap().starts_with("result:"), "{task}");
+        assert!(
+            task["result"]["digest"]
+                .as_str()
+                .unwrap()
+                .starts_with("result:"),
+            "{task}"
+        );
         assert_eq!(task["workspaceDigest"], task["result"]["digest"], "{task}");
         assert_eq!(task["reviewActions"]["accept"], false);
         assert_eq!(task["reviewActions"]["unblockAction"], "rerun_checks");
@@ -808,9 +1968,20 @@ mod native_acceptance_tests {
             .executor
             .publication(|store| {
                 store.write(|db| {
-                    let task: String = db.query_row("SELECT task_id FROM runtime_tasks LIMIT 1", [], |r| r.get(0))?;
-                    lifecycle::event_tx(db, &task, "TASK_REOPENED", json!({"previous":"COMPLETED","revision":0}))?;
-                    db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id=?", [&task])?;
+                    let task: String =
+                        db.query_row("SELECT task_id FROM runtime_tasks LIMIT 1", [], |r| {
+                            r.get(0)
+                        })?;
+                    lifecycle::event_tx(
+                        db,
+                        &task,
+                        "TASK_REOPENED",
+                        json!({"previous":"COMPLETED","revision":0}),
+                    )?;
+                    db.execute(
+                        "UPDATE runtime_tasks SET state='PLANNING' WHERE task_id=?",
+                        [&task],
+                    )?;
                     Ok(())
                 })?;
                 Ok(())
@@ -841,7 +2012,11 @@ mod native_acceptance_tests {
             .unwrap()
             .unwrap();
         let next = presented(&runtime, &draft).await;
-        assert_eq!(next["result"]["checks"].as_array().unwrap().len(), 1, "{next}");
+        assert_eq!(
+            next["result"]["checks"].as_array().unwrap().len(),
+            1,
+            "{next}"
+        );
         assert_eq!(next["result"]["checks"][0]["name"], "/bin/false");
         assert_eq!(next["result"]["acceptanceAvailable"], false);
         runtime.shutdown().await;
@@ -859,7 +2034,10 @@ mod native_acceptance_tests {
             .executor
             .publication(move |store| {
                 store.write(|db| {
-                    let task: String = db.query_row("SELECT task_id FROM runtime_tasks LIMIT 1", [], |r| r.get(0))?;
+                    let task: String =
+                        db.query_row("SELECT task_id FROM runtime_tasks LIMIT 1", [], |r| {
+                            r.get(0)
+                        })?;
                     body(db, &task)
                 })
             })
@@ -871,7 +2049,10 @@ mod native_acceptance_tests {
     async fn presented_with(runtime: &Runtime, draft: &str, record: Value) -> Value {
         let mut product = json!({"tasks":{},"sprints":[],"messages":[]});
         product["tasks"][draft] = record;
-        let facts = runtime.owner_facts("project", product, json!({})).await.unwrap();
+        let facts = runtime
+            .owner_facts("project", product, json!({}))
+            .await
+            .unwrap();
         facts["product"]["tasks"][draft].clone()
     }
     /// Replaces the worker's and reviewer's reported checks of the fixture result.
@@ -912,24 +2093,53 @@ mod native_acceptance_tests {
         assert_eq!(actions["acknowledgeOpenChecks"], false, "{task}");
         assert!(actions["unblockAction"].is_null(), "{task}");
         assert_eq!(task["result"]["acceptanceAvailable"], true);
-        let notes: Vec<&str> = task["result"]["warnings"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
-        assert!(notes.iter().any(|n| n.starts_with("The runtime's own verification of this version passed. 4 self-reported checks")), "{notes:?}");
+        let notes: Vec<&str> = task["result"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(
+            notes.iter().any(|n| n.starts_with(
+                "The runtime's own verification of this version passed. 4 self-reported checks"
+            )),
+            "{notes:?}"
+        );
         assert!(notes.contains(&"Worker check \u{201c}test exits 0\u{201d}: it ran before the final edits, so that run does not count."), "{notes:?}");
         assert!(notes.contains(&"Worker check \u{201c}npm test\u{201d}: not run: npm is not installed in the guarded sandbox."), "{notes:?}");
-        assert!(notes.iter().any(|n| n.starts_with("Reviewer check \u{201c}/bin/true\u{201d}")), "{notes:?}");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.starts_with("Reviewer check \u{201c}/bin/true\u{201d}")),
+            "{notes:?}"
+        );
         // The same-model review note is still there.
-        assert!(notes.contains(&"The reviewer runs on the same model as the work it reviews."), "{notes:?}");
+        assert!(
+            notes.contains(&"The reviewer runs on the same model as the work it reviews."),
+            "{notes:?}"
+        );
         let state = root.join(".cortex-dev/acceptance-state");
         std::fs::create_dir(&state).unwrap();
         let mut product = json!({"tasks":{},"sprints":[]});
         product["tasks"][&draft] = json!({"checkout":{"kind":"main"}});
         let p = json!({"action":"accept","taskId":draft,"digest":task["result"]["digest"],
             "version":task["result"]["sourceVersion"],"acknowledgeOpenChecks":false});
-        let accepted = accept(&root, "project", &draft, &state, &mut product, &p, &mut Git::new())
-            .await
-            .unwrap_or_else(|e| panic!("{}: {}", e.code, e.message));
+        let accepted = accept(
+            &root,
+            "project",
+            &draft,
+            &state,
+            &mut product,
+            &p,
+            &mut Git::new(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{}: {}", e.code, e.message));
         assert_eq!(accepted["done"], true);
-        assert_eq!(product["tasks"][&draft]["acceptance"]["open"], json!({"failed":0,"not_run":0,"unverified":0}));
+        assert_eq!(
+            product["tasks"][&draft]["acceptance"]["open"],
+            json!({"failed":0,"not_run":0,"unverified":0})
+        );
         runtime.shutdown().await;
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
@@ -945,8 +2155,18 @@ mod native_acceptance_tests {
             json!([])).await;
         let task = presented(&runtime, &draft).await;
         assert_eq!(task["reviewActions"]["accept"], false, "{task}");
-        assert_eq!(task["reviewActions"]["acknowledgeOpenChecks"], true, "{task}");
-        assert!(task["result"]["warnings"].as_array().unwrap().iter().all(|n| !n.as_str().unwrap().contains("self-reported")), "{task}");
+        assert_eq!(
+            task["reviewActions"]["acknowledgeOpenChecks"], true,
+            "{task}"
+        );
+        assert!(
+            task["result"]["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|n| !n.as_str().unwrap().contains("self-reported")),
+            "{task}"
+        );
         // The runtime's own verification failed: the unconfirmed claim stays an open check.
         report_checks(&runtime,
             json!([{"name":"npm test","outcome":"not_run","command":["npm","test"],"blocker":"npm is missing."}]),
@@ -959,7 +2179,12 @@ mod native_acceptance_tests {
         }).await;
         let failed = presented(&runtime, &draft).await;
         assert_eq!(failed["reviewActions"]["accept"], false, "{failed}");
-        assert!(failed["result"]["warnings"].as_array().map_or(true, |a| a.iter().all(|n| !n.as_str().unwrap().contains("self-reported"))), "{failed}");
+        assert!(
+            failed["result"]["warnings"].as_array().map_or(true, |a| a
+                .iter()
+                .all(|n| !n.as_str().unwrap().contains("self-reported"))),
+            "{failed}"
+        );
         runtime.shutdown().await;
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
@@ -980,13 +2205,20 @@ mod native_acceptance_tests {
             Ok(())
         }).await;
         let sprint = json!({"checkout":{"kind":"main"},"sprintId":"sp_1"});
-        assert_eq!(presented_with(&runtime, &draft, sprint.clone()).await["reviewActions"]["accept"], true);
+        assert_eq!(
+            presented_with(&runtime, &draft, sprint.clone()).await["reviewActions"]["accept"],
+            true
+        );
         // A later task of the sprint writes another file of the same folder.
         std::fs::write(root.join("later.txt"), "a later task's file").unwrap();
         let task = presented_with(&runtime, &draft, sprint.clone()).await;
         assert_eq!(task["reviewActions"]["accept"], true, "{task}");
         assert_eq!(task["workspaceDigest"], task["result"]["digest"], "{task}");
-        assert!(task["reviewActions"]["workspaceChanged"].is_null() && task["reviewActions"]["ownWritesOnly"].is_null(), "{task}");
+        assert!(
+            task["reviewActions"]["workspaceChanged"].is_null()
+                && task["reviewActions"]["ownWritesOnly"].is_null(),
+            "{task}"
+        );
         // Accept binds the same result identity.
         let state = root.join(".cortex-dev/acceptance-state");
         std::fs::create_dir(&state).unwrap();
@@ -994,9 +2226,17 @@ mod native_acceptance_tests {
         product["tasks"][&draft] = sprint.clone();
         let p = json!({"action":"accept","taskId":draft,"digest":task["result"]["digest"],
             "version":task["result"]["sourceVersion"],"acknowledgeOpenChecks":false});
-        accept(&root, "project", &draft, &state, &mut product, &p, &mut Git::new())
-            .await
-            .unwrap_or_else(|e| panic!("{}: {}", e.code, e.message));
+        accept(
+            &root,
+            "project",
+            &draft,
+            &state,
+            &mut product,
+            &p,
+            &mut Git::new(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{}: {}", e.code, e.message));
         // Outside a sprint the whole folder still counts.
         let single = presented_with(&runtime, &draft, json!({"checkout":{"kind":"main"}})).await;
         assert_eq!(single["reviewActions"]["accept"], false, "{single}");
@@ -1027,7 +2267,10 @@ mod native_acceptance_tests {
         // Another integration identity is not this result's commit.
         let mut other = committed;
         other["integration"]["digest"] = json!("f".repeat(64));
-        assert_ne!(presented_with(&runtime, &draft, other).await["workspaceDigest"], digest);
+        assert_ne!(
+            presented_with(&runtime, &draft, other).await["workspaceDigest"],
+            digest
+        );
         runtime.shutdown().await;
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
@@ -1039,16 +2282,47 @@ mod native_acceptance_tests {
     async fn workers_of_a_reopened_version_are_marked_superseded() {
         let (root, runtime, _draft) = completed().await;
         let workers = |facts: &Value| facts["workers"].as_array().unwrap().clone();
-        let facts = runtime.owner_facts("project", json!({"tasks":{},"sprints":[],"messages":[]}), json!({})).await.unwrap();
-        assert!(workers(&facts).iter().all(|w| w.get("superseded").is_none()), "{facts}");
+        let facts = runtime
+            .owner_facts(
+                "project",
+                json!({"tasks":{},"sprints":[],"messages":[]}),
+                json!({}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            workers(&facts)
+                .iter()
+                .all(|w| w.get("superseded").is_none()),
+            "{facts}"
+        );
         with_task(&runtime, |db, task| {
-            lifecycle::event_tx(db, task, "TASK_REOPENED", json!({"previous":"COMPLETED","revision":0}))?;
-            db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id=?", [task])?;
+            lifecycle::event_tx(
+                db,
+                task,
+                "TASK_REOPENED",
+                json!({"previous":"COMPLETED","revision":0}),
+            )?;
+            db.execute(
+                "UPDATE runtime_tasks SET state='PLANNING' WHERE task_id=?",
+                [task],
+            )?;
             Ok(())
-        }).await;
-        let facts = runtime.owner_facts("project", json!({"tasks":{},"sprints":[],"messages":[]}), json!({})).await.unwrap();
+        })
+        .await;
+        let facts = runtime
+            .owner_facts(
+                "project",
+                json!({"tasks":{},"sprints":[],"messages":[]}),
+                json!({}),
+            )
+            .await
+            .unwrap();
         assert_eq!(workers(&facts).len(), 2);
-        assert!(workers(&facts).iter().all(|w| w["superseded"] == true), "{facts}");
+        assert!(
+            workers(&facts).iter().all(|w| w["superseded"] == true),
+            "{facts}"
+        );
         runtime.shutdown().await;
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
@@ -1078,27 +2352,66 @@ mod native_acceptance_tests {
             }
             Ok(())
         }).await;
-        let facts = runtime.owner_facts("project", json!({"tasks":{},"sprints":[],"messages":[]}), json!({})).await.unwrap();
+        let facts = runtime
+            .owner_facts(
+                "project",
+                json!({"tasks":{},"sprints":[],"messages":[]}),
+                json!({}),
+            )
+            .await
+            .unwrap();
         let workers = facts["workers"].as_array().unwrap();
         let work = workers.iter().find(|w| w["role"] == "backend-dev").unwrap();
-        let steps: Vec<&Value> = work["activity"].as_array().unwrap().iter().filter(|a| a["kind"] == "tool").collect();
-        let step = |call: &str| steps.iter().find(|a| a["toolCallRef"] == format!("att-a-work:{call}")).map(|a| serde_json::from_str::<Value>(a["args"].as_str().unwrap()).unwrap());
+        let steps: Vec<&Value> = work["activity"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["kind"] == "tool")
+            .collect();
+        let step = |call: &str| {
+            steps
+                .iter()
+                .find(|a| a["toolCallRef"] == format!("att-a-work:{call}"))
+                .map(|a| serde_json::from_str::<Value>(a["args"].as_str().unwrap()).unwrap())
+        };
         let read = step("read").expect("the read is on the worker's page");
-        assert_eq!((read["path"].as_str(), read["status"].as_str()), (Some("src/counter.js"), Some("completed")));
+        assert_eq!(
+            (read["path"].as_str(), read["status"].as_str()),
+            (Some("src/counter.js"), Some("completed"))
+        );
         assert_eq!(step("skill").unwrap()["ref"], "documentation-sync");
         assert_eq!(step("grep").unwrap()["query"], "TODO");
-        assert!(step("edit").is_none(), "a Cortex write is the edit row above, not a second step");
-        assert!(steps.iter().all(|a| a["text"].as_str().unwrap().starts_with("worker-backend-dev:")));
+        assert!(
+            step("edit").is_none(),
+            "a Cortex write is the edit row above, not a second step"
+        );
+        assert!(steps.iter().all(|a| a["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("worker-backend-dev:")));
         // Every row has a time and a distinct sequence, and they are in time order.
         let all = work["activity"].as_array().unwrap();
         assert!(all.iter().all(|a| a["at"].is_i64()), "{all:?}");
-        let mut sequences: Vec<i64> = all.iter().map(|a| a["sequence"].as_i64().unwrap()).collect();
-        assert!(all.windows(2).all(|w| w[0]["at"].as_i64() <= w[1]["at"].as_i64()));
+        let mut sequences: Vec<i64> = all
+            .iter()
+            .map(|a| a["sequence"].as_i64().unwrap())
+            .collect();
+        assert!(all
+            .windows(2)
+            .all(|w| w[0]["at"].as_i64() <= w[1]["at"].as_i64()));
         sequences.sort();
         sequences.dedup();
         assert_eq!(sequences.len(), all.len());
-        let review = workers.iter().find(|w| w["role"] == "code-reviewer").unwrap();
-        let reviewer: Vec<&Value> = review["activity"].as_array().unwrap().iter().filter(|a| a["kind"] == "tool").collect();
+        let review = workers
+            .iter()
+            .find(|w| w["role"] == "code-reviewer")
+            .unwrap();
+        let reviewer: Vec<&Value> = review["activity"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["kind"] == "tool")
+            .collect();
         assert_eq!(reviewer.len(), 1, "{review}");
         assert_eq!(reviewer[0]["toolCallRef"], "att-a-review:read");
         runtime.shutdown().await;

@@ -2,7 +2,8 @@ import { createMemo, For, Match, Show, Switch } from "solid-js";
 import { LiveTerminal } from "./terminal";
 import { FEATURES } from "@cortex/workspace-domain";
 import { ArchiveFacts, DeleteArchive } from "./archive";
-import { useWs, type WindowChrome } from "./ctx";
+import { useWs, type PhoneFrame, type WindowChrome } from "./ctx";
+import { machineLine } from "./phone-words";
 import { Confirmed } from "./freshness";
 import { CodePanel } from "./code";
 import { GitPanel } from "./git";
@@ -13,8 +14,10 @@ import { APP_SECTIONS, MACHINE_SECTIONS, ORCHESTRATION_PAGES, type Orchestration
 import { defaultCheckout, repoOf } from "./review-model";
 import { asOf, awaitsOwner, checkCounts, clock, dayClock, engineLimits, limitsText, newestObserved, homeView, inboxItems, projectsOn, rowIcon, sameBranch, sideRows, sideWord, sprintRoute, sprintView, type EngineLimit, type LimitWindow, type ProjectSummary, type SideRow, type TaskView } from "./selectors";
 import { workerFace } from "./session-model";
+import { same } from "./stable";
 import { SprintActions, SprintCrumb } from "./sprint";
-import { BranchChip, TaskActions, TaskInspector, TaskTitle } from "./task-chrome";
+import { BranchChip, TaskActions, TaskInspector, TaskTitle, taskWhyId } from "./task-chrome";
+import { BandActions } from "./git-actions";
 
 const tile = (name: string, n: number) => ({ letter: name[0]?.toUpperCase() ?? "?", cls: `t${(n % 6) + 1}` });
 const project = (machine: string, id: string): Route => ({ name: "project", machine, project: id, view: "board", scope: { kind: "all" } });
@@ -105,8 +108,8 @@ export function TitleBar() {
       </button>
     </div>
     <div class="tb-main">
-      <button class="ib" classList={{ "ws-hide": !ws.router.canBack() }} aria-label="Back" onClick={() => ws.router.back()}><I n="arrow-left" /></button>
-      <button class="ib" classList={{ "ws-hide": !ws.router.canForward() }} aria-label="Forward" onClick={() => ws.router.forward()}><I n="arrow-right" /></button>
+      <button class="ib" classList={{ "tb-nav-off": !ws.router.canBack() }} aria-label="Back" disabled={!ws.router.canBack()} onClick={() => { if (ws.router.canBack()) ws.router.back(); }}><I n="arrow-left" /></button>
+      <button class="ib" classList={{ "tb-nav-off": !ws.router.canForward() }} aria-label="Forward" disabled={!ws.router.canForward()} onClick={() => { if (ws.router.canForward()) ws.router.forward(); }}><I n="arrow-right" /></button>
       <div class="crumbs">
         <Switch fallback={<span class="cur">{crumb()}</span>}>
           <Match when={route().name === "project" && ctx.summary()}>{s => <>
@@ -134,12 +137,13 @@ export function TitleBar() {
         <Show when={ctx.view()} fallback={<Show when={ctx.sprint()} fallback={<Show when={route().name === "archive"} fallback={<>
           <Show when={areaName() === "Code"}><button class="btn btn-line" onClick={() => ws.setCodeLeft("search")}><I n="search" s={14} />Search</button></Show>
           <Show when={areaName() === "Git" && ctx.summary()}>{s => <button class="btn btn-line" {...ws.needs("create_branch")} onClick={() => ws.open({ kind: "branch", projectId: s().project.id })}><I n="branch" s={14} />New branch</button>}</Show>
+          <Show when={route().name === "project" && ctx.summary()}>{s => <BandActions view={null} summary={s()} />}</Show>
           <Show when={route().name !== "new" && route().name !== "settings" && !areaName()}><span class="split">
             <button class="btn btn-primary" onClick={() => ws.newItem("task")}><I n="plus" s={14} />New task</button>
             <button class="btn btn-primary" popovertarget="m-new" aria-label="New task or sprint"><I n="chevron-down" s={14} /></button>
           </span></Show>
           <Show when={route().name === "project"}><button class="ib" popovertarget="m-project" aria-label="Project actions"><I n="more" /></button></Show>
-        </>}><DeleteArchive /></Show>}>{s => <SprintActions sprint={s()} tab={(route() as Extract<Route, { name: "sprint" }>).tab} />}</Show>}>{v => <TaskActions view={v()} onMenu={el => ws.openTaskMenu(v().id, el)} />}</Show>
+        </>}><DeleteArchive /></Show>}>{s => <SprintActions sprint={s()} tab={(route() as Extract<Route, { name: "sprint" }>).tab} />}</Show>}>{v => <TaskActions view={v()} onMenu={el => ws.openTaskMenu(v().id, el)} git={<Show when={ctx.summary()}>{s => <BandActions view={v()} summary={s()} whyId={taskWhyId(v().id)} />}</Show>} />}</Show>
       </div>
       <div class="tb-fixed">
         {ws.demo?.chip()}
@@ -207,7 +211,8 @@ function UsageBar(props: { row: EngineLimit; window: LimitWindow; first: boolean
 /** Every connected engine stays visible; unknown is never drawn as zero. */
 function SidebarUsage() {
   const ws = useWs();
-  const known = createMemo(() => engineLimits(ws.store.state(), ws.machine()).rows);
+  // Built afresh on every read of the machine: equal limits keep their rows, so a resting pointer and an open list stay put.
+  const known = createMemo(() => engineLimits(ws.store.state(), ws.machine()).rows, undefined, { equals: same });
   const stale = () => known().some(r => r.windows.some(w => asOf(w.observedAt, ws.store.clock())?.stale));
   const label = () => `Engine limits: ${limitsText(known())} used this week${stale() ? ", some values are stale" : ""}`;
   return <Show when={known().length > 0}>
@@ -224,8 +229,10 @@ function SidebarFoot() {
   <div class="sb-foot">
     <button class="btn" {...ws.needs("add_project")} aria-describedby={why() ? "sb-why" : undefined} onClick={() => ws.open({ kind: "add-project" })}><I n="folder-plus" s={14} />Add project</button>
     <span class="grow"></span>
-    <A class="ib" to={{ name: "settings", section: "appearance", machine: null }} aria-label="Settings" aria-current={route().name === "settings" ? "page" : undefined}><I n="settings" /></A>
-    <button class="ib" aria-label="Help and shortcuts" onClick={() => ws.openHelp()}><I n="help" /></button>
+    <Show when={ws.shell.kind === "phone" && ws.shell} fallback={<>
+      <A class="ib" to={{ name: "settings", section: "appearance", machine: null }} aria-label="Settings" aria-current={route().name === "settings" ? "page" : undefined}><I n="settings" /></A>
+      <button class="ib" aria-label="Help and shortcuts" onClick={() => ws.openHelp()}><I n="help" /></button>
+    </>}>{phone => <button class="ib" aria-label="Settings" onClick={() => phone().openSettings()}><I n="settings" /></button>}</Show>
   </div>
   </>;
 }
@@ -264,9 +271,9 @@ function Sidebar() {
   const onMove = (e: PointerEvent) => { if (dragging) ws.panels.setSidebarWidth(e.clientX); };
   return <nav class="sidebar" aria-label="Workspace">
     <div class="sb-top">
-      <A class="nav" to={{ name: "new", machine: m(), kind: "task", project: null }} aria-current={route().name === "new" ? "page" : undefined}><I n="plus" />New task<span class="kbd">Ctrl+N</span></A>
+      <A class="nav" to={{ name: "new", machine: m(), kind: "task", project: null }} aria-current={route().name === "new" ? "page" : undefined}><I n="plus" />New task<Show when={ws.keys("Ctrl+N")}>{k => <span class="kbd">{k()}</span>}</Show></A>
       <A class="nav" to={{ name: "inbox", machine: m() }} aria-current={route().name === "inbox" ? "page" : undefined}><I n="inbox" />Inbox<Show when={inbox() > 0}><span class="count">{inbox()}</span></Show></A>
-      <button class="nav ws-nav-btn" onClick={() => ws.openPalette()}><I n="search" />Search<span class="kbd">Ctrl+K</span></button>
+      <button class="nav ws-nav-btn" onClick={() => ws.openPalette()}><I n="search" />Search<Show when={ws.keys("Ctrl+K")}>{k => <span class="kbd">{k()}</span>}</Show></button>
       <A class="nav" to={{ name: "home", machine: m() }} aria-current={route().name === "home" ? "page" : undefined}><I n="home" />Home</A>
       <A class="nav" to={{ name: "archive", machine: m() }} aria-current={route().name === "archive" ? "page" : undefined}><I n="archive" />Archive<Show when={index().archive.length > 0}><span class="count">{index().archive.length}</span></Show></A>
     </div>
@@ -282,14 +289,14 @@ function Sidebar() {
     </div>
     <SidebarUsage />
     <SidebarFoot />
-    <div class="ws-resize" role="separator" aria-orientation="vertical" aria-label="Sidebar width" tabindex="0"
+    <Show when={ws.shell.kind !== "phone"}><div class="ws-resize" role="separator" aria-orientation="vertical" aria-label="Sidebar width" tabindex="0"
       aria-valuemin={SIDEBAR_MIN} aria-valuemax={SIDEBAR_MAX} aria-valuenow={ws.panels.sidebarWidth()}
       onPointerDown={e => { dragging = true; e.currentTarget.setPointerCapture?.(e.pointerId); }} onPointerMove={onMove} onPointerUp={() => { dragging = false; }}
       onDblClick={() => ws.panels.setSidebarWidth(SIDEBAR_DEFAULT)}
       onKeyDown={e => {
         const step = e.key === "ArrowLeft" ? -16 : e.key === "ArrowRight" ? 16 : 0;
         if (step) { e.preventDefault(); ws.panels.setSidebarWidth(ws.panels.sidebarWidth() + step); }
-      }}></div>
+      }}></div></Show>
   </nav>;
 }
 
@@ -318,6 +325,7 @@ function SettingsNav() {
   return <nav class="sidebar" aria-label="Settings">
     <div class="sb-top" style={{ "padding-bottom": "4px" }}><A class="nav" to={{ name: "home", machine: ws.machine().id }}><I n="arrow-left" />Back to workspace</A></div>
     <div class="sb-scroll">
+      <Show when={ws.shell.kind !== "phone"} fallback={<div class="snav-h">{ws.machine().name}</div>}>
       <div class="snav-h">App</div>
       <For each={APP_SECTIONS.filter(s => s !== "machines")}>{s => <Item section={s} machine={null} />}</For>
       <div class="snav-h">Machines</div>
@@ -328,7 +336,9 @@ function SettingsNav() {
         <div class="mi-h">Settings for</div>
         <For each={ws.store.state().machines}>{m => <MenuItem icon={m.kind === "local" ? "laptop" : "server"} label={m.name} sub={connection(m)} check={m.id === ws.machine().id} onSelect={() => switchTo(m.id)} />}</For>
       </Pop>
-      <For each={MACHINE_SECTIONS}>{s => <><Item section={s} machine={ws.machine().id} /><Show when={s === "orchestration"}><For each={ORCHESTRATION_PAGES}>{page}</For></Show></>}</For>
+      </Show>
+      {/* A phone reaches this machine's remote access only from the computer itself. */}
+      <For each={ws.shell.kind === "phone" ? MACHINE_SECTIONS.filter(s => s !== "remote") : MACHINE_SECTIONS}>{s => <><Item section={s} machine={ws.machine().id} /><Show when={s === "orchestration"}><For each={ORCHESTRATION_PAGES}>{page}</For></Show></>}</For>
     </div>
     <SidebarUsage />
     <SidebarFoot />
@@ -500,7 +510,7 @@ export function FrameMenus() {
   const ws = useWs();
   const machines = () => ws.store.state().machines;
   const current = () => ws.machine();
-  const limits = createMemo(() => engineLimits(ws.store.state(), current()));
+  const limits = createMemo(() => engineLimits(ws.store.state(), current()), undefined, { equals: same });
   const projectId = () => { const r = ws.router.route(); return r.name === "project" ? r.project : null; };
   const sub = (m: typeof machines extends () => (infer T)[] ? T : never) => `${m.kind === "local" ? "Local" : "Remote"}, ${m.connection === "connected" ? "connected" : `offline, last seen ${clock(m.lastConfirmedAt)}`}`;
   return <>
@@ -522,8 +532,8 @@ export function FrameMenus() {
       <MenuItem icon="layers" label="New sprint" keys="Ctrl+Shift+N" needs="create_sprint" onSelect={() => ws.newItem("sprint")} />
     </Pop>
     <Pop id="m-project" class="pop-right" align="right" label="Project actions">
-      <MenuItem icon="terminal" label="Open in terminal" disabled={ws.terminalAvailable() ? undefined : ws.t("notAvailable")} onSelect={() => { if (!ws.panels.terminalOpen()) ws.toggleTerminal(); }} />
-      <MenuItem icon="external" label={ws.externalLabel()} disabled={ws.noOpener("workspace.open_editor", "noExternal")} onSelect={() => { const id = projectId(); if (id) ws.run({type:"open_editor",projectId:id}); }} />
+      <Show when={ws.shell.kind !== "phone"}><MenuItem icon="terminal" label="Open in terminal" disabled={ws.terminalAvailable() ? undefined : ws.t("notAvailable")} onSelect={() => { if (!ws.panels.terminalOpen()) ws.toggleTerminal(); }} /></Show>
+      <Show when={ws.shell.kind !== "phone"}><MenuItem icon="external" label={ws.externalLabel()} disabled={ws.noOpener("workspace.open_editor", "noExternal")} onSelect={() => { const id = projectId(); if (id) ws.run({type:"open_editor",projectId:id}); }} /></Show>
       <MenuItem icon="settings" label="Project settings" onSelect={() => { const id = projectId(); if (id) ws.go({ name: "project", machine: current().id, project: id, view: "settings", scope: { kind: "all" } }); }} />
       <div class="mi-sep"></div>
       <MenuItem icon="x" label="Remove project…" danger needs="remove_project" onSelect={() => { const id=projectId(); if (id) ws.open({kind:"confirm",title:"Remove this project?",danger:true,action:"Remove",note:"Stops its work and removes this project from the list. Files, branches and task history are kept. You can add the folder again.",go:async()=>{const result=await ws.run({type:"remove_project",projectId:id,confirmed:true});if(result.ok)ws.go({name:"home",machine:current().id});return result.ok;}}); }} />
@@ -535,4 +545,57 @@ export function FrameMenus() {
     </Pop>
     {ws.demo?.menu()}
   </>;
+}
+
+/** Pages the drawer opens from. Anywhere else the band offers Back, when there is somewhere to go back to. */
+const PHONE_TOP = new Set<Route["name"]>(["root", "home", "inbox", "archive", "settings", "notfound"]);
+/**
+ * The phone's title band: the menu or Back, the page's title, and its one primary action. No tabs, window controls or drag
+ * region; everything else a desktop band holds is in the drawer or the page itself.
+ */
+export function PhoneBar(props: { title: string; openDrawer: () => void }) {
+  const ws = useWs();
+  const ctx = useRouteContext();
+  const route = () => ws.router.route();
+  const back = () => !PHONE_TOP.has(route().name) && ws.router.canBack();
+  const area = () => { const r = route(); return r.name === "project" && ["code", "git", "worktrees"].includes(r.view ?? ""); };
+  return <header class="titlebar ws-phonebar">
+    <Show when={back()} fallback={<button class="ib" aria-label="Menu" onClick={() => props.openDrawer()}><I n="panel-left" /></button>}>
+      <button class="ib" aria-label="Back" onClick={() => ws.router.back()}><I n="arrow-left" /></button>
+    </Show>
+    <span class="ws-phonebar-t trunc">{props.title}</span>
+    <div class="ws-phonebar-a">
+      <Show when={ctx.view()} fallback={<>
+        <Show when={["home", "inbox", "project"].includes(route().name) && !area()}><button class="btn btn-primary" onClick={() => ws.newItem("task")}><I n="plus" s={14} />New task</button></Show>
+        <Show when={area() && ws.inspectable()}><button class="ib" aria-label="Details" aria-pressed={ws.panels.inspectorVisible()} onClick={() => ws.panels.toggleInspector()}><I n="panel-right" /></button></Show>
+        <Show when={route().name === "project"}><button class="ib" popovertarget="m-project" aria-label="Project actions"><I n="more" /></button></Show>
+      </>}>{v => <button class="ib" aria-label="Task actions" onClick={e => ws.openTaskMenu(v().id, e.currentTarget)}><I n="more" /></button>}</Show>
+    </div>
+  </header>;
+}
+
+/** The drawer's head: the machine in view and how it is reached. It opens the machine sheet. */
+export function PhoneDrawerHead(props: { onOpen: () => void }) {
+  const ws = useWs();
+  const phone = ws.shell as PhoneFrame;
+  const line = () => machineLine(phone.machine());
+  return <button class="ws-machine-m" aria-label={`Machines. ${phone.machine().name}, ${line().text}`} onClick={() => { props.onOpen(); phone.openMachines(); }}>
+    <I n="laptop" /><span class="ws-machine-m-t"><span class="trunc w500">{phone.machine().name}</span><span class={`cap trunc ${line().tone}`}>{line().text}</span></span><I n="chevrons-v" s={14} class="faint" />
+  </button>;
+}
+
+/**
+ * The band under the phone's title band while the machine is out of reach. The last known state stays on screen with its time,
+ * and every control that needs the machine is off with the reason: nothing is queued for later.
+ */
+export function PhoneConnection() {
+  const ws = useWs();
+  const phone = ws.shell as PhoneFrame;
+  const lost = () => {
+    const s = ws.store.connection().state;
+    return s === "disconnected" || s === "unavailable" || (ws.store.ready() && (s === "connecting" || phone.machine().state !== "connected"));
+  };
+  const asOf = () => { const at = ws.store.lastRead(); return at === null ? "" : ` Shown as of ${clock(at)}.`; };
+  return <Show when={lost()}><Strip class="ws-conn ws-phone-conn" role="alert" tone="warn" icon={<I n="wifi-off" s={14} />}
+    action={<button class="btn btn-sm" onClick={() => { phone.retry(); void ws.store.reload(); }}>Retry</button>}>{`Reconnecting to ${phone.machine().name}…${asOf()}`}</Strip></Show>;
 }

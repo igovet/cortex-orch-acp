@@ -28,15 +28,36 @@ and that each `profiles.json` `select_when`/`avoid_when` equals its source's
 authorization mechanism. Workers publish immutable Markdown reports and submit
 structured results through their authenticated channel. They receive explicit
 predecessor report references, not an automatic copy of the parent chat. The
-build-verification role is retained among the 23 but is runtime-reserved: it is
-not plannable or dispatched because command verification is executed by the
-runtime itself. The runtime directive selects the coordinator's user-facing reply
-language from the chat language (English or Russian); worker communications and
-reports remain English. User-facing structured question text and options are
-the exception: the question tool contract requires the current turn's
-`user_question_language` (`en` or `ru`), supplied on every worker turn.
-The runtime relays strings verbatim and does not translate or deterministically
-verify their natural language.
+build-verification role is retained among the 23 but is runtime-reserved: plan
+intake refuses it and no runtime path dispatches it, because the runtime runs the
+plan's verification commands itself (as the former runtime did). Its profile,
+instructions and tool catalogue stay complete and are exercised on a stored node
+by the role test; it is dispatched only if a future runtime stage needs a
+model-run build check.
+
+The assignment brief (the advance step's assignment, which is the worker's prompt)
+carries, never truncated away: the objective and `scope`; `acceptance`, the plan's
+verification commands the runtime runs after an approving review; `constraints`,
+the owner's messages to the task (bounded, with size and sha256 when long), the
+write denials in force and the access mode; `predecessor_reports`, every report
+of the node's dependencies (for the consultation, every report of its packet)
+with its id, node, role, title, size and page count; `report`, the
+runtime-selected report skeleton (see [Markdown reports](../markdown-reports/index.md#report-structure));
+and `user_question_language`. A review gets its `review_packet` instead of
+`predecessor_reports`.
+
+Language: everything another worker or the coordinator reads is English (worker
+reports and their headings, summaries, briefs, worker messages and the
+coordinator's instructions to workers). Everything the owner reads directly is in
+the owner's language: the coordinator's messages and questions to the owner, the
+final result text and its not-verified list, a worker's question to the owner
+(question text and option labels) and the runtime's own stop questions. The owner's
+language is the task's `en`/`ru` setting, otherwise the language of the task's
+goal; the runtime records it in `task_language` at task start and at every turn,
+states it in every turn's route instructions per role, and gives workers
+`user_question_language`. The coordinator composes the owner-facing text from the
+English reports in the owner's language. The runtime relays strings verbatim and
+does not translate or deterministically verify their natural language.
 
 The profile catalogue (`profiles.json`) declares `access_class` as `write`,
 `read_only` or `consultant` for each profile. The generator selects the matching
@@ -116,8 +137,12 @@ bounded read-only objective, or a granted external reader. A read-only investiga
 cannot escalate to that command route; it reports the capability gap for runtime
 replanning. Neither remounting nor moving a fixture establishes the original read.
 `project_read` remains project-only. Role, mode, protected paths and owner
-constraints still apply. `access_request` handles assignment-local additional
-project work paths, not outside grants or remounts. Exceptional outside
+constraints still apply. `access_request` handles a writing worker's
+assignment-local additional project work paths, not outside grants or remounts.
+It reserves write paths only, so it is served to writing workers alone: a
+read-only role or any review already reads the whole project, could never be
+granted a write, and reports a missing access as a limitation (the former runtime
+refused it there with `read_only_role`). Exceptional outside
 command/write routes belong to writing workers, never to read-only escalation
 or denial bypass.
 
@@ -201,7 +226,7 @@ ownership and screenshot evidence responsibilities.
 
 Read-only roles (`READ_ONLY`: architect, ux-designer, code-reviewer, senior-consultant, explorer, planner, security-auditor, accessibility-auditor, database-architect, performance-engineer and the runtime-reserved build-verification profile) never change the project, whatever scope a plan requests. `plan_submit` therefore refuses a read-only task whose scope names a literal path (no `*`, `?` or `[`) that does not exist yet (`read_only_scope_not_writable`): with no writer behind it, such a path is an output the worker could never write. On 2026-09-28 a plan gave seven Opus ux-designer tasks an output file each; every worker did the work and then failed to save it against the read-only project. The task returns content in its report and a dependent writing task creates the file. A nonexistent path is accepted when a writing task of the same plan whose scope overlaps it (the scheduler's the runtime) is ordered with the read-only task, transitively: the read-only task depends on it (a reviewer of the directory its predecessor writer creates), or it depends on the read-only task (the remedy above). An unordered parallel writer does not count, since the read could precede the write. The refusal lists every remaining path in `violations`, so one correction fixes them all. On 2026-10-14 three coordinator plans in one design project were refused on their first attempt for exactly those writer-covered reviewer and art-direction paths.
 
-`INLINED_SKILLS` are delivered in full with the role instructions because their case arises in almost every session: `tool-discipline`, `content-safety` and `coordinator-communication` for the coordinator; `tool-discipline`, `tool-discipline-worker`, `content-safety`, `report-publication` and `code-and-evidence` for ordinary workers (consultants omit project/command discipline). The text is exactly what `read_skill` returns for each id. Naming them was not enough: on 2026-09-28 Claude sessions given the same named list never called `read_skill`, while Codex sessions did. `NAMED_SKILLS` names the remaining situational skills with their triggers; a model requests those through `read_skill`, so they are not pasted into every prompt. `situational_skill_triggers` supplies the same action-bound catalogue to the role text, the `read_skill` tool description, and its `skill` selector description. The model is instructed to call `read_skill` before the matching action, not to pre-load all skills: editing documentation made wrong by a behavior change calls for `documentation-sync`; starting a browser or server session calls for `interactive-resources`. Inlined skills are excluded from this catalogue. The `read_skill.skill` selector advertises an `anyOf`: a role-scoped enum for named Cortex shared/reference skills, plus a separate path branch for an exact project/user `SKILL.md` listed in the current session. The runtime checks that path against the session grant; it is not restricted to the named-skill enum. Enum membership alone is not a trigger. Coordinator channels include the coordinator-only shared skills identified by `COORDINATOR_ONLY_SHARED_ROLE_IDS` (`cortex-control`, `coordinator-communication`, `skill-management`, `knowledge-harvest-scope`, `requirements-intake` and `design-workflow`); worker and consultant channels do not. Consultants and read-only roles are neither named nor offered the file-changing `skill-authoring` and `knowledge-harvest` procedures; read-only roles keep `documentation-sync` for impact assessment. Always-inlined skills carry no trigger. The coordinator's `pipeline-publication` reference is named "before submitting the final synthesis", and its former `recovery` reference was folded into `context-compaction`. The runtime does not read situational skills on the model's behalf. Automated prompt/schema tests establish delivery, not model compliance on a true trigger.
+`INLINED_SKILLS` are delivered in full with the role instructions because their case arises in almost every session: `tool-discipline`, `content-safety` and `coordinator-communication` for the coordinator; `tool-discipline`, `tool-discipline-worker`, `content-safety`, `report-publication` and `code-and-evidence` for ordinary workers (consultants omit project/command discipline). The text is exactly what `read_skill` returns for each id. Naming them was not enough: on 2026-09-28 Claude sessions given the same named list never called `read_skill`, while Codex sessions did. `NAMED_SKILLS` names the remaining situational skills with their triggers; a model requests those through `read_skill`, so they are not pasted into every prompt. `situational_skill_triggers` supplies the same action-bound catalogue to the role text, the `read_skill` tool description, and its `skill` selector description. The model is instructed to call `read_skill` before the matching action, not to pre-load all skills: editing documentation made wrong by a behavior change calls for `documentation-sync`; starting a browser or server session calls for `interactive-resources`. Inlined skills are excluded from this catalogue. The `read_skill.skill` selector advertises an `anyOf`: a role-scoped enum for named Cortex shared/reference skills, plus a separate branch for a project skill given by name, directory or `SKILL.md` path below the project skill directories (see [project skills](../unified-system-prompt/index.md#project-skills)). The runtime resolves it read-only inside the project for roles served `project_read`; a Cortex id always selects the Cortex skill. Enum membership alone is not a trigger. Coordinator channels include the coordinator-only shared skills identified by `COORDINATOR_ONLY_SHARED_ROLE_IDS` (`cortex-control`, `coordinator-communication`, `skill-management`, `knowledge-harvest-scope`, `requirements-intake` and `design-workflow`); worker and consultant channels do not. Consultants and read-only roles are neither named nor offered the file-changing `skill-authoring` and `knowledge-harvest` procedures; read-only roles keep `documentation-sync` for impact assessment. Always-inlined skills carry no trigger. The coordinator's `pipeline-publication` reference is named "before submitting the final synthesis", and its former `recovery` reference was folded into `context-compaction`. The runtime does not read situational skills on the model's behalf. Automated prompt/schema tests establish delivery, not model compliance on a true trigger.
 
 Reference ids are scoped separately: workers can read the worker references (`report-publication`, `code-and-evidence`, and `interactive-resources`), each design stage owner can read the design data references of its parent design skill (for example `design-colors`, `design-critique` or `design-defect-checklist`), and every design role can read `design-banned-patterns`, the worker-readable copy of the coordinator-only `DESIGN` template's "Banned AI-tell patterns" section (a test keeps the two identical), coordinators can read their coordinator references (including `question-banks`, `agreed-spec`, `design-intake`, the `PRODUCT`, `DESIGN` and `SCREENS` templates and `visual-review`), and both can read the example catalogue (`index` and the `*-example` ids). The runtime checks the channel role and the enum; prompt text only explains when an available skill may be useful and grants no authority. Cortex MCP `read_report`, `read_skill`, draft/publication, `command_run` and result tools are distinct from external code-index MCP tools and native workspace aids; only the Cortex command receipt supports a passed worker check. The `documentation-sync` trigger covers coordinator documentation-impact planning as well as affected edits. The 2026-09-28 live CLI backend worker wrote only code/tests, while a Codex writer handled README updates, so that run did not test Claude worker compliance on a genuine documentation-edit trigger.
 

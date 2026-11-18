@@ -1,6 +1,6 @@
 # CW-U12: Task composer Steer and Queue send modes
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies · **Phase:** 3+ · **Size:** M
+**Status:** Implemented: Steer and Queue send modes with a per-machine default ([screens](../SCREENS.md)); no-paid checks only · **Phase:** 3+ · **Size:** M
 
 ## Goal
 

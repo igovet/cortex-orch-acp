@@ -131,8 +131,9 @@ export function Models() {
         }}</For>
       </div>
       <div class="ws-split-r">
-        <Show when={selected()} keyed fallback={<div class="surface ws-empty">Pick a model to see its policy.</div>}>
-          {s => <Detail engine={s.engine} model={s.entry} rules={v()} set={r => d.set(r)} off={off()} problems={d.problems()} back={() => setPicked(null)} />}
+        {/* Keyed by the picked model, not by its catalogue entry: a background catalogue read updates the panel in place. */}
+        <Show when={selected() ? `${selected()!.engine}:${selected()!.model}` : null} keyed fallback={<div class="surface ws-empty">Pick a model to see its policy.</div>}>
+          {_ => { const first = selected()!, s = () => selected() ?? first; return <Detail engine={s().engine} model={s().entry} rules={v()} set={r => d.set(r)} off={off()} problems={d.problems()} back={() => setPicked(null)} />; }}
         </Show>
       </div>
     </div>

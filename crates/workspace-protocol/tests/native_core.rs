@@ -107,3 +107,25 @@ fn decoder_enforces_text_frame_utf8_and_page_bounds_before_dispatch() {
         "invalid_page_limit"
     );
 }
+/// A conversation read from its end (`history.earlier`) decodes with the same bounded page as `history.page`.
+#[test]
+fn a_backward_history_read_decodes_with_the_history_page_bounds() {
+    let query = |limit: u64, extra: Option<(&str, serde_json::Value)>| {
+        let mut v = json!({"protocol":{"major":2,"mapping":2},"requestId":"k","projectId":"p","operation":"history.earlier",
+            "payload":{"target":"t","cursor":null,"limit":limit}});
+        if let Some((k, value)) = extra {
+            v["payload"][k] = value;
+        }
+        decode_native_query(&serde_json::to_vec(&v).unwrap())
+    };
+    assert!(matches!(
+        query(100, None).unwrap().body,
+        workspace_protocol::core::CoreQuery::HistoryEarlier(_)
+    ));
+    assert_eq!(query(101, None).unwrap_err(), "invalid_page_limit");
+    assert_eq!(query(0, None).unwrap_err(), "invalid_page_limit");
+    assert_eq!(
+        query(100, Some(("direction", json!("backward")))).unwrap_err(),
+        "invalid_request"
+    );
+}

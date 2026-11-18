@@ -14,10 +14,19 @@ use std::time::Duration;
 const HOME: &str = "/home/acceptance";
 
 pub fn user_command(argv: &[&str]) -> Vec<String> {
-    let mut v: Vec<String> = ["runuser", "-u", "acceptance", "--", "env", "HOME=/home/acceptance", "XDG_RUNTIME_DIR=/run/user/1001", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let mut v: Vec<String> = [
+        "runuser",
+        "-u",
+        "acceptance",
+        "--",
+        "env",
+        "HOME=/home/acceptance",
+        "XDG_RUNTIME_DIR=/run/user/1001",
+        "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1001/bus",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
     v.extend(argv.iter().map(|s| s.to_string()));
     v
 }
@@ -30,16 +39,27 @@ pub fn ctl(args: &[&str]) -> Res<String> {
     let mut argv = vec!["systemctl", "--user"];
     argv.extend(args);
     let cmd = user_command(&argv);
-    let done = capture(std::process::Command::new(&cmd[0]).args(&cmd[1..]), Duration::from_secs(120))?;
+    let done = capture(
+        std::process::Command::new(&cmd[0]).args(&cmd[1..]),
+        Duration::from_secs(120),
+    )?;
     if done.code != 0 {
         println!("{} {}", done.stdout, done.stderr);
-        return Err(format!("fixture systemctl {} failed (exit {})", args.join(" "), done.code));
+        return Err(format!(
+            "fixture systemctl {} failed (exit {})",
+            args.join(" "),
+            done.code
+        ));
     }
     Ok(done.stdout.trim().to_string())
 }
 
 fn mkdir_private(path: &Path) -> Res<()> {
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path).map_err(|e| format!("{}: {e}", path.display()))
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Three project identities, one with an unreadable store, plus a saved sprint.
@@ -89,7 +109,13 @@ fn seed(home: &Path, channel: &Channel) -> Res<PathBuf> {
         ("pauseReason", Value::Null),
     ]);
     let product = state.join("product").join(format!("{project}.json"));
-    write(&product, &line(&obj(vec![("tasks", obj(vec![])), ("sprints", arr(vec![sprint]))])))?;
+    write(
+        &product,
+        &line(&obj(vec![
+            ("tasks", obj(vec![])),
+            ("sprints", arr(vec![sprint])),
+        ])),
+    )?;
     chmod(&registry_path, 0o600)?;
     chmod(&product, 0o600)?;
     Ok(registry_path)
@@ -99,10 +125,19 @@ fn prepare_fixture_start(unit: &str) -> Res<()> {
     super::require_container(false)?;
     // These are deliberate test restarts, not crashes. Do not spend the product unit's
     // five-per-minute budget across unrelated fixture phases, or hide a failure.
-    require(ctl(&["show", unit, "-p", "ActiveState", "--value"])? == "inactive", "fixture unit not stopped")?;
-    require(ctl(&["show", unit, "-p", "Result", "--value"])? == "success", "fixture unit did not stop cleanly")?;
+    require(
+        ctl(&["show", unit, "-p", "ActiveState", "--value"])? == "inactive",
+        "fixture unit not stopped",
+    )?;
+    require(
+        ctl(&["show", unit, "-p", "Result", "--value"])? == "success",
+        "fixture unit did not stop cleanly",
+    )?;
     ctl(&["reset-failed", unit])?;
-    emit("fixture_start_budget_reset", vec![("previous_result", s("success"))]);
+    emit(
+        "fixture_start_budget_reset",
+        vec![("previous_result", s("success"))],
+    );
     Ok(())
 }
 
@@ -115,23 +150,55 @@ fn seed_large_board(home: &Path, channel: &Channel) -> Res<()> {
     // The real service creates the tasks through its public workspace API; nothing is written
     // into the store behind its back until it has stopped.
     ctl(&["start", unit])?;
-    wait_secs("service for large-board seeding", 60, || Ok(ctl(&["is-active", unit])? == "active"))?;
+    wait_secs("service for large-board seeding", 60, || {
+        Ok(ctl(&["is-active", unit])? == "active")
+    })?;
     // The unit is Type=simple: active means started, not listening yet.
-    wait_secs("service socket for large-board seeding", 60, || Ok(channel.socket.exists()))?;
+    wait_secs("service socket for large-board seeding", 60, || {
+        Ok(channel.socket.exists())
+    })?;
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let me = me.to_string_lossy().into_owned();
-    let cmd = user_command(&[&me, "installed-seed-large", "--channel", &channel.name, "api"]);
-    crate::proc::run(std::process::Command::new(&cmd[0]).args(&cmd[1..]), Duration::from_secs(600))?;
+    let cmd = user_command(&[
+        &me,
+        "installed-seed-large",
+        "--channel",
+        &channel.name,
+        "api",
+    ]);
+    crate::proc::run(
+        std::process::Command::new(&cmd[0]).args(&cmd[1..]),
+        Duration::from_secs(600),
+    )?;
     ctl(&["stop", unit])?;
     prepare_fixture_start(unit)?;
-    let cmd = user_command(&[&me, "installed-seed-large", "--channel", &channel.name, "store"]);
-    crate::proc::run(std::process::Command::new(&cmd[0]).args(&cmd[1..]), Duration::from_secs(600))?;
-    emit("large_store_seeded", vec![("tasks", n(68)), ("sprint_tasks", n(31)), ("history_rows", n(100000))]);
+    let cmd = user_command(&[
+        &me,
+        "installed-seed-large",
+        "--channel",
+        &channel.name,
+        "store",
+    ]);
+    crate::proc::run(
+        std::process::Command::new(&cmd[0]).args(&cmd[1..]),
+        Duration::from_secs(600),
+    )?;
+    emit(
+        "large_store_seeded",
+        vec![
+            ("tasks", n(68)),
+            ("sprint_tasks", n(31)),
+            ("history_rows", n(100000)),
+        ],
+    );
     Ok(())
 }
 
 fn install(path: &str) -> Res<Captured> {
-    let done = capture(std::process::Command::new("apt").args(["install", "--yes", path]), Duration::from_secs(900))?;
+    let done = capture(
+        std::process::Command::new("apt").args(["install", "--yes", path]),
+        Duration::from_secs(900),
+    )?;
     println!("{}\n{}", done.stdout, done.stderr);
     if done.code != 0 {
         return Err(format!("apt failed (exit {})", done.code));
@@ -143,30 +210,84 @@ fn git_commit(project: &Path, message: &str, file: &str) -> Res<()> {
     let p = project.to_string_lossy().into_owned();
     run_ok(&["git", "-C", &p, "init", "-q", "-b", "main"])?;
     run_ok(&["git", "-C", &p, "add", file])?;
-    run_ok(&["git", "-C", &p, "-c", "user.name=Acceptance", "-c", "user.email=acceptance@example.invalid", "commit", "-q", "-m", message])?;
+    run_ok(&[
+        "git",
+        "-C",
+        &p,
+        "-c",
+        "user.name=Acceptance",
+        "-c",
+        "user.email=acceptance@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        message,
+    ])?;
     Ok(())
 }
 
-pub fn run(channel: &Channel, backend: &str, mode: &str, close_cycles: u32, python_allowed: bool, only: Option<&str>) -> Res<()> {
+pub fn run(
+    channel: &Channel,
+    backend: &str,
+    mode: &str,
+    close_cycles: u32,
+    python_allowed: bool,
+    only: Option<&str>,
+) -> Res<()> {
     super::require_container(false)?;
     let unit = channel.unit.clone();
     let package = channel.package.clone();
     let home = PathBuf::from(HOME);
-    let me = std::env::current_exe().map_err(|e| e.to_string())?.to_string_lossy().into_owned();
+    let me = std::env::current_exe()
+        .map_err(|e| e.to_string())?
+        .to_string_lossy()
+        .into_owned();
     let python_policy = |stage: &str| -> Res<()> {
-        let present = capture(std::process::Command::new("sh").args(["-c", "command -v python3 >/dev/null 2>&1"]), Duration::from_secs(10))?.code == 0;
-        emit("python_policy", vec![("stage", s(stage)), ("present", b(present)), ("allowed_by_archive_depends", b(python_allowed))]);
-        require(python_allowed || !present, &format!("python3 is present in the gate container ({stage}) but no archive requires it"))
+        let present = capture(
+            std::process::Command::new("sh").args(["-c", "command -v python3 >/dev/null 2>&1"]),
+            Duration::from_secs(10),
+        )?
+        .code
+            == 0;
+        emit(
+            "python_policy",
+            vec![
+                ("stage", s(stage)),
+                ("present", b(present)),
+                ("allowed_by_archive_depends", b(python_allowed)),
+            ],
+        );
+        require(
+            python_allowed || !present,
+            &format!(
+                "python3 is present in the gate container ({stage}) but no archive requires it"
+            ),
+        )
     };
     python_policy("image")?;
-    run_ok(&["useradd", "--uid", "1001", "--create-home", "--shell", "/bin/sh", "acceptance"])?;
-    wait("system bus", || Ok(Path::new("/run/dbus/system_bus_socket").exists()))?;
+    run_ok(&[
+        "useradd",
+        "--uid",
+        "1001",
+        "--create-home",
+        "--shell",
+        "/bin/sh",
+        "acceptance",
+    ])?;
+    wait("system bus", || {
+        Ok(Path::new("/run/dbus/system_bus_socket").exists())
+    })?;
     run_ok(&["loginctl", "enable-linger", "acceptance"])?;
-    wait("lingering user bus", || Ok(Path::new("/run/user/1001/bus").exists()))?;
+    wait("lingering user bus", || {
+        Ok(Path::new("/run/user/1001/bus").exists())
+    })?;
     let expected = config::seed(&home, channel)?;
     chown_tree(&home, "1001:1001")?;
     let preserved = |stage: &str| -> Res<()> {
-        emit("orchestration_config_preserved", config::verify(&home, channel, &expected, stage)?);
+        emit(
+            "orchestration_config_preserved",
+            config::verify(&home, channel, &expected, stage)?,
+        );
         Ok(())
     };
     preserved("seeded")?;
@@ -188,39 +309,99 @@ pub fn run(channel: &Channel, backend: &str, mode: &str, close_cycles: u32, pyth
     if mode == "upgrade" {
         let all = format!("{}{}", current.stdout, current.stderr).to_lowercase();
         require(!all.contains("downgrad"), "apt reported a downgrade")?;
-        require(Regex::new(r"Upgrading:\s+1").unwrap().is_match(&current.stdout), "not an ordinary apt upgrade")?;
-        wait("upgrade restarted service", || Ok(ctl(&["show", "-p", "MainPID", "--value", &unit])? != before))?;
-        require(sha_file(&registry)? == prior_hash, "upgrade changed the registered projects")?;
-        emit("upgrade_registry_preserved", vec![("count", n(3)), ("sha256", s(&prior_hash))]);
+        require(
+            Regex::new(r"Upgrading:\s+1")
+                .unwrap()
+                .is_match(&current.stdout),
+            "not an ordinary apt upgrade",
+        )?;
+        wait("upgrade restarted service", || {
+            Ok(ctl(&["show", "-p", "MainPID", "--value", &unit])? != before)
+        })?;
+        require(
+            sha_file(&registry)? == prior_hash,
+            "upgrade changed the registered projects",
+        )?;
+        emit(
+            "upgrade_registry_preserved",
+            vec![("count", n(3)), ("sha256", s(&prior_hash))],
+        );
     } else {
         // New lingering user's existing default.target predates package install.
         run_ok(&["systemctl", "restart", "user@1001.service"])?;
     }
-    wait("installed unit", || Ok(ctl(&["is-active", &unit])? == "active"))?;
+    wait("installed unit", || {
+        Ok(ctl(&["is-active", &unit])? == "active")
+    })?;
     ctl(&["stop", &unit])?;
     let phase = |name: &str| -> Res<()> {
-        let argv = user_command(&[&me, "installed-session", "--channel", &channel.name, "--close-cycles", &close_cycles.to_string(), backend, name]);
-        let outcome = crate::proc::run(std::process::Command::new(&argv[0]).args(&argv[1..]), Duration::from_secs(600));
+        let argv = user_command(&[
+            &me,
+            "installed-session",
+            "--channel",
+            &channel.name,
+            "--close-cycles",
+            &close_cycles.to_string(),
+            backend,
+            name,
+        ]);
+        let outcome = crate::proc::run(
+            std::process::Command::new(&argv[0]).args(&argv[1..]),
+            Duration::from_secs(600),
+        );
         let project = home.join("journey");
         let marker = |f: &str| project.join(f).exists();
         let failed = outcome.is_err();
         if failed {
-            let state = ctl(&["show", &unit, "-p", "ActiveState", "-p", "SubState", "-p", "ExecMainStatus", "-p", "MainPID"]).unwrap_or_default();
+            let state = ctl(&[
+                "show",
+                &unit,
+                "-p",
+                "ActiveState",
+                "-p",
+                "SubState",
+                "-p",
+                "ExecMainStatus",
+                "-p",
+                "MainPID",
+            ])
+            .unwrap_or_default();
             emit("failed_service_state", vec![("state", s(state))]);
             let j = user_command(&["journalctl", "--user", "--unit", &unit, "--no-pager"]);
-            if let Ok(d) = capture(std::process::Command::new(&j[0]).args(&j[1..]), Duration::from_secs(120)) {
+            if let Ok(d) = capture(
+                std::process::Command::new(&j[0]).args(&j[1..]),
+                Duration::from_secs(120),
+            ) {
                 let _ = std::fs::write("/evidence/failure-user-service.log", d.stdout);
             }
         }
         let fixture_error = std::fs::read_to_string(project.join("fixture-error")).ok();
-        emit("fake_markers", vec![("phase", s(name)), ("answered", b(marker("answered"))), ("finish", b(marker("finish"))), ("fixture_error", opt_s(fixture_error))]);
+        emit(
+            "fake_markers",
+            vec![
+                ("phase", s(name)),
+                ("answered", b(marker("answered"))),
+                ("finish", b(marker("finish"))),
+                ("fixture_error", opt_s(fixture_error)),
+            ],
+        );
         outcome?;
-        require(ctl(&["is-active", &unit])? == "active", "service died when window closed")?;
-        emit("service_survives_close", vec![("backend", s(backend)), ("phase", s(name))]);
+        require(
+            ctl(&["is-active", &unit])? == "active",
+            "service died when window closed",
+        )?;
+        emit(
+            "service_survives_close",
+            vec![("backend", s(backend)), ("phase", s(name))],
+        );
         Ok(())
     };
     let save_journal = || -> Res<()> {
-        let j = capture(std::process::Command::new("journalctl").args([&format!("--user-unit={unit}"), "--no-pager"]), Duration::from_secs(120))?;
+        let j = capture(
+            std::process::Command::new("journalctl")
+                .args([&format!("--user-unit={unit}"), "--no-pager"]),
+            Duration::from_secs(120),
+        )?;
         write(Path::new("/evidence/service.log"), &j.stdout)
     };
     if only.is_none() {
@@ -228,7 +409,9 @@ pub fn run(channel: &Channel, backend: &str, mode: &str, close_cycles: u32, pyth
         phase("cold-start")?;
         preserved("first-launch")?;
         ctl(&["stop", &unit])?;
-        let delay = home.join(".config/systemd/user").join(format!("{unit}.d/startup-delay.conf"));
+        let delay = home
+            .join(".config/systemd/user")
+            .join(format!("{unit}.d/startup-delay.conf"));
         let write_delay = || -> Res<()> {
             std::fs::create_dir_all(delay.parent().unwrap()).map_err(|e| e.to_string())?;
             write(&delay, "[Service]\nExecStartPre=/usr/bin/sleep 10\n")?;
@@ -262,7 +445,10 @@ pub fn run(channel: &Channel, backend: &str, mode: &str, close_cycles: u32, pyth
         for (name, _) in &expected {
             std::fs::remove_file(channel.config(&home).join(name)).map_err(|e| e.to_string())?;
         }
-        emit("orchestration_fixture_retired", vec![("channel", s(&channel.name))]);
+        emit(
+            "orchestration_fixture_retired",
+            vec![("channel", s(&channel.name))],
+        );
         seed_large_board(&home, channel)?;
         phase("large-board")?;
         ctl(&["stop", &unit])?;
@@ -285,9 +471,16 @@ pub fn run(channel: &Channel, backend: &str, mode: &str, close_cycles: u32, pyth
     // only service override is the allowed project root (the unit's own default is the filesystem root).
     let override_dir = home.join(".config/systemd/user").join(format!("{unit}.d"));
     std::fs::create_dir_all(&override_dir).map_err(|e| e.to_string())?;
-    let exec = format!("/usr/bin/{} {HOME} {}", channel.service, channel.runtime.display());
+    let exec = format!(
+        "/usr/bin/{} {HOME} {}",
+        channel.service,
+        channel.runtime.display()
+    );
     let fixture_conf = override_dir.join("fixture.conf");
-    write(&fixture_conf, &format!("[Service]\nExecStart=\nExecStart={exec}\n"))?;
+    write(
+        &fixture_conf,
+        &format!("[Service]\nExecStart=\nExecStart={exec}\n"),
+    )?;
     let journey = native::prepare(&home, channel, "journey", "reconcile-question")?;
     git_commit(&journey, "Disposable acceptance fixture", "work.txt")?;
     let native_project = native::prepare(&home, channel, "native-journey", "")?;
@@ -312,12 +505,31 @@ pub fn run(channel: &Channel, backend: &str, mode: &str, close_cycles: u32, pyth
     let report = obj(vec![
         ("files", n(verified.files)),
         ("links", n(verified.links)),
-        ("mismatches", arr(verified.mismatches.iter().map(s).collect())),
+        (
+            "mismatches",
+            arr(verified.mismatches.iter().map(s).collect()),
+        ),
     ]);
-    write(Path::new("/evidence/payload.json"), &(crate::json::pretty_ascii(&report)?))?;
-    require(verified.files > 0 && verified.mismatches.is_empty(), &format!("installed payload differs: {}", line(&report)))?;
-    emit("installed_payload_matches_archive", vec![("files", n(verified.files)), ("links", n(verified.links)), ("mismatches", arr(vec![]))]);
-    emit("installed_scenario_passed", vec![("backend", s(backend)), ("mode", s(mode))]);
+    write(
+        Path::new("/evidence/payload.json"),
+        &(crate::json::pretty_ascii(&report)?),
+    )?;
+    require(
+        verified.files > 0 && verified.mismatches.is_empty(),
+        &format!("installed payload differs: {}", line(&report)),
+    )?;
+    emit(
+        "installed_payload_matches_archive",
+        vec![
+            ("files", n(verified.files)),
+            ("links", n(verified.links)),
+            ("mismatches", arr(vec![])),
+        ],
+    );
+    emit(
+        "installed_scenario_passed",
+        vec![("backend", s(backend)), ("mode", s(mode))],
+    );
     let _ = (&package, refs(&[]));
     Ok(())
 }

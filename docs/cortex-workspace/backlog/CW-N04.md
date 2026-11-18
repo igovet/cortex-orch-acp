@@ -1,6 +1,6 @@
 # CW-N04: Device allow-list and immediate revocation enforced at the QUIC/ALPN accept step; force-close-on-revoke test
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Not implemented; there is no device allow-list or revocation · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Make the desktop's local allow-list the only authority for remote access. Each incoming connection is checked against it at accept time, before any application protocol runs. Revocation closes live sessions immediately and rejects reconnects.

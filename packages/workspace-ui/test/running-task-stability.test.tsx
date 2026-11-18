@@ -13,9 +13,9 @@ import { capabilitiesWire, flush, scriptedTransport, wireDecision, wireTask } fr
  * A running task on a native service, as the desktop sees it: the board read, the conversation read on its own, and a stream
  * of events while the task works. Each step of work adds rows to the conversation and moves the task's version.
  */
-function runningService(more: { question?: boolean; workers?: Worker[] } = {}) {
+function runningService(more: { question?: boolean; workers?: Worker[]; runtime?: { state: string } } = {}) {
   let version = 1, high = 3;
-  const task = () => wireTask({ version: String(version), description: "Fix the login race", executionId: "execution", phase: "execution", executionState: "running", runtimeState: "EXECUTING" });
+  const task = () => wireTask({ version: String(version), description: "Fix the login race", executionId: "execution", phase: "execution", executionState: "running", runtimeState: more.runtime?.state ?? "EXECUTING" });
   const rows: Record<string, unknown>[] = [];
   const row = (kind: string, text: string, toolStatus: string | null = null) => rows.push({ historyId: `h${rows.length}`, sequence: String(rows.length + 1), revision: "1", kind, text, toolStatus,
     recordedAt: `2026-11-17T10:00:${String(rows.length).padStart(2, "0")}.000000+00:00`, availability: "available" });
@@ -38,7 +38,7 @@ function runningService(more: { question?: boolean; workers?: Worker[] } = {}) {
       if (op === "overview") return { ok: true, result: { name: "This machine" } };
       if (op === "project.config.read") return { ok: true, result: { value: {}, tokens: {} } };
       if (op === "config.read") return { ok: true, result: { config: emptyConfig(), connections: [], tokens: {} } };
-      return { ok: true, result: op === "repo.snapshot" ? null : op === "workers" ? more.workers ?? [] : { tasks: {}, sprints: [] } };
+      return { ok: true, result: op === "repo.snapshot" ? null : op === "workers" ? [...(more.workers ?? [])] : { tasks: {}, sprints: [] } };
     },
   });
   /** One step of work: a tool call and what the coordinator said, then the event that says so (a native delta, or a refresh). */
@@ -120,14 +120,14 @@ it("a running task's page with a question, its workers and its waiting line remo
     route: { model: "opus", effort: "high" }, attempt: { n: 1, of: 1 }, elapsedMs: 4000, runningSince: null, context: null, usage: null, activity: [], result: { summary: "Patched", checks: [] } } as unknown as Worker;
   const { s, work } = runningService({ question: true, workers: [finished] });
   const root = await openTask(s);
-  await vi.waitFor(() => expect(root.querySelector(".timeline .dc .dc-answer .c-route")).not.toBeNull(), { timeout: 4000 });
+  await vi.waitFor(() => expect(root.querySelector('.timeline .dc [aria-label="Send answer"]')).not.toBeNull(), { timeout: 4000 });
   await settle();
   const page = root.querySelector(".l-task")!;
   expect(page.textContent).toContain("Workers: 1 finished");
   // The question is open and no worker runs: the last line says so, as the header does, never "Working…".
   expect(page.querySelector(".timeline .ws-waiting")?.textContent).toBe("Waiting for you");
   expect(page.textContent).not.toContain("Working…");
-  const card = page.querySelector(".timeline .dc")!, answerRoute = card.querySelector(".dc-answer .c-route")!, answer = card.querySelector("textarea")!;
+  const card = page.querySelector(".timeline .dc")!, plane = card.querySelector('[aria-label="Send answer"]')!, answer = card.querySelector("textarea")!;
   // Every element taken off the page, counted with all it held.
   let removed = 0;
   const observer = new MutationObserver(records => { for (const r of records) for (const node of r.removedNodes) if (node.nodeType === 1) removed += 1 + (node as Element).querySelectorAll("*").length; });
@@ -141,7 +141,9 @@ it("a running task's page with a question, its workers and its waiting line remo
   await new Promise(resolve => setTimeout(resolve, 1100)); await settle();
   observer.disconnect();
   expect(removed).toBe(0);
-  expect(card.isConnected && answerRoute.isConnected && answer.isConnected).toBe(true);
+  expect(card.isConnected && plane.isConnected && answer.isConnected).toBe(true);
+  // The answer goes into the running session: its form offers no model or effort.
+  expect(card.querySelector(".c-route")).toBeNull();
 });
 
 it("a keyed row hears only a change of its own item, not every new read of the list", () => {
@@ -164,3 +166,69 @@ it("a keyed row hears only a change of its own item, not every new read of the l
     expect(host.textContent).toBe("AB2");
   } finally { stop(); }
 });
+
+it("a streaming task on screen rereads its facts at most once per interval, never its Git without a Git screen, while its conversation keeps up", async () => {
+  const { s, work } = runningService();
+  let stop!: () => void;
+  const store = createRoot(d => { stop = d; return createWorkspaceStore(createRealPort({ transport: s.transport, actorId: "owner", registry: true, streamFactsMs: 1500 })); });
+  // The task page is on view: it holds interest in its project's facts, as the screens do.
+  store.interest("p", "facts", "task-1");
+  const said = () => (store.state().sessions.find(x => x.taskId === "task-1")?.timeline ?? []).flatMap((e: TimelineEntry) => e.kind === "cortex" ? [e.text] : []);
+  const reads = (op: string) => s.calls.filter(c => c.operation === "machine.call" && (c.message as { op: string }).op === op).length;
+  try {
+    await vi.waitFor(() => expect(said()).toHaveLength(2));
+    // The opening reads (the board arriving moves the task's state) settle first: the burst starts a full interval after the last.
+    for (let n = -1; n !== reads("product.facts");) { n = reads("product.facts"); await new Promise(resolve => setTimeout(resolve, 1600)); }
+    const facts = reads("product.facts"), repo = reads("repo.snapshot");
+    const started = Date.now();
+    for (let i = 0; i < 8; i++) {
+      const at = work(`Step ${i}`);
+      // Every step's conversation still arrives promptly.
+      await vi.waitFor(() => expect(store.version("project:p")).toBe(at));
+      await vi.waitFor(() => expect(said().at(-1)).toBe(`Step ${i}`));
+    }
+    // One leading read, then at most one per interval of the burst (eight steps would otherwise read eight times).
+    const bound = 1 + Math.ceil((Date.now() - started) / 1500);
+    expect(reads("product.facts") - facts).toBeLessThanOrEqual(bound);
+    // Without a Git screen on view the repository read on opening is all there is: streamed work reads no Git.
+    expect(reads("repo.snapshot") - repo).toBe(0);
+    expect(repo).toBeLessThanOrEqual(1);
+    // One trailing read follows the interval, then nothing while nothing streams.
+    await new Promise(resolve => setTimeout(resolve, 1800));
+    const settled = reads("product.facts");
+    expect(settled - facts).toBeGreaterThanOrEqual(2);
+    expect(settled - facts).toBeLessThanOrEqual(bound + 1);
+    await new Promise(resolve => setTimeout(resolve, 1800));
+    expect(reads("product.facts")).toBe(settled);
+  } finally { stop(); }
+}, 15_000);
+
+it("a task whose state moves reads its workers at once, not a facts interval later", async () => {
+  // Workers finish and the task moves on (the runtime state changes) well inside the facts interval: the workers must arrive
+  // with that state, or the task bar's Work details count and the team bar change seconds after the screen settled.
+  const workers: Worker[] = [], runtime = { state: "EXECUTING" };
+  const { s, work } = runningService({ workers, runtime });
+  let stop!: () => void;
+  const store = createRoot(d => { stop = d; return createWorkspaceStore(createRealPort({ transport: s.transport, actorId: "owner", registry: true, streamFactsMs: 60_000 })); });
+  // The task page is on view.
+  store.interest("p", "facts", "task-1");
+  const said = () => (store.state().sessions.find(x => x.taskId === "task-1")?.timeline ?? []).flatMap((e: TimelineEntry) => e.kind === "cortex" ? [e.text] : []);
+  const reads = () => s.calls.filter(c => c.operation === "machine.call" && (c.message as { op: string }).op === "product.facts").length;
+  try {
+    await vi.waitFor(() => expect(said()).toHaveLength(2));
+    await vi.waitFor(() => expect(reads()).toBeGreaterThan(0));
+    await new Promise(resolve => setTimeout(resolve, 200));
+    const before = reads();
+    // Streamed text alone stays throttled.
+    work("Step 0");
+    await vi.waitFor(() => expect(said().at(-1)).toBe("Step 0"));
+    await new Promise(resolve => setTimeout(resolve, 200));
+    expect(reads()).toBe(before);
+    expect(store.state().workers).toHaveLength(0);
+    workers.push({ id: "w1", taskId: "task-1", executionId: "execution", role: "backend-dev", status: "completed", lane: "execution", goal: "Patch", now: null, waitsFor: null, scope: [],
+      route: null, attempt: { n: 1, of: 1 }, elapsedMs: 4000, runningSince: null, context: null, usage: null, activity: [], result: { summary: "Patched", checks: [] } } as unknown as Worker);
+    runtime.state = "RECONCILING";
+    work("Step 1");
+    await vi.waitFor(() => expect(store.state().workers.map(w => w.id)).toEqual(["w1"]), { timeout: 2000 });
+  } finally { stop(); }
+}, 15_000);

@@ -1,9 +1,14 @@
 # Risks and open decisions
 
-**Status: planned; no implementation or qualification is implied.**
+**Status: open risks and decisions for what is not built (push), for what is built but not qualified (remote access, the Android app, the relay stack) and for qualification of the built desktop. The desktop local slice itself is implemented and checked by no-paid automated checks.**
 
-- Android stack is provisionally React Native New Architecture; the physical-device comparison with Tauri Android ([CW-F02a](backlog/CW-F02a.md), [CW-F02b](backlog/CW-F02b.md), decision record [CW-F02](backlog/CW-F02.md)) is a go/no-go decision before Android production work.
-- iroh Android bindings, LAN discovery, relay privacy, availability, operating cost and forced-relay tests remain unverified. The n0 public relay stays disabled by default; enabling it requires an explicit trust/operations decision.
+- Android stack: decided by the owner on 2026-11-17 as the same Tauri/Solid interface in a Tauri 2 Android app, not React Native ([mobile approval](design/mobile-approval.md)). The device spikes CW-F02a, CW-F02b and the CW-F02 record are superseded. The stack's behavior on a physical device (install, WebView, camera, keyboard, Back, lifecycle, network changes) is not verified.
+- Android Keystore wrapping: the device key and the machine key are 0600 files, not wrapped by the Android Keystore or an OS keyring. Open: implement wrapping, or record the file as accepted for this release.
+- Relay qualification: the built-in default relay (`default-relay.txt`, `https://cortex-relay.vetrov.dev`) runs from `deploy/relay/` behind Traefik and the Cloudflare proxy. One live check on 2026-11-18 (`crates/workspace-remote/tests/relay.rs` with `CORTEX_RELAY_TEST_URL`) paired a client that was given no direct address and exchanged one request, both on the development machine. Not verified: a phone on another network, a long-lived session through the Cloudflare proxy, forced-relay data transfer, relay privacy, availability and operating cost.
+- Device verification: one phone (Pixel 9 Pro XL) paired by pasted link with a throwaway machine service on the same network and loaded its Home on 2026-11-18 ([platforms](platforms.md#android-build-prerequisites)). Pairing with the installed desktop application, the QR scan, reconnect after network changes, a connection from another network and revoke on a live connection have not run on a device.
+- Policy review of settings writes from a phone: a paired phone may save machine and project settings (including MCP server configuration), register and remove projects and start work. Whether these should be narrower for a phone, and whether the allowlist needs an independent review, is open ([security](security.md#remote-access-built-not-qualified)).
+- App lock (optional, off by default) and the phone-side relay override are not built.
+- iroh LAN discovery (mDNS) is not built; the pairing link carries direct addresses and the relay. The n0 public relay stays disabled by default; enabling it requires an explicit trust/operations decision.
 - FCM requires provider infrastructure and supported services; no delivery SLA or no-GMS support is assumed.
 - Rust service/public adapter and actual Cortex workspace isolation do not exist as specified; verify before lease design.
 - WebKitGTK GPU behavior, editor/LSP compatibility and performance budgets need real hardware measurement.

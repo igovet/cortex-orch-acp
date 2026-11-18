@@ -1,6 +1,6 @@
 # CW-I01: Canonical file tree, read and search in the Rust service
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: bounded file tree, read and locate in the service ([IDE and Git](../ide-and-git.md)); full-text search is not confirmed in code · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Implement the canonical file tree, bounded read and bounded search in the Rust/tokio machine service. They operate on the project root registered through CW-H02. Paths are canonicalized against that root, listings use opaque cursors, and no file content leaves the service except for an authorized, size-limited read.

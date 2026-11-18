@@ -114,14 +114,12 @@ await main(async () => {
 
   // The pieces no demo state reaches, drawn with the app's own stylesheet.
   async function css() {
-    const tabs = await call(() => {
-      const host = document.createElement("div"); host.style.width = "380px"; host.innerHTML = `<div class="dc"><div class="dc-tabs"><button class="dc-tab" id="a"><span>1</span><i class="i s12 i-check ws-off"></i></button><button class="dc-tab" id="b"><span>2</span><i class="i s12 i-check"></i></button></div><div class="dc-panels"><div class="dc-panel" id="p1"><div class="dc-q">A short one</div></div><div class="dc-panel" id="p2" aria-hidden="true"><div class="dc-q">${"A much longer question that wraps over several lines. ".repeat(4)}</div></div></div></div>`; document.querySelector(".main").append(host);
-      const panels = host.querySelector(".dc-panels"), one = panels.getBoundingClientRect().height, p1 = host.querySelector("#p1"), p2 = host.querySelector("#p2"); p1.setAttribute("aria-hidden", "true"); p2.removeAttribute("aria-hidden"); const two = panels.getBoundingClientRect().height;
-      const a = host.querySelector("#a").getBoundingClientRect(), b = host.querySelector("#b").getBoundingClientRect(), hidden = getComputedStyle(p1).visibility; host.remove(); return {one, two, a: a.width, b: b.width, hidden};
+    const form = await call(() => {
+      const host = document.createElement("div"); host.style.width = "380px"; host.innerHTML = `<div class="dc"><div class="dc-panel" id="p1"><div class="dc-n">Question 1 of 2</div><div class="dc-q">A short one</div></div><div class="dc-panel" id="p2"><div class="dc-n">Question 2 of 2</div><div class="dc-q">${"A much longer question that wraps over several lines. ".repeat(4)}</div></div><div class="dc-send"><button class="btn btn-primary" id="go">Send answers</button></div></div>`; document.querySelector(".main").append(host);
+      const p1 = host.querySelector("#p1").getBoundingClientRect(), p2 = host.querySelector("#p2").getBoundingClientRect(), go = host.querySelector("#go").getBoundingClientRect(), shown = getComputedStyle(host.querySelector("#p2")).visibility; host.remove(); return {stacked: p2.top >= p1.bottom, below: go.top >= p2.bottom, shown};
     });
-    check("switching a question tab moves nothing", tabs.one === tabs.two && tabs.one > 60, {tabs});
-    check("a tab keeps its width with or without a check", tabs.a === tabs.b, {tabs});
-    check("a hidden question is not shown", tabs.hidden === "hidden", {tabs});
+    check("questions asked together stand one under another, every one on view", form.stacked && form.shown === "visible", {form});
+    check("the one Send answers button follows the last question", form.below, {form});
     const qa = await call(() => {
       const host = document.createElement("div"); host.style.width = "380px"; host.innerHTML = `<div class="qa"><i class="i s14 i-question"></i><div class="qa-b"><div class="qa-q">Какой визуальный стиль ближе?</div><div class="qa-a">Тёплый и домашний: кофейные оттенки, уют, и ещё немного длинного текста, чтобы он занял две строки</div></div><span class="qa-t">23:22</span></div>`; document.querySelector(".main").append(host);
       const b = host.querySelector(".qa-b").getBoundingClientRect(), t = host.querySelector(".qa-t").getBoundingClientRect(), q = host.querySelector(".qa-q").getBoundingClientRect(), a = host.querySelector(".qa-a").getBoundingClientRect(); host.remove(); return {stacked: a.top >= q.bottom, beside: t.left >= b.right, width: b.width};

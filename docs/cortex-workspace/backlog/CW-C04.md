@@ -1,6 +1,6 @@
 # CW-C04: Typed task/execution/wait/decision read projections with explicit unknown states
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: typed task, execution, wait and decision read projections serve the local client with explicit unknown states ([local task execution](../local-task-execution.md)); the versioned public form is part of CW-C01 · **Phase:** 3+ · **Size:** L
 
 ## Goal
 

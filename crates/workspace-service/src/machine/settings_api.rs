@@ -373,7 +373,11 @@ mod state_root_tests {
             state: base.join("state"),
             routing_override: None,
         };
-        let host = Host { environment: environment.clone(), store: ".cortex-dev".into(), runtime_root: base.join("runtime") };
+        let host = Host {
+            environment: environment.clone(),
+            store: ".cortex-dev".into(),
+            runtime_root: base.join("runtime"),
+        };
         let config = host.config().unwrap();
         let resolved = super::super::config_read::environment(&config).unwrap();
         assert_eq!(resolved.state, environment.state);

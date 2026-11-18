@@ -123,7 +123,54 @@ async fn channel_restriction_filters_discovery_and_calls() {
     let refused=g.handle(json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
         "params":{"name":"result_submit","arguments":{"report":"# Not allowed","summary":"No","checks":[],"request_key":"r"}}})).await.unwrap();
     assert!(refused.get("error").is_some());
+    // A tool outside this channel's catalogue is a refusal that names its reason.
+    assert_eq!(refused["error"]["code"], -32001);
+    assert_eq!(refused["error"]["data"]["code"], "tool_not_offered");
+    assert_eq!(
+        refused["error"]["message"],
+        "authority_refused: tool_not_offered"
+    );
+    // Schema-invalid arguments name the code and point at the live schema.
+    let invalid = g
+        .handle(json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+        "params":{"name":"project_read","arguments":{"path":"a","invented":1}}}))
+        .await
+        .unwrap();
+    assert_eq!(invalid["error"]["code"], -32602);
+    assert_eq!(invalid["error"]["data"]["code"], "invalid_arguments");
     assert_eq!(c.calls.load(Ordering::SeqCst), 0);
+}
+#[tokio::test]
+async fn a_named_core_refusal_keeps_authority_and_its_code() {
+    struct Refusing;
+    impl GatewayCore for Refusing {
+        fn authenticate<'a>(&'a self, _: &'a Credentials) -> FutureResult<'a, Channel> {
+            Box::pin(async { Ok(channel()) })
+        }
+        fn execute<'a>(
+            &'a self,
+            _: &'a Credentials,
+            _: &'a Channel,
+            _: &'a str,
+            _: Value,
+            _: Value,
+        ) -> FutureResult<'a, Value> {
+            Box::pin(async { Err(Error::Refused("write_denied")) })
+        }
+    }
+    let g = Gateway::new(Arc::new(Refusing), credentials());
+    let r = g
+        .handle(json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"project_read","arguments":{"path":"src"}}}))
+        .await
+        .unwrap();
+    assert_eq!(r["error"]["code"], -32001);
+    assert_eq!(r["error"]["data"]["code"], "write_denied");
+    assert_eq!(r["error"]["data"]["retryable"], false);
+    assert!(r["error"]["data"]["hint"]
+        .as_str()
+        .unwrap()
+        .contains("protected"));
 }
 #[test]
 fn catalogues_all_profiles_review_and_no_legacy_mutation_route() {

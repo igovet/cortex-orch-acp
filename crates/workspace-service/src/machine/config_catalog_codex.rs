@@ -614,7 +614,11 @@ mod tests {
         let connections = f.env.state.join("cortex/connections");
         let home = state(&f.env, &f.record);
         for p in [&connections, home.parent().unwrap(), &home] {
-            assert_eq!(fs::metadata(p).unwrap().permissions().mode() & 0o022, 0, "created private");
+            assert_eq!(
+                fs::metadata(p).unwrap().permissions().mode() & 0o022,
+                0,
+                "created private"
+            );
             // What a umask-002 desktop session used to leave behind.
             fs::set_permissions(p, fs::Permissions::from_mode(0o775)).unwrap();
         }
@@ -688,7 +692,10 @@ mod tests {
             assert_eq!(data()["rules"][version].as_array().unwrap().len(), 14);
         }
         assert_ne!(hashes["2.3.0"], hashes["2.6.0"]);
-        assert_eq!(hashes["2.6.0"], "733b7521c2a437a34ed016d45a6f46bebff2bac123a172467574ee827db98b99");
+        assert_eq!(
+            hashes["2.6.0"],
+            "733b7521c2a437a34ed016d45a6f46bebff2bac123a172467574ee827db98b99"
+        );
         // A version without an exact digest is not refused by digest, so only
         // the registered ones may carry one: 2.4.0 and 2.5.0 are unregistered.
         assert!(hashes["2.4.0"].is_null() && data()["rules"]["2.4.0"].is_null());
@@ -699,10 +706,15 @@ mod tests {
             assert_eq!(old[index], new[index], "rule {index} is shared");
         }
         for index in [1, 3, 4, 5] {
-            assert_ne!(old[index][0], new[index][0], "rule {index} reads the 2.6.0 site");
+            assert_ne!(
+                old[index][0], new[index][0],
+                "rule {index} reads the 2.6.0 site"
+            );
         }
         let turn = new[5][1].as_str().unwrap();
-        assert!(turn.contains("approvalPolicy: \"untrusted\"") && turn.contains("dangerFullAccess"));
+        assert!(
+            turn.contains("approvalPolicy: \"untrusted\"") && turn.contains("dangerFullAccess")
+        );
         assert!(!turn.contains("permissions:"));
     }
     fn exact_bundle_is_patched_natively_and_drift_refused(version: &str) {

@@ -8,22 +8,61 @@ explicit verdict. Alternatively, a caller creates a server-owned draft, edits
 only the returned path and publishes it through the current attempt. Publication is idempotent and
 retains the draft on failure for recovery.
 
-The coordinator owns `pipeline.md`, which keeps the newest edition first and
-records requirements, assignments, candidates, checks, decisions and selected
-evidence. Before task-level acceptance, the coordinator publishes a current
-edition with its rationale, report references, artifact and check evidence,
-remaining work and decision basis. A correcting edition follows only if
-the actual decision changes. Reports are evidence; publication does not mean
-semantic acceptance.
-
-The pre-accept edition describes a lasting decision basis and actual unresolved
-deliverable or verification work, without describing acceptance as the next
-step or claiming it is pending. The task decision event and stored state give
-the recorded outcome after the edition is published.
+The runtime owns each task's one `pipeline.md`, which keeps the newest edition
+first with older editions below. No model creates or edits it: `create_draft`
+does not offer the pipeline template (the store still refuses it with
+`runtime_owned_operation`). The runtime
+publishes the first edition ("Initial pipeline", the pipeline template filled
+with the owner's request and the coordinator route) before the first
+coordinator turn, and a new "Runtime <STATE>" edition at each driver boundary
+where the plan revision, task state, review cycle or number of open questions
+changed. A runtime edition records the state, plan revision, original objective,
+each assignment's status, dependencies and report reference, open questions, a
+review waiver, the runtime verification outcome, the synthesis and a blocker.
+Editions are derived from durable state, so a crash between a state change and
+its edition is repaired at the next boundary. The coordinator reads the current
+pipeline with `read_report` without arguments. Reports are evidence;
+publication does not mean semantic acceptance, and the task decision event and
+stored state give the recorded outcome. A task created before the runtime
+published pipelines gets its first edition at its next boundary; earlier
+history is not back-filled. See
+[native incoming ACP](../../project/native-incoming-acp.md) for the exact rules.
 
 Routine reports open with a decision brief, then record the result, changes,
 checks, limitations and relevant evidence links. The implementation, verification
-and pipeline templates leave incident decisions out by default. For a production
+and pipeline templates leave incident decisions out by default.
+
+## Report structure
+
+The runtime, never the model, chooses a worker report's template
+(`cortex_core::assignment_brief`): the profile's `report_template` in
+`profiles.json` for an execution assignment, and for a review the `general`
+template with three review sections. The assignment brief's `report` object
+carries that skeleton: every `##` heading in order, one line on what belongs under
+it and whether it is required. An inline report is published under that template.
+
+| Template (roles) | Required sections |
+| --- | --- |
+| implementation (accessibility-fixer, backend-dev, data-engineer, devops-engineer, frontend-dev, fullstack-dev, mobile-dev, refactorer) | Changes; Verification; Risks and remaining work |
+| investigation (debugger, explorer) | Evidence examined; Findings; Gaps and next steps |
+| verification (accessibility-auditor, build-verification, performance-engineer, qa-engineer, security-auditor) | Executed checks; Failures and gaps; Assessment |
+| planning (architect, database-architect, planner, ux-designer) | Evidence reviewed; Proposed work graph; Risks and open questions |
+| documentation (technical-writer) | Documentation changes; Validation; Limits and follow-up |
+| general (general, senior-consultant) | Evidence and work; Verification; Risks and remaining work |
+| review (every review assignment; general template) | Verdict; Findings; Coverage (optional: Verification; Risks and remaining work) |
+
+The other headings of each template are listed in the skeleton as optional.
+`result_submit` checks only that each required heading is present: a level-two
+heading with the exact English text, letter case and spacing free, outside fenced
+code. Content is never judged. A missing section is a correctable tool error
+(`report_sections_missing`, `field` `report`, `missing` naming each heading);
+nothing is recorded, and a corrected resubmission, with the same request key or a
+new one, is a new payload. After two such refusals in one attempt the report is
+accepted as it is and the result carries `report_structure`
+`{"status":"REPORT_STRUCTURE_INCOMPLETE","missing":[...]}`, which the reviewer's
+`review_packet`, a successor's `predecessor_reports` and the coordinator's capsule
+show. A report template's own guidance comment line is refused
+(`draft_guidance_remaining`); any other HTML comment is ordinary content. For a production
 incident, the coordinator records an incident decision in the current pipeline;
 the owner can include it in the final handoff when relevant.
 

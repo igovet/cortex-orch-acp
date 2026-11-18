@@ -44,10 +44,12 @@ async fn seeded() -> (std::path::PathBuf, Arc<Runtime>, String, String) {
     std::fs::create_dir(&root).unwrap();
     let path = root.clone();
     let runtime = Arc::new(
-        tokio::task::spawn_blocking(move || Runtime::open(&path, "project", Arc::new(FailingStart)))
-            .await
-            .unwrap()
-            .unwrap(),
+        tokio::task::spawn_blocking(move || {
+            Runtime::open(&path, "project", Arc::new(FailingStart))
+        })
+        .await
+        .unwrap()
+        .unwrap(),
     );
     let execution = runtime
         .host
@@ -117,7 +119,13 @@ fn boot() -> String {
 }
 async fn relaunched(runtime: &Runtime) {
     for _ in 0..200 {
-        if sql(runtime, "SELECT count(*) FROM runtime_events WHERE type='NATIVE_SESSION_START_FAILED'").await != "0" {
+        if sql(
+            runtime,
+            "SELECT count(*) FROM runtime_events WHERE type='NATIVE_SESSION_START_FAILED'",
+        )
+        .await
+            != "0"
+        {
             return;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -129,7 +137,11 @@ async fn purge(runtime: &Runtime) -> CoreResult<()> {
     runtime
         .host
         .executor
-        .publication(move |store| store.purge_workspace_task("project", &draft, false).map(|_| ()))
+        .publication(move |store| {
+            store
+                .purge_workspace_task("project", &draft, false)
+                .map(|_| ())
+        })
         .unwrap()
         .await
         .unwrap()
@@ -158,9 +170,23 @@ async fn tasks_without_a_runtime_record_or_with_a_damaged_state_never_fail_the_p
     // Positive evidence settles the old task's rows; no runtime event is written for it.
     assert_eq!(sql(&runtime, "SELECT group_concat(idempotency_key||':'||status,',') FROM (SELECT * FROM delegation_provisioning WHERE task_id='legacy-old' ORDER BY idempotency_key)").await,
         "old-failed:terminated,old-open:in_progress,old-ready:terminated");
-    assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE task_id IN ('legacy-old','damaged')").await, "0");
+    assert_eq!(
+        sql(
+            &runtime,
+            "SELECT count(*) FROM runtime_events WHERE task_id IN ('legacy-old','damaged')"
+        )
+        .await,
+        "0"
+    );
     // The damaged task is left exactly as it was; the project opened.
-    assert_eq!(sql(&runtime, "SELECT state||':'||coalesce(blocker,'') FROM runtime_tasks WHERE task_id='damaged'").await, "NOT_A_STATE:");
+    assert_eq!(
+        sql(
+            &runtime,
+            "SELECT state||':'||coalesce(blocker,'') FROM runtime_tasks WHERE task_id='damaged'"
+        )
+        .await,
+        "NOT_A_STATE:"
+    );
     // A later restart is just as quiet.
     runtime.recover().await.unwrap();
     close(root, runtime).await;
@@ -177,7 +203,11 @@ async fn a_finished_python_task_is_adopted_and_its_result_is_shown_as_an_earlier
         UPDATE runtime_tasks SET state='COMPLETED',synthesis=NULL WHERE task_id='{task}';")).await;
     let message = |key: &str| json!({"projectId":"project","executionId":execution,"requestId":key,"action":"prompt","text":"Please change it."});
     assert_eq!(
-        runtime.control("project".into(), message("before")).await.unwrap_err().to_string(),
+        runtime
+            .control("project".into(), message("before"))
+            .await
+            .unwrap_err()
+            .to_string(),
         "native_execution_binding_invalid"
     );
     runtime.recover().await.unwrap();
@@ -185,28 +215,78 @@ async fn a_finished_python_task_is_adopted_and_its_result_is_shown_as_an_earlier
     assert_eq!(sql(&runtime, "SELECT o.epoch=e.owner_epoch AND o.epoch=2 FROM task_owners o JOIN workspace_executions e ON e.runtime_task_id=o.task_id").await, "1");
     // The finished result reads as a read-only result of an earlier version, with its
     // own identity; it is never acceptable here, and Request changes is offered.
-    let (actions, _) = crate::machine::task_facts::native_review(&root, "project", &execution, "COMPLETED", &json!({}), None);
+    let (actions, _) = crate::machine::task_facts::native_review(
+        &root,
+        "project",
+        &execution,
+        "COMPLETED",
+        &json!({}),
+        None,
+    );
     assert_eq!(actions["accept"], false);
     assert_eq!(actions["unblockAction"], "request_changes");
     assert_eq!(actions["earlierVersion"], true);
-    assert!(actions["reason"].as_str().unwrap().contains("earlier version of the app"), "{actions}");
+    assert!(
+        actions["reason"]
+            .as_str()
+            .unwrap()
+            .contains("earlier version of the app"),
+        "{actions}"
+    );
     let version = sql(&runtime, "SELECT max(id) FROM runtime_events").await;
     assert_eq!(actions["version"], version);
-    assert_eq!(actions["digest"], format!("result:wr_{execution}:{version}"));
+    assert_eq!(
+        actions["digest"],
+        format!("result:wr_{execution}:{version}")
+    );
     // A closed card is closed, not "waiting for Cortex".
-    let (closed, _) = crate::machine::task_facts::native_review(&root, "project", &execution, "COMPLETED", &json!({"status":"done"}), None);
+    let (closed, _) = crate::machine::task_facts::native_review(
+        &root,
+        "project",
+        &execution,
+        "COMPLETED",
+        &json!({"status":"done"}),
+        None,
+    );
     assert_eq!(closed["reason"], "This task is closed.");
     assert_eq!(closed["unblockAction"], Value::Null);
-    let (stopped, _) = crate::machine::task_facts::native_review(&root, "project", &execution, "CANCELLED", &json!({}), None);
-    assert_eq!(stopped["reason"], "This task stopped without a result to review.");
+    let (stopped, _) = crate::machine::task_facts::native_review(
+        &root,
+        "project",
+        &execution,
+        "CANCELLED",
+        &json!({}),
+        None,
+    );
+    assert_eq!(
+        stopped["reason"],
+        "This task stopped without a result to review."
+    );
     // Request changes now reopens it and relaunches the coordinator.
-    let receipt = runtime.control("project".into(), message("after")).await.unwrap();
+    let receipt = runtime
+        .control("project".into(), message("after"))
+        .await
+        .unwrap();
     assert_eq!(receipt["outcome"], "recorded");
-    assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='TASK_REOPENED'").await, "1");
+    assert_eq!(
+        sql(
+            &runtime,
+            "SELECT count(*) FROM runtime_events WHERE type='TASK_REOPENED'"
+        )
+        .await,
+        "1"
+    );
     relaunched(&runtime).await;
     // Adoption happens once.
     runtime.recover().await.unwrap();
-    assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='NATIVE_TASK_ADOPTED'").await, "1");
+    assert_eq!(
+        sql(
+            &runtime,
+            "SELECT count(*) FROM runtime_events WHERE type='NATIVE_TASK_ADOPTED'"
+        )
+        .await,
+        "1"
+    );
     close(root, runtime).await;
 }
 
@@ -218,8 +298,14 @@ async fn process_records_end_only_when_their_process_cannot_run() {
     let close_task = json!({"projectId":"project","executionId":execution,"requestId":"close","action":"close_task","confirmed":true});
     runtime.control("project".into(), close_task).await.unwrap();
     let own = std::fs::read_to_string("/proc/self/stat").unwrap();
-    let fields: Vec<&str> = own[own.rfind(')').unwrap() + 1..].split_whitespace().collect();
-    let (pid, pgid, start) = (std::process::id(), fields[2].to_owned(), fields[19].to_owned());
+    let fields: Vec<&str> = own[own.rfind(')').unwrap() + 1..]
+        .split_whitespace()
+        .collect();
+    let (pid, pgid, start) = (
+        std::process::id(),
+        fields[2].to_owned(),
+        fields[19].to_owned(),
+    );
     let mut child = std::process::Command::new("/bin/true").spawn().unwrap();
     let dead = child.id();
     child.wait().unwrap();
@@ -228,12 +314,18 @@ async fn process_records_end_only_when_their_process_cannot_run() {
         INSERT INTO attempt_process_registry VALUES ('p-old','{task}','acp_host',NULL,NULL,1,1,'1','an-earlier-boot','d','0',NULL,NULL);
         INSERT INTO attempt_process_registry VALUES ('p-dead','{task}','acp_host',NULL,NULL,{dead},{dead},'1','{b}','d','0',NULL,NULL);
         INSERT INTO attempt_process_registry VALUES ('p-live','{task}','acp_host',NULL,NULL,{pid},{pgid},'{start}','{b}','d','0',NULL,NULL);")).await;
-    assert_eq!(purge(&runtime).await.unwrap_err().code(), "active_execution");
+    assert_eq!(
+        purge(&runtime).await.unwrap_err().code(),
+        "active_execution"
+    );
     runtime.recover().await.unwrap();
     assert_eq!(sql(&runtime, "SELECT group_concat(attempt_id||':'||coalesce(termination_reason,'open'),',') FROM (SELECT * FROM attempt_process_registry ORDER BY attempt_id)").await,
         "p-dead:process_gone,p-live:open,p-old:previous_boot");
     // The live process still blocks deletion; once it ends, Delete proceeds.
-    assert_eq!(purge(&runtime).await.unwrap_err().code(), "active_execution");
+    assert_eq!(
+        purge(&runtime).await.unwrap_err().code(),
+        "active_execution"
+    );
     exec(&runtime, "UPDATE attempt_process_registry SET terminated_at='1',termination_reason='process_exited' WHERE attempt_id='p-live'".into()).await;
     purge(&runtime).await.unwrap();
     close(root, runtime).await;
@@ -273,13 +365,27 @@ async fn never_started_legacy_rows_settle_and_restarts_record_nothing_new() {
         "released:no_engine_process");
     assert_eq!(sql(&runtime, "SELECT json_extract(payload_json,'$.evidence')||':'||json_extract(payload_json,'$.count') FROM runtime_events WHERE type='NATIVE_PROCESS_SETTLED'").await,
         "no_engine_session_or_process_and_capacity_released:2");
-    assert_eq!(sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await, "RECOVERING:native_session_outcome_unknown");
+    assert_eq!(
+        sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await,
+        "RECOVERING:native_session_outcome_unknown"
+    );
     let counted = "SELECT count(*) FROM runtime_events";
     let before = sql(&runtime, counted).await;
     runtime.recover().await.unwrap();
     runtime.recover().await.unwrap();
-    assert_eq!(sql(&runtime, counted).await, before, "a restart re-recorded an unchanged recovery");
-    assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='NATIVE_RECOVERY_REQUIRED'").await, "1");
+    assert_eq!(
+        sql(&runtime, counted).await,
+        before,
+        "a restart re-recorded an unchanged recovery"
+    );
+    assert_eq!(
+        sql(
+            &runtime,
+            "SELECT count(*) FROM runtime_events WHERE type='NATIVE_RECOVERY_REQUIRED'"
+        )
+        .await,
+        "1"
+    );
     close(root, runtime).await;
 }
 
@@ -291,9 +397,21 @@ async fn never_started_legacy_rows_settle_and_restarts_record_nothing_new() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_result_held_only_for_a_descriptive_check_command_is_checked_again() {
     for (verification, blocker, rechecked) in [
-        ("VERIFICATION_PASSED", "completion_worker_check_unverified", true),
-        ("VERIFICATION_FAILED", "completion_worker_check_unverified", false),
-        ("VERIFICATION_PASSED", "completion_artifact_changed_or_missing", false),
+        (
+            "VERIFICATION_PASSED",
+            "completion_worker_check_unverified",
+            true,
+        ),
+        (
+            "VERIFICATION_FAILED",
+            "completion_worker_check_unverified",
+            false,
+        ),
+        (
+            "VERIFICATION_PASSED",
+            "completion_artifact_changed_or_missing",
+            false,
+        ),
     ] {
         let (root, runtime, _, task) = seeded().await;
         exec(&runtime, format!("
@@ -301,9 +419,16 @@ async fn a_result_held_only_for_a_descriptive_check_command_is_checked_again() {
             INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES ('{task}','{verification}','runtime','{{}}','0');")).await;
         runtime.recover().await.unwrap();
         let resumed = "SELECT count(*) FROM runtime_events WHERE type='NATIVE_RECOVERY_RESUMED' AND json_extract(payload_json,'$.reason')='completion_rechecked' AND json_extract(payload_json,'$.state')='RECONCILING'";
-        assert_eq!(sql(&runtime, resumed).await, if rechecked { "1" } else { "0" }, "{verification}/{blocker}");
+        assert_eq!(
+            sql(&runtime, resumed).await,
+            if rechecked { "1" } else { "0" },
+            "{verification}/{blocker}"
+        );
         if !rechecked {
-            assert_eq!(sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await, format!("RECOVERING:{blocker}"));
+            assert_eq!(
+                sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await,
+                format!("RECOVERING:{blocker}")
+            );
         }
         close(root, runtime).await;
     }
@@ -315,7 +440,11 @@ async fn a_result_held_only_for_a_descriptive_check_command_is_checked_again() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dead_services_broker_directory_is_removed_on_recovery() {
     let (root, runtime, _, _) = seeded().await;
-    let store = root.join(if workspace_protocol::channel::current().is_dev() { ".cortex-dev" } else { ".cortex" });
+    let store = root.join(if workspace_protocol::channel::current().is_dev() {
+        ".cortex-dev"
+    } else {
+        ".cortex"
+    });
     let stale = store.join("cortex-mcp-47b3baad186df5cc42d2cd46");
     let fresh = store.join("cortex-mcp-0123456789abcdef01234567");
     let other = store.join("cortex-mcp-not-a-broker");
@@ -328,7 +457,10 @@ async fn a_dead_services_broker_directory_is_removed_on_recovery() {
         std::fs::File::open(dir).unwrap().set_modified(old).unwrap();
     }
     runtime.recover().await.unwrap();
-    assert!(!stale.exists(), "the dead service's broker directory stayed");
+    assert!(
+        !stale.exists(),
+        "the dead service's broker directory stayed"
+    );
     assert!(fresh.exists() && other.exists());
     close(root, runtime).await;
 }
@@ -340,17 +472,42 @@ async fn a_dead_services_broker_directory_is_removed_on_recovery() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_work_stop_asks_the_owner_with_concrete_answers() {
     let (root, runtime, _, task) = seeded().await;
-    exec(&runtime, format!("UPDATE runtime_tasks SET state='EXECUTING',blocker=NULL WHERE task_id='{task}';")).await;
-    let (owner, epoch) = (sql(&runtime, "SELECT owner_ref FROM task_owners").await, sql(&runtime, "SELECT epoch FROM task_owners").await);
-    let owner = OwnerEpoch { owner, epoch: epoch.parse().unwrap() };
+    exec(
+        &runtime,
+        format!("UPDATE runtime_tasks SET state='EXECUTING',blocker=NULL WHERE task_id='{task}';"),
+    )
+    .await;
+    let (owner, epoch) = (
+        sql(&runtime, "SELECT owner_ref FROM task_owners").await,
+        sql(&runtime, "SELECT epoch FROM task_owners").await,
+    );
+    let owner = OwnerEpoch {
+        owner,
+        epoch: epoch.parse().unwrap(),
+    };
     let (_keep, cancelled) = tokio::sync::watch::channel(false);
     runtime
-        .stop_after_error(&task, &owner, CoreError::Refused("lost_worker_action_outcome_unknown"), cancelled)
+        .stop_after_error(
+            &task,
+            &owner,
+            CoreError::Refused("lost_worker_action_outcome_unknown"),
+            cancelled,
+        )
         .await;
-    assert_eq!(sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await, "WAITING_USER:lost_worker_action_outcome_unknown");
+    assert_eq!(
+        sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await,
+        "WAITING_USER:lost_worker_action_outcome_unknown"
+    );
     assert_eq!(sql(&runtime, "SELECT count(*) FROM pending_questions WHERE status='open' AND dedup_key LIKE 'runtime:stop:%'").await, "1");
-    let question = sql(&runtime, "SELECT text FROM pending_questions WHERE status='open'").await;
-    assert!(question.contains("without an accepted result"), "{question}");
+    let question = sql(
+        &runtime,
+        "SELECT text FROM pending_questions WHERE status='open'",
+    )
+    .await;
+    assert!(
+        question.contains("without an accepted result"),
+        "{question}"
+    );
     assert!(!question.contains("lost_worker"), "{question}");
     close(root, runtime).await;
 }
@@ -372,15 +529,29 @@ async fn an_unasked_legacy_work_stop_gets_its_question_on_start() {
             exec(&runtime, format!("INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES ('{task}','USER_STEERING','runtime','{{}}','0');")).await;
         }
         runtime.recover().await.unwrap();
-        let state = sql(&runtime, "SELECT state||':'||coalesce(blocker,'') FROM runtime_tasks").await;
+        let state = sql(
+            &runtime,
+            "SELECT state||':'||coalesce(blocker,'') FROM runtime_tasks",
+        )
+        .await;
         let open = sql(&runtime, "SELECT count(*) FROM pending_questions WHERE status='open' AND dedup_key LIKE 'runtime:stop:%'").await;
         if followed {
             assert_eq!((state.as_str(), open.as_str()), ("RECOVERING:", "0"));
         } else {
-            assert_eq!((state.as_str(), open.as_str()), ("WAITING_USER:lost_worker_action_outcome_unknown", "1"));
+            assert_eq!(
+                (state.as_str(), open.as_str()),
+                ("WAITING_USER:lost_worker_action_outcome_unknown", "1")
+            );
             // A later start does not ask twice.
             runtime.recover().await.unwrap();
-            assert_eq!(sql(&runtime, "SELECT count(*) FROM pending_questions WHERE dedup_key LIKE 'runtime:stop:%'").await, "1");
+            assert_eq!(
+                sql(
+                    &runtime,
+                    "SELECT count(*) FROM pending_questions WHERE dedup_key LIKE 'runtime:stop:%'"
+                )
+                .await,
+                "1"
+            );
         }
         close(root, runtime).await;
     }

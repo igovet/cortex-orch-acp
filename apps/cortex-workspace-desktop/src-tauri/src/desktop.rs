@@ -18,6 +18,8 @@ struct Native {
     bridge: Mutex<Option<Arc<Bridge>>>,
     drop: Arc<std::sync::Mutex<Option<(std::time::Instant, Result<Value, String>)>>>,
     traffic: Arc<stall::Traffic>,
+    /// The notifications this window raised that can still be clicked, and where each leads.
+    notes: crate::notification::Shared,
 }
 impl Native {
     async fn bridge(&self) -> Result<Arc<Bridge>, String> {
@@ -199,18 +201,58 @@ async fn save_attachment(window: &WebviewWindow, message: Value) -> Result<Value
 }
 
 #[tauri::command]
-async fn workspace_notify(window: WebviewWindow, label: String) -> Result<(), String> {
+async fn workspace_notify(
+    window: WebviewWindow,
+    state: State<'_, Native>,
+    label: String,
+    target: Value,
+) -> Result<(), String> {
     if window.label() != "main"
         || !policy::local_url(window.url().map_err(|_| "bridge_origin_refused")?.as_str())
     {
         return Err("bridge_origin_refused".into());
     }
-    if label.chars().count() > 1000 {
-        return Err("notification_label_too_long".into());
-    }
-    tauri::async_runtime::spawn_blocking(move || crate::notification::send(&label))
+    let target = policy::notification_target(&label, target)?;
+    let notes = state.notes.clone();
+    tauri::async_runtime::spawn_blocking(move || crate::notification::send(&notes, &label, target))
         .await
         .map_err(|_| "Desktop notification delivery failed.")?
+}
+
+/// A click on one of the service's notifications. Its target must have the exact shape the
+/// window opens; the window then claims the click from the service, which hands over the
+/// server's activation token (the token is spent by the process that raises the window), and
+/// raises itself and opens the place. A click another window claimed first does nothing here.
+fn claim(window: &WebviewWindow, bridge: Arc<Bridge>, event: &Value) {
+    let Ok(target) = policy::notification_target("", event["target"].clone()) else {
+        return;
+    };
+    let Some(nonce) = event["nonce"].as_str().map(str::to_owned) else {
+        return;
+    };
+    let window = window.clone();
+    tauri::async_runtime::spawn(async move {
+        let Ok(reply) = bridge
+            .rpc(
+                "notifications.opened",
+                serde_json::json!({ "nonce": nonce }),
+            )
+            .await
+        else {
+            return;
+        };
+        if reply["claimed"] != true {
+            return;
+        }
+        let token = reply["token"].as_str().map(str::to_owned);
+        let shown = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            if let Ok(gtk) = shown.gtk_window() {
+                crate::notification::raise(&gtk, token.as_deref());
+            }
+            let _ = shown.emit("workspace-navigate", &target);
+        });
+    });
 }
 
 /// A window that stops answering leaves a line on stderr naming how long and what it was handling,
@@ -253,12 +295,13 @@ fn watch_main_thread(window: WebviewWindow, traffic: Arc<stall::Traffic>) {
 
 /// Called only after the frontend unsaved guard and pending request barrier.
 #[tauri::command]
-fn workspace_close(window: WebviewWindow) -> Result<(), String> {
+fn workspace_close(window: WebviewWindow, state: State<'_, Native>) -> Result<(), String> {
     if window.label() != "main"
         || !policy::local_url(window.url().map_err(|_| "bridge_origin_refused")?.as_str())
     {
         return Err("bridge_origin_refused".into());
     }
+    crate::notification::withdraw(&state.notes);
     let owner = window.clone();
     window
         .with_webview(move |webview| {
@@ -322,12 +365,29 @@ pub fn run() {
             let handle = app.handle().clone();
             let traffic = app.state::<Native>().traffic.clone();
             watch_main_thread(window.clone(), traffic.clone());
+            // A click on one of this window's notifications raises the window and opens its place.
+            // Without a listener the window raises none (see notification::send).
+            let clicked = window.clone();
+            let _ =
+                crate::notification::listen(app.state::<Native>().notes.clone(), move |opened| {
+                    let window = clicked.clone();
+                    let _ = clicked.run_on_main_thread(move || {
+                        if let Ok(gtk) = window.gtk_window() {
+                            crate::notification::raise(&gtk, opened.token.as_deref());
+                        }
+                        let _ = window.emit("workspace-navigate", &opened.target);
+                    });
+                });
             tauri::async_runtime::spawn(async move {
                 loop {
                     if let Ok(bridge) = handle.state::<Native>().bridge().await {
                         bridge
                             .subscribe(|event| {
                                 traffic.event();
+                                if event["type"] == "notification_open" {
+                                    claim(&window, bridge.clone(), &event);
+                                    return;
+                                }
                                 let _ = window.emit("workspace-transport", event);
                             })
                             .await;

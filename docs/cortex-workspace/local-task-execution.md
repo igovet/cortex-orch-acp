@@ -1,5 +1,7 @@
 # Local task execution
 
+Conversation waits explain when decision details are unavailable and point to Answer in the header. Open decisions also render before their timeline reference arrives. Sent attachment chips tolerate the whitespace normalization used by runtime history.
+
 **Status: implemented source slice, not full product or installed-package qualification.**
 The local wire version is 1.8. See [protocol](protocol.md) and
 [IDE and Git](ide-and-git.md) for the wider contract.
@@ -156,7 +158,20 @@ and a narrow local squash: the source must be the clean, already-committed proje
 folder, the target an existing clean worktree and ancestor of that source, and
 cleanup must not be requested. Report/review/check validation, current source,
 fresh-result and accepted-revision fences precede every effect. The machine lock
-covers overlay access and the existing durable operation intent precedes Git.
+is held only for admission (the saved task record is checked again under it) and
+for each overlay save; the existing durable operation intent precedes Git, and Git,
+hooks and GitHub run after the lock is released. Each save writes only the fields
+integration owns (status, work, completion time, integration, fresh-result marker,
+conflict, merge, acceptance, automatic-ready marker, pull-request attempt) into the
+overlay as it is then, so other edits made meanwhile (a title, a target) are kept,
+and it waits for the machine lock without a time limit, as does finishing the
+intent: an effect that happened is always recorded. Until the integration
+settles, another owner action on the same task and deletion of its sprint are
+refused at once with `operation_in_progress`, and any other Git-changing owner
+action of the same repository (another integration, a merge finish or abort, a
+file-conflict choice, a Git action) is refused at once with
+`integration_in_progress`: one runs per repository from admission to the
+recorded outcome.
 A known target-commit failure restores its exact previous index only if HEAD is
 unchanged. A real `git merge --squash` content conflict (unmerged index entries)
 is reported as `integration_conflict`, not as a hook failure: because a squash
@@ -230,11 +245,11 @@ private-output failures. Receipt-derived failed/passed targets still retain the
 interpreter, as do existing size/materialization boundaries.
 Native acceptance and owner-deletion boundaries are described below.
 
-Saved draft `product.task` actions `edit`, `settings` and `rename`, plus private `target`, `reopen`, `restore` and `sprint` linking, now run natively when checkout options are materialized. Draft edits preserve attachment bytes and unrelated options; expected-version and execution-identity checks arbitrate against Start in the same Core transaction as version/outbox updates. `rename` alone also applies to a started, finished or closed task: it changes only the owner-visible title option, never the saved request, settings or lifecycle, and a cleared or deleted task refuses it with `not_editable`. Sprint linking preserves dependency order, refuses started tasks and holds the Start arbitration transaction across the private JSON replacement. Private target/reopen/restore changes neither start work nor certify a result. The unchanged response and persistence shapes are compared with offline Python fixtures in `crates/workspace-service/tests/task_actions.rs`, captured by the former generator `generate_task_action_fixture` (removed with the Python runtime). Legacy unmaterialized checkout projections, and structured or floating-point rename titles outside the native text-title surface, still delegate before any effect. Owner `close` (including external/already-in-target), `archive`, `auto_ready`, `merged` and `resolution_started` now run in Rust as private presentation actions. External closure preserves the confirmation/conflict/settlement/containment refusal order, checks session/root/epoch, unknown launches and live workers, and rechecks settlement under the Core immediate transaction through overlay replacement. Archive preserves the unmerged-work question, including dirty/changed-head and missing/removed worktree cases. Conflict handoff retains guidance and clears acceptance, without resolving files. These actions never transition the scheduler, certify checks or mutate Git/user files. Their replies and persisted JSON/SQLite state are compared with the 87-case offline capture from the former generator `generate_task_lifecycle_fixture` (removed with the Python runtime) in `tests/task_actions.rs` (both under `crates/workspace-service/`). Owner acceptance and archive-discard answers now also run in Rust within the native evidence/materialized-checkout boundary described below. Manual file choices and merge finish/abort now use Rust as described below; integration validation/effects outside the committed-source local squash slice are refused natively (the former Python provider was removed). An uncertain native mutation never falls back or automatically replays.
+Saved draft `product.task` actions `edit`, `settings` and `rename`, plus private `target`, `reopen`, `restore` and `sprint` linking, now run natively when checkout options are materialized. Draft edits preserve attachment bytes and unrelated options; expected-version and execution-identity checks arbitrate against Start in the same Core transaction as version/outbox updates. `rename` alone also applies to a started, finished or closed task: it changes only the owner-visible title option, never the saved request, settings or lifecycle, and a cleared or deleted task refuses it with `not_editable`. Sprint linking preserves dependency order, refuses started tasks and holds the Start arbitration transaction across the private JSON replacement. Private target/reopen/restore changes neither start work nor certify a result. The unchanged response and persistence shapes are compared with offline Python fixtures in `crates/workspace-service/tests/task_actions.rs`, captured by the former generator `generate_task_action_fixture` (removed with the Python runtime). Legacy unmaterialized checkout projections, and structured or floating-point rename titles outside the native text-title surface, still delegate before any effect. Owner `close` (including external/already-in-target), `archive`, `merged` and `resolution_started` now run in Rust as private presentation actions. External closure preserves the confirmation/conflict/settlement/containment refusal order, checks session/root/epoch, unknown launches and live workers, and rechecks settlement under the Core immediate transaction through overlay replacement. Archive preserves the unmerged-work question, including dirty/changed-head and missing/removed worktree cases. Conflict handoff retains guidance and clears acceptance, without resolving files. These actions never transition the scheduler, certify checks or mutate Git/user files. Their replies and persisted JSON/SQLite state are compared with the 87-case offline capture from the former generator `generate_task_lifecycle_fixture` (removed with the Python runtime) in `tests/task_actions.rs` (both under `crates/workspace-service/`). Owner acceptance and archive-discard answers now also run in Rust within the native evidence/materialized-checkout boundary described below. Manual file choices and merge finish/abort now use Rust as described below; integration validation/effects outside the committed-source local squash slice are refused natively (the former Python provider was removed). An uncertain native mutation never falls back or automatically replays.
 
 ### Native owner review decisions
 
-`product.task` actions `accept` and `answer_archive` now use Rust for
+`product.task` actions `accept` and `confirm_discard` now use Rust for
 materialized checkouts and the existing native result-evidence surface.
 Acceptance preserves the completed/current execution, project/session/owner,
 unknown-Start, digest, fresh-result and evidence-version gates. Existing report,
@@ -248,20 +263,20 @@ checkout digest. Informational answers need no invented verification.
 The machine lock protects the overlay. Acceptance revalidates under Core's
 immediate writer transaction through the private JSON replacement, preventing
 Start/owner-state changes between validation and save. It neither completes the
-runtime nor creates a check receipt. A denied archive-discard answer postpones
-the question using the existing retention setting; a literal confirmed discard
-binds consent to the exact legacy checkout digest. It deletes no files or task.
+runtime nor creates a check receipt. Archiving never asks and never discards. `confirm_discard` is allowed only on an
+archived task and binds the owner's consent to delete its work at cleanup to the
+exact legacy checkout digest; it deletes no files or task.
 Unobservable source records no consent; later purge still rechecks the digest,
 unmerged work and its independent deletion fences.
 
-The 110 cases in
+The 83 cases in
 [`task-review-python.json`](../../crates/workspace-service/tests/fixtures/task-review-python.json),
 captured offline by
 the former generator `generate_task_review_fixture` (removed with the Python runtime),
 compare replies, persisted JSON and SQLite rows through `Service::machine`
 without a helper or engine. Cases include plain/Git/worktree sources, unknown
 starts, foreign bindings, stale versions/digests, manual and policy-blocked
-checks, failed reviews, drift, unreadable files and both archive answers.
+checks, failed reviews, drift, unreadable files.
 Additional native tests exercise exclusive store access and real overlay-write
 failure: neither invokes Python or changes authoritative runtime state.
 
@@ -320,7 +335,13 @@ records the finished merge. It does not stage additional paths. Abort invokes
 only `git merge --abort`, clears the retained merge/acceptance and preserves
 the other task fields. Neither action certifies a result or completes runtime work.
 
-The machine lock spans reads, intent persistence, Git and the private JSON save.
+The machine lock spans reads and intent persistence, and each private JSON save,
+which writes only the task's conflict, merge, acceptance, resolver and status (and
+the overlay's `hasGit`/`ghAvailable` facts) and waits for the lock without a time
+limit. The Git commit or abort and its hooks run after the lock is released, under
+the repository's integration lock (another Git-changing owner action of the
+project is refused at once with `integration_in_progress`); meanwhile other owner
+actions on the task are refused at once with `operation_in_progress`.
 A successful commit must have the observed HEAD and merge HEAD as parents;
 a successful abort must leave HEAD unchanged. Both require MERGE_HEAD gone.
 Normal hooks remain enabled, and no force, automatic restoration or retry is
@@ -397,8 +418,10 @@ Standalone `workers` and worker bundles in `product.facts` now read retained ass
 Coordinator detail requests (`workers` with `workerId=coordinator:<task>`) now read the registered task's retained ACP session directly in Rust. The existing messages, plans, selected tools/edits/commands, status and confirmed route DTOs retain the 100-row scan and 60,000-byte page budget. `wh1` continuations bind project, task, session, page size and a fixed high watermark; later inserts cannot enter older pages, and session replacement invalidates old cursors. Sparse tool updates enrich retained input across page boundaries, with the original 100-update clipping notice. Hidden bookkeeping, thoughts, read bodies and report bodies stay out of the display. Malformed retained updates retain an unavailable-content row; unsupported request/display shapes, private report diff blocks, noncanonical timestamps and intermediate reads above 1,000 rows or 8 MiB still use the retained interpreter. Offline Python DTOs in `fixtures/coordinator-facts.json` are captured by the former generator `generate_coordinator_fixture` (removed with the Python runtime) under `crates/workspace-service/tests/`; tests run with no Python helper or engine. The full receipt/closure validator remains on the migration provider; native Git source observations do not substitute for its receipt checks.
 
 Native `product.read` attachment requests read the registered task's saved options
-through Core, including before activation, returning a validated array (including a genuinely empty array),
-not the unrelated presentation product object. A missing task or invalid saved
+through Core, including before activation, returning a validated array of file
+references (including a genuinely empty array; each body is saved privately on that
+read and opened with `product.attachment` `read`), not the unrelated presentation
+product object. A missing task or invalid saved
 attachment array refuses. The same files start with the task (see [Attachments](#attachments)).
 
 Completed native task facts display the retained synthesis alongside observed
@@ -658,10 +681,23 @@ re-enters the driver (lost-worker retry for interrupted workers, coordinator
 recovery for an interrupted planning turn). A Resume that refuses (for example
 `native_shutdown_unconfirmed`) commits nothing and leaves the task paused, and a
 recovery barrier recorded while paused (`native_session_outcome_unknown`) is
-never erased: the task returns as RECOVERING for Retry. Explicit `retry` and owner
-steering settle the old process, retain its prior revision/results, supersede
+never erased: the task returns as RECOVERING for Retry. Explicit `retry`, and an
+owner message to a task whose coordinator waits for the owner, is held in
+recovery or was reopened, settle the old process, retain its prior revision/results, supersede
 obsolete questions and start a fresh coordinator/plan. None of them revive a
-revoked channel. An admitted control whose finish receipt never committed is
+revoked channel. An owner message (Send now, or a queued message) to a working task,
+also one whose worker asked the owner a question, settles, cancels and interrupts
+nothing: the running driver, workers, review and verification continue, the worker's
+question stays answerable and the task keeps its state, so its receipt does not wait
+for any process. The message is recorded once and reaches the coordinator's next turn
+at a safe boundary, in order, and is recorded delivered once the engine answered that
+turn's prompt (see [steering](../features/steering-and-questions/index.md)). A queued
+message stays in the machine's queue, editable, movable and removable, until the
+service takes it at such a boundary (window open or closed); it then reads "Taken from
+the queue for delivery" and refuses changes (`message_taken`). Send now on a queued row
+records it at once. The task's Work details list the owner's write denials in force (path,
+when set) with Remove, which lifts that one denial (`executions.control`
+`allow_write`). An admitted control whose finish receipt never committed is
 closed as an explicit `outcome: unknown` receipt carrying the task revision; the
 same request keeps replaying as `native_control_outcome_unknown`, the task holds
 in RECOVERING until the owner retries, and later restarts do not raise it again.
@@ -669,7 +705,14 @@ A follow-up or incoming start uses the task's own coordinator route (explicit
 choice, else the route pinned when the task started); only a task with neither
 needs a resolvable owner default. A failed first prompt keeps its draft and a
 retry of the same text reuses it. Steering text is retained
-in the event stream and display history. Attachments of an owner message are validated before admission and retained with it (see Attachments); an invalid file refuses before mutation. Retry is allowed only for waiting/blocked/recovering work, not a
+in the event stream and display history. The desktop shows an owner message, a
+queued message, a worker message, a planner message and a question answer from
+the press, before the service answers, and drops that local copy once the
+service's record reads in its place: a saved, queued or worker message carries
+the send's `requestId` as its id; a history `user` row carries no request
+identity, so it is matched by text among the rows that arrived after the send.
+A refused send keeps its text and files on its line with Retry; the local copy
+is display only and never stands for a recorded message. Attachments of an owner message are validated before admission and retained with it (see Attachments); an invalid file refuses before mutation. Retry is allowed only for waiting/blocked/recovering work, not a
 completed task. As with Python steering, an owner message (Request changes) to a
 COMPLETED or FAILED result reopens it in the same transaction: `TASK_REOPENED`,
 unsettled result text and blocker cleared, then a fresh plan. A cancelled task, or
@@ -712,7 +755,7 @@ version passed. N self-reported checks it does not cover are shown for informati
 and do not block acceptance:" followed by up to ten named checks). Such notes need
 no acknowledgement and are not counted as open checks. A self-reported `failed`
 check, a policy-blocked one, a failed or missing runtime verification and an
-unapproved review still block Accept (`crates/workspace-service/src/machine/task_facts_work.rs`).
+unapproved review still block Accept (`crates/workspace-service/src/machine/task_facts_work.rs`). A failed worker check whose withdrawal completion confirmed (a probe withdrawn after its run) is omitted again on the result card when the runtime re-derives that withdrawal from the run's recorded output: a native output is kept under the channel that ran the command, and its stored file must still hash to the digest completion recorded. On a native task a check that still blocks is named in the reason ("Worker check “…” failed. Rerun that check or request changes. Only a recorded technical blocker may be acknowledged."). A verification the native runtime recorded is compared with the native folder observation only; an earlier-format digest is taken only for a result verified before its task was adopted.
 Changed files after the result disable Accept with the Request changes action.
 For a task of a sprint that works in the project folder itself, later tasks write
 the same folder, so its result is compared on the files it recorded writing: while
@@ -803,7 +846,24 @@ reply names a cut under a top-level `partial` object (`tasks`, `workers`,
 session rows, paged by its own cursor; rows whose message or tool-call identity
 names a worker attempt belong to that worker's page, and so does a command run on
 a worker's channel (a command on the coordinator's channel appears on neither
-worker page). The Conversation omits worker narration and worker tool calls.
+worker page). The Conversation omits worker narration and worker tool calls: its
+history read (`history.page`, `cortex_core::projections::history`) looks a row's
+attempt up under the execution's runtime task (`workspace_executions.runtime_task_id`,
+where `delegation_provisioning` records attempts), never under the workspace task
+it is asked for. Its live line speaks for the coordinator: while workers run it
+reads "Waiting for <role>…" (or "Waiting for N workers…"), and a worker's running
+command, edit or read shows only on that worker's page. What needs the owner stays
+in the Conversation whatever session it came from: questions, open or answered,
+are read from the task's decisions (`decisions.page`, by the runtime task), not
+from any session stream, and a worker's question carries `askedBy` (the worker
+role recorded for its assignment) and reads "Asked by <role>". The result and
+review entries come from the task's results, and the coordinator's own tool calls
+that start, wait for or stop a worker stay coordinator rows.
+The coordinator's own message text is recorded in full around its question: every
+chunk the engine emits, including chunks processed after `user_question_request`
+committed `WAITING_USER`, is kept in order (`record` in
+`crates/workspace-service/src/native_activity.rs`), so a message is never cut short
+at the question.
 Check receipts of the current result are read newest first up to 1000; beyond that
 the result is marked `checksPartial` and Accept is refused (presentation and the
 Accept command alike) with a readable reason, never decided from part of the
@@ -864,6 +924,8 @@ Machine connectivity and task process confirmation are separate. An unconfirmed 
 
 A matching bound `RECOVERING` / `recovery` / `recovering` projection with `waitReason: turn_interrupted` and no contradictory-evidence warning is different: the cancelled turn is waiting for an owner message. It shows **Interrupted** under Needs you, with **Send a message to continue from the recorded state**. Re-check installs that same recorded wait and restores messaging; it does not itself continue work. The generic Working indicator and Mark as handled card are absent. The task is not declared physically stopped, so process-quiescence guards remain in force. Missing bindings, mismatched runtime facts and other recovery states stay unconfirmed.
 
+A bound `EXECUTING` or `REVIEWING` projection whose next step is queued behind another unfinished task's files carries the `waiting_for_files` warning and a `waitReason` sentence naming that task and the files. It stays Working and reads "Waiting for the task “<title>” to release <files>"; the step starts by itself when the holding ends, and Stop and Pause stay available. Nothing asks the owner.
+
 Only a task that waits on the owner (Needs you, or a merge conflict) shows the **Waiting for you** card; a cancelled or failed run has no decision and shows none. **Mark as handled** appears only where the machine offers it. A task closed with **Close task** reads as closed (Done, not certified) from the cancellation the close committed, even when an earlier host refused its finish receipt because an engine exit was unconfirmed.
 
 Coordinator messages and selected tool steps use the retained public `history.page`
@@ -898,9 +960,26 @@ never an inherited guess. Recorded model names are preferred; a recorded model
 without a name is explicitly marked as an alias. Transport, connection and
 configuration identities are not display labels.
 
+On the native runtime, every engine session start records `NATIVE_SESSION_CONFIGURED`
+(`channel_id`, `session`, `engine`, `model`, `parameters`) only after the engine has
+confirmed each `configure` value (`Engine::configure` refuses a reply whose
+`currentValue` differs from the value sent), in the same transaction as
+`NATIVE_ACCESS_MODE_CONFIRMED`. A native worker's `route` is
+`{engine, model, effort}` from the newest such record of a worker channel bound to that
+worker (`effort` from `thought_level`, `effort` or `reasoning_effort`, else empty), so
+the route shown is the route its engine session runs on. It is never the
+coordinator's route or the task's settings. A worker with no such record (not
+started yet, or a store written before the record existed) has a null route.
+The desktop labels a route that names its engine as `Engine · Model, Effort`, with
+the model's name taken from that engine's catalogue on the machine. A worker
+with a null route reads **Chosen when it starts** while it waits, and **Not
+confirmed** otherwise. The worker card, the worker page and the inspector's
+Selected worker section show only the worker's own route. The inspector's
+Route and access section labels the task's route **Coordinator model**.
+
 Task and project freshness uses recorded task/question/history timestamps, never the time a poll completed. Task freshness uses that task rather than an unrelated project refresh. Elapsed durations use one whole-second formatter: seconds, minutes plus seconds, then hours/minutes/seconds. An unreported time is omitted.
 
-A worker can ask while the runtime remains EXECUTING for other workers. Its actionable pending question still appears in the task conversation, Inbox and sidebar; it does not imply that the entire runtime is paused. Answers held for a question batch may bind to a newer display version only when the question text, options, owner, requirement and permission identities are unchanged; a changed question clears the held batch instead of submitting an old decision. The native window can notify outside the open task/sprint; see [notification behavior](maintenance-and-controls.md). All work lists sprint planning with an Open planning link before it has materialized tasks, rather than implying there is no work.
+A worker can ask while the runtime remains EXECUTING for other workers. Its actionable pending question still appears in the task conversation, Inbox and sidebar; it does not imply that the entire runtime is paused. Questions asked together are answered in one form and sent by its one Send answers action as one batch answer, bound to the question versions on view; nothing waits in the app between questions. A batch that gained, lost or closed a question since is refused as a whole, and the form keeps every answer the owner gave with the reason. The answer form has no model or effort control, because the answer continues the existing session. The native window can notify outside the open task/sprint; see [notification behavior](maintenance-and-controls.md). All work lists sprint planning with an Open planning link before it has materialized tasks, rather than implying there is no work.
 
 Weekly Claude/Codex usage comes from the runtime quota reader used by route selection. Packaged Claude discovery can use the verified SDK CLI when no global `claude` is on PATH. Claude uses named weekly windows; Codex uses the reported 10080-minute duration in either primary or secondary, never the slot name alone. Missing Codex duration stays unknown. Multiple scopes/connections use the highest reported percentage, not their sum or the last entry. Unknown usage/observation time remains unknown; OpenCode and five-hour windows are omitted. These source and fixture checks do not qualify live account availability.
 
@@ -942,7 +1021,7 @@ The Settings machine catalogue retains every connection-selectable route identit
 efforts for the chosen model. Unsupported or withdrawn routes are not silently
 replaced. A failed dispatch remains unknown and is not replayed automatically.
 
-A folder without Git runs in the project folder. On start, a saved worktree choice becomes the project-folder checkout (internal kind `main`) because there is no repository from which to create a worktree; no repository is created implicitly. Tasks, results, review and acceptance do not depend on Git. Code can read/save project files, while Changes explains that a Git diff is unavailable. Accepted work reaches Ready to merge; the owner can close it as-is without Git, or explicitly initialize Git before using Git integration. Closing as-is a result that already reached Ready to merge through acceptance or the automatic passed-checks promotion keeps it checked (`notVerifiedByCortex` stays false); closing any other result as-is still records the lasting Not verified warning.
+A folder without Git runs in the project folder. On start, a saved worktree choice becomes the project-folder checkout (internal kind `main`) because there is no repository from which to create a worktree; no repository is created implicitly. Tasks, results, review and acceptance do not depend on Git. Code can read/save project files, while Changes explains that a Git diff is unavailable. Accepted work reaches Ready to merge; the owner can close it as-is without Git, or explicitly initialize Git before using Git integration. Closing as-is a result that already reached Ready to merge through acceptance (manual or automatic) keeps it checked, and so does a result that an earlier build marked `automaticReady` (`notVerifiedByCortex` stays false); closing any other result as-is still records the lasting Not verified warning.
 
 A separate worktree is prepared on explicit start under the machine's configured
 worktree root, grouped by repository identity. New task branches and directory names
@@ -965,7 +1044,7 @@ a commit refuses helper data already staged by another client. Separate-branch i
 
 Machine configuration is reread after activation and on machine-fact refreshes, including background first-run setup. Dirty settings retain their original revision token even if a newer read arrives. A structured revision conflict keeps the draft and exposes Review changes and explicit Reapply mine against the refreshed revision. Unknown save outcomes remain unknown and are never automatically retried. A refused defaults update does not write Workspace-only mode/checkout values.
 
-Git commit-message drafts update reactive checkout state synchronously, survive fact refreshes, and clear only after a successful matching commit. A newer draft entered while Commit is in flight is kept. Empty messages remain refused. Commit is local and requires no remote: an existing staged selection is kept, or, when the index is empty, the listed non-helper changes are staged and committed. Amend uses the same visible message and explicit confirmation. App-generated messages use English templates for task commits, squash/PR defaults, Git Generate, automatic merge updates, conflict completion and revert commits, regardless of task language. Owner-written messages remain editable and are not translated. Revert requires an empty index before applying its inverse and making the English-message commit; a failure leaves Git’s visible pending work for manual recovery. Push accepts a configured remote name or the confirmed credential-redacted display URL and resolves it against current Git configuration before one non-forcing push. Unknown, stale or ambiguous URLs are refused; an unclear push result is never retried automatically. Pull refuses an absent tracking upstream with setup guidance. Fetch and Pull use Git's configured defaults/tracking directly, not the Push dialog's remote field. When a remote exists, Pull is disabled with a reason when no upstream exists or the last fetched state has no incoming commits; Fetch checks for newer remote state. Local-only repositories omit Fetch, Pull, Push, PR creation and push-status wording rather than showing dead network controls. Local commits, review, squash merge and confirmed closure still work.
+Git commit-message drafts update reactive checkout state synchronously, survive fact refreshes, and clear only after a successful matching commit. A newer draft entered while Commit is in flight is kept. Empty messages remain refused. Commit is local and requires no remote: an existing staged selection is kept, or, when the index is empty, the listed non-helper changes are staged and committed. Amend uses the same visible message and explicit confirmation. The Finish dialog's commit message (Commit to this branch and squash merge) and its pull request title and description are written in English by a model from the task's real changes, with the [short model texts](#short-model-texts) mechanism (`product.task` `draft_integration_text` with `method` `commit`, `squash` or `pr`, `targetBranch`, and for `commit` the pending `paths`). The machine reads the changed files with their added and deleted line counts (for `commit` the pending paths against `HEAD`, otherwise the checkout against its merge base with the target), new files by name only, and a diff excerpt of at most 12,000 bytes (2,000 per file, smallest edits first, at most 15 files); a file whose name looks private is listed by name and never read: `.env*`; SSH keys (`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`); `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`, `*.kdbx`; `.netrc`, `.npmrc`, `.pypirc`, `.htpasswd`; `*.tfvars`, `*.tfstate`; `kubeconfig*` and `.kube/config`; `credentials`, `credentials.json` and `service-account*`; and any name containing secret, credential, password or token. Unicode format characters (bidirectional controls, zero-width characters, the byte order mark and the like) are removed from every title, commit message and pull request text. The prompt also carries the task description and the result summary. While the text is being written the dialog keeps its own text and says so; a text the owner already edited is never replaced. Without a model text the machine returns a fallback built from the same changed files (for example "Update 3 files in src, docs" with the file list). Nothing is committed, merged or pushed until the owner confirms, and the commit itself never waits for a model. Automatic merge updates, conflict completion and revert commits keep their English templates, regardless of task language. Owner-written messages remain editable and are not translated. Revert requires an empty index before applying its inverse and making the English-message commit; a failure leaves Git’s visible pending work for manual recovery. Push accepts a configured remote name or the confirmed credential-redacted display URL and resolves it against current Git configuration before one non-forcing push. Unknown, stale or ambiguous URLs are refused; an unclear push result is never retried automatically. While a fetch, pull, push or commit of a project runs, another Git action on that project is refused at once with `git_in_progress` and a message naming the running action, instead of waiting; shorter Git actions are waited for. Pull refuses an absent tracking upstream with setup guidance. Fetch and Pull use Git's configured defaults/tracking directly, not the Push dialog's remote field. When a remote exists, Pull is disabled with a reason when no upstream exists or the last fetched state has no incoming commits; Fetch checks for newer remote state. Local-only repositories omit Fetch, Pull, Push, PR creation and push-status wording rather than showing dead network controls. Local commits, review, squash merge and confirmed closure still work.
 
 ## Integration and conflicts
 
@@ -1003,6 +1082,8 @@ Clean worktree removal uses Git without force and retains the branch. Dirty tree
 are never forcibly removed. After a confirmed squash, optional immediate cleanup removes only a clean, separate task worktree and retains its branch. Integration is recorded first; a failed cleanup is recorded as retained, not as a failed merge. Archive purge recognizes already removed worktrees. Removing a merged checkout can make its old verification evidence unavailable; the scheduler preserves Done and the recorded integration instead of reopening the task. Only explicit reopening changes that owner/integration state.
 
 Acceptance binds the runtime-evidence event version, not the execution display version: late transcript/progress writes cannot stale an unchanged result. New runtime evidence and changed source still invalidate old decisions. The UI uses current service review actions and source-drift warnings rather than inferring availability from check counts. An unsuccessful or unconfirmed Accept keeps its reason and Refresh result action beside the result after the transient toast closes. A paused queue identifies the blocking task and its review reason; review it, then use Continue queue.
+
+Automatic sprint acceptance is recorded by the sprint service's `auto_ready` action, not by an owner click. The action decides from the sprint's current run mode at the moment the acceptance would be written: it reads the run mode under the machine lock that a `product.sprint` `patch` of `runMode` also takes, in the same critical section that writes the acceptance. Switching a sprint to Manual stops automatic acceptance of every result not yet accepted, including one that finished while the sprint was Automatic; such a result keeps Accept as an owner action. Switching a sprint to Automatic settles its finished results that are still waiting, through the same validator. The background sprint pass runs when something can move the sprint on (an owner or loop change of a sprint or task record, a runtime task event while a sprint is in motion, start or activation, and a 30-second safety tick while one is), at most every two seconds per project, and offers `auto_ready` only for unaccepted finished members of sprints currently in Automatic, including in a paused queue; a Manual sprint costs that pass no task read, folder observation or window refresh. The action then requires a completed runtime execution whose runtime verification passed and that the owner has not resolved, zero open failed, not-run and unverified checks, no evidence warning, and the source version and digest a manual Accept would record, and it repeats the manual validator under the write transaction. A refusal from that validator (stale result, required checks or review, required acknowledgement, unavailable result) returns `accepted: false`, leaves the task unaccepted and leaves the queue to pause. No open check is acknowledged on the owner's behalf. The action never waits for the machine lock: while another operation holds it, the action returns `accepted: false` with `deferred: true`, the queue neither accepts nor pauses on that pass, and the next pass tries again. A refusal is not evaluated again on every pass: it is kept while the runtime evidence of the task (its revision, state, latest event and latest node), its saved record and the project folder's change signal are unchanged, for at most 30 seconds, and a run-mode change of any sprint of the project drops it. A folder without a usable change signal (no Git, no commit, a nested checkout, over 100,000 paths, or a file changed in the last two seconds) keeps the refusal only while the same inputs hold, for at most 10 seconds. A settle that cannot complete (an unreadable checkout, a Git timeout, a failed save) answers `accepted: false` with the failure and its reason instead of failing the pass, is kept for 10 seconds, and pauses only its own sprint's queue with a reason that names the task and says the result could not be accepted automatically; a paused queue shows that reason, and every other task and sprint keeps running. The kept refusal only skips a refusal; an acceptance always runs the full validator. Task completion does not read sprint state or take the machine lock, so a long operation holding that lock never delays or fails a completion. An automatic record has the manual shape plus `"automatic": true`; a manual record keeps its previous shape.
 
 Planning failures expose Retry planning and retain up to eight bounded non-content diagnostic entries per sprint: attempt, engine stage, stop reason, event/text counts, elapsed time, cancellation/deadline flags and exception class. They never retain prompts, owner answers, model output or raw error text. An old untraced stop remains unexplained; this trace is not proof that its cause was repaired.
 
@@ -1049,7 +1130,7 @@ A lost active session after service restart remains unknown, not silently resume
 Before synthesis, the runtime attempts each exact executable worker check reported
 as `not_run` or `unverified` once on that observed source revision. An existing matching final
 verification receipt avoids a duplicate run. Policy/paid-consent blockers remain
-blocked and explicitly not run, never converted to failures or automatically executed. Plan submission and verification repair first probe program availability in the real verification sandbox, using the same final launch path and check directory. A bare program name is looked up on the command search path that verifier and worker commands share: the project's `.venv/bin`, `venv/bin` and `node_modules/.bin`, then the service's inherited `PATH`, so a tool the owner installed through a version manager link (for example `/usr/local/bin/node` into `~/.nvm`) is found by the plan check exactly where workers run it. An unavailable probe environment does not establish that the check program is missing; an incomplete wrapper command is refused rather than declared available. Workers declare checks early with the same preflight; it proves availability only, not success. Missing tools require an isolated project-private installation or an executable alternative, without sudo or system changes. If neither is possible, the responsible worker asks the owner immediately through the existing question route. New unrunnable executable gap declarations are refused before publication. A nonzero test result is a failure, not a technical waiver.
+blocked and explicitly not run, never converted to failures or automatically executed. Plan submission and verification repair first probe program availability in the real verification sandbox, using the same final launch path and check directory. A bare program name is looked up on the command search path that verifier and worker commands share: the project's `.venv/bin`, `venv/bin` and `node_modules/.bin`, then the owner's [tool search path](maintenance-and-controls.md#tool-search-path) (the `PATH` read from the owner's login shell plus folders the owner added), so a tool the owner's terminal finds (for example `node` and `npm` from `~/.nvm`, or a `/usr/local/bin/node` link into it) is found by the plan check exactly where workers and the final verifier run it. Other search entries inside the project are never used. A changed tool search path applies from each task's next command or check, without a restart. An unavailable probe environment does not establish that the check program is missing; an incomplete wrapper command is refused rather than declared available. Workers declare checks early with the same preflight; it proves availability only, not success. Missing tools require an isolated project-private installation or an executable alternative, without sudo or system changes. If neither is possible, the responsible worker asks the owner immediately through the existing question route. New unrunnable executable gap declarations are refused before publication. A nonzero test result is a failure, not a technical waiver.
 
 Human-only judgements and legacy gap items without a recorded command appear separately as **Check manually**. They keep their original evidence and explanation but do not enter passed/failed counters, offer Rerun, or block owner Accept. Legacy items with a recorded command remain rerunnable; an actual missing-program exit is a visible failed run, not a fabricated pass.
 
@@ -1067,8 +1148,7 @@ cannot be waived by that acknowledgement.
 
 Maintenance checks eligible records roughly once per minute while the activated
 service child runs. Done records are eligible for archive after the machine's
-auto-archive interval (default seven days). Unmerged work asks the owner first;
-declining leaves it outside the Archive. Archive retention defaults to 30 days
+auto-archive interval (default seven days). A done record is archived without a question, with its work kept; a record saved with the retired archive-question fields loads as an ordinary Done or archived task and shows no question. Archive retention defaults to 30 days
 and is machine-configurable. Purge requires archived state and checks live or
 unknown execution protection. Runtime deletion reuses the existing exclusive-lock,
 journaled retention cleanup and reports SQLite checkpoint/VACUUM outcomes. Storage shows a persistent count of purged records with failed space reclamation, including explicit purges, and a per-maintenance-run count.
@@ -1136,34 +1216,162 @@ whether the bytes landed, nothing is resent on its own, and Save asks again.
 Unsaved text is held in memory, so a crash of the window loses it. Create,
 rename, Save as, Compare and language servers are not built.
 
+### The file tree
+
+Code's tree shows every file and folder in the checkout's folder: what Git
+tracks and the untracked files it reports, at once from the repository
+snapshot, and everything else (dot-files, `.env`, build output and other files
+Git ignores) from on-demand folder reads (`repo.list`). Ignored entries are
+dimmed and named "ignored" to assistive technology. When Code opens, one read
+names what the snapshot leaves out without walking into it: every ignored file,
+the top-most ignored folders and the untracked folders, empty ones included. A
+folder Git ignores (or, in a folder without Git, `node_modules`, `.venv` and
+`__pycache__`) starts closed; opening it reads that one folder, one level, by
+descriptor and without following links, and shows at most 500 entries with a
+"N more not shown" row for the rest. Its subfolders are read when they are
+opened. Opening Code or another checkout, coming back to it, Refresh files and
+the owner's save there read again: the overview and every open folder, in one
+call. Nothing reads on a timer. A folder inside a submodule lists its entries
+without ignored marks, because Git cannot judge them. `.git`, `.cortex`,
+`.cortex-dev` and the other Cortex private names are never listed, a link is
+listed but not followed, and names that are not UTF-8 are counted, not shown.
+Ignored files open, view and save exactly like any other file. Go to file finds
+every file the tree has shown, listed ones included; Search in files searches the
+Git files as before; the Git page and Changes
+keep to what Git reports.
+
+### Viewing files
+
+Code shows a file by its name. Markdown, CSV, TSV and SVG open formatted, and
+HTML and JSON open as source; a Preview and Source switch in the file bar moves
+between the two in one click, each file keeping the last choice, and a jump to a
+line shows the source. The preview shows the editor's text, unsaved text
+included. Markdown uses the conversation's renderer, which never interprets
+embedded HTML. CSV and TSV show a table of at most 1,000 rows; JSON is shown
+indented, or says that it does not parse. SVG is shown only as an image, so its
+scripts and external references never run or load. HTML is rebuilt from its
+structural tags only: scripts, styles, forms, frames, links, event and style
+attributes and remote images are dropped, and links are not followed.
+
+PNG, JPEG, GIF, WebP, BMP, ICO and AVIF pictures are shown inline; MP4, M4V,
+WebM, OGV and MOV video and MP3, WAV, Ogg, Opus, FLAC, M4A and AAC sound play
+inline with their own controls. Their bytes come from the same guarded read as
+text (`repo.file` with `media: true`): only these names are sent, as base64 of at
+most 4 MiB, from inside the checkout, never through a link, and never for
+saving. Whether a video or sound format plays depends on the media codecs
+installed with the system webview; one that cannot be decoded says so. PDF files,
+larger media and other binary files show a placeholder that names the reason and
+offers Show as text, which opens the file read-only with its reason when it has
+no text.
+
 ## Automatic task titles
 
-New task requires a description, not a title. After saving, the activated service
-requests a short title from that task's selected model route (or the controller's
-configured route). Saving does not wait for naming and does not start execution.
-The title prompt asks for the description's language, independently of message
-language settings. Until a valid title arrives, the description's first line stays
-visible. No engine, missing login, invalid output or any other naming failure
-silently retains that fallback.
+New task requires a description, not a title. After the task is saved, the app
+asks the machine to name it (`product.task` `generate_title`). The machine starts
+a background job and answers at once with its id; saving and starting never wait
+for naming. Until a title is saved, the description's first sentence (at most 60
+characters) is shown. The title is written by the cheapest model of the
+connection whose plan limit is the least used, as described in
+[short model texts](#short-model-texts). The prompt asks for at most eight words in
+the language of the task text; the stored title is one line of at most 80
+characters.
 
-Two auxiliary sessions at most run concurrently per activated project; pending
-descriptions are picked up by the service loop. Each attempt has a 30-second
-deadline, 12,000-character description input limit, 1,024-character streamed-output
-limit and 200-character single-line stored-title limit (the prompt asks for 80).
-A durable attempt marker prevents retries after replay or service restart. An
-interrupted attempt keeps its fallback rather than repeating a potentially billed
-call. These sessions have no task channel, external MCP or filesystem/terminal
-bridge, run from an empty temporary directory, and require read-only/plan mode.
-They do not change owner settings.
+When no route, hardened engine session or usable answer is available within the 25-second budget,
+the job saves the description label with `titleState: "failed"`, and the task
+shows "Title not generated" with Retry. Retry starts one new job. A job is never
+repeated by itself, so a restart or a lost reply never repeats a possibly billed
+call. The title is saved only under a free `machine.lock`: the job tries again
+for up to 20 seconds in the background and then drops its title instead of
+waiting or reporting busy. It never replaces a title the owner wrote (a rename
+or a draft title, `titleState: "user"`) and never writes over a purged task.
 
-Generated titles use the existing product overlay and polling path. A
-materialized sprint task is named by its plan item's own title: joining the
+A materialized sprint task is named by its plan item's own title: joining the
 sprint (`product.task` `sprint` with `title`) records it as the task's title with
 titleState=generated, not as an owner rename, and never over an owner's title. An
 item without a title of its own keeps the description label. A user rename always records titleState=user, even for identical text.
-Generation and rename serialize through the same file lock and atomic write;
-a late result cannot overwrite an owner rename or resurrect a purged task.
 No storage migration or wire-version change is required.
+
+## Short model texts
+
+Task titles, commit messages and pull request texts use one mechanism
+(`crates/workspace-service/src/machine/short_text.rs`, route choice in
+`crates/workspace-service/src/native_routes/short_text.rs`).
+
+- Route: among the routes the owner allows for automatic choice (enabled, not
+  denied, listed in `auto`, placed in a tier) on Claude or Codex native
+  connections, each connection offers its cheapest model by tier placement
+  (`light`, then `standard`, `deep`, `flagship`; equal tiers by model id). The
+  connection is the one whose plan limit is least used, read the same way route
+  ranking reads it: the highest used percentage of its live windows. Connections
+  with a reading below 95 % come first, lowest first; then connections without a
+  reading (unknown, never zero); then those at or above 95 %. Equal keys keep the
+  fixed order Claude, then Codex, then connection id. With the shipped tiers the
+  Claude choice is `haiku` and the Codex choice is the `light` Codex model.
+- Execution: one minimal ACP engine session on that route
+  (`crates/workspace-service/src/short_text_engine.rs`). It is launched with the
+  route's ordinary engine-session launch, so it carries the same hardening as
+  every engine session: a cleared environment with the real `HOME` and the
+  connection's own native directory, and for Codex Cortex's native launcher,
+  which turns every MCP server configured in the owner's Codex account off,
+  confirms that with `codex mcp list` and the disabled features (no shell tool,
+  plugins, hooks, apps or subagents) with `codex features list` before App
+  Server starts, and trusts only the session's own folder, without writing the
+  owner's `config.toml`. A Codex connection without that launcher is not used
+  for short texts. The session runs in an empty private scratch directory that is removed
+  afterwards, is given no ACP MCP servers, and is set to the chosen model, `low`
+  effort when the catalogue offers it, and the engine's read-only mode
+  (`read-only` for Codex, `plan` for Claude; an engine offering neither is not
+  used). It receives one text prompt. Every permission request is answered with
+  the reject option (or cancelled when none is offered), and a permission
+  request or any tool call makes the answer unusable. Only the agent's message
+  text is kept. The whole run, engine start included, has a 25-second budget;
+  the engine is then shut down and its process group reaped. The session has
+  no runtime task or channel, writes nothing to a project store, takes no
+  `machine.lock` and never appears in a task's history. At most two runs go at
+  once; a job over that uses its fallback text.
+- Jobs: `generate_title` and `draft_integration_text` return `{"jobId"}` at once;
+  `short_text_poll` with `taskId` and `jobId` returns `{"state":"running"}` or the
+  finished job with `source` (`model` or `fallback`), `reason` and `route`
+  (engine, model, connection id, tier, plan reading and choice reason). None of
+  them takes `machine.lock` or waits for a model. Jobs live in the service's
+  memory for ten minutes; after a restart a poll is refused as `unknown_job`.
+- Diagnostics: `short-text.log` in the service log folder records
+  `short_text_selected`, `short_text_generated` and `short_text_fallback` with
+  purpose, engine, model, connection id, tier, plan reading, choice reason,
+  outcome code and duration. It never records a prompt, a description, a diff
+  or an answer.
+
+## File mentions, commands and skills in a message
+
+The message fields offer inline suggestions. What the engine receives is the
+owner's text exactly as it stands in the field when it is sent; no suggestion
+adds a hidden content block, flag or instruction.
+
+- `@` names a project file. The list filters the file names of the project's
+  repository snapshot (tracked and untracked, not ignored, the names Go to file
+  uses), plus the task's own changed files, in the window. Picking one writes
+  `@<project-relative path>` (quoted, `@"a b.md"`, when the path holds a space).
+  The engine receives that text inside the message and reads the file itself
+  through its project tools, since it works in the project folder. Mentions are
+  not sent as ACP `resource_link` or embedded resource blocks: the native prompt
+  carries the owner's text inside Cortex's own instructions and recovery capsule
+  as one text block, and only stored attachments become further blocks.
+- `/` at the start of a line in the task's message field lists that screen's
+  own controls: `/stop` (the title band's Stop or End run, while running),
+  `/resume` (Resume, while paused), `/queue` and `/now` (the delivery choice),
+  `/details`, `/changes` and `/code` (the task's areas, where they are offered)
+  and `/new` (New task in this project). Picking one runs that control and sends
+  nothing.
+- The same `/` list names the project's own skills, read with `repo.skills` from
+  the index `read_skill` uses. Picking one writes the sentence
+  `Use the project skill <name> (<path>).` (or `Use the project skill at <path>.`
+  when a Cortex skill has the same name). The coordinator receives that sentence
+  as part of the message; its instructions already list the project skills and
+  it reads one with `read_skill`. Nothing activates a skill on its own.
+- Engine slash commands (`available_commands_update`) are not offered. The
+  runtime does not keep them, and a message reaches the engine inside Cortex's
+  prompt, not at its start, so an engine would not run `/name` typed there as a
+  command.
 
 ## Attachments
 
@@ -1183,25 +1391,39 @@ no part of that selection is silently sent.
 
 Saved files stay available where they were sent. A task page reads its creation
 files on demand, sprint descriptions and planning conversations show theirs, and a
-sent conversation message keeps its files in the service's private product state as
-a recorded copy. A chip with its contents opens a preview of an image or, for any
+sent conversation message keeps a reference to its files in the service's private
+product state. A chip is drawn from the reference alone (name, type, size); its bytes
+are read when the owner opens it. A chip that can be opened opens a preview of an image or, for any
 file, offers **Save a copy** through the system's save dialog; the owner picks the
 destination. A chip with only a name cannot be opened: worker-guidance records carry
-names, and a recorded copy drops its bytes, oldest first, when a newer queued
-message or sprint needs the bounded space. Answers to questions keep their files
+names, and an older recorded copy may have kept only the name. A file whose saved
+body is gone says so when opened. Answers to questions keep their files
 with the delivered answer, without a chip on the answered card. Each submission permits up to eight
 files and 4 MiB of combined decoded bytes. A question batch shares that bound.
 Text is required alongside attachments.
 
-Queue saves both text and bytes in the service's private product state. It
-survives window closure; **Edit** removes the queued item only after acknowledgement
+Queue saves the text and its file references in the service's private product
+state. It survives window closure; **Edit** removes the queued item only after acknowledgement
 and restores text and attachments to the composer. Existing composer text is
 preserved before the restored text. A failed send retains the draft and files;
 an ambiguous response is not automatically retried.
 
-The local wire uses `Attachment {name, mimeType, data}` with standard base64
-content. The service rejects path-like names, malformed encoding and excessive
-input. Accepted resources are snapshotted in private `.cortex` source-block
+A file crosses the local wire as bytes once: when the owner attaches it (picker,
+drop or paste), the form uploads it with `machine.call` `product.attachment`
+`{action: "upload", files: [{name, mimeType, data}]}` (standard base64, at most
+eight files and 4 MiB together), and the service answers one reference per file,
+`{name, mimeType, size, sha256}`. Every later command and record carries only that
+reference: `tasks.create`, `decisions.answer` (single and batch), `executions.prompt`,
+the saved-task edit, `product.message` add/edit (queue), `product.comment` add/edit,
+`product.sprint` create/note, and the window's pending and failed sends. Each of them
+refuses inline `data` with `inline_attachment_refused`, and a reference whose body is
+not saved with `attachment_unavailable`. The service reads each body when it hands
+the files to Core (draft options at create, source blocks at Start, a message or an
+answer) or builds a planning prompt, and nowhere else. Replies (`product.read`,
+`product.facts`, `product.board`, a task's files) carry references only; one body is
+read back by `product.attachment` `{action: "read", sha256}` (at most 4 MiB, by
+digest only, checked against it). The service rejects path-like names, malformed
+encoding and excessive input. Accepted resources are snapshotted in private `.cortex` source-block
 storage and exposed through runtime prompt-resource references/`read_source`;
 images use ACP image content, other files embedded resources. Answer text remains
 unchanged; its identified answer, resources and wake-up references commit in the
@@ -1222,7 +1444,7 @@ Native delivery: the draft's files are decoded and checked once more inside the 
 not filesystem paths, are delivered. Neither saving a draft nor attaching a file
 starts a model call.
 
-The data contract also accepts optional attachments for sprint creation, planning answers/messages, review comments and conflict-resolution guidance. Sprint descriptions and conversation entries expose their saved bytes for listing/opening. Planning uses the same ACP image/resource representation as task inputs, through the existing auxiliary planner (no project tools), and never places base64 in prompt text or diagnostics. A sprint's initial files and all planning follow-ups share eight files/4 MiB in total because a retry resends that input; excess is refused before saving. Omitted attachment fields on older records remain valid. The private product-state response has a bounded aggregate size below the 8-MiB local frame cap; a full state refuses new content rather than saving an unreadable record. Task creation bytes are readable on demand through `readTaskAttachments` on the real port, backed by the owner-only targeted `product.read` selector, rather than copied into every board snapshot.
+The data contract also accepts optional attachments for sprint creation, planning answers/messages, review comments and conflict-resolution guidance. Sprint descriptions and conversation entries list their saved files by reference; a file's bytes are read when it is opened. Planning uses the same ACP image/resource representation as task inputs, through the existing auxiliary planner (no project tools), and never places base64 in prompt text or diagnostics. A sprint's initial files and all planning follow-ups share eight files/4 MiB in total because a retry resends that input; excess is refused before saving. Omitted attachment fields on older records remain valid. The private product-state response has a bounded aggregate size below the 8-MiB local frame cap; a full state refuses new content rather than saving an unreadable record. A task's creation files are listed on demand through `readTaskAttachments` on the real port, backed by the owner-only targeted `product.read` selector, as references (their bodies are saved privately on that read), rather than copied into every board snapshot.
 
 ## Task Stop and Resume
 
@@ -1238,6 +1460,17 @@ an explicit owner Resume reconstructs the exact recorded session metadata. Resum
 refuses a stale display version or changed owner. Stop is urgent intent for the
 exact execution and does not require the background progress version to remain
 unchanged. Close as is and Cancel task are separate confirmed terminal controls.
+
+In Workspace the task composer is the one place that controls the run, as in other chat
+clients: with an empty field its action button is Start on a draft, Stop while the task
+runs and Resume while it is paused; as soon as the field holds text or files it is the
+paper plane (Send now or Queue, or Send and resume), and clearing the field brings Stop
+or Resume back. Enter never presses Start, Stop or Resume. The title band shows no state
+chip and no Start, Stop or Resume; the task's "…" menu keeps Start, Stop, Resume and
+Continue. A task waiting for the owner's answer, a held task and a result in review have
+no Stop in the composer. Where a machine offers no message composer, Start, Stop and
+Resume stay in the title band. A sprint's planning composer works the same way: Stop
+cancels planning and Resume continues it.
 
 A started task whose runtime row does not exist yet (its coordinator's engine is
 still opening) projects as `starting`, not unknown, as long as its start, session

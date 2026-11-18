@@ -308,7 +308,7 @@ fn native_task_projection_matches_frozen_oracle_for_interrupted_state() {
     let (p, s) = setup();
     s.write(|db|{db.execute("UPDATE runtime_tasks SET state='RECOVERING'",[])?;db.execute("INSERT INTO task_orchestration(task_id,state,updated_at,wait_reason) VALUES ('runtime','RECOVERING','now','turn_interrupted')",[])?;Ok(())}).unwrap();
     let r = reader(&p);
-    let mut expected: Value =
+    let expected: Value =
         serde_json::from_str(include_str!("fixtures/task-projection-interrupted.json")).unwrap();
     let mut actual = serde_json::to_value(get(&r)).unwrap();
     // The confirmation time is the store's wall clock; everything else is frozen.
@@ -330,14 +330,21 @@ fn a_task_the_owner_closed_reads_as_resolved_even_without_its_finish_receipt() {
     .unwrap();
     let t = get(&r);
     assert_eq!(t.phase, "stopped");
-    assert!(t.warnings.contains(&"owner_resolved_without_certification".into()));
+    assert!(t
+        .warnings
+        .contains(&"owner_resolved_without_certification".into()));
     // A run the runtime cancelled for another reason is not an owner resolution.
     s.write(|db| {
-        db.execute("UPDATE runtime_tasks SET blocker='task_stopped' WHERE task_id='runtime'", [])?;
+        db.execute(
+            "UPDATE runtime_tasks SET blocker='task_stopped' WHERE task_id='runtime'",
+            [],
+        )?;
         Ok(())
     })
     .unwrap();
-    assert!(!get(&r).warnings.contains(&"owner_resolved_without_certification".into()));
+    assert!(!get(&r)
+        .warnings
+        .contains(&"owner_resolved_without_certification".into()));
 }
 /// Live run 2026-11-17: Finish chosen on the runtime's stop question cancelled the task
 /// (`user_force_finished`), but the lists kept it in Needs you as a cancelled run. It is
@@ -353,12 +360,16 @@ fn finish_chosen_on_the_stop_question_reads_as_the_owner_closing_the_task() {
     .unwrap();
     let t = get(&r);
     assert_eq!(t.phase, "stopped");
-    assert!(t.warnings.contains(&"owner_resolved_without_certification".into()));
+    assert!(t
+        .warnings
+        .contains(&"owner_resolved_without_certification".into()));
     s.write(|db| {
         db.execute("UPDATE runtime_tasks SET blocker='task_stopped' WHERE task_id='runtime'", [])?;
         db.execute("INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES ('runtime','USER_FORCE_FINISHED','runtime','{}','now')", [])?;
         Ok(())
     })
     .unwrap();
-    assert!(get(&r).warnings.contains(&"owner_resolved_without_certification".into()));
+    assert!(get(&r)
+        .warnings
+        .contains(&"owner_resolved_without_certification".into()));
 }

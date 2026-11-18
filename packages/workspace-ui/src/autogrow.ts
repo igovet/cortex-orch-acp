@@ -1,4 +1,4 @@
-import { createEffect, onCleanup, onMount } from "solid-js";
+import { createEffect, onCleanup } from "solid-js";
 
 /** Keeps a textarea as tall as its text, from the height its stylesheet gives it up to the `textarea[data-grow]` max-height, and scrolling only past that. Measured, because WebKitGTK has no `field-sizing: content`. */
 export function autoGrow(el: HTMLTextAreaElement, value: () => string) {
@@ -31,14 +31,4 @@ export function autoGrow(el: HTMLTextAreaElement, value: () => string) {
   });
   box.observe(el);
   onCleanup(() => { box.disconnect(); cancelAnimationFrame(pending); });
-}
-
-/** Reports a floating dock's height, so the feed under it can leave that much room at its end. */
-export function reportHeight(el: () => HTMLElement, report: (px: number) => void) {
-  onMount(() => {
-    report(el().offsetHeight);
-    if (typeof ResizeObserver === "undefined") return;
-    const box = new ResizeObserver(() => report(el().offsetHeight));
-    box.observe(el()); onCleanup(() => box.disconnect());
-  });
 }

@@ -1341,7 +1341,9 @@ fn publish(env: &RouteEnvironment, id: &str, snapshot: &Value) -> Result<()> {
 /// bound (readers refuse beyond 4096 entries). Best-effort: a failed removal is harmless.
 const KEPT_SNAPSHOTS: usize = 16;
 fn prune(directory: &Path) {
-    let Ok(entries) = fs::read_dir(directory) else { return };
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
     let mut dated: Vec<_> = entries
         .filter_map(|e| e.ok())
         .filter(|e| {

@@ -178,7 +178,8 @@ pub(super) fn execute(store: &Store, i: &Identity, name: &str, args: &Value) -> 
                 )
                 .optional()?)
         })?;
-        let (kind, payload, created, origin) = row.ok_or(CoreError::Refused("unknown_source_ref"))?;
+        let (kind, payload, created, origin) =
+            row.ok_or(CoreError::Refused("unknown_source_ref"))?;
         let payload: Value = serde_json::from_str(&payload)?;
         let bytes = match payload["text"].as_str() {
             Some(text) => text.as_bytes().to_vec(),

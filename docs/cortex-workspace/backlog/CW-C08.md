@@ -1,6 +1,6 @@
 # CW-C08: Structured steer/stop/recheck; no Paseo-only control dependency
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: Stop, Continue, Close, steer and recheck are structured runtime controls ([protocol](../protocol.md)); no-paid checks only; paid live runs not performed · **Phase:** 3+ · **Size:** L
 
 ## Goal
 

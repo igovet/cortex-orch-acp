@@ -67,6 +67,9 @@ async fn run() -> std::io::Result<()> {
         return Err(std::io::Error::other("channel_runtime_required"));
     }
     let config = Config::for_user(PathBuf::from(&args[0]), LaunchSpec::native(checkout)?)?;
+    // The owner's tool search path: read from their shell in the background, never
+    // blocking or failing start.
+    workspace_service::tool_path::start(&config.state_dir);
     let service = {
         let mut environment = workspace_service::native_routes::RouteEnvironment::for_user()
             .map_err(|e| std::io::Error::other(e.code()))?;
@@ -83,6 +86,12 @@ async fn run() -> std::io::Result<()> {
         )
         .await?
     };
+    // Remote access never keeps the service from running: a host that cannot start is
+    // reported by `remote.status`.
+    service.start_remote().await;
+    // Desktop notifications come from the service, so they arrive while no window is open. A
+    // machine without a session bus stays silent and `service.status` says so.
+    service.start_notifications().await;
     let server = tokio::spawn(service.clone().serve());
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {

@@ -3,7 +3,7 @@ import { LIMITS, validate } from "@cortex/workspace-contract";
 import { emptyWorkspace } from "@cortex/workspace-domain";
 import type { CommandEnvelope, MachineFacts, PortUpdate, ProjectionUpdate, WorkspaceCommand } from "@cortex/workspace-domain";
 import { createRealPort, MACHINE_POLL_MS, machineReadDelay, planFrom, unavailableTransport, usageObserved, USAGE_GRACE_MS, USAGE_LATE_MS, USAGE_REFRESH_MS, USAGE_RETRY_MS, type ProjectLocator } from "../src/port/real";
-import { capabilitiesWire, flush, scriptedTransport, snapshot, wireDecision, wireTask } from "./support";
+import { capabilitiesWire, flush, refOf, scriptedTransport, snapshot, wireDecision, wireTask } from "./support";
 import { REPO_RETRY_MS } from "../src/port/real";
 
 const projects: ProjectLocator[] = [{ projectId: "p", name: "Project", repository: "/p", openBranch: "main", defaultBranch: "main" }];
@@ -121,7 +121,9 @@ describe("real port", () => {
     const s = service(), p = await loaded(s);
     const attachments = [{name:"note.txt",mimeType:"text/plain",data:btoa("fixture")}];
     await p.command(envelope({type:"create_task",projectId:"p",description:"Task with file",checkout:{kind:"main"},attachments}));
-    expect(s.calls.find(c => c.operation === "tasks.create")!.message).toMatchObject({payload:{attachments}});
+    // The bytes go once, to the upload; the command names the saved file.
+    expect(s.calls.find(c => c.operation === "tasks.create")!.message).toMatchObject({payload:{attachments:attachments.map(refOf)}});
+    expect(JSON.stringify(s.calls.find(c => c.operation === "tasks.create")!.message)).not.toContain(attachments[0].data);
   });
 
   it("carries the task route and checkout choice in a valid create command", async () => {
@@ -241,6 +243,25 @@ describe("real port", () => {
     }
   });
 
+  it("sends every answer of a batch from one command, and refuses a batch that is not exactly the one asked", async () => {
+    const members = [
+      wireDecision({decisionId:"d1",questionId:"q1",batchId:"batch",options:[{optionId:"o1",label:"North"}]}),
+      wireDecision({decisionId:"d2",questionId:"q2",batchId:"batch",options:[]}),
+    ];
+    const s = service([wireTask({executionId:"e"})], members), p = await loaded(s);
+    const one = {decisionId:"d1",answer:"North",optionId:"o1"}, two = {decisionId:"d2",answer:"Two\nlines",optionId:null};
+    // A question missing from the batch, or one answered twice, sends nothing.
+    for (const answers of [[one], [one, one]]) expect((await p.command(envelope({type:"answer_decision",taskId:"task-1",decisionId:"d1",answer:"North",optionId:"o1",answers}))).ok).toBe(false);
+    expect(s.calls.filter(c => c.operation === "decisions.answer")).toEqual([]);
+    const result = await p.command(envelope({type:"answer_decision",taskId:"task-1",decisionId:"d1",answer:"North",optionId:"o1",answers:[two, one]}, "whole-batch"));
+    expect(result.ok).toBe(true);
+    const sent = s.calls.filter(c => c.operation === "decisions.answer");
+    expect(sent).toHaveLength(1);
+    expect(sent[0].message).toMatchObject({target:"batch",payload:{batchId:"batch",answers:[
+      {decisionId:"d1",questionId:"q1",optionId:"o1",text:"North"},{decisionId:"d2",questionId:"q2",optionId:null,text:"Two\nlines"},
+    ]}});
+  });
+
   it("passes connection changes through", () => {
     const s = service();
     const p = port(s);
@@ -294,6 +315,40 @@ describe("real port", () => {
       expect(ops).not.toContain("workers");
     });
 
+    it("names a task and drafts integration text through background jobs without waiting for a model", async () => {
+      vi.useFakeTimers();
+      try {
+        const {s,p,ready} = helper();
+        await ready();
+        const updates: PortUpdate[] = [];
+        const stop = p.subscribe(u => updates.push(u));
+        let titlePolls = 0;
+        const answer = s.answers["machine.call"]!;
+        s.answers["machine.call"] = message => {
+          const call = message as {op:string; params?: Record<string, unknown>};
+          const action = call.op === "product.task" ? call.params?.action : undefined;
+          if (action === "generate_title") return {ok:true,result:{jobId:"st_1"}};
+          if (action === "draft_integration_text") return {ok:true,result:{jobId:"st_2"}};
+          if (action === "short_text_poll" && call.params?.jobId === "st_1") return {ok:true,result:++titlePolls < 2 ? {state:"running"} : {state:"done",source:"model",route:{model:"haiku"}}};
+          if (action === "short_text_poll") return {ok:true,result:{state:"done",source:"model",text:{message:"Retry uploads\n\nThree attempts."},route:{model:"haiku"}}};
+          return answer(message);
+        };
+        // The command returns at once; the refresh follows when the job is written.
+        expect((await p.command(envelope({type:"generate_title",taskId:"task-1"}))).ok).toBe(true);
+        expect(updates.some(u => u.kind === "refresh")).toBe(false);
+        await vi.advanceTimersByTimeAsync(3000);
+        expect(titlePolls).toBe(2);
+        expect(updates.some(u => u.kind === "refresh")).toBe(true);
+        const text = p.draftIntegrationText!({taskId:"task-1",method:"squash",targetBranch:"main"});
+        await vi.advanceTimersByTimeAsync(1500);
+        expect(await text).toEqual({source:"model",message:"Retry uploads\n\nThree attempts.",title:undefined,body:undefined,model:"haiku"});
+        // A machine that cannot start a job gives no text, never an error.
+        s.answers["machine.call"] = message => (message as {op:string}).op === "product.task" ? {ok:false,code:"unsupported_action",message:"no"} : answer(message);
+        expect(await p.draftIntegrationText!({taskId:"task-1",method:"pr",targetBranch:"main"})).toBeNull();
+        stop();
+      } finally { vi.useRealTimers(); }
+    });
+
     it("keeps cached Git facts after an action and publishes the fresh snapshot later", async () => {
       vi.useFakeTimers();
       let stop = () => {};
@@ -334,6 +389,8 @@ describe("real port", () => {
         };
         const updates: PortUpdate[] = [];
         stop = p.subscribe(update => updates.push(update));
+        // The project's Git page is on view: only then is a failed repository read retried on its own.
+        p.interest!("p", "git");
         await ready();
         const [failed] = await p.query("project.facts", {});
         expect(failed.repo).toBeNull();
@@ -367,6 +424,7 @@ describe("real port", () => {
           return { ok: false, code: "machine_tool_failed", message: "Filesystem operation failed." };
         };
         stop = p.subscribe(() => {});
+        p.interest!("p", "git");
         await ready();
         const [failed] = await p.query("project.facts", {});
         // A generic failure keeps the generic guidance rather than echoing an internal message.
@@ -477,7 +535,7 @@ describe("real port", () => {
       expect(asked.filter(a => a.op === "config.read")).toHaveLength(configReads);
     });
 
-    it("keeps an overview a screen asked for current on the machine poll, and never reads it before", async () => {
+    it("keeps an overview current on the machine poll only while a screen shows it, and never reads it before", async () => {
       vi.useFakeTimers();
       let stop = () => {};
       try {
@@ -490,10 +548,19 @@ describe("real port", () => {
         expect(machines.length).toBeGreaterThan(0);
         expect(machines.every(m => !("name" in m.patch))).toBe(true);
         await p.query("machine.overview", {});
+        // Read once, with no screen left showing it: the poll does not read it again.
+        asked.length = 0;
+        await vi.advanceTimersByTimeAsync(2 * MACHINE_POLL_MS);
+        expect(asked.map(a => a.op)).not.toContain("overview");
+        const release = p.watchOverview!();
         asked.length = 0; machines.length = 0;
         await vi.advanceTimersByTimeAsync(2 * MACHINE_POLL_MS);
         expect(asked.filter(a => a.op === "overview").length).toBeGreaterThan(0);
         expect(machines.find(m => "retentionDays" in m.patch)?.patch).toMatchObject({ retentionDays: 9, name: "Desk" });
+        release();
+        asked.length = 0;
+        await vi.advanceTimersByTimeAsync(2 * MACHINE_POLL_MS);
+        expect(asked.map(a => a.op)).not.toContain("overview");
       } finally { stop(); vi.useRealTimers(); }
     });
 
@@ -625,20 +692,22 @@ describe("real port", () => {
 
     it("carries actual bytes for prompt, queue and queued delivery", async () => {
       const attachments = [{name:"notes.txt",mimeType:"text/plain",data:btoa("fixture")}];
-      const message = {id:"q1",taskId:"task-1",workerId:null,text:"Queued",mode:"queue",delivery:"queued",at:1,deliveredAt:null,failure:null,attachments};
+      const refs = attachments.map(refOf);
+      const message = {id:"q1",taskId:"task-1",workerId:null,text:"Queued",mode:"queue",delivery:"queued",at:1,deliveredAt:null,failure:null,attachments:refs};
       const {s,p,asked,ready} = helper({messages:[message]});
       await ready();
       expect(await p.command(envelope({type:"send_message",taskId:"task-1",text:"Now",mode:"send_now",attachments}))).toMatchObject({ok:true});
-      expect(s.calls.find(c => c.operation === "executions.prompt")!.message).toMatchObject({text:"Now",attachments});
+      expect(s.calls.find(c => c.operation === "executions.prompt")!.message).toMatchObject({text:"Now",attachments:refs});
       expect(await p.command(envelope({type:"send_message",taskId:"task-1",text:"Later",mode:"queue",attachments},"queue-new"))).toMatchObject({ok:true});
-      expect(asked.find(c => c.op === "product.message" && c.params?.action === "add")?.params).toMatchObject({message:{attachments}});
+      expect(asked.find(c => c.op === "product.message" && c.params?.action === "add")?.params).toMatchObject({message:{attachments:refs}});
       expect(await p.command(envelope({type:"send_queued",messageId:"q1"},"queue-send"))).toMatchObject({ok:true});
-      expect(s.calls.filter(c => c.operation === "executions.prompt").at(-1)!.message).toMatchObject({text:"Queued",requestId:"q1",attachments});
+      expect(s.calls.filter(c => c.operation === "executions.prompt").at(-1)!.message).toMatchObject({text:"Queued",requestId:"q1",attachments:refs});
     });
 
     it("carries sprint creation and every planner note as bytes, including legacy planning prompts", async () => {
       const attachments = [{name:"screen.png",mimeType:"image/png",data:btoa("screenshot")}];
-      const sprint = {id:"sp",projectId:"p",planning:"question",conversation:[],attachments};
+      const refs = attachments.map(refOf);
+      const sprint = {id:"sp",projectId:"p",planning:"question",conversation:[],attachments:refs};
       const {s,p,asked,ready} = helper({sprints:[sprint]});
       await ready();
       const original = s.answers["machine.call"]!;
@@ -657,22 +726,23 @@ describe("real port", () => {
         return original(message);
       };
       expect(await p.command(envelope({type:"create_sprint",projectId:"p",description:"Plan",attachments,runMode:"manual",checkout:{kind:"worktree"},settings:{model:"model",effort:"",mode:"guarded",language:"en"}}))).toMatchObject({ok:true,entityId:"sp"});
-      expect(asked.find(c => c.op === "product.sprint" && c.params?.action === "create")?.params).toMatchObject({attachments,checkout:{kind:"worktree"}});
+      expect(asked.find(c => c.op === "product.sprint" && c.params?.action === "create")?.params).toMatchObject({attachments:refs,checkout:{kind:"worktree"}});
       for (const payload of [{type:"plan_message",sprintId:"sp",text:"Look",attachments},{type:"answer_planning",sprintId:"sp",answer:"Use it",attachments}] as WorkspaceCommand[]) {
         expect(await p.command(envelope(payload))).toMatchObject({ok:true});
       }
-      expect(asked.filter(c => c.op === "product.sprint" && c.params?.action === "note").every(c => c.params?.attachments === attachments || JSON.stringify(c.params?.attachments) === JSON.stringify(attachments))).toBe(true);
+      expect(asked.filter(c => c.op === "product.sprint" && c.params?.action === "note").every(c => JSON.stringify(c.params?.attachments) === JSON.stringify(refs))).toBe(true);
       (sprint as typeof sprint & {planningTaskId?:string}).planningTaskId = "task-1";
       expect(await p.command(envelope({type:"plan_message",sprintId:"sp",text:"Legacy",attachments}))).toMatchObject({ok:true});
-      expect(s.calls.filter(c => c.operation === "executions.prompt").at(-1)?.message).toMatchObject({text:"Legacy",attachments});
+      expect(s.calls.filter(c => c.operation === "executions.prompt").at(-1)?.message).toMatchObject({text:"Legacy",attachments:refs});
       const [facts] = await p.query("project.facts", {});
-      expect(facts.sprints[0].attachments).toEqual(attachments);
+      expect(facts.sprints[0].attachments).toEqual(refs);
     });
 
     it("carries review comments, edits, queue edits and resolution guidance without losing bytes", async () => {
       const attachments = [{name:"screen.png",mimeType:"image/png",data:btoa("fixture")}];
-      const comment = {id:"c",path:"a.txt",line:1,text:"Fix",sent:false,attachments};
-      const message = {id:"q",taskId:"task-1",workerId:null,text:"Queued",mode:"queue",delivery:"queued",at:1,deliveredAt:null,failure:null,attachments};
+      const refs = attachments.map(refOf);
+      const comment = {id:"c",path:"a.txt",line:1,text:"Fix",sent:false,attachments:refs};
+      const message = {id:"q",taskId:"task-1",workerId:null,text:"Queued",mode:"queue",delivery:"queued",at:1,deliveredAt:null,failure:null,attachments:refs};
       const {s,p,asked,ready} = helper({comments:{"task-1":[comment]},messages:[message]});
       await ready();
       for (const payload of [
@@ -682,10 +752,10 @@ describe("real port", () => {
         {type:"send_comments",taskId:"task-1"},
         {type:"resolve_with_cortex",taskId:"task-1",guidance:"Keep this",attachments},
       ] as WorkspaceCommand[]) expect(await p.command(envelope(payload))).toMatchObject({ok:true});
-      expect(asked.find(c => c.op === "product.comment" && c.params?.action === "add")?.params).toMatchObject({comment:{attachments}});
-      expect(asked.find(c => c.op === "product.comment" && c.params?.action === "edit")?.params).toMatchObject({attachments});
-      expect(asked.find(c => c.op === "product.message" && c.params?.action === "edit")?.params).toMatchObject({attachments});
-      expect(s.calls.filter(c => c.operation === "executions.prompt").every(c => JSON.stringify((c.message as {attachments?:unknown}).attachments) === JSON.stringify(attachments))).toBe(true);
+      expect(asked.find(c => c.op === "product.comment" && c.params?.action === "add")?.params).toMatchObject({comment:{attachments:refs}});
+      expect(asked.find(c => c.op === "product.comment" && c.params?.action === "edit")?.params).toMatchObject({attachments:refs});
+      expect(asked.find(c => c.op === "product.message" && c.params?.action === "edit")?.params).toMatchObject({attachments:refs});
+      expect(s.calls.filter(c => c.operation === "executions.prompt").every(c => JSON.stringify((c.message as {attachments?:unknown}).attachments) === JSON.stringify(refs))).toBe(true);
       const before = s.calls.length;
       for (const payload of [
         {type:"add_comment",taskId:"task-1",path:"a.txt",line:1,text:"Invalid"},

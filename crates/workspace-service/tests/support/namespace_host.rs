@@ -2,6 +2,10 @@
 //! The required container run must execute the real journeys, never this branch.
 #[path = "../../src/native_command_sandbox.rs"]
 mod sandbox;
+// The sandbox reads the owner's tool search path from this module.
+#[allow(dead_code, unused_imports)]
+#[path = "../../src/tool_path.rs"]
+pub mod tool_path;
 pub mod native_effects {
     pub fn identity() -> std::io::Result<String> {
         use std::io::Read;

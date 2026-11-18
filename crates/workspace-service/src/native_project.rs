@@ -75,19 +75,12 @@ pub(super) fn writable(
     waits::check_mutation_tx(db, &i.task, a)?;
     if let Some(path) = path {
         safe(path)?;
-        for row in db
-            .prepare(
-                "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_STEERING'",
-            )?
-            .query_map([&i.task], |r| r.get::<_, String>(0))?
+        // The owner's write denials in force at this write (lifted ones excluded).
+        if cortex_core::lifecycle::steering::denials(db, &i.task)?
+            .iter()
+            .any(|p| policy::overlaps(path, p))
         {
-            let v: Value = serde_json::from_str(&row?)?;
-            if v["deny_write"].as_array().is_some_and(|a| {
-                a.iter()
-                    .any(|p| p.as_str().is_some_and(|p| policy::overlaps(path, p)))
-            }) {
-                return Err(CoreError::Refused("write_denied"));
-            }
+            return Err(CoreError::Refused("write_denied"));
         }
     }
     Ok(())

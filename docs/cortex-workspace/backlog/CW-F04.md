@@ -1,6 +1,6 @@
 # CW-F04: Validate the current Cortex runtime's actual snapshot/candidate workspace paths and attempt lifecycle against source, as the concrete input to the Rust service's file/Git/PTY ownership boundary
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Not confirmed in code; the validation record is not present, and the service owns paths and the attempt lifecycle natively ([architecture](../architecture.md)) · **Phase:** 3+ · **Size:** L
 
 ## Goal
 

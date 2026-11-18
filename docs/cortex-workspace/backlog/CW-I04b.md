@@ -1,6 +1,6 @@
 # CW-I04b: Python language server integration (completion, diagnostics, definition)
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Not implemented; no language server integration exists · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Connect a pinned Python language server, run by the Rust service, to the desktop CodeMirror client (@codemirror/lsp-client). Provide completion, diagnostics and go-to-definition for the fixture Python project. This item also introduces the service-side language-server supervisor, which CW-I04c reuses. The server candidate and its exact version are selected and recorded during CW-F03.

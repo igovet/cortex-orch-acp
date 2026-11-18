@@ -9,8 +9,8 @@ const E4 = ["low", "medium", "high", "xhigh"], E5 = [...E4, "max"];
 const m = (id: string, label: string, efforts = E4, observed = true) => ({ id, label, efforts, observed });
 /** What the engines report in the fixture. It includes models the preset denies, as a real catalogue does. */
 export const CATALOGUE_MODELS = {
-  "claude-agent-acp": [m("default", "Default"), m("opus[1m]", "Opus"), m("claude-fable-5-1[1m]", "Fable"), m("claude-sonnet-5", "Sonnet"), m("haiku", "Haiku", E5), m("claude-opus-4-8", "Opus 4.8"), m("claude-sonnet-4-6", "Sonnet 4.6"), m("claude-haiku-4-5-20251001", "Haiku 4.5", E5)],
-  "codex-acp": [m("gpt-6.1-sol", "GPT-6.1 Sol"), m("gpt-6-astra", "GPT-6 Astra"), m("gpt-6-luna", "GPT-6 Luna", E5), m("gpt-6.1-terra", "GPT-6.1 Terra"), m("gpt-6-sol", "GPT-6 Sol"), m("gpt-5.6-terra", "GPT-5.6 Terra")],
+  "claude-agent-acp": [m("opus[1m]", "Opus"), m("claude-fable-5-1[1m]", "Fable"), m("claude-sonnet-5", "Sonnet"), m("haiku", "Haiku", E5), m("claude-opus-4-8", "Opus 4.8"), m("claude-sonnet-4-6", "Sonnet 4.6"), m("claude-haiku-4-5-20251001", "Haiku 4.5", E5)],
+  "codex-acp": [m("gpt-6.2-sol", "GPT-6.2 Sol"), m("gpt-6.2-astra", "GPT-6.2 Astra"), m("gpt-6-luna", "GPT-6 Luna", E5), m("gpt-6.1-terra", "GPT-6.1 Terra"), m("gpt-6-sol", "GPT-6 Sol"), m("gpt-5.6-terra", "GPT-5.6 Terra")],
   opencode: [],
 };
 export const newCatalogue = (): Record<EngineKey, EngineCatalogue> => {
@@ -29,26 +29,25 @@ export const presetRouting = (): RoutingRules => ({
   providers: ["claude-agent-acp", "codex-acp"],
   engines: {
     "claude-agent-acp": {
-      enabled: ["default", "opus[1m]", "claude-fable-5-1[1m]", "claude-sonnet-5", "haiku"],
-      auto: ["default", "opus[1m]", "claude-fable-5-1[1m]", "claude-sonnet-5", "haiku"],
-      tiers: { "claude-fable-5-1[1m]": ["flagship"], "claude-sonnet-5": ["standard", "deep"], default: ["deep"], haiku: ["light"], "opus[1m]": ["flagship", "deep"] },
+      enabled: ["opus[1m]", "claude-fable-5-1[1m]", "claude-sonnet-5", "haiku"],
+      auto: ["opus[1m]", "claude-fable-5-1[1m]", "claude-sonnet-5", "haiku"],
+      tiers: { "claude-fable-5-1[1m]": ["flagship"], "claude-sonnet-5": ["standard", "deep"], haiku: ["light"], "opus[1m]": ["flagship", "deep"] },
       policy: {
         "claude-fable-5-1[1m]": pol({ effortFloor: "low", maxEffort: "high", preferredFor: ["design"], requestNames: ["fable", "фейбл", "фэйбл"] }),
         "claude-sonnet-5": pol({ effortFloor: "medium", maxEffort: "xhigh", preferredFor: ["implementation_backend", "implementation_frontend", "investigation", "review", "analysis", "operations"] }),
-        default: pol({ effortFloor: "medium", maxEffort: "xhigh" }),
         haiku: pol({ alsoStandardFor: ["testing"], effortFloor: "high", effortLadder: ["high", "xhigh", "max"], maxEffort: "max", preferredFor: LIGHT_WORK }),
         "opus[1m]": pol({ effortFloor: "medium", maxEffort: "xhigh", preferredFor: ["design", "planning", "implementation_frontend_design", "debugging", "analysis", "implementation_backend", "implementation_frontend"], preferredWhen: OPUS_WHEN, requestNames: ["opus", "опус"] }),
       },
       quota: [{ window: "seven_day_opus", models: ["opus[1m]"] }, { window: "seven_day_sonnet", models: ["claude-sonnet-5"] }, { window: "seven_day_fable", models: ["claude-fable-5-1[1m]"] }, { window: "seven_day_haiku", models: ["haiku"] }],
     },
     "codex-acp": {
-      enabled: ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna", "gpt-6.1-terra"],
-      auto: ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna", "gpt-6.1-terra"],
-      tiers: { "gpt-6-astra": ["flagship"], "gpt-6-luna": ["light"], "gpt-6.1-sol": ["standard", "deep"], "gpt-6.1-terra": ["standard"] },
+      enabled: ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6-luna", "gpt-6.1-terra"],
+      auto: ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-6-luna", "gpt-6.1-terra"],
+      tiers: { "gpt-6.2-astra": ["flagship"], "gpt-6-luna": ["light"], "gpt-6.2-sol": ["standard", "deep"], "gpt-6.1-terra": ["standard"] },
       policy: {
-        "gpt-6-astra": pol({ effortFloor: "low", maxEffort: "high", preferredFor: ["design"], requestNames: ["astra", "астр"] }),
+        "gpt-6.2-astra": pol({ effortFloor: "low", maxEffort: "high", preferredFor: ["design"], requestNames: ["astra", "астр"] }),
         "gpt-6-luna": pol({ alsoStandardFor: ["testing"], effortFloor: "high", effortLadder: ["high", "xhigh", "max"], maxEffort: "max", preferredFor: LIGHT_WORK }),
-        "gpt-6.1-sol": pol({ effortFloor: "medium", maxEffort: "xhigh", preferredFor: ["implementation_backend", "implementation_frontend", "planning", "design", "review", "operations", "analysis", "investigation"] }),
+        "gpt-6.2-sol": pol({ effortFloor: "medium", maxEffort: "xhigh", preferredFor: ["implementation_backend", "implementation_frontend", "planning", "design", "review", "operations", "analysis", "investigation"] }),
         "gpt-6.1-terra": pol({ effortFloor: "medium", maxEffort: "high", preferredFor: ["writing", "testing", "debugging"] }),
       },
       quota: [],

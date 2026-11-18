@@ -3,7 +3,7 @@ import type { BlockChoice, CodeSide, ConflictBlock, ConflictFile, MergeState } f
 import { useWs } from "./ctx";
 import { Code, GitLetter } from "./diff";
 import { createTicker } from "./freshness";
-import { A, Count, I, useWantOverview } from "./kit";
+import { A, Count, I, Keyed, useWantOverview } from "./kit";
 import { ActionBar, Row, Strip, Whole } from "./layout";
 import { AcceptBlocker, AcceptButton, OpenChecks, Outcomes } from "./review";
 import { ResultText } from "./result-text";
@@ -139,7 +139,7 @@ export function ReadyPanel(props: { m: SessionModel; route: TaskRoute }) {
       </div>
     </Show>
     <Show when={t().status === "ready_to_merge" && !contained() && !same() && t().acceptance}>{a => <div class="rcard">
-      <div class="rcard-h"><I n="merge" s={14} class="st-merge" />Ready to merge<span class="r">Accepted v{a().version} by you{a().at != null ? `, ${clock(a().at!)}` : ""}</span></div>
+      <div class="rcard-h"><I n="merge" s={14} class="st-merge" />Ready to merge<span class="r">Accepted v{a().version} {a().automatic ? "automatically" : "by you"}{a().at != null ? `, ${clock(a().at!)}` : ""}</span></div>
       <div class="rcard-b"><ResultText text={t().result?.summary} /><Show when={view().sprint && dependents().length > 0}> This task is part of the {view().sprint!.description} sprint, and <A class="lnk" to={{ name: "task", machine: view().machine.id, task: dependents()[0].id }}>{dependents()[0].title}</A> depends on its checked result. The queue does not wait for a merge.</Show></div>
       <Outcomes checks={t().result?.checks ?? []} />
       <Show when={t().integration?.method === "pr"}><Row class="rv-stale" lead={<I n="merge" s={14} class="faint" />} title={<>Pull request created into <span class="mono">{t().integration!.targetBranch}</span></>} detail={<>{t().integration!.draft ? "Draft. " : ""}{ws.t("prNote")}</>} end={<span>{ws.store.mode === "demo" ? "Mock" : "GitHub CLI"}</span>} /></Show>
@@ -219,8 +219,9 @@ export function ConflictPanel(props: { m: SessionModel; route: TaskRoute }) {
       <div class="cf-body">
         <div class="flist">
           <div class="wg">Conflicts<Count n={m().files.length} /></div>
-          <For each={m().files}>{f => <button class="fitem" aria-current={current()?.path === f.path ? "true" : undefined} onClick={() => { setPicked(f.path); setBlockAt(0); }}><GitLetter status="C" /><span class="trunc">{fileName(f.path)}</span>
-            <Show when={!fileResolved(f)} fallback={<span class="r st-ok">Resolved</span>}><span class={`r ${cx() === "running" ? "st-run" : "st-bad"}`}>{cx() === "running" ? "Resolving" : `${f.blocks.filter(b => !b.choice).length} left`}</span></Show></button>}</For>
+          {/* Keyed by path: a block resolved in the background updates its file's row instead of replacing the focused button. */}
+          <Keyed each={m().files} by={f => f.path}>{f => <button class="fitem" aria-current={current()?.path === f().path ? "true" : undefined} onClick={() => { setPicked(f().path); setBlockAt(0); }}><GitLetter status="C" /><span class="trunc">{fileName(f().path)}</span>
+            <Show when={!fileResolved(f())} fallback={<span class="r st-ok">Resolved</span>}><span class={`r ${cx() === "running" ? "st-run" : "st-bad"}`}>{cx() === "running" ? "Resolving" : `${f().blocks.filter(b => !b.choice).length} left`}</span></Show></button>}</Keyed>
           <Show when={m().clean.length > 0}><div class="wg">Merged cleanly<Count n={m().clean.length} /></div>
             <For each={m().clean}>{f => <div class="fitem"><GitLetter status={f.status} /><span class="trunc">{f.path}</span></div>}</For></Show>
         </div>

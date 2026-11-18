@@ -31,7 +31,9 @@ const input = (label: string, text: string) => { const el = document.querySelect
 
 /** The real native service (configuration, product store, Git), but no account, network, engine or native shell bridge. */
 async function machine() {
-  const home=mkdtempSync(resolve(tmpdir(),"cw-first-use-")); folders.push(home);
+  // The service socket sits below this folder; a long TMPDIR (a sandbox's) would put it past the Unix socket path limit.
+  const base=resolve(tmpdir(),"cw-first-use-XXXXXX/runtime/cortex-workspace-dev/service.sock").length>100 ? "/tmp" : tmpdir();
+  const home=mkdtempSync(resolve(base,"cw-first-use-")); folders.push(home);
   // The service keeps its state under the dev channel's namespace in XDG_STATE_HOME; its worktrees default is below it.
   const repo=resolve(home,"projects/project"), state=resolve(home,"xdg-state/cortex-workspace-dev");
   mkdirSync(repo,{recursive:true});
@@ -139,7 +141,8 @@ it.each([0,1100])("visible typed/pasted Git draft commits after %i ms, with real
   const message=delay?"Pasted commit\n\nBody from clipboard":"Typed commit";
   input("Commit message",message);
   if(delay) await new Promise(r=>setTimeout(r,delay));
-  button("Commit").click(); await settle();
+  // The Git pane's own Commit, not the title band's Commit…, which opens its dialog.
+  all(".commit-box button").find(b => b.textContent?.trim().startsWith("Commit"))!.click(); await settle();
   expect(m.git("log","-1","--format=%B")).toBe(message);
 });
 

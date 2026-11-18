@@ -297,7 +297,10 @@ mod stop_continuation_tests {
             .clone();
         // The owner reads the reason in plain words, never the raw blocker code.
         let prompt = d["prompt"].as_str().unwrap();
-        assert!(prompt.contains("the coordinator session could not start"), "{prompt}");
+        assert!(
+            prompt.contains("the coordinator session could not start"),
+            "{prompt}"
+        );
         assert!(!prompt.contains("_session_start_failed"), "{prompt}");
         let option = d["options"][0].clone();
         assert!(option["label"].as_str().unwrap().starts_with("Continue"));
@@ -390,9 +393,16 @@ mod resume_tests {
             }
         }
         fn coordinator_pin(&self, root: &Path, settings: &Value) -> CoreResult<Option<Value>> {
-            Ok(Some(json!({"route_id":self.task_route(root, settings)?.model})))
+            Ok(Some(
+                json!({"route_id":self.task_route(root, settings)?.model}),
+            ))
         }
-        fn pinned_route(&self, root: &Path, pin: &Value, _: Option<&str>) -> CoreResult<SessionRoute> {
+        fn pinned_route(
+            &self,
+            root: &Path,
+            pin: &Value,
+            _: Option<&str>,
+        ) -> CoreResult<SessionRoute> {
             Ok(Self::session(root, pin["route_id"].as_str().unwrap()))
         }
     }
@@ -488,7 +498,10 @@ mod resume_tests {
         })
         .await;
         pause(&runtime, &execution).await;
-        assert_eq!(sql(&runtime, "SELECT state FROM runtime_tasks").await, "PAUSED");
+        assert_eq!(
+            sql(&runtime, "SELECT state FROM runtime_tasks").await,
+            "PAUSED"
+        );
         // An owned process that has not been confirmed gone: Resume refuses whole.
         exec(
             &runtime,
@@ -497,18 +510,36 @@ mod resume_tests {
         .await;
         let error = resume(&runtime, &execution, "resume-1").await.unwrap_err();
         assert_eq!(error.to_string(), "native_shutdown_unconfirmed");
-        assert_eq!(sql(&runtime, "SELECT state FROM runtime_tasks").await, "PAUSED");
         assert_eq!(
-            sql(&runtime, "SELECT count(*) FROM runtime_requests WHERE request_key='resume-1'").await,
+            sql(&runtime, "SELECT state FROM runtime_tasks").await,
+            "PAUSED"
+        );
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_requests WHERE request_key='resume-1'"
+            )
+            .await,
             "0",
             "a refused Resume must not leave an admission behind"
         );
         // Once the process is confirmed gone, the same task resumes (retryable).
-        exec(&runtime, "UPDATE capacity_reservations SET state='released'").await;
+        exec(
+            &runtime,
+            "UPDATE capacity_reservations SET state='released'",
+        )
+        .await;
         resume(&runtime, &execution, "resume-2").await.unwrap();
-        assert_ne!(sql(&runtime, "SELECT state FROM runtime_tasks").await, "PAUSED");
+        assert_ne!(
+            sql(&runtime, "SELECT state FROM runtime_tasks").await,
+            "PAUSED"
+        );
         assert_eq!(
-            sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='TURN_INTERRUPTED'").await,
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='TURN_INTERRUPTED'"
+            )
+            .await,
             "0",
             "Resume continues; it never interrupts"
         );
@@ -529,20 +560,51 @@ mod resume_tests {
         )
         .await;
         let request = json!({"projectId":"project","executionId":execution,"requestId":"ip-1","action":"incoming_prompt","text":"More"});
-        let error = runtime.control("project".into(), request.clone()).await.unwrap_err();
+        let error = runtime
+            .control("project".into(), request.clone())
+            .await
+            .unwrap_err();
         assert_eq!(error.to_string(), "native_shutdown_unconfirmed");
-        assert_eq!(sql(&runtime, "SELECT state FROM runtime_tasks").await, "PAUSED");
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='USER_STEERING'").await, "0");
         assert_eq!(
-            sql(&runtime, "SELECT count(*) FROM runtime_requests WHERE request_key='ip-1'").await,
+            sql(&runtime, "SELECT state FROM runtime_tasks").await,
+            "PAUSED"
+        );
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='USER_STEERING'"
+            )
+            .await,
+            "0"
+        );
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_requests WHERE request_key='ip-1'"
+            )
+            .await,
             "0",
             "a refused prompt must not leave an admission behind"
         );
         // Once the process is confirmed gone, the same prompt is accepted and resumes.
-        exec(&runtime, "UPDATE capacity_reservations SET state='released'").await;
+        exec(
+            &runtime,
+            "UPDATE capacity_reservations SET state='released'",
+        )
+        .await;
         runtime.control("project".into(), request).await.unwrap();
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='USER_STEERING'").await, "1");
-        assert_ne!(sql(&runtime, "SELECT state FROM runtime_tasks").await, "PAUSED");
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='USER_STEERING'"
+            )
+            .await,
+            "1"
+        );
+        assert_ne!(
+            sql(&runtime, "SELECT state FROM runtime_tasks").await,
+            "PAUSED"
+        );
         close(root, runtime).await;
     }
 
@@ -567,7 +629,9 @@ mod resume_tests {
             .await
             .unwrap()
             .unwrap();
-        resume(&runtime, &execution, "resume-barrier").await.unwrap();
+        resume(&runtime, &execution, "resume-barrier")
+            .await
+            .unwrap();
         // Resume itself keeps the barrier as evidence (it returns as RECOVERING with it)...
         assert_eq!(
             sql(&runtime, "SELECT json_extract(payload_json,'$.barrier')||':'||json_extract(payload_json,'$.state') FROM runtime_events WHERE type='OWNER_TASK_RESUMED'").await,
@@ -577,7 +641,11 @@ mod resume_tests {
         // like an owner message instead of silently starting nothing.
         coordinator_relaunched(&runtime).await;
         assert_eq!(
-            sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='TURN_INTERRUPTED'").await,
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='TURN_INTERRUPTED'"
+            )
+            .await,
             "1"
         );
         close(root, runtime).await;
@@ -600,16 +668,28 @@ mod resume_tests {
             Ok(())
         }).unwrap().await.unwrap().unwrap();
         runtime.recover().await.unwrap();
-        assert_eq!(sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await, "PAUSED:native_session_outcome_unknown");
-        let error = runtime.control("project".into(), message(&execution, "paused-msg")).await.unwrap_err();
+        assert_eq!(
+            sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await,
+            "PAUSED:native_session_outcome_unknown"
+        );
+        let error = runtime
+            .control("project".into(), message(&execution, "paused-msg"))
+            .await
+            .unwrap_err();
         assert_eq!(error.to_string(), "task_paused");
         // The attempt was settled by that recovery (its host is gone and no engine works
         // in the project), while the task stays held; a later recovery keeps it settled.
         runtime.recover().await.unwrap();
-        assert_eq!(sql(&runtime, "SELECT state FROM capacity_reservations").await, "released");
+        assert_eq!(
+            sql(&runtime, "SELECT state FROM capacity_reservations").await,
+            "released"
+        );
         resume(&runtime, &execution, "continue-held").await.unwrap();
         coordinator_relaunched(&runtime).await;
-        assert_ne!(sql(&runtime, "SELECT coalesce(blocker,'') FROM runtime_tasks").await, "native_session_outcome_unknown");
+        assert_ne!(
+            sql(&runtime, "SELECT coalesce(blocker,'') FROM runtime_tasks").await,
+            "native_session_outcome_unknown"
+        );
         close(root, runtime).await;
     }
 
@@ -655,22 +735,108 @@ mod resume_tests {
             default_available: true,
         })
         .await;
-        // Finish refuses (unconfirmed shutdown) after the follow-up was admitted.
+        // A message to a task held in recovery restarts its coordinator, so finish
+        // refuses (unconfirmed shutdown) after the follow-up was admitted. (A message
+        // to a working task restarts nothing; see the boundary test below.)
         exec(
             &runtime,
-            "INSERT INTO capacity_reservations VALUES ('r2','fixture',(SELECT task_id FROM runtime_tasks),NULL,'a2','worker','ambiguous','0','0',NULL)",
+            "UPDATE runtime_tasks SET state='RECOVERING'; INSERT INTO capacity_reservations VALUES ('r2','fixture',(SELECT task_id FROM runtime_tasks),NULL,'a2','worker','ambiguous','0','0',NULL)",
         )
         .await;
         let request = json!({"projectId":"project","executionId":execution,"requestId":"follow","action":"incoming_prompt","text":"More"});
-        let error = runtime.control("project".into(), request.clone()).await.unwrap_err();
+        let error = runtime
+            .control("project".into(), request.clone())
+            .await
+            .unwrap_err();
         assert_eq!(error.to_string(), "native_shutdown_unconfirmed");
         // The same key never records a second copy and never claims success.
-        let error = runtime.control("project".into(), request).await.unwrap_err();
+        let error = runtime
+            .control("project".into(), request)
+            .await
+            .unwrap_err();
         assert_eq!(error.to_string(), "native_control_outcome_unknown");
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='USER_STEERING'").await, "1");
-        assert_eq!(sql(&runtime, "SELECT state FROM runtime_tasks").await, "RECOVERING");
-        assert_eq!(sql(&runtime, "SELECT blocker FROM runtime_tasks").await, "native_control_outcome_unknown");
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='USER_STEERING'"
+            )
+            .await,
+            "1"
+        );
+        assert_eq!(
+            sql(&runtime, "SELECT state FROM runtime_tasks").await,
+            "RECOVERING"
+        );
+        assert_eq!(
+            sql(&runtime, "SELECT blocker FROM runtime_tasks").await,
+            "native_control_outcome_unknown"
+        );
         let _ = task;
+        close(root, runtime).await;
+    }
+
+    /// An owner message to a working task with a live worker process is recorded at once:
+    /// nothing is settled, cancelled or interrupted, and the task keeps its state.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_to_a_working_task_settles_and_interrupts_nothing() {
+        let (root, runtime, execution, task) = seeded(Routes {
+            generation: AtomicUsize::new(0),
+            default_available: true,
+        })
+        .await;
+        exec(
+            &runtime,
+            "UPDATE runtime_tasks SET state='EXECUTING',revision=1;
+             INSERT INTO runtime_nodes VALUES ((SELECT task_id FROM runtime_tasks),1,'n','worker-backend-dev','Work','[]','[\"src\"]','execution','running','a3',NULL);
+             INSERT INTO capacity_reservations VALUES ('r3','fixture',(SELECT task_id FROM runtime_tasks),'a3','a3','worker','reserved','0','0',NULL)",
+        )
+        .await;
+        // The task's live driver (it runs the worker): it must not be cancelled.
+        let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
+        let (done, finished) = tokio::sync::watch::channel(false);
+        runtime.install_pump(task.clone(), cancel, finished).await;
+        let request = json!({"projectId":"project","executionId":execution,"requestId":"steer","action":"incoming_prompt","text":"Use the other output"});
+        let receipt = runtime
+            .control("project".into(), request.clone())
+            .await
+            .unwrap();
+        assert!(
+            !cancelled.has_changed().unwrap() && !*cancelled.borrow_and_update(),
+            "the running driver was cancelled"
+        );
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_TASK_CONTINUED'"
+            )
+            .await,
+            "0",
+            "a second driver was started"
+        );
+        assert_eq!(receipt["state"], "EXECUTING");
+        assert_eq!(
+            runtime.control("project".into(), request).await.unwrap(),
+            receipt
+        );
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT state||':'||coalesce(blocker,'') FROM runtime_tasks"
+            )
+            .await,
+            "EXECUTING:"
+        );
+        assert_eq!(
+            sql(&runtime, "SELECT status FROM runtime_nodes").await,
+            "running"
+        );
+        assert_eq!(
+            sql(&runtime, "SELECT state FROM capacity_reservations").await,
+            "reserved"
+        );
+        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type IN ('TURN_INTERRUPTED','LIVE_ASSIGNMENTS_CANCELLED','NATIVE_RECOVERY_REQUIRED')").await, "0");
+        assert_eq!(sql(&runtime, "SELECT json_extract(payload_json,'$.delivery') FROM runtime_events WHERE type='USER_STEERING'").await, "boundary");
+        done.send_replace(true);
         close(root, runtime).await;
     }
 
@@ -683,9 +849,19 @@ mod resume_tests {
         .await;
         let request = json!({"projectId":"project","executionId":execution,"requestId":"follow-1","action":"incoming_prompt","text":"More"});
         // No task route and no default: refused before any admission.
-        let error = runtime.control("project".into(), request.clone()).await.unwrap_err();
+        let error = runtime
+            .control("project".into(), request.clone())
+            .await
+            .unwrap_err();
         assert_eq!(error.to_string(), "native_route_authorization_unavailable");
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='USER_STEERING'").await, "0");
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='USER_STEERING'"
+            )
+            .await,
+            "0"
+        );
         // The task's own route accepts it.
         let t = task.clone();
         runtime.host.executor.write(move |db| {
@@ -696,7 +872,14 @@ mod resume_tests {
         let mut request = request;
         request["requestId"] = json!("follow-2");
         runtime.control("project".into(), request).await.unwrap();
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='USER_STEERING'").await, "1");
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='USER_STEERING'"
+            )
+            .await,
+            "1"
+        );
         close(root, runtime).await;
     }
 
@@ -716,9 +899,15 @@ mod resume_tests {
                 .unwrap()
                 .unwrap(),
         );
-        let draft = runtime.command("project".into(), json!({"protocol":{"major":1,"minor":8},"requestId":"draft","projectId":"project",
+        let draft = runtime
+            .command(
+                "project".into(),
+                json!({"protocol":{"major":1,"minor":8},"requestId":"draft","projectId":"project",
             "actorId":actor(),"operation":"tasks.create","target":"project","expectedVersion":"0",
-            "ownerEpoch":null,"payload":{"description":"Pin fixture","checkout":{"kind":"main"}}})).await.unwrap();
+            "ownerEpoch":null,"payload":{"description":"Pin fixture","checkout":{"kind":"main"}}}),
+            )
+            .await
+            .unwrap();
         runtime.command("project".into(), json!({"protocol":{"major":1,"minor":8},"requestId":"start","projectId":"project",
             "actorId":actor(),"operation":"tasks.start","target":draft["target"],"expectedVersion":draft["entityVersion"],
             "ownerEpoch":null,"payload":{}})).await.unwrap();
@@ -736,7 +925,14 @@ mod resume_tests {
         let task = sql(&runtime, "SELECT task_id FROM runtime_tasks").await;
         let route = runtime.coordinator_route(&task, None).await.unwrap();
         assert_eq!(route.model, "default-0");
-        assert_eq!(runtime.routes.route(&runtime.host.root, "orchestrator").unwrap().model, "default-1");
+        assert_eq!(
+            runtime
+                .routes
+                .route(&runtime.host.root, "orchestrator")
+                .unwrap()
+                .model,
+            "default-1"
+        );
         close(root, runtime).await;
     }
 
@@ -797,16 +993,40 @@ mod resume_tests {
         assert_eq!(sql(&runtime, "SELECT state||':'||release_observation FROM capacity_reservations WHERE reservation_id='legacy-reservation'").await, "released:never_launched");
         assert_eq!(sql(&runtime, "SELECT json_extract(payload_json,'$.evidence') FROM runtime_events WHERE type='NATIVE_PROCESS_SETTLED'").await,
             "session_start_failed_before_engine_launch");
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='NATIVE_PROCESS_UNCONFIRMED'").await, "0");
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_PROCESS_UNCONFIRMED'"
+            )
+            .await,
+            "0"
+        );
         // The owner's next message is admitted, settles and relaunches the coordinator
         // (the fixture engine exits before initialize: no model is called).
-        let receipt = runtime.control("project".into(), message(&execution, "after-fix")).await.unwrap();
+        let receipt = runtime
+            .control("project".into(), message(&execution, "after-fix"))
+            .await
+            .unwrap();
         assert_eq!(receipt["outcome"], "recorded");
         coordinator_relaunched(&runtime).await;
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='NATIVE_CONTROL_OUTCOME_UNKNOWN'").await, "0");
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_CONTROL_OUTCOME_UNKNOWN'"
+            )
+            .await,
+            "0"
+        );
         // Recovery is idempotent: a later restart records nothing new for the attempt.
         runtime.recover().await.unwrap();
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='NATIVE_PROCESS_SETTLED'").await, "1");
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_PROCESS_SETTLED'"
+            )
+            .await,
+            "1"
+        );
         close(root, runtime).await;
     }
 
@@ -823,12 +1043,36 @@ mod resume_tests {
         let mut engine = fake_engine(&root);
         runtime.recover().await.unwrap();
         assert_eq!(sql(&runtime, "SELECT status FROM delegation_provisioning WHERE idempotency_key='legacy-assignment'").await, "ambiguous");
-        assert_eq!(sql(&runtime, "SELECT state FROM capacity_reservations WHERE reservation_id='legacy-reservation'").await, "ambiguous");
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='NATIVE_PROCESS_SETTLED'").await, "0");
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT state FROM capacity_reservations WHERE reservation_id='legacy-reservation'"
+            )
+            .await,
+            "ambiguous"
+        );
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_PROCESS_SETTLED'"
+            )
+            .await,
+            "0"
+        );
         // The attempt is stamped once with this boot; restarts in the same boot do not settle it.
         runtime.recover().await.unwrap();
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='NATIVE_PROCESS_UNCONFIRMED'").await, "1");
-        let error = runtime.control("project".into(), message(&execution, "same-boot")).await.unwrap_err();
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_PROCESS_UNCONFIRMED'"
+            )
+            .await,
+            "1"
+        );
+        let error = runtime
+            .control("project".into(), message(&execution, "same-boot"))
+            .await
+            .unwrap_err();
         assert_eq!(error.to_string(), "native_shutdown_unconfirmed");
         assert_eq!(sql(&runtime, "SELECT status FROM delegation_provisioning WHERE idempotency_key='legacy-assignment'").await, "ambiguous");
         // A recovery in a later boot: no process of that boot can still run.
@@ -839,7 +1083,10 @@ mod resume_tests {
         assert_eq!(sql(&runtime, "SELECT json_extract(payload_json,'$.evidence') FROM runtime_events WHERE type='NATIVE_PROCESS_SETTLED'").await,
             "unconfirmed_attempt_from_previous_boot");
         stop_fake_engine(&mut engine);
-        runtime.control("project".into(), message(&execution, "next-boot")).await.unwrap();
+        runtime
+            .control("project".into(), message(&execution, "next-boot"))
+            .await
+            .unwrap();
         coordinator_relaunched(&runtime).await;
         close(root, runtime).await;
     }
@@ -856,7 +1103,9 @@ mod resume_tests {
             .unwrap();
         // The scan reads it from the process table: wait until it shows its marker.
         for _ in 0..200 {
-            if std::fs::read(format!("/proc/{}/cmdline", child.id())).is_ok_and(|c| c.windows(9).any(|w| w == b"codex-acp")) {
+            if std::fs::read(format!("/proc/{}/cmdline", child.id()))
+                .is_ok_and(|c| c.windows(9).any(|w| w == b"codex-acp"))
+            {
                 return child;
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -886,16 +1135,25 @@ mod resume_tests {
         killed_worker(&runtime, &task).await;
         // Another task's writer of the same file is queued behind the worker's holding.
         let r = root.to_string_lossy().into_owned();
-        let conflict = || runtime.host.executor.write(move |db| {
-            cortex_core::scheduler::policy::write_conflict_tx(db, "other-task")
-        }).unwrap();
+        let conflict = || {
+            runtime
+                .host
+                .executor
+                .write(move |db| {
+                    cortex_core::scheduler::policy::write_conflict_tx(db, "other-task")
+                })
+                .unwrap()
+        };
         runtime.host.executor.write(move |db| {
             db.execute("INSERT INTO tasks VALUES ('other-task',?,'0')", [&r])?;
             db.execute("INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES ('other-task','EXECUTING','g','0','0')", [])?;
             db.execute("INSERT INTO runtime_nodes VALUES ('other-task',(SELECT revision FROM runtime_tasks WHERE task_id='other-task'),'reset','worker-backend-dev','Reset test','[]','[\"test/counter.test.js\"]','execution','pending',NULL,NULL)", [])?;
             Ok(())
         }).unwrap().await.unwrap().unwrap();
-        assert_eq!(conflict().await.unwrap().unwrap().unwrap()["holder_task"], json!(task));
+        assert_eq!(
+            conflict().await.unwrap().unwrap().unwrap()["holder_task"],
+            json!(task)
+        );
         runtime.recover().await.unwrap();
         assert_eq!(sql(&runtime, "SELECT status FROM delegation_provisioning WHERE idempotency_key='killed-assignment'").await, "terminated");
         assert_eq!(sql(&runtime, "SELECT state||':'||release_observation FROM capacity_reservations WHERE reservation_id='killed-reservation'").await,
@@ -903,19 +1161,39 @@ mod resume_tests {
         assert_eq!(sql(&runtime, "SELECT json_extract(payload_json,'$.evidence') FROM runtime_events WHERE type='NATIVE_PROCESS_SETTLED'").await,
             "service_gone_and_no_engine_process_in_project");
         // Held for the owner, not driven on by itself.
-        assert_eq!(sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks WHERE task_id!='other-task'").await, "RECOVERING:native_session_outcome_unknown");
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT state||':'||blocker FROM runtime_tasks WHERE task_id!='other-task'"
+            )
+            .await,
+            "RECOVERING:native_session_outcome_unknown"
+        );
         assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type IN ('NATIVE_RECOVERY_RESUMED','NATIVE_PROCESS_UNCONFIRMED')").await, "0");
         // The settled worker no longer holds its files for the other task.
         assert!(conflict().await.unwrap().unwrap().is_none());
         // A later restart records nothing new for it.
         let counted = sql(&runtime, "SELECT count(*) FROM runtime_events").await;
         runtime.recover().await.unwrap();
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events").await, counted);
+        assert_eq!(
+            sql(&runtime, "SELECT count(*) FROM runtime_events").await,
+            counted
+        );
         // The owner's message is admitted and relaunches the coordinator.
-        let receipt = runtime.control("project".into(), message(&execution, "continue-after-kill")).await.unwrap();
+        let receipt = runtime
+            .control("project".into(), message(&execution, "continue-after-kill"))
+            .await
+            .unwrap();
         assert_eq!(receipt["outcome"], "recorded");
         coordinator_relaunched(&runtime).await;
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='NATIVE_CONTROL_OUTCOME_UNKNOWN'").await, "0");
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_CONTROL_OUTCOME_UNKNOWN'"
+            )
+            .await,
+            "0"
+        );
         close(root, runtime).await;
     }
 
@@ -930,9 +1208,21 @@ mod resume_tests {
         runtime.recover().await.unwrap();
         // Stop is confirmed (no unknown outcome), and so is Resume.
         pause(&runtime, &execution).await;
-        assert_eq!(sql(&runtime, "SELECT state FROM runtime_tasks").await, "PAUSED");
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='NATIVE_CONTROL_OUTCOME_UNKNOWN'").await, "0");
-        resume(&runtime, &execution, "resume-after-kill").await.unwrap();
+        assert_eq!(
+            sql(&runtime, "SELECT state FROM runtime_tasks").await,
+            "PAUSED"
+        );
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_CONTROL_OUTCOME_UNKNOWN'"
+            )
+            .await,
+            "0"
+        );
+        resume(&runtime, &execution, "resume-after-kill")
+            .await
+            .unwrap();
         coordinator_relaunched(&runtime).await;
         // Close as is reports no unconfirmed process, and Delete removes the task.
         let request = json!({"projectId":"project","executionId":execution,"requestId":"close-after-kill","action":"close_task","confirmed":true});
@@ -940,8 +1230,18 @@ mod resume_tests {
         assert_eq!(receipt["outcome"], "recorded");
         assert_eq!(receipt["processesUnconfirmed"], Value::Null);
         let draft = sql(&runtime, "SELECT task_id FROM workspace_tasks").await;
-        runtime.host.executor.publication(move |store| store.purge_workspace_task("project", &draft, false)).unwrap().await.unwrap().unwrap();
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM capacity_reservations").await, "0");
+        runtime
+            .host
+            .executor
+            .publication(move |store| store.purge_workspace_task("project", &draft, false))
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sql(&runtime, "SELECT count(*) FROM capacity_reservations").await,
+            "0"
+        );
         close(root, runtime).await;
     }
 
@@ -957,9 +1257,26 @@ mod resume_tests {
         killed_worker(&runtime, &task).await;
         let mut engine = fake_engine(&root);
         runtime.recover().await.unwrap();
-        assert_eq!(sql(&runtime, "SELECT state FROM capacity_reservations WHERE reservation_id='killed-reservation'").await, "ambiguous");
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='NATIVE_PROCESS_UNCONFIRMED'").await, "1");
-        let error = runtime.control("project".into(), message(&execution, "while-alive")).await.unwrap_err();
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT state FROM capacity_reservations WHERE reservation_id='killed-reservation'"
+            )
+            .await,
+            "ambiguous"
+        );
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_PROCESS_UNCONFIRMED'"
+            )
+            .await,
+            "1"
+        );
+        let error = runtime
+            .control("project".into(), message(&execution, "while-alive"))
+            .await
+            .unwrap_err();
         assert_eq!(error.to_string(), "native_shutdown_unconfirmed");
         stop_fake_engine(&mut engine);
         runtime.recover().await.unwrap();
@@ -997,17 +1314,42 @@ mod resume_tests {
         // Close commits its cancellation and is reported done, so the window closes the
         // card; the unconfirmed process stays recorded and keeps deletion refused.
         let request = json!({"projectId":"project","executionId":execution,"requestId":"close-1","action":"close_task","confirmed":true});
-        let receipt = runtime.control("project".into(), request.clone()).await.unwrap();
+        let receipt = runtime
+            .control("project".into(), request.clone())
+            .await
+            .unwrap();
         assert_eq!(receipt["outcome"], "recorded");
         assert_eq!(receipt["processesUnconfirmed"], true);
-        assert_eq!(sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await, "CANCELLED:owner_resolved_without_certification");
+        assert_eq!(
+            sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await,
+            "CANCELLED:owner_resolved_without_certification"
+        );
         assert_eq!(sql(&runtime, "SELECT json_extract(payload_json,'$.processes_unconfirmed') FROM runtime_events WHERE type='OWNER_TASK_RESOLVED'").await, "1");
-        assert_eq!(sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type='NATIVE_CONTROL_OUTCOME_UNKNOWN'").await, "0");
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_CONTROL_OUTCOME_UNKNOWN'"
+            )
+            .await,
+            "0"
+        );
         // The same request replays its receipt.
-        assert_eq!(runtime.control("project".into(), request).await.unwrap()["outcome"], "recorded");
+        assert_eq!(
+            runtime.control("project".into(), request).await.unwrap()["outcome"],
+            "recorded"
+        );
         let draft = sql(&runtime, "SELECT task_id FROM workspace_tasks").await;
-        let purge = |draft: String| runtime.host.executor.publication(move |store| store.purge_workspace_task("project", &draft, false)).unwrap();
-        assert_eq!(purge(draft.clone()).await.unwrap().unwrap_err().code(), "active_execution");
+        let purge = |draft: String| {
+            runtime
+                .host
+                .executor
+                .publication(move |store| store.purge_workspace_task("project", &draft, false))
+                .unwrap()
+        };
+        assert_eq!(
+            purge(draft.clone()).await.unwrap().unwrap_err().code(),
+            "active_execution"
+        );
         runtime.recover().await.unwrap();
         purge(draft).await.unwrap().unwrap();
         close(root, runtime).await;
@@ -1119,6 +1461,7 @@ impl Runtime {
                     "text",
                     "attachments",
                     "confirmed",
+                    "path",
                 ]
                 .contains(&k.as_str())
             })
@@ -1139,9 +1482,15 @@ impl Runtime {
         {
             return Ok(receipt);
         }
-        // Resume continues the retained task where Pause left it; only Retry and
-        // owner messages interrupt the work and ask the coordinator to replan.
+        // Resume continues the retained task where Pause left it. Retry, and an owner
+        // message to a task that waits, is held or was reopened, restart the coordinator.
+        // A message to a working task interrupts nothing: Core records it for the
+        // coordinator's next boundary (`lifecycle::steering`).
         let resume = request["action"] == "resume";
+        let message = matches!(
+            request["action"].as_str(),
+            Some("prompt" | "incoming_prompt")
+        );
         let restart = matches!(
             request["action"].as_str(),
             Some("retry" | "prompt" | "incoming_prompt")
@@ -1165,19 +1514,39 @@ impl Runtime {
         // From here the control is admitted. If it cannot reach its finish receipt,
         // its outcome is settled explicitly as unknown (never claimed, never forever).
         let outcome = async {
-            self.settle_task(&b.task).await?;
+            // Lifting a write denial, like a boundary message, leaves the running work alone.
+            let lift = request["action"] == "allow_write";
+            let boundary = lift
+                || message && {
+                    let (t, key) = (
+                        b.task.clone(),
+                        request["requestId"].as_str().unwrap_or_default().to_owned(),
+                    );
+                    self.host
+                        .executor
+                        .read(move |db| cortex_core::lifecycle::steering::delivery(db, &t, &key))?
+                        .await
+                        .map_err(|_| CoreError::Refused("native_host_closed"))??
+                        .as_deref()
+                        == Some(cortex_core::lifecycle::steering::BOUNDARY)
+                };
+            // The running driver, its workers, review and verification keep going.
+            if !boundary {
+                self.settle_task(&b.task).await?;
+            }
             // Continue on a task held for recovery (a restart left an outcome unknown
             // while it was paused) has nothing to resume: no driver would run it. Every
             // owned process is already confirmed gone (Resume refuses otherwise), so it
             // continues like an owner message, never silently doing nothing.
             let route = match route {
+                _ if boundary => None,
                 Some(route) => Some(route),
                 None if resume && self.held_for_recovery(&b.task).await? => {
                     Some(self.coordinator_route(&b.task, None).await?)
                 }
                 None => None,
             };
-            let restart = restart || route.is_some();
+            let restart = !boundary && (restart || route.is_some());
             let p = project.clone();
             let r = request.clone();
             let result = self
@@ -1186,10 +1555,10 @@ impl Runtime {
                 .publication(move |s| control::finish(s, &p, &actor(), &r, restart))?
                 .await
                 .map_err(|_| CoreError::Refused("native_host_closed"))??;
-            Ok::<_, CoreError>((result, route))
+            Ok::<_, CoreError>((result, route, boundary))
         }
         .await;
-        let (result, route) = match outcome {
+        let (result, route, boundary) = match outcome {
             Ok(result) => result,
             Err(error) => {
                 let p = project.clone();
@@ -1205,12 +1574,24 @@ impl Runtime {
                 return Err(err(error));
             }
         };
-        if let Some(route) = route {
-            let prompt = format!(
-                "{}\n\nContinue from the retained task state. Owner input: {}",
-                b.goal,
-                request["text"].as_str().unwrap_or("Continue.")
-            );
+        if boundary {
+            // A working task has a driver that delivers the message at its next
+            // boundary. Only when none runs (never replacing a live one) is one started.
+            if request["action"] != "allow_write" && !self.driven(&b.task).await {
+                self.resume_task(b.task, b.owner).await.map_err(err)?;
+            }
+        } else if let Some(route) = route {
+            // An owner message reaches the relaunched coordinator in its owner-message
+            // section (`lifecycle::steering`), with any earlier undelivered ones.
+            let prompt = if message {
+                format!("{}\n\nContinue from the retained task state.", b.goal)
+            } else {
+                format!(
+                    "{}\n\nContinue from the retained task state. Owner input: {}",
+                    b.goal,
+                    request["text"].as_str().unwrap_or("Continue.")
+                )
+            };
             self.continue_task(b.task, b.owner, prompt, route)
                 .await
                 .map_err(err)?;
@@ -1250,8 +1631,14 @@ impl Runtime {
             .executor
             .publication(move |s| {
                 s.read(|db| {
-                    control::binding(db, &s.key().root().to_string_lossy(), &p, &actor(), &execution)
-                        .map(|b| b.task)
+                    control::binding(
+                        db,
+                        &s.key().root().to_string_lossy(),
+                        &p,
+                        &actor(),
+                        &execution,
+                    )
+                    .map(|b| b.task)
                 })
             })?
             .await
@@ -1355,7 +1742,9 @@ impl Runtime {
                 // The same stop as a live driver's: a completion gap returns to the
                 // coordinator (which then asks the owner) instead of hanging unasked.
                 if !*cancelled.borrow() && !*runtime.stop.borrow() {
-                    runtime.stop_after_error(&task, &owner, error, cancelled.clone()).await;
+                    runtime
+                        .stop_after_error(&task, &owner, error, cancelled.clone())
+                        .await;
                 }
             }
             done.send_replace(true);
@@ -1518,13 +1907,20 @@ impl Runtime {
 /// Files typed with an answer are checked and decoded once, here. The command that
 /// Core records carries no file bytes, only `payload.capture`, the fingerprint of
 /// the retained bodies, so a replay of the same answer binds to the same files.
+/// `payload.captureQuestions` names, file by file, the question whose answer carried
+/// it, so each answered question later shows its own files.
 fn answer_files(mut request: Value) -> io::Result<(Value, Option<cortex_core::input::Capture>)> {
     let mut files = Vec::new();
+    let mut owners = Vec::new();
     if let Some(answers) = request["payload"]["answers"].as_array_mut() {
         for answer in answers {
+            let question = answer["questionId"].clone();
             if let Some(found) = answer.as_object_mut().and_then(|a| a.remove("attachments")) {
                 match found {
-                    Value::Array(items) => files.extend(items),
+                    Value::Array(items) => {
+                        owners.extend(std::iter::repeat_n(question, items.len()));
+                        files.extend(items);
+                    }
                     Value::Null => {}
                     _ => return Err(failure("invalid_request")),
                 }
@@ -1536,5 +1932,6 @@ fn answer_files(mut request: Value) -> io::Result<(Value, Option<cortex_core::in
     }
     let capture = cortex_core::input::capture_from_wire(&Value::Array(files)).map_err(err)?;
     request["payload"]["capture"] = capture.fingerprint();
+    request["payload"]["captureQuestions"] = Value::Array(owners);
     Ok((request, Some(capture)))
 }

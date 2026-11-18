@@ -22,7 +22,11 @@ pub struct AgentSession {
 
 impl AgentSession {
     /// Start `argv[0]` with exactly `env` (nothing inherited) in `cwd`.
-    pub fn spawn(argv: &[String], env: &[(String, String)], cwd: &Path) -> Result<AgentSession, String> {
+    pub fn spawn(
+        argv: &[String],
+        env: &[(String, String)],
+        cwd: &Path,
+    ) -> Result<AgentSession, String> {
         let mut child = Command::new(&argv[0])
             .args(&argv[1..])
             .env_clear()
@@ -54,12 +58,19 @@ impl AgentSession {
             }
         });
         let stdin = child.stdin.take();
-        Ok(AgentSession { child, stdin, lines, stderr: captured })
+        Ok(AgentSession {
+            child,
+            stdin,
+            lines,
+            stderr: captured,
+        })
     }
 
     pub fn send(&mut self, message: &Value) -> Result<(), String> {
         let stdin = self.stdin.as_mut().ok_or("stdin is closed")?;
-        writeln!(stdin, "{message}").and_then(|()| stdin.flush()).map_err(|e| format!("write to agent failed: {e}"))
+        writeln!(stdin, "{message}")
+            .and_then(|()| stdin.flush())
+            .map_err(|e| format!("write to agent failed: {e}"))
     }
 
     fn drained_stderr(&self) -> String {
@@ -69,13 +80,17 @@ impl AgentSession {
     /// The next stdout line and its JSON; any malformed or missing line is an error.
     pub fn recv(&mut self, timeout: Duration) -> Result<Value, String> {
         match self.lines.recv_timeout(timeout) {
-            Ok(Some(line)) => serde_json::from_str(&line).map_err(|e| format!("non-JSON stdout line {line:?}: {e}")),
-            Ok(None) | Err(RecvTimeoutError::Disconnected) => {
-                Err(format!("agent closed stdout unexpectedly (stderr: {:?})", self.drained_stderr()))
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                Err(format!("timed out after {}s waiting for a stdout line (stderr so far: {:?})", timeout.as_secs(), self.drained_stderr()))
-            }
+            Ok(Some(line)) => serde_json::from_str(&line)
+                .map_err(|e| format!("non-JSON stdout line {line:?}: {e}")),
+            Ok(None) | Err(RecvTimeoutError::Disconnected) => Err(format!(
+                "agent closed stdout unexpectedly (stderr: {:?})",
+                self.drained_stderr()
+            )),
+            Err(RecvTimeoutError::Timeout) => Err(format!(
+                "timed out after {}s waiting for a stdout line (stderr so far: {:?})",
+                timeout.as_secs(),
+                self.drained_stderr()
+            )),
         }
     }
 

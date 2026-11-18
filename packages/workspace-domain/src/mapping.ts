@@ -2,7 +2,7 @@ import type { Check as WireCheck, Decision as WireDecision, Result as WireResult
 import { emptySession } from "./invariants";
 import type { ProjectSlice } from "./port";
 import { descriptionLabel } from "./projections";
-import type { Check, CheckOutcome, Connection, Decision, Project, Result, Task, TaskStatus } from "./types";
+import type { AttachmentRef, Check, CheckOutcome, Connection, Decision, DecisionTarget, Project, Result, Task, TaskStatus } from "./types";
 
 /**
  * Wire DTOs to view models. This reads what the runtime already decided; it never runs a transition and never promotes a
@@ -103,12 +103,40 @@ export function mapResult(result: WireResult): Result {
 }
 
 export function mapDecision(decision: WireDecision): Decision {
+  // The contract's known kinds do not list `permission`, so its decoder reads that kind as `unknown`; the runtime's
+  // permission details stay with it and say what it is.
+  const permission = decision.kind === "permission" || (decision.kind === "unknown" && typeof (decision as { permission?: unknown }).permission === "object" && (decision as { permission?: unknown }).permission !== null);
   // Only a pending decision that still allows an answer can be answered. Anything else, known or not, stays closed.
   const open = decision.status === "pending" && decision.allowedOperations.includes("decisions.answer");
   return {
-    id: decision.decisionId, kind: "question", from: "", workerId: null, batchId: decision.batchId, at: typeof decision.createdAt === "string" ? lastConfirmed(decision.createdAt) : null, text: decision.prompt,
-    options: decision.options.map(option => ({ label: option.label, optionId:option.optionId })), answer: decision.status === "answered" ? { text: typeof decision.answerText === "string" ? decision.answerText : "Answered", at: typeof decision.answeredAt === "string" ? lastConfirmed(decision.answeredAt) : null } : null, withdrawn: !open && decision.status !== "answered" && decision.status !== "pending", suspended:decision.status === "pending" && !open,
+    // A worker's question is answered in the task's Conversation; `askedBy` names the worker role that asked, a coordinator's has none.
+    id: decision.decisionId, kind: permission ? "permission" : "question", from: typeof decision.askedBy === "string" ? decision.askedBy : "", workerId: null, batchId: decision.batchId, at: typeof decision.createdAt === "string" ? lastConfirmed(decision.createdAt) : null, text: decision.prompt,
+    // The runtime's stop question says what each answer does and which one it recommends.
+    options: decision.options.map(option => ({ label: option.label, optionId:option.optionId, ...(typeof option.detail === "string" && option.detail ? { sub: option.detail } : {}), ...(option.recommended === true ? { recommended: true as const } : {}) })), answer: decision.status === "answered" ? { text: typeof decision.answerText === "string" ? decision.answerText : "Answered", at: typeof decision.answeredAt === "string" ? lastConfirmed(decision.answeredAt) : null, ...answerFiles(decision.answerAttachments) } : null, withdrawn: !open && decision.status !== "answered" && decision.status !== "pending", suspended:decision.status === "pending" && !open,
+    ...(decision.optionsOnly === true ? { optionsOnly: true as const } : {}),
+    ...(typeof decision.headline === "string" && decision.headline ? { headline: decision.headline } : {}),
+    // A batch member's short subject label, when the asker gave one.
+    ...(typeof decision.topic === "string" && decision.topic ? { topic: decision.topic } : {}),
+    ...(Array.isArray(decision.targets) ? { targets: decision.targets.flatMap(decisionTarget) } : {}),
+    ...(typeof decision.replacedBy === "string" && decision.replacedBy ? { replacedBy: decision.replacedBy } : {}),
+    ...(permission ? { permission: mapPermission((decision as { permission?: unknown }).permission) } : {}),
   };
+}
+/** The files the owner attached to an answer: only complete saved references are kept; anything else is dropped, never guessed. */
+function answerFiles(raw: unknown): { attachments?: AttachmentRef[] } {
+  if (!Array.isArray(raw)) return {};
+  const files = raw.filter((f): f is AttachmentRef => !!f && typeof f === "object" && typeof f.name === "string" && typeof f.mimeType === "string"
+    && typeof f.size === "number" && typeof f.sha256 === "string" && /^[0-9a-f]{64}$/.test(f.sha256));
+  return files.length ? { attachments: files.map(({ name, mimeType, size, sha256 }) => ({ name, mimeType, size, sha256 })) } : {};
+}
+/** One target the runtime named on its stop question, kept only when it is complete; anything else is dropped, never guessed. */
+function decisionTarget(raw: unknown): DecisionTarget[] {
+  if (typeof raw !== "object" || raw === null) return [];
+  const t = raw as Record<string, unknown>, text = (v: unknown) => typeof v === "string" && v ? v : null;
+  if (t.kind === "task" && text(t.taskId)) return [{ kind: "task", taskId: text(t.taskId)!, title: text(t.title) ?? "" }];
+  if (t.kind === "report" && text(t.reportId)) return [{ kind: "report", reportId: text(t.reportId)!, role: text(t.role) ?? "" }];
+  if (t.kind === "rule" && text(t.path)) return [{ kind: "rule", path: text(t.path)! }];
+  return [];
 }
 
 /** A phase is believed only when the runtime state, if reported, agrees with it. */
@@ -136,7 +164,7 @@ export function mapTask(task: WireTask, context: { projectId: string }, result?:
     checkout: { kind: "main", branch: "" }, targetBranch: null, dependencies: [], status, resumeStatus: "working",
     observedPhase:phase, coordinatorRoute: task.coordinatorRoute ?? null, warnings:task.warnings, issue: task.waitReason, executionId: task.executionId, result: mapped, workspaceDigest: mapped?.digest ?? null, acceptance: null,
     conflict: "none", merge: null, resolvedBy: null, integration: null, closedAs: ownerResolved ? "as_is" : null, notVerifiedByCortex: ownerResolved, doneAt: ownerResolved ? lastConfirmed(task.lastConfirmedAt) : null,
-    archive: null, archiveQuestion: false, archiveAskAfter: null, work: "unmerged",
+    archive: null, work: "unmerged",
     process: !known ? "unknown" : status === "working" || status === "needs_you" ? "live" : "stopped",
     unexpectedChanges: false, purgeBlocker: null, settings: { model: "", effort: "", mode: "guarded", language: "auto" }, lastConfirmedAt: lastConfirmed(task.lastConfirmedAt),
   };
@@ -159,4 +187,11 @@ export function mapProjectSlice(project: Project, tasks: WireTask[], decisions: 
     return [session];
   });
   return { project, tasks: mapped, sessions };
+}
+/** A permission decision's details, each field kept only when it has the expected shape. */
+function mapPermission(raw: unknown): NonNullable<Decision["permission"]> {
+  const p = typeof raw === "object" && raw !== null ? raw as Record<string, unknown> : {};
+  const text = (v: unknown) => typeof v === "string" ? v : "";
+  return { operation: text(p.operation), paths: Array.isArray(p.paths) ? p.paths.filter((s): s is string => typeof s === "string") : [],
+    reason: text(p.reason), reasonText: text(p.reasonText), access: text(p.access) };
 }

@@ -1,6 +1,6 @@
 # CW-F02b: React Native (New Architecture) minimal spike on the owner's physical device: FCM push, Keystore round-trip and jank capture
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Superseded by the owner's decision of 2026-11-17: the Android client is not React Native; this spike was not run · **Phase:** 3+ · **Size:** L
 
 Split from [CW-F02](CW-F02.md): the combined Tauri and React Native spike exceeds the two-day limit for size L, so each stack has its own time-boxed item.
 

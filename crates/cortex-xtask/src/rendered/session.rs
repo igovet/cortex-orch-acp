@@ -1,7 +1,6 @@
 //! The infrastructure of the rendered journey: the private display (Openbox or headless Mutter), the native service, the shipped
 //! desktop binary with the request-file probe, and the audits that read it. The journey itself is `flow.rs`.
 
-
 use super::{pretty_block, pretty_line, AUDIT, POPOVERS, PROBE};
 use crate::installed::input::Input;
 use crate::installed::util::*;
@@ -22,7 +21,24 @@ const SHADOW_BLUR_MAX: f64 = 8.0;
 /// The interface face of the design (docs/cortex-workspace/DESIGN.md): bundled by `packages/workspace-ui` `fonts.css` and named first by its `--font` token.
 pub const DESIGN_FONT: &str = "Noto Sans Variable";
 // What a dying process leaves on stderr, counted by name. Message bodies are never retained.
-const STDERR_MARKERS: [&str; 16] = ["panic", "Segmentation", "Aborted", "core dumped", "CRITICAL", "WARNING", "EGL", "MESA", "Error reading events from display", "Broken pipe", "Lost connection", "Protocol error", "bwrap", "Operation not permitted", "out of memory", "WebProcess"];
+const STDERR_MARKERS: [&str; 16] = [
+    "panic",
+    "Segmentation",
+    "Aborted",
+    "core dumped",
+    "CRITICAL",
+    "WARNING",
+    "EGL",
+    "MESA",
+    "Error reading events from display",
+    "Broken pipe",
+    "Lost connection",
+    "Protocol error",
+    "bwrap",
+    "Operation not permitted",
+    "out of memory",
+    "WebProcess",
+];
 const WEB_TERMINATION: [&str; 3] = ["crashed", "exceeded_memory_limit", "terminated_by_api"];
 
 pub(super) struct Run {
@@ -84,13 +100,18 @@ pub(super) fn flag(v: &Value, path: &str) -> bool {
 }
 
 pub(super) fn count(v: &Value, path: &str) -> usize {
-    at(v, path).and_then(Value::as_arr).map_or(0, <[Value]>::len)
+    at(v, path)
+        .and_then(Value::as_arr)
+        .map_or(0, <[Value]>::len)
 }
 
 /// Names every regression in one audit; an empty list means the screen passed.
 pub fn judge(report: &Value) -> Vec<String> {
     let mut wrong = Vec::new();
-    let (vw, vh) = (num(report, "page.viewport.0"), num(report, "page.viewport.1"));
+    let (vw, vh) = (
+        num(report, "page.viewport.0"),
+        num(report, "page.viewport.1"),
+    );
     for part in ["html", "body", "root"] {
         if text(report, &format!("page.{part}")) != text(report, "page.surface") {
             wrong.push(format!("{part}_background_is_not_the_theme_surface"));
@@ -109,7 +130,11 @@ pub fn judge(report: &Value) -> Vec<String> {
         wrong.push("page_scrolls".into());
     }
     let bar = at(report, "chrome.barBox").filter(|b| b.truthy());
-    if bar.is_none_or(|_| num(report, "chrome.barBox.y") != 0.0 || num(report, "chrome.barBox.h") != TITLEBAR_H || num(report, "chrome.barBox.w") != vw) {
+    if bar.is_none_or(|_| {
+        num(report, "chrome.barBox.y") != 0.0
+            || num(report, "chrome.barBox.h") != TITLEBAR_H
+            || num(report, "chrome.barBox.w") != vw
+    }) {
         wrong.push("title_band_geometry".into());
     }
     if count(report, "chrome.outside") > 0 {
@@ -118,15 +143,25 @@ pub fn judge(report: &Value) -> Vec<String> {
     if count(report, "chrome.overlaps") > 0 {
         wrong.push("title_band_controls_overlap".into());
     }
-    if num(report, "chrome.winGroups") != 1.0 || num(report, "chrome.winButtons") != 3.0 || flag(report, "chrome.winHidden") {
+    if num(report, "chrome.winGroups") != 1.0
+        || num(report, "chrome.winButtons") != 3.0
+        || flag(report, "chrome.winHidden")
+    {
         wrong.push("window_controls_are_not_one_real_group".into());
     }
     if at(report, "chrome.split").is_some_and(Value::truthy)
-        && (count(report, "chrome.split.parts") != 2 || num(report, "chrome.split.parts.1.w") > CHEVRON_MAX || text(report, "chrome.split.display") == "grid")
+        && (count(report, "chrome.split.parts") != 2
+            || num(report, "chrome.split.parts.1.w") > CHEVRON_MAX
+            || text(report, "chrome.split.display") == "grid")
     {
         wrong.push("split_chevron_stretched".into());
     }
-    for (path, name) in [("light", "light_background_in_dark_theme"), ("native", "unstyled_native_control"), ("dashes", "dash_stands_for_missing_data"), ("clipped", "control_text_clipped")] {
+    for (path, name) in [
+        ("light", "light_background_in_dark_theme"),
+        ("native", "unstyled_native_control"),
+        ("dashes", "dash_stands_for_missing_data"),
+        ("clipped", "control_text_clipped"),
+    ] {
         if count(report, path) > 0 {
             wrong.push(name.into());
         }
@@ -140,8 +175,14 @@ pub fn judge(report: &Value) -> Vec<String> {
     if text(report, "ui.userSelect") != "text" {
         wrong.push("page_text_is_not_selectable".into());
     }
-    let faces: Vec<&str> = at(report, "fonts.faces").and_then(Value::as_obj).map(|o| o.iter().map(|(k, _)| k.as_str()).collect()).unwrap_or_default();
-    let loaded: Vec<&str> = at(report, "fonts.loaded").and_then(Value::as_arr).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    let faces: Vec<&str> = at(report, "fonts.faces")
+        .and_then(Value::as_obj)
+        .map(|o| o.iter().map(|(k, _)| k.as_str()).collect())
+        .unwrap_or_default();
+    let loaded: Vec<&str> = at(report, "fonts.loaded")
+        .and_then(Value::as_arr)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
     if faces.contains(&"Cousine") && !loaded.iter().any(|f| f.starts_with("Cousine")) {
         wrong.push("code_font_not_loaded".into());
     }
@@ -167,7 +208,10 @@ pub fn exit_status(code: Option<std::process::ExitStatus>) -> Value {
         None => obj(vec![("state", s("running"))]),
         Some(status) => match (status.code(), status.signal()) {
             (Some(c), _) => obj(vec![("state", s("exited")), ("exit_code", n(c as i64))]),
-            (None, Some(sig)) => obj(vec![("state", s("signalled")), ("signal", s(signal_name(sig)))]),
+            (None, Some(sig)) => obj(vec![
+                ("state", s("signalled")),
+                ("signal", s(signal_name(sig))),
+            ]),
             _ => obj(vec![("state", s("exited"))]),
         },
     }
@@ -175,7 +219,17 @@ pub fn exit_status(code: Option<std::process::ExitStatus>) -> Value {
 
 pub(super) fn signal_name(sig: i32) -> String {
     match sig {
-        1 => "SIGHUP", 2 => "SIGINT", 3 => "SIGQUIT", 4 => "SIGILL", 6 => "SIGABRT", 7 => "SIGBUS", 8 => "SIGFPE", 9 => "SIGKILL", 11 => "SIGSEGV", 13 => "SIGPIPE", 15 => "SIGTERM",
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        4 => "SIGILL",
+        6 => "SIGABRT",
+        7 => "SIGBUS",
+        8 => "SIGFPE",
+        9 => "SIGKILL",
+        11 => "SIGSEGV",
+        13 => "SIGPIPE",
+        15 => "SIGTERM",
         other => return other.to_string(),
     }
     .to_string()
@@ -183,7 +237,13 @@ pub(super) fn signal_name(sig: i32) -> String {
 
 /// Size and marker counts of a process's stderr, never its lines.
 pub fn stderr_summary(path: &Path) -> Value {
-    let Ok(raw) = std::fs::read(path) else { return obj(vec![("bytes", n(0)), ("lines", n(0)), ("markers", obj(vec![]))]) };
+    let Ok(raw) = std::fs::read(path) else {
+        return obj(vec![
+            ("bytes", n(0)),
+            ("lines", n(0)),
+            ("markers", obj(vec![])),
+        ]);
+    };
     let data = String::from_utf8_lossy(&raw).into_owned();
     let mut markers = obj(vec![]);
     for word in STDERR_MARKERS {
@@ -192,22 +252,47 @@ pub fn stderr_summary(path: &Path) -> Value {
             markers.set(word, n(found as i64));
         }
     }
-    obj(vec![("bytes", n(raw.len() as i64)), ("lines", n(data.matches('\n').count() as i64)), ("markers", markers)])
+    obj(vec![
+        ("bytes", n(raw.len() as i64)),
+        ("lines", n(data.matches('\n').count() as i64)),
+        ("markers", markers),
+    ])
 }
 
 /// Each core a dead process left, by name and size.
 pub fn core_files(directory: &Path) -> Value {
     let mut found: Vec<(String, u64)> = std::fs::read_dir(directory)
-        .map(|rd| rd.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("core")).map(|e| (e.file_name().to_string_lossy().into_owned(), e.metadata().map(|m| m.len()).unwrap_or(0))).collect())
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with("core"))
+                .map(|e| {
+                    (
+                        e.file_name().to_string_lossy().into_owned(),
+                        e.metadata().map(|m| m.len()).unwrap_or(0),
+                    )
+                })
+                .collect()
+        })
         .unwrap_or_default();
     found.sort();
-    arr(found.into_iter().map(|(name, bytes)| obj(vec![("name", s(name)), ("bytes", n(bytes as i64))])).collect())
+    arr(found
+        .into_iter()
+        .map(|(name, bytes)| obj(vec![("name", s(name)), ("bytes", n(bytes as i64))]))
+        .collect())
 }
 
 /// Every web-process-terminated WebKit reported to the probe, in order.
 pub fn web_terminations(directory: &Path) -> Value {
     let text = std::fs::read_to_string(directory.join("web-process.log")).unwrap_or_default();
-    arr(text.split_whitespace().map(|w| w.parse::<usize>().ok().and_then(|i| WEB_TERMINATION.get(i)).map_or_else(|| s(w), |name| s(*name))).collect())
+    arr(text
+        .split_whitespace()
+        .map(|w| {
+            w.parse::<usize>()
+                .ok()
+                .and_then(|i| WEB_TERMINATION.get(i))
+                .map_or_else(|| s(w), |name| s(*name))
+        })
+        .collect())
 }
 
 /// Name and state of this process group's members and of any WebKit process, from /proc. Never a command line.
@@ -215,10 +300,17 @@ pub fn owned_processes(group: i32) -> Value {
     let mut found = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/proc") {
         for entry in entries.flatten() {
-            let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else { continue };
-            let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else { continue };
+            let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else {
+                continue;
+            };
+            let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
+                continue;
+            };
             let fields: Vec<&str> = stat[close + 2..].split_whitespace().collect();
-            if fields.len() > 2 && (fields[2].parse::<i32>().ok() == Some(group) || stat[open + 1..close].starts_with("WebKit")) {
+            if fields.len() > 2
+                && (fields[2].parse::<i32>().ok() == Some(group)
+                    || stat[open + 1..close].starts_with("WebKit"))
+            {
                 found.push(format!("{}:{}", &stat[open + 1..close], fields[0]));
             }
         }
@@ -229,7 +321,12 @@ pub fn owned_processes(group: i32) -> Value {
 
 /// Which of the separate things went wrong, strongest evidence first. A compositor death takes a Wayland client with it, so it
 /// is named before the app.
-pub fn failure_class(app_exited: bool, terminated: bool, compositor_exited: bool, error: &str) -> Value {
+pub fn failure_class(
+    app_exited: bool,
+    terminated: bool,
+    compositor_exited: bool,
+    error: &str,
+) -> Value {
     if compositor_exited {
         s("compositor_exited")
     } else if app_exited {
@@ -244,7 +341,9 @@ pub fn failure_class(app_exited: bool, terminated: bool, compositor_exited: bool
 }
 
 pub(super) fn stop(child: &mut Option<Child>) {
-    let Some(mut process) = child.take() else { return };
+    let Some(mut process) = child.take() else {
+        return;
+    };
     unsafe { libc::killpg(process.id() as i32, libc::SIGTERM) };
     let end = Instant::now() + Duration::from_secs(8);
     while Instant::now() < end && process.try_wait().ok().flatten().is_none() {
@@ -266,16 +365,41 @@ pub(super) fn probe_library(scratch: &Path) -> Res<PathBuf> {
     let source = scratch.join("probe.c");
     write(&source, PROBE)?;
     let shim = scratch.join("probe.so");
-    let flags = run(&["pkg-config", "--cflags", "--libs", "webkit2gtk-4.1", "gtk+-3.0"], Duration::from_secs(20))?.stdout;
-    let mut gcc = vec!["gcc".to_string(), "-shared".into(), "-fPIC".into(), "-O1".into(), "-w".into(), "-o".into(), shim.to_string_lossy().into_owned(), source.to_string_lossy().into_owned()];
+    let flags = run(
+        &[
+            "pkg-config",
+            "--cflags",
+            "--libs",
+            "webkit2gtk-4.1",
+            "gtk+-3.0",
+        ],
+        Duration::from_secs(20),
+    )?
+    .stdout;
+    let mut gcc = vec![
+        "gcc".to_string(),
+        "-shared".into(),
+        "-fPIC".into(),
+        "-O1".into(),
+        "-w".into(),
+        "-o".into(),
+        shim.to_string_lossy().into_owned(),
+        source.to_string_lossy().into_owned(),
+    ];
     gcc.extend(flags.split_whitespace().map(String::from));
-    run(&gcc.iter().map(String::as_str).collect::<Vec<_>>(), Duration::from_secs(120))?;
+    run(
+        &gcc.iter().map(String::as_str).collect::<Vec<_>>(),
+        Duration::from_secs(120),
+    )?;
     Ok(shim)
 }
 
 pub(super) fn channel_entry(checkout: &Path, name: &str) -> Res<Value> {
     let text = read_to_string(&checkout.join("crates/workspace-protocol/channels.json"))?;
-    parse(&text)?.get(name).cloned().ok_or_else(|| format!("channel {name} is not defined"))
+    parse(&text)?
+        .get(name)
+        .cloned()
+        .ok_or_else(|| format!("channel {name} is not defined"))
 }
 
 pub(super) fn xdotool(args: &[&str]) -> Res<String> {
@@ -314,8 +438,37 @@ pub(super) struct Stack {
 }
 
 impl Stack {
-    pub(super) fn new(scratch: PathBuf, probe_dir: PathBuf, shim: PathBuf, artifacts: PathBuf, checkout: PathBuf, channel: Value, wayland: bool) -> Stack {
-        Stack { scratch, probe_dir, shim, artifacts, checkout, channel, xvfb: None, wm: None, service: None, app: None, sequence: 0, launches: 0, wayland, compositor: None, pulse: None, input: None, closes: 0, launch_theme: "dark".into(), wayland_name: WAYLAND_NAME.into(), a11y: true }
+    pub(super) fn new(
+        scratch: PathBuf,
+        probe_dir: PathBuf,
+        shim: PathBuf,
+        artifacts: PathBuf,
+        checkout: PathBuf,
+        channel: Value,
+        wayland: bool,
+    ) -> Stack {
+        Stack {
+            scratch,
+            probe_dir,
+            shim,
+            artifacts,
+            checkout,
+            channel,
+            xvfb: None,
+            wm: None,
+            service: None,
+            app: None,
+            sequence: 0,
+            launches: 0,
+            wayland,
+            compositor: None,
+            pulse: None,
+            input: None,
+            closes: 0,
+            launch_theme: "dark".into(),
+            wayland_name: WAYLAND_NAME.into(),
+            a11y: true,
+        }
     }
 }
 
@@ -328,7 +481,15 @@ impl Stack {
         let mut fds = [0i32; 2];
         require(unsafe { libc::pipe(fds.as_mut_ptr()) } == 0, "pipe failed")?;
         let child = Command::new("Xvfb")
-            .args(["-displayfd", &fds[1].to_string(), "-screen", "0", &format!("{}x{}x24", SCREEN.0, SCREEN.1), "-nolisten", "tcp"])
+            .args([
+                "-displayfd",
+                &fds[1].to_string(),
+                "-screen",
+                "0",
+                &format!("{}x{}x24", SCREEN.0, SCREEN.1),
+                "-nolisten",
+                "tcp",
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0)
@@ -339,19 +500,35 @@ impl Stack {
         let got = unsafe { libc::read(fds[0], buf.as_mut_ptr() as *mut _, 32) };
         unsafe { libc::close(fds[0]) };
         self.xvfb = Some(child);
-        let display = format!(":{}", String::from_utf8_lossy(&buf[..got.max(0) as usize]).trim());
+        let display = format!(
+            ":{}",
+            String::from_utf8_lossy(&buf[..got.max(0) as usize]).trim()
+        );
         std::env::set_var("DISPLAY", display);
         std::env::set_var("GDK_BACKEND", "x11");
         std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
         std::env::set_var("NO_AT_BRIDGE", "0");
         std::env::set_var("GTK_A11Y", "always");
-        self.wm = Some(Command::new("openbox").arg("--sm-disable").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn().map_err(|e| format!("openbox: {e}"))?);
+        self.wm = Some(
+            Command::new("openbox")
+                .arg("--sm-disable")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .map_err(|e| format!("openbox: {e}"))?,
+        );
         sleep_ms(1500);
         Ok(())
     }
 
     pub(super) fn start_service(&mut self) -> Res<()> {
-        let log = std::fs::OpenOptions::new().create(true).append(true).open(self.scratch.join("service.log")).map_err(|e| e.to_string())?;
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.scratch.join("service.log"))
+            .map_err(|e| e.to_string())?;
         self.service = Some(
             Command::new(self.artifacts.join(self.ns("service_binary")))
                 .arg(std::env::var("HOME").map_err(|_| "HOME unset")?)
@@ -367,20 +544,45 @@ impl Stack {
     }
 
     pub(super) fn socket(&self) -> PathBuf {
-        Path::new(&std::env::var("XDG_RUNTIME_DIR").unwrap_or_default()).join(self.ns("runtime_namespace")).join("service.sock")
+        Path::new(&std::env::var("XDG_RUNTIME_DIR").unwrap_or_default())
+            .join(self.ns("runtime_namespace"))
+            .join("service.sock")
     }
 
     /// Writes the dark/light choice GTK reads with no settings daemon; WebKit derives prefers-color-scheme from it: the real System path.
     pub(super) fn gtk_theme(&self, theme: &str) -> Res<()> {
-        let config = PathBuf::from(std::env::var("XDG_CONFIG_HOME").map_err(|_| "XDG_CONFIG_HOME unset")?).join("gtk-3.0");
+        let config =
+            PathBuf::from(std::env::var("XDG_CONFIG_HOME").map_err(|_| "XDG_CONFIG_HOME unset")?)
+                .join("gtk-3.0");
         std::fs::create_dir_all(&config).map_err(|e| e.to_string())?;
-        write(&config.join("settings.ini"), &format!("[Settings]\ngtk-theme-name={}\n", if theme == "dark" { "Adwaita-dark" } else { "Adwaita" }))?;
+        write(
+            &config.join("settings.ini"),
+            &format!(
+                "[Settings]\ngtk-theme-name={}\n",
+                if theme == "dark" {
+                    "Adwaita-dark"
+                } else {
+                    "Adwaita"
+                }
+            ),
+        )?;
         if self.wayland {
             // On Wayland GTK takes the theme from GSettings.
-            let keyfile = config.parent().ok_or("XDG_CONFIG_HOME has no parent")?.join("glib-2.0/settings/keyfile");
-            std::fs::create_dir_all(keyfile.parent().ok_or("no keyfile directory")?).map_err(|e| e.to_string())?;
+            let keyfile = config
+                .parent()
+                .ok_or("XDG_CONFIG_HOME has no parent")?
+                .join("glib-2.0/settings/keyfile");
+            std::fs::create_dir_all(keyfile.parent().ok_or("no keyfile directory")?)
+                .map_err(|e| e.to_string())?;
             let dark = theme == "dark";
-            write(&keyfile, &format!("[org/gnome/desktop/interface]\ngtk-theme='{}'\ncolor-scheme='{}'\n", if dark { "Adwaita-dark" } else { "Adwaita" }, if dark { "prefer-dark" } else { "prefer-light" }))?;
+            write(
+                &keyfile,
+                &format!(
+                    "[org/gnome/desktop/interface]\ngtk-theme='{}'\ncolor-scheme='{}'\n",
+                    if dark { "Adwaita-dark" } else { "Adwaita" },
+                    if dark { "prefer-dark" } else { "prefer-light" }
+                ),
+            )?;
         }
         Ok(())
     }
@@ -393,7 +595,11 @@ impl Stack {
         if !self.wayland {
             return;
         }
-        command.env_remove("DISPLAY").env("GDK_BACKEND", "wayland").env("WAYLAND_DISPLAY", &self.wayland_name).env("GSETTINGS_BACKEND", "keyfile");
+        command
+            .env_remove("DISPLAY")
+            .env("GDK_BACKEND", "wayland")
+            .env("WAYLAND_DISPLAY", &self.wayland_name)
+            .env("GSETTINGS_BACKEND", "keyfile");
         if self.a11y {
             command.env("GTK_A11Y", "always").env("NO_AT_BRIDGE", "0");
         } else {
@@ -405,10 +611,23 @@ impl Stack {
         self.gtk_theme("dark")?;
         let logs = self.scratch.join("logs");
         std::fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
-        let sink = std::fs::File::create(logs.join(if self.a11y { "compositor.stderr" } else { "stage-compositor.stderr" })).map_err(|e| e.to_string())?;
+        let sink = std::fs::File::create(logs.join(if self.a11y {
+            "compositor.stderr"
+        } else {
+            "stage-compositor.stderr"
+        }))
+        .map_err(|e| e.to_string())?;
         let mut command = Command::new("mutter");
         command
-            .args(["--headless", "--wayland", "--no-x11", "--virtual-monitor", &format!("{}x{}", MONITOR.0, MONITOR.1), "--wayland-display", &self.wayland_name])
+            .args([
+                "--headless",
+                "--wayland",
+                "--no-x11",
+                "--virtual-monitor",
+                &format!("{}x{}", MONITOR.0, MONITOR.1),
+                "--wayland-display",
+                &self.wayland_name,
+            ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(sink)
@@ -421,15 +640,22 @@ impl Stack {
             std::env::remove_var("GDK_BACKEND");
             std::env::set_var("WAYLAND_DISPLAY", &self.wayland_name);
         }
-        let socket = Path::new(&std::env::var("XDG_RUNTIME_DIR").unwrap_or_default()).join(&self.wayland_name);
+        let socket = Path::new(&std::env::var("XDG_RUNTIME_DIR").unwrap_or_default())
+            .join(&self.wayland_name);
         let mut gone = None;
         let up = wait_secs("Wayland compositor", 20, || {
-            gone = self.compositor.as_mut().and_then(|c| c.try_wait().ok().flatten());
+            gone = self
+                .compositor
+                .as_mut()
+                .and_then(|c| c.try_wait().ok().flatten());
             Ok(socket.exists() || gone.is_some())
         });
         up?;
         if let Some(status) = gone {
-            return Err(format!("wayland_compositor_failed:{}", line(&exit_status(Some(status)))));
+            return Err(format!(
+                "wayland_compositor_failed:{}",
+                line(&exit_status(Some(status)))
+            ));
         }
         // The keyboard and pointer are created before GTK enumerates the seat.
         self.input = Some(Input::new("wayland")?);
@@ -443,11 +669,22 @@ impl Stack {
         self.launches += 1;
         let logs = self.scratch.join("logs");
         std::fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
-        let sink = std::fs::File::create(logs.join(format!("app-{}.stderr", self.launches))).map_err(|e| e.to_string())?;
+        let sink = std::fs::File::create(logs.join(format!("app-{}.stderr", self.launches)))
+            .map_err(|e| e.to_string())?;
         let mut command = Command::new(self.artifacts.join(self.ns("desktop_binary")));
         self.apply_env(&mut command);
-        command.env("LD_PRELOAD", &self.shim).env("CW_PROBE_DIR", &self.probe_dir).stdin(Stdio::null()).stdout(Stdio::null()).stderr(sink).process_group(0);
-        self.app = Some(command.spawn().map_err(|e| format!("desktop binary: {e}"))?);
+        command
+            .env("LD_PRELOAD", &self.shim)
+            .env("CW_PROBE_DIR", &self.probe_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(sink)
+            .process_group(0);
+        self.app = Some(
+            command
+                .spawn()
+                .map_err(|e| format!("desktop binary: {e}"))?,
+        );
         Ok(())
     }
 
@@ -460,20 +697,29 @@ impl Stack {
         let answer = self.probe_dir.join("response.json");
         let _ = std::fs::remove_file(&answer);
         self.sequence += 1;
-        let temporary = self.probe_dir.join(format!("request-{}.tmp", self.sequence));
+        let temporary = self
+            .probe_dir
+            .join(format!("request-{}.tmp", self.sequence));
         write(&temporary, body)?;
-        std::fs::rename(&temporary, self.probe_dir.join("request.js")).map_err(|e| e.to_string())?;
+        std::fs::rename(&temporary, self.probe_dir.join("request.js"))
+            .map_err(|e| e.to_string())?;
         let end = Instant::now() + Duration::from_secs(seconds);
         while Instant::now() < end {
             if answer.exists() {
                 let reply = read_to_string(&answer)?;
                 if let Some(error) = reply.strip_prefix('!') {
-                    return Err(format!("probe_script_failed:{}", error.chars().take(160).collect::<String>()));
+                    return Err(format!(
+                        "probe_script_failed:{}",
+                        error.chars().take(160).collect::<String>()
+                    ));
                 }
                 return Ok(reply);
             }
             if let Some(status) = self.app_status() {
-                return Err(format!("app_exited_during_request:{}", line(&exit_status(Some(status)))));
+                return Err(format!(
+                    "app_exited_during_request:{}",
+                    line(&exit_status(Some(status)))
+                ));
             }
             sleep_ms(30);
         }
@@ -485,7 +731,12 @@ impl Stack {
         parse(&reply)
     }
 
-    pub(super) fn wait_for(&mut self, step: &str, seconds: u64, mut check: impl FnMut(&mut Stack) -> Res<bool>) -> Res<()> {
+    pub(super) fn wait_for(
+        &mut self,
+        step: &str,
+        seconds: u64,
+        mut check: impl FnMut(&mut Stack) -> Res<bool>,
+    ) -> Res<()> {
         let end = Instant::now() + Duration::from_secs(seconds);
         while Instant::now() < end {
             if check(self)? {
@@ -498,12 +749,21 @@ impl Stack {
 
     pub(super) fn loaded(&mut self) -> Res<()> {
         self.wait_for("page_not_ready", 30, |st| Ok(st.js("return document.readyState === 'complete' && !!document.querySelector('.titlebar') ? 'yes' : ''", 5).is_ok_and(|a| a == "yes")))?;
-        self.js("await document.fonts.ready; return 'yes';", 10).map(|_| ())
+        self.js("await document.fonts.ready; return 'yes';", 10)
+            .map(|_| ())
     }
 
     pub(super) fn window_id(&mut self) -> Res<String> {
         let pid = self.app.as_ref().map(|a| a.id()).ok_or("no app")?;
-        let found = xdotool(&["search", "--all", "--onlyvisible", "--pid", &pid.to_string(), "--name", &format!("^{}$", text(&self.channel, "title"))])?;
+        let found = xdotool(&[
+            "search",
+            "--all",
+            "--onlyvisible",
+            "--pid",
+            &pid.to_string(),
+            "--name",
+            &format!("^{}$", text(&self.channel, "title")),
+        ])?;
         let ids: Vec<&str> = found.lines().collect();
         require(ids.len() == 1, "owned_window_identity_ambiguous")?;
         Ok(ids[0].to_string())
@@ -512,12 +772,19 @@ impl Stack {
 
 pub(super) fn geometry(window: &str) -> Res<[i64; 4]> {
     let out = xdotool(&["getwindowgeometry", "--shell", window])?;
-    let pick = |key: &str| -> Res<i64> { out.lines().find_map(|l| l.strip_prefix(&format!("{key}="))).and_then(|v| v.trim().parse().ok()).ok_or_else(|| format!("geometry {key}")) };
+    let pick = |key: &str| -> Res<i64> {
+        out.lines()
+            .find_map(|l| l.strip_prefix(&format!("{key}=")))
+            .and_then(|v| v.trim().parse().ok())
+            .ok_or_else(|| format!("geometry {key}"))
+    };
     Ok([pick("X")?, pick("Y")?, pick("WIDTH")?, pick("HEIGHT")?])
 }
 
 pub(super) fn xprop(window: &str, name: &str) -> String {
-    run(&["xprop", "-id", window, name], Duration::from_secs(10)).map(|c| c.stdout.trim().to_string()).unwrap_or_default()
+    run(&["xprop", "-id", window, name], Duration::from_secs(10))
+        .map(|c| c.stdout.trim().to_string())
+        .unwrap_or_default()
 }
 
 pub(super) fn maximized(window: &str) -> bool {
@@ -527,7 +794,11 @@ pub(super) fn maximized(window: &str) -> bool {
 
 pub(super) fn pointer(window: &str, x: f64, y: f64, actions: &[&str]) -> Res<()> {
     let g = geometry(window)?;
-    let mut args = vec!["mousemove".to_string(), (g[0] + x.round() as i64).to_string(), (g[1] + y.round() as i64).to_string()];
+    let mut args = vec![
+        "mousemove".to_string(),
+        (g[0] + x.round() as i64).to_string(),
+        (g[1] + y.round() as i64).to_string(),
+    ];
     args.extend(actions.iter().map(|a| a.to_string()));
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     xdotool(&refs)?;
@@ -542,7 +813,11 @@ pub(super) fn drag(window: &str, start: (f64, f64), by: (i64, i64)) -> Res<()> {
     let g = geometry(window)?;
     let (ax, ay) = (g[0] + start.0.round() as i64, g[1] + start.1.round() as i64);
     for step in 1..=8 {
-        xdotool(&["mousemove", &(ax + by.0 * step / 8).to_string(), &(ay + by.1 * step / 8).to_string()])?;
+        xdotool(&[
+            "mousemove",
+            &(ax + by.0 * step / 8).to_string(),
+            &(ay + by.1 * step / 8).to_string(),
+        ])?;
         sleep_ms(30);
     }
     xdotool(&["mouseup", "1"])?;
@@ -614,13 +889,49 @@ pub(super) fn popovers(run_: &mut Run, st: &mut Stack, label: &str) -> Res<()> {
     let rows = results.as_arr().unwrap_or(&[]);
     let bad: Vec<&Value> = rows
         .iter()
-        .filter(|p| !(flag(p, "supported") && flag(p, "open") && text(p, "display") != "none" && num(p, "rect.2") > 0.0 && num(p, "rect.3") > 0.0 && flag(p, "inside") && num(p, "items") > 0.0))
+        .filter(|p| {
+            !(flag(p, "supported")
+                && flag(p, "open")
+                && text(p, "display") != "none"
+                && num(p, "rect.2") > 0.0
+                && num(p, "rect.3") > 0.0
+                && flag(p, "inside")
+                && num(p, "items") > 0.0)
+        })
         .collect();
     if !bad.is_empty() || rows.is_empty() {
-        fault(run_, "popovers", vec![("screen", s(label)), ("results", results.clone()), ("bad", arr(bad.iter().map(|p| at(p, "id").cloned().unwrap_or(Value::Null)).collect()))]);
+        fault(
+            run_,
+            "popovers",
+            vec![
+                ("screen", s(label)),
+                ("results", results.clone()),
+                (
+                    "bad",
+                    arr(bad
+                        .iter()
+                        .map(|p| at(p, "id").cloned().unwrap_or(Value::Null))
+                        .collect()),
+                ),
+            ],
+        );
     } else {
-        let opened = arr(rows.iter().map(|p| obj(vec![("id", at(p, "id").cloned().unwrap_or(Value::Null)), ("rect", at(p, "rect").cloned().unwrap_or(Value::Null)), ("items", at(p, "items").cloned().unwrap_or(Value::Null))])).collect());
-        outcome(run_, "popovers", "passed", vec![("screen", s(label)), ("opened", opened)]);
+        let opened = arr(rows
+            .iter()
+            .map(|p| {
+                obj(vec![
+                    ("id", at(p, "id").cloned().unwrap_or(Value::Null)),
+                    ("rect", at(p, "rect").cloned().unwrap_or(Value::Null)),
+                    ("items", at(p, "items").cloned().unwrap_or(Value::Null)),
+                ])
+            })
+            .collect());
+        outcome(
+            run_,
+            "popovers",
+            "passed",
+            vec![("screen", s(label)), ("opened", opened)],
+        );
     }
     Ok(())
 }
@@ -635,7 +946,12 @@ pub(super) fn nav(st: &mut Stack, label: &str) -> Res<()> {
 
 pub(super) fn click_control(st: &mut Stack, window: &str, selector: &str) -> Res<()> {
     let centre = st.query(&format!("const r = document.querySelector({}).getBoundingClientRect(); return JSON.stringify([r.x + r.width / 2, r.y + r.height / 2]);", crate::json::quote(selector, true)), 10)?;
-    pointer(window, num(&centre, "0"), num(&centre, "1"), &["click", "1"])?;
+    pointer(
+        window,
+        num(&centre, "0"),
+        num(&centre, "1"),
+        &["click", "1"],
+    )?;
     sleep_ms(350);
     Ok(())
 }
@@ -650,22 +966,64 @@ pub(super) fn window_behaviour(run_: &mut Run, st: &mut Stack) -> Res<()> {
     let hints = xprop(&window, "_MOTIF_WM_HINTS");
     let extents = xprop(&window, "_NET_FRAME_EXTENTS");
     let native = parse(&st.js("@native", 10)?)?;
-    let background: Vec<f64> = (0..3).map(|i| num(&native, &format!("background.{i}"))).collect();
+    let background: Vec<f64> = (0..3)
+        .map(|i| num(&native, &format!("background.{i}")))
+        .collect();
     if background != [24.0, 27.0, 26.0] {
-        fault(run_, "window_background_is_not_the_surface", vec![("native", native.clone())]);
+        fault(
+            run_,
+            "window_background_is_not_the_surface",
+            vec![("native", native.clone())],
+        );
     }
     // `_MOTIF_WM_HINTS = flags, functions, decorations, ...`: decorations off in the third field.
-    let fields: Vec<u64> = hints.split('=').nth(1).map(|t| t.split(',').filter_map(|p| u64::from_str_radix(p.trim().trim_start_matches("0x"), 16).ok()).collect()).unwrap_or_default();
+    let fields: Vec<u64> = hints
+        .split('=')
+        .nth(1)
+        .map(|t| {
+            t.split(',')
+                .filter_map(|p| u64::from_str_radix(p.trim().trim_start_matches("0x"), 16).ok())
+                .collect()
+        })
+        .unwrap_or_default();
     let no_frame = fields.len() >= 3 && fields[0] & 2 != 0 && fields[2] == 0;
-    if !no_frame || flag(&native, "decorated") || line(at(&native, "top").unwrap_or(&Value::Null)) != line(at(&native, "web").unwrap_or(&Value::Null)) {
-        fault(run_, "os_decoration_present", vec![("hints", s(hints.as_str())), ("extents", s(extents.as_str())), ("native", native.clone())]);
+    if !no_frame
+        || flag(&native, "decorated")
+        || line(at(&native, "top").unwrap_or(&Value::Null))
+            != line(at(&native, "web").unwrap_or(&Value::Null))
+    {
+        fault(
+            run_,
+            "os_decoration_present",
+            vec![
+                ("hints", s(hints.as_str())),
+                ("extents", s(extents.as_str())),
+                ("native", native.clone()),
+            ],
+        );
     } else {
-        outcome(run_, "no_os_decoration", "passed", vec![("hints", s(hints.as_str())), ("extents", s(extents.as_str())), ("native", native.clone())]);
+        outcome(
+            run_,
+            "no_os_decoration",
+            "passed",
+            vec![
+                ("hints", s(hints.as_str())),
+                ("extents", s(extents.as_str())),
+                ("native", native.clone()),
+            ],
+        );
     }
     let start = geometry(&window)?;
     let view = st.query("return JSON.stringify([innerWidth, innerHeight]);", 10)?;
     if [start[2] as f64, start[3] as f64] != [num(&view, "0"), num(&view, "1")] {
-        fault(run_, "webview_does_not_fill_window", vec![("window", arr(start.iter().map(|v| n(*v)).collect())), ("viewport", view)]);
+        fault(
+            run_,
+            "webview_does_not_fill_window",
+            vec![
+                ("window", arr(start.iter().map(|v| n(*v)).collect())),
+                ("viewport", view),
+            ],
+        );
     }
     // The real buttons, with the real pointer, through a real window manager.
     click_control(st, &window, ".win button[aria-label=\"Maximize\"]")?;
@@ -674,21 +1032,55 @@ pub(super) fn window_behaviour(run_: &mut Run, st: &mut Stack) -> Res<()> {
     let full = geometry(&window)?;
     st.wait_for("restore_label", 15, |st| Ok(st.js("return document.querySelector('.win button:nth-child(2)').getAttribute('aria-label') === 'Restore' ? 'Restore' : ''", 10)? == "Restore"))?;
     let filled = st.query("const r = document.getElementById('root').getBoundingClientRect(); return JSON.stringify([r.width, r.height, innerWidth, innerHeight]);", 10)?;
-    outcome(run_, "maximize", "passed", vec![("window", arr(full.iter().map(|v| n(*v)).collect())), ("root_and_viewport", filled.clone())]);
-    if (full[2], full[3]) != SCREEN || (num(&filled, "0"), num(&filled, "1")) != (SCREEN.0 as f64, SCREEN.1 as f64) {
-        fault(run_, "maximize_does_not_fill", vec![("window", arr(full.iter().map(|v| n(*v)).collect())), ("root", filled)]);
+    outcome(
+        run_,
+        "maximize",
+        "passed",
+        vec![
+            ("window", arr(full.iter().map(|v| n(*v)).collect())),
+            ("root_and_viewport", filled.clone()),
+        ],
+    );
+    if (full[2], full[3]) != SCREEN
+        || (num(&filled, "0"), num(&filled, "1")) != (SCREEN.0 as f64, SCREEN.1 as f64)
+    {
+        fault(
+            run_,
+            "maximize_does_not_fill",
+            vec![
+                ("window", arr(full.iter().map(|v| n(*v)).collect())),
+                ("root", filled),
+            ],
+        );
     }
     click_control(st, &window, ".win button[aria-label=\"Restore\"]")?;
     let w = window.clone();
     st.wait_for("restore_button", 15, |_| Ok(!maximized(&w)))?;
-    outcome(run_, "restore", "passed", vec![("window", arr(geometry(&window)?.iter().map(|v| n(*v)).collect()))]);
+    outcome(
+        run_,
+        "restore",
+        "passed",
+        vec![(
+            "window",
+            arr(geometry(&window)?.iter().map(|v| n(*v)).collect()),
+        )],
+    );
     click_control(st, &window, ".win button[aria-label=\"Minimize\"]")?;
     let w = window.clone();
-    st.wait_for("minimize_button", 15, |_| Ok(xprop(&w, "_NET_WM_STATE").contains("_NET_WM_STATE_HIDDEN")))?;
-    outcome(run_, "minimize", "passed", vec![("state", s(xprop(&window, "_NET_WM_STATE")))]);
+    st.wait_for("minimize_button", 15, |_| {
+        Ok(xprop(&w, "_NET_WM_STATE").contains("_NET_WM_STATE_HIDDEN"))
+    })?;
+    outcome(
+        run_,
+        "minimize",
+        "passed",
+        vec![("state", s(xprop(&window, "_NET_WM_STATE")))],
+    );
     let _ = xdotool(&["windowactivate", "--sync", &window]);
     let w = window.clone();
-    st.wait_for("unminimize", 15, |_| Ok(!xprop(&w, "_NET_WM_STATE").contains("_NET_WM_STATE_HIDDEN")))?;
+    st.wait_for("unminimize", 15, |_| {
+        Ok(!xprop(&w, "_NET_WM_STATE").contains("_NET_WM_STATE_HIDDEN"))
+    })?;
 
     xdotool(&["windowmove", &window, "100", "60"])?;
     xdotool(&["windowsize", &window, "1300", "860"])?;
@@ -697,50 +1089,138 @@ pub(super) fn window_behaviour(run_: &mut Run, st: &mut Stack) -> Res<()> {
     let blank = band_blank(st)?;
     drag(&window, blank, (140, 90))?;
     let after = geometry(&window)?;
-    outcome(run_, "band_drag", "passed", vec![("before", arr(before.iter().map(|v| n(*v)).collect())), ("after", arr(after.iter().map(|v| n(*v)).collect()))]);
+    outcome(
+        run_,
+        "band_drag",
+        "passed",
+        vec![
+            ("before", arr(before.iter().map(|v| n(*v)).collect())),
+            ("after", arr(after.iter().map(|v| n(*v)).collect())),
+        ],
+    );
     // The window follows from where the pointer is when the slop is crossed, so a quick drag lands a step short.
-    if (after[0] - before[0] - 140).abs() > 30 || (after[1] - before[1] - 90).abs() > 30 || after[2..] != before[2..] {
-        fault(run_, "band_drag_failed", vec![("before", arr(before.iter().map(|v| n(*v)).collect())), ("after", arr(after.iter().map(|v| n(*v)).collect()))]);
+    if (after[0] - before[0] - 140).abs() > 30
+        || (after[1] - before[1] - 90).abs() > 30
+        || after[2..] != before[2..]
+    {
+        fault(
+            run_,
+            "band_drag_failed",
+            vec![
+                ("before", arr(before.iter().map(|v| n(*v)).collect())),
+                ("after", arr(after.iter().map(|v| n(*v)).collect())),
+            ],
+        );
     }
     // A press after the drag must reach the page at once.
-    let pressed = st.js("return document.querySelector('.tb-toggle').getAttribute('aria-pressed');", 10)?;
+    let pressed = st.js(
+        "return document.querySelector('.tb-toggle').getAttribute('aria-pressed');",
+        10,
+    )?;
     click_control(st, &window, ".tb-toggle")?;
-    if st.js("return document.querySelector('.tb-toggle').getAttribute('aria-pressed');", 10)? == pressed {
+    if st.js(
+        "return document.querySelector('.tb-toggle').getAttribute('aria-pressed');",
+        10,
+    )? == pressed
+    {
         fault(run_, "first_click_after_drag_lost", vec![]);
     }
     let ring = st.query("const a = document.activeElement, s = getComputedStyle(a); return JSON.stringify({ active: a.tagName, focusVisible: a.matches(':focus-visible'), outline: s.outlineStyle });", 10)?;
     if flag(&ring, "focusVisible") || text(&ring, "outline") != "none" {
-        fault(run_, "focus_ring_stays_after_a_mouse_click", vec![("ring", ring)]);
+        fault(
+            run_,
+            "focus_ring_stays_after_a_mouse_click",
+            vec![("ring", ring)],
+        );
     } else {
-        outcome(run_, "no_focus_ring_after_mouse_click", "passed", vec![("active", at(&ring, "active").cloned().unwrap_or(Value::Null)), ("focusVisible", b(false)), ("outline", s("none"))]);
+        outcome(
+            run_,
+            "no_focus_ring_after_mouse_click",
+            "passed",
+            vec![
+                (
+                    "active",
+                    at(&ring, "active").cloned().unwrap_or(Value::Null),
+                ),
+                ("focusVisible", b(false)),
+                ("outline", s("none")),
+            ],
+        );
     }
     click_control(st, &window, ".tb-toggle")?;
     let held = geometry(&window)?;
     let toggle = st.query("const r = document.querySelector('.tb-toggle').getBoundingClientRect(); return JSON.stringify([r.x + r.width / 2, r.y + r.height / 2]);", 10)?;
     drag(&window, (num(&toggle, "0"), num(&toggle, "1")), (120, 60))?;
     if geometry(&window)?[..2] != held[..2] {
-        fault(run_, "control_in_band_dragged_the_window", vec![("before", arr(held.iter().map(|v| n(*v)).collect()))]);
+        fault(
+            run_,
+            "control_in_band_dragged_the_window",
+            vec![("before", arr(held.iter().map(|v| n(*v)).collect()))],
+        );
     } else {
-        outcome(run_, "controls_do_not_drag", "passed", vec![("at", arr(held.iter().map(|v| n(*v)).collect()))]);
+        outcome(
+            run_,
+            "controls_do_not_drag",
+            "passed",
+            vec![("at", arr(held.iter().map(|v| n(*v)).collect()))],
+        );
     }
-    if st.js("return document.querySelector('.tb-toggle').getAttribute('aria-pressed');", 10)? != pressed {
+    if st.js(
+        "return document.querySelector('.tb-toggle').getAttribute('aria-pressed');",
+        10,
+    )? != pressed
+    {
         click_control(st, &window, ".tb-toggle")?;
     }
-    pointer(&window, blank.0, blank.1, &["click", "--repeat", "2", "--delay", "90", "1"])?;
+    pointer(
+        &window,
+        blank.0,
+        blank.1,
+        &["click", "--repeat", "2", "--delay", "90", "1"],
+    )?;
     let w = window.clone();
     st.wait_for("double_click_maximize", 15, |_| Ok(maximized(&w)))?;
-    outcome(run_, "double_click_maximizes", "passed", vec![("window", arr(geometry(&window)?.iter().map(|v| n(*v)).collect()))]);
+    outcome(
+        run_,
+        "double_click_maximizes",
+        "passed",
+        vec![(
+            "window",
+            arr(geometry(&window)?.iter().map(|v| n(*v)).collect()),
+        )],
+    );
     let blank_full = band_blank(st)?;
-    pointer(&window, blank_full.0, blank_full.1, &["click", "--repeat", "2", "--delay", "90", "1"])?;
+    pointer(
+        &window,
+        blank_full.0,
+        blank_full.1,
+        &["click", "--repeat", "2", "--delay", "90", "1"],
+    )?;
     let w = window.clone();
     st.wait_for("double_click_restore", 15, |_| Ok(!maximized(&w)))?;
     sleep_ms(300);
-    for (edge, by, expect) in [("right", (90i64, 0i64), (90i64, 0i64)), ("bottom", (0, 70), (0, 70))] {
+    for (edge, by, expect) in [
+        ("right", (90i64, 0i64), (90i64, 0i64)),
+        ("bottom", (0, 70), (0, 70)),
+    ] {
         let now = geometry(&window)?;
-        let start = if edge == "right" { ((now[2] - 2) as f64, now[3] as f64 / 2.0) } else { (now[2] as f64 / 2.0, (now[3] - 2) as f64) };
+        let start = if edge == "right" {
+            ((now[2] - 2) as f64, now[3] as f64 / 2.0)
+        } else {
+            (now[2] as f64 / 2.0, (now[3] - 2) as f64)
+        };
         drag(&window, start, by)?;
         let grown = geometry(&window)?;
-        outcome(run_, "edge_resize", "passed", vec![("edge", s(edge)), ("before", arr(now.iter().map(|v| n(*v)).collect())), ("after", arr(grown.iter().map(|v| n(*v)).collect()))]);
+        outcome(
+            run_,
+            "edge_resize",
+            "passed",
+            vec![
+                ("edge", s(edge)),
+                ("before", arr(now.iter().map(|v| n(*v)).collect())),
+                ("after", arr(grown.iter().map(|v| n(*v)).collect())),
+            ],
+        );
         if (grown[2] - now[2] - expect.0).abs() > 6 || (grown[3] - now[3] - expect.1).abs() > 6 {
             fault(run_, "edge_resize_failed", vec![("edge", s(edge))]);
         }
@@ -748,7 +1228,16 @@ pub(super) fn window_behaviour(run_: &mut Run, st: &mut Stack) -> Res<()> {
     let now = geometry(&window)?;
     drag(&window, (2.0, 2.0), (-30, -20))?;
     let grown = geometry(&window)?;
-    outcome(run_, "edge_resize", "passed", vec![("edge", s("top_left")), ("before", arr(now.iter().map(|v| n(*v)).collect())), ("after", arr(grown.iter().map(|v| n(*v)).collect()))]);
+    outcome(
+        run_,
+        "edge_resize",
+        "passed",
+        vec![
+            ("edge", s("top_left")),
+            ("before", arr(now.iter().map(|v| n(*v)).collect())),
+            ("after", arr(grown.iter().map(|v| n(*v)).collect())),
+        ],
+    );
     if grown[2] - now[2] < 20 || grown[3] - now[3] < 12 || grown[0] >= now[0] {
         fault(run_, "edge_resize_failed", vec![("edge", s("top_left"))]);
     }
@@ -769,7 +1258,11 @@ pub fn scrollbar(cli: &Cli) -> Res<i32> {
     let artifacts = PathBuf::from(cli.flag("artifacts").unwrap_or("/artifacts"));
     let checkout = PathBuf::from(cli.flag("checkout").unwrap_or("/checkout"));
     let evidence = PathBuf::from(cli.flag("evidence").unwrap_or("/evidence"));
-    let label = cli.positional.first().cloned().unwrap_or_else(|| "new".into());
+    let label = cli
+        .positional
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "new".into());
     let scratch_arg = cli.flag("scratch");
     let Some(scratch) = scratch_arg else {
         // The wrapper: a private session bus and disposable directories, then this command again inside them.
@@ -811,7 +1304,15 @@ pub fn scrollbar(cli: &Cli) -> Res<i32> {
     std::fs::create_dir_all(scratch.join("projects")).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(scratch.join("logs")).map_err(|e| e.to_string())?;
     let shim = probe_library(&scratch)?;
-    let mut st = Stack::new(scratch.clone(), probe_dir, shim, artifacts, checkout, channel, false);
+    let mut st = Stack::new(
+        scratch.clone(),
+        probe_dir,
+        shim,
+        artifacts,
+        checkout,
+        channel,
+        false,
+    );
     let mut results = obj(vec![("binary", s(label.as_str()))]);
     let outcome_ = (|| -> Res<()> {
         st.start_display()?;
@@ -832,14 +1333,26 @@ pub fn scrollbar(cli: &Cli) -> Res<i32> {
         let click = |st: &mut Stack, body: &str| -> Res<()> {
             let spot = st.query(body, 15)?;
             let g = geometry(&window)?;
-            xdotool(&["mousemove", "--sync", &(g[0] + num(&spot, "0") as i64).to_string(), &(g[1] + num(&spot, "1") as i64).to_string()])?;
+            xdotool(&[
+                "mousemove",
+                "--sync",
+                &(g[0] + num(&spot, "0") as i64).to_string(),
+                &(g[1] + num(&spot, "1") as i64).to_string(),
+            ])?;
             sleep_ms(200);
             xdotool(&["click", "1"])?;
             sleep_ms(500);
             Ok(())
         };
         click(&mut st, "const el=document.querySelector('a[aria-label=\"Settings\"]');const r=el.getBoundingClientRect();return JSON.stringify([r.x+r.width/2,r.y+r.height/2])")?;
-        st.wait_for("settings", 30, |st| Ok(st.js("return document.querySelector('.set-main') ? 'yes' : ''", 15).is_ok_and(|a| a == "yes")))?;
+        st.wait_for("settings", 30, |st| {
+            Ok(st
+                .js(
+                    "return document.querySelector('.set-main') ? 'yes' : ''",
+                    15,
+                )
+                .is_ok_and(|a| a == "yes"))
+        })?;
         click(&mut st, "const a=[...document.querySelectorAll('.set-nav a, .set-side a, nav a')].find(a=>/Shortcuts/.test(a.textContent));const r=a.getBoundingClientRect();return JSON.stringify([r.x+r.width/2,r.y+r.height/2])")?;
         st.wait_for("shortcuts", 30, |st| Ok(st.js("return document.querySelector('.set-main') && /Shortcuts/.test(document.querySelector('.set-main').textContent) ? 'yes' : ''", 15).is_ok_and(|a| a == "yes")))?;
         sleep_ms(500);
@@ -849,7 +1362,10 @@ pub fn scrollbar(cli: &Cli) -> Res<i32> {
         let state = "const el=document.querySelector('.set-main');const r=el.getBoundingClientRect();return JSON.stringify({top:el.scrollTop,sh:el.scrollHeight,ch:el.clientHeight,left:r.left,right:r.right,bar:el.offsetWidth-el.clientWidth,iw:innerWidth,ih:innerHeight,edge:getComputedStyle(document.documentElement).getPropertyValue('--ws-edge'),dpr:devicePixelRatio})";
         let before = st.query(state, 15)?;
         results.set("before", before.clone());
-        require(num(&before, "sh") > num(&before, "ch") + 50.0, "page must scroll for this check")?;
+        require(
+            num(&before, "sh") > num(&before, "ch") + 50.0,
+            "page must scroll for this check",
+        )?;
         // The former driver also saved screenshots of the private screen as evidence; no check reads them, and this harness takes none.
         results.set("screenshots", s("not_taken"));
         // The thumb is 5px wide, 3px in from each side of the 11px bar: grab both sides of it.
@@ -857,10 +1373,16 @@ pub fn scrollbar(cli: &Cli) -> Res<i32> {
         let thumb_top = num(&before, "ch") * num(&before, "top") / num(&before, "sh");
         let g0 = geometry(&window)?;
         let mut attempts = obj(vec![]);
-        for (side, offset) in [("thumb-left", 3.0), ("thumb-right", num(&before, "bar") - 4.0)] {
+        for (side, offset) in [
+            ("thumb-left", 3.0),
+            ("thumb-right", num(&before, "bar") - 4.0),
+        ] {
             let s0 = st.query(state, 15)?;
             let w0 = geometry(&window)?;
-            let (grab_x, grab_y) = ((g0[0] as f64 + bar_left + offset) as i64, g0[1] + 150 + thumb_top as i64);
+            let (grab_x, grab_y) = (
+                (g0[0] as f64 + bar_left + offset) as i64,
+                g0[1] + 150 + thumb_top as i64,
+            );
             // A hand drifts sideways while dragging; a pure vertical move would hide an edge resize.
             pointer_abs(grab_x, grab_y)?;
             sleep_ms(200);
@@ -878,7 +1400,10 @@ pub fn scrollbar(cli: &Cli) -> Res<i32> {
             attempts.set(
                 side,
                 obj(vec![
-                    ("scrollDelta", Value::Num(format!("{}", num(&s1, "top") - num(&s0, "top")))),
+                    (
+                        "scrollDelta",
+                        Value::Num(format!("{}", num(&s1, "top") - num(&s0, "top"))),
+                    ),
                     ("grabbedAt", n(grab_x - g0[0])),
                     ("windowFrom", arr(w0.iter().map(|v| n(*v)).collect())),
                     ("windowTo", arr(w1.iter().map(|v| n(*v)).collect())),
@@ -909,8 +1434,19 @@ pub fn scrollbar(cli: &Cli) -> Res<i32> {
         xdotool(&["mouseup", "1"])?;
         sleep_ms(500);
         let e1 = geometry(&window)?;
-        results.set("edge_resize_right", obj(vec![("from", arr(e0.iter().map(|v| n(*v)).collect())), ("to", arr(e1.iter().map(|v| n(*v)).collect()))]));
-        let ok = attempts.as_obj().unwrap_or(&[]).iter().all(|(_, a)| num(a, "scrollDelta") > 40.0 && !flag(a, "resized")) && (e1[2] - e0[2] >= 40);
+        results.set(
+            "edge_resize_right",
+            obj(vec![
+                ("from", arr(e0.iter().map(|v| n(*v)).collect())),
+                ("to", arr(e1.iter().map(|v| n(*v)).collect())),
+            ]),
+        );
+        let ok = attempts
+            .as_obj()
+            .unwrap_or(&[])
+            .iter()
+            .all(|(_, a)| num(a, "scrollDelta") > 40.0 && !flag(a, "resized"))
+            && (e1[2] - e0[2] >= 40);
         results.set("ok", b(ok));
         results.set("after", st.query(state, 15)?);
         Ok(())
@@ -924,7 +1460,10 @@ pub fn scrollbar(cli: &Cli) -> Res<i32> {
     }
     let rendered = pretty_block(&results, 2);
     std::fs::create_dir_all(&evidence).map_err(|e| e.to_string())?;
-    write(&evidence.join(format!("scrollbar-{label}.json")), &format!("{rendered}\n"))?;
+    write(
+        &evidence.join(format!("scrollbar-{label}.json")),
+        &format!("{rendered}\n"),
+    )?;
     println!("{}", pretty_line(&results));
     Ok(if flag(&results, "ok") { 0 } else { 1 })
 }
@@ -940,19 +1479,46 @@ mod tests {
 
     #[test]
     fn failure_class_names_the_strongest_evidence() {
-        assert_eq!(failure_class(true, true, true, "x").as_str(), Some("compositor_exited"));
-        assert_eq!(failure_class(true, true, false, "x").as_str(), Some("app_exited"));
-        assert_eq!(failure_class(false, true, false, "x").as_str(), Some("web_process_terminated"));
-        assert_eq!(failure_class(false, false, false, "step failed").as_str(), Some("journey_step_failed"));
-        assert!(matches!(failure_class(false, false, false, ""), Value::Null));
+        assert_eq!(
+            failure_class(true, true, true, "x").as_str(),
+            Some("compositor_exited")
+        );
+        assert_eq!(
+            failure_class(true, true, false, "x").as_str(),
+            Some("app_exited")
+        );
+        assert_eq!(
+            failure_class(false, true, false, "x").as_str(),
+            Some("web_process_terminated")
+        );
+        assert_eq!(
+            failure_class(false, false, false, "step failed").as_str(),
+            Some("journey_step_failed")
+        );
+        assert!(matches!(
+            failure_class(false, false, false, ""),
+            Value::Null
+        ));
     }
 
     #[test]
     fn exit_status_names_the_signal() {
-        assert_eq!(line(&exit_status(None)), line(&obj(vec![("state", s("running"))])));
-        assert_eq!(text(&exit_status(Some(std::process::ExitStatus::from_raw(0))), "state"), "exited");
+        assert_eq!(
+            line(&exit_status(None)),
+            line(&obj(vec![("state", s("running"))]))
+        );
+        assert_eq!(
+            text(
+                &exit_status(Some(std::process::ExitStatus::from_raw(0))),
+                "state"
+            ),
+            "exited"
+        );
         let killed = exit_status(Some(std::process::ExitStatus::from_raw(11)));
-        assert_eq!((text(&killed, "state"), text(&killed, "signal")), ("signalled", "SIGSEGV"));
+        assert_eq!(
+            (text(&killed, "state"), text(&killed, "signal")),
+            ("signalled", "SIGSEGV")
+        );
     }
 
     #[test]
@@ -972,7 +1538,10 @@ mod tests {
     fn web_terminations_are_read_in_order_and_cores_by_name() {
         let dir = crate::proc::TempDir::new("rendered-test-").unwrap();
         std::fs::write(dir.0.join("web-process.log"), "2\n0\n1\n").unwrap();
-        assert_eq!(line(&web_terminations(&dir.0)), r#"["terminated_by_api", "crashed", "exceeded_memory_limit"]"#);
+        assert_eq!(
+            line(&web_terminations(&dir.0)),
+            r#"["terminated_by_api", "crashed", "exceeded_memory_limit"]"#
+        );
         std::fs::write(dir.0.join("core.123"), "xxxx").unwrap();
         assert_eq!(text(&core_files(&dir.0), "0.name"), "core.123");
         assert_eq!(num(&core_files(&dir.0), "0.bytes"), 4.0);
@@ -998,11 +1567,17 @@ mod tests {
         assert!(judge(&report("Noto Sans Variable", "rgb(24, 27, 26)")).is_empty());
         // The interface face is Noto Sans Variable; the rule stays strict, so the face the design no longer uses is a regression.
         let wrong = judge(&report("Roboto Variable", "rgb(24, 27, 26)"));
-        assert!(wrong.contains(&"design_font_not_first".to_string()) && wrong.contains(&"text_in_a_fallback_face".to_string()));
+        assert!(
+            wrong.contains(&"design_font_not_first".to_string())
+                && wrong.contains(&"text_in_a_fallback_face".to_string())
+        );
         let mut broken = report("Noto Sans Variable", "rgb(24, 27, 26)");
         broken.set("maxShadow", n(12));
         broken.set("dashes", arr(vec![s("span.x")]));
         let wrong = judge(&broken);
-        assert!(wrong.contains(&"strong_shadow".to_string()) && wrong.contains(&"dash_stands_for_missing_data".to_string()));
+        assert!(
+            wrong.contains(&"strong_shadow".to_string())
+                && wrong.contains(&"dash_stands_for_missing_data".to_string())
+        );
     }
 }

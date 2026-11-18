@@ -168,8 +168,8 @@ async fn stopped_merge(root: &Path, snapshot: IndexSnapshot, git: &mut Git) -> R
     // files and SQUASH_MSG. The target was verified clean before the merge.
     // Cleanliness is confirmed before the exact index restore, which stays last:
     // status may refresh the index stat cache.
-    let clean = git.success(root, &["reset", "--merge"]).await?
-        && git.clean(root).await.unwrap_or(false);
+    let clean =
+        git.success(root, &["reset", "--merge"]).await? && git.clean(root).await.unwrap_or(false);
     if clean {
         unchanged_head(root, &snapshot, git).await?;
         snapshot.restore()?;

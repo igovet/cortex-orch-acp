@@ -15,7 +15,9 @@ Resume continues from the saved state: open and ready worker waits and pending
 coordinator or worker questions stay answerable, and work that Pause interrupted
 resumes through lost-worker retry or coordinator recovery. It never interrupts,
 cancels or replans, and never invents a user message or answer. Only explicit Retry
-and owner steering replan. Stopping an individual worker still
+and an owner message to a waiting, held or reopened task replan at once; a message to
+a working task interrupts nothing and reaches the coordinator at its next boundary
+(see [steering](../steering-and-questions/index.md)). Stopping an individual worker still
 cancels its wait. See [Workspace Stop and Resume](../../cortex-workspace/local-task-execution.md#task-stop-and-resume).
 
 The task state machine (`crates/cortex-core/src/lifecycle`) is:
@@ -213,7 +215,7 @@ worker or a model acceptance decision; unlike `COMPLETED`, it makes no quality
 claim about the deliverable.
 
 Only an immutable, attempt-owned report and its structured result close a node.
-A reviewer, required whenever the project changed, submits APPROVE, REQUEST_CHANGES or BLOCK. Changes produce
+A reviewer, required whenever the project changed, submits APPROVE, REQUEST_CHANGES, BLOCK or INCOMPLETE. A reviewer that could not cover the whole change submits INCOMPLETE; a fresh reviewer then reviews what it left uncovered, at most twice, before the owner is asked ([review outcomes](../orchestration/index.md)). When the runtime stops a task with its own question, the driver ends and the question is the one stop shown; its answer relaunches the coordinator. Changes produce
 fix nodes and another review, with a three-cycle ceiling. A fix node never keeps a read-only role: the runtime gives it a writing role chosen from its scope. Structured review findings confine fixes to the
 named plan tasks when the runtime can verify them. With no findings and multiple
 implementers, the runtime first returns to the coordinator to plan the remedy
@@ -319,6 +321,24 @@ levels) and empty directories, which Git does not track. A nested checkout that 
 observed sets `incomplete`. The `EXECUTION_BASELINE` receipt records `metadata_only`,
 `cap_reached` and `incomplete`; a metadata-only or incomplete observation never supports
 either `REVIEW_NOT_REQUIRED` waiver.
+
+A plain project folder, in no Git repository at all, runs the same lifecycle (execution
+baseline, worker change lists, review packet, verification, completion and acceptance) on
+an observation made without Git. It is chosen only when Git itself answers "not a git
+repository" for the folder and the folder holds no `.git` entry; a repository, or a folder
+inside one, is always observed by Git exactly as above, and a repository Git cannot read
+(damaged, locked, owned by another user or untrusted) stays refused with
+`project_revision_unavailable`. The plain observation walks the folder without following
+links: every non-directory entry is deliverable content hashed exactly as above (there are
+no ignore rules without a repository, so nothing is ignored and the ignored digest covers
+an empty set), the private stores (`.cortex`, `.cortex-dev`, and at the top
+`.cortex-dev-owner.json` and `.cortex-workspace-dev.json`) are skipped, a directory holding
+a `.git` entry is a nested checkout observed as above, and empty directories count. Its
+digest is domain-separated from any repository's. An unreadable directory refuses with
+`project_unobservable_unreadable_content`, and more than 300,000 walked entries (or
+100,000 files) refuses with `project_unobservable_too_many_paths`; the walk never returns a
+partial listing. When either refusal, or `project_revision_unavailable`, stops a task, the
+runtime's stop question names that cause in the owner's language.
 
 A task never has two drivers: installing a driver for a task cancels and awaits any
 prior one, and every exit path of a worker turn in a concurrent batch signals the

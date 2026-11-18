@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-phone-rename"
+description = "Enables the phone_rename command without any pre-configured scope."
+commands.allow = ["phone_rename"]
+
+[[permission]]
+identifier = "deny-phone-rename"
+description = "Denies the phone_rename command without any pre-configured scope."
+commands.deny = ["phone_rename"]

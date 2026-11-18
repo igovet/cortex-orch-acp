@@ -1,6 +1,6 @@
 # CW-G06: Optional worktree lifecycle
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: worktree screens, the Worktrees settings page and worktree cleanup exist, but the service reports `taskWorktrees: false` and every task runs in the project folder ([IDE and Git](../ide-and-git.md)) · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Optional worktree lifecycle.

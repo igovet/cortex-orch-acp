@@ -1,6 +1,6 @@
 # CW-G08: Per-attempt change attribution
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies · **Phase:** 3+ · **Size:** M
+**Status:** Not confirmed in code: per-attempt change attribution is not found · **Phase:** 3+ · **Size:** M
 
 ## Goal
 

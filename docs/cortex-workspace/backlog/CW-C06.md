@@ -1,6 +1,6 @@
 # CW-C06: Stable work-item/execution links and idempotent legacy import
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: product tasks keep stable links to runtime executions; legacy stores written by the former runtime are not adopted automatically ([local task execution](../local-task-execution.md)) · **Phase:** 3+ · **Size:** L
 
 ## Goal
 

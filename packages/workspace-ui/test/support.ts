@@ -2,6 +2,19 @@ import type { Decision as WireDecision, ProjectSnapshot, Task as WireTask } from
 import { LIMITS, PROTOCOL, SCHEMA_FINGERPRINT } from "@cortex/workspace-contract";
 import { applyProjection, emptyWorkspace, type CommandEnvelope, type CommandReceipt, type PortCapabilities, type PortUpdate, type ProjectionUpdate, type QueryOperation, type QueryParameters, type QueryResults, type Task, type WorkspacePort, type WorkspaceState } from "@cortex/workspace-domain";
 import type { RealTransport, TransportEvent } from "../src/port/real";
+import { createHash } from "node:crypto";
+
+/** The reference the machine answers for an uploaded file: what every later command carries instead of its bytes. */
+export function refOf(file: { name: string; mimeType: string; data: string }) {
+  const bytes = Buffer.from(file.data, "base64");
+  return { name: file.name, mimeType: file.mimeType, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+}
+/** The machine's private attachment files, faked: upload stores bodies by digest, read answers one. */
+function attachmentCall(bodies: Map<string, string>, params: { action?: string; files?: { name: string; mimeType: string; data: string }[]; sha256?: string } = {}) {
+  if (params.action === "upload") return { ok: true, result: (params.files ?? []).map(f => { const ref = refOf(f); bodies.set(ref.sha256, f.data); return ref; }) };
+  const data = bodies.get(params.sha256 ?? "");
+  return data === undefined ? { ok: false, code: "attachment_unavailable", message: "This attachment is no longer saved here." } : { ok: true, result: { sha256: params.sha256, size: Buffer.from(data, "base64").length, data } };
+}
 
 /** A port driven by hand, so a test decides exactly when a receipt or a projection arrives. */
 export function scriptedPort(options: { mode?: "real" | "demo"; capabilities?: PortCapabilities; failQuery?: Error } = {}) {
@@ -33,7 +46,7 @@ export function draftTask(): Task {
   return {
     id: "t", projectId: "p", sprintId: null, description: "Fix the race", title: "Fix the race", titleState: "generated", checkout: { kind: "main", branch: "main" }, targetBranch: null, dependencies: [],
     status: "draft", resumeStatus: "working", issue: null, executionId: null, result: null, workspaceDigest: null, acceptance: null, conflict: "none", merge: null, resolvedBy: null, integration: null,
-    closedAs: null, notVerifiedByCortex: false, doneAt: null, archive: null, archiveQuestion: false, archiveAskAfter: null, work: "unmerged", process: "stopped", unexpectedChanges: false, purgeBlocker: null,
+    closedAs: null, notVerifiedByCortex: false, doneAt: null, archive: null, work: "unmerged", process: "stopped", unexpectedChanges: false, purgeBlocker: null,
     settings: { model: "", effort: "", mode: "guarded", language: "auto" },
   };
 }
@@ -61,10 +74,13 @@ export const snapshot = (version: string, tasks: WireTask[], projectId = "p"): P
 export function scriptedTransport(answers: Partial<Record<string, (message: unknown) => unknown>> = {}) {
   const calls: { operation: string; message: unknown }[] = [];
   const listeners = new Set<(event: TransportEvent) => void>();
+  const bodies = new Map<string, string>();
   const transport: RealTransport = {
     async request(operation, message) {
       calls.push({ operation, message });
       const answer = answers[operation];
+      // Unless a test scripts it, the attachment store behaves like the machine's.
+      if (operation === "machine.call" && (message as {op?:string}).op === "product.attachment" && !answers["product.attachment"]) return attachmentCall(bodies, (message as {params?: Parameters<typeof attachmentCall>[1]}).params);
       if (!answer) throw new Error(`No answer scripted for ${operation}`);
       if (operation === "machine.call" && (message as {op?:string}).op === "product.facts") {
         // The fake helper composes the same two readers as the real bundled endpoint.
@@ -79,6 +95,6 @@ export function scriptedTransport(answers: Partial<Record<string, (message: unkn
     },
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
   };
-  return { transport, calls, answers, send(event: TransportEvent) { for (const listener of listeners) listener(event); } };
+  return { transport, calls, answers, bodies, send(event: TransportEvent) { for (const listener of listeners) listener(event); } };
 }
 export const flush = () => new Promise(resolve => setTimeout(resolve, 0));

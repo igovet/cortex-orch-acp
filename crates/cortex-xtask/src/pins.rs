@@ -17,7 +17,9 @@ const EDITOR: &str = "packages/workspace-ui";
 const EDITOR_SCOPES: [&str; 2] = ["@codemirror/", "@lezer/"];
 
 fn version_pin(text: &str) -> bool {
-    Regex::new(r"^[0-9]+\.[0-9]+\.[0-9]+$").unwrap().is_match(text)
+    Regex::new(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+        .unwrap()
+        .is_match(text)
 }
 
 fn read_toml(path: &Path) -> Res<Value> {
@@ -43,7 +45,9 @@ fn dependency_tables<'a>(manifest: &'a Value, out: &mut Vec<&'a Value>) {
 
 /// The editor's direct packages are exactly the reviewed versions, in the manifest and in the lock.
 fn check_editor(root: &Path, errors: &mut Vec<String>) -> Res<()> {
-    let reviewed = read_json(&root.join("pinned-dependencies.json"))?.req("workspace_editor")?.clone();
+    let reviewed = read_json(&root.join("pinned-dependencies.json"))?
+        .req("workspace_editor")?
+        .clone();
     let package = read_json(&root.join(EDITOR).join("package.json"))?;
     let package = package.req("dependencies")?;
     let lock = read_json(&root.join(EDITOR).join("package-lock.json"))?;
@@ -56,15 +60,26 @@ fn check_editor(root: &Path, errors: &mut Vec<String>) -> Res<()> {
     }
     let reviewed_empty = !reviewed.truthy();
     if reviewed_empty || !same_object(&direct, &reviewed) {
-        errors.push(format!("{EDITOR}: editor packages differ from the reviewed exact pins"));
+        errors.push(format!(
+            "{EDITOR}: editor packages differ from the reviewed exact pins"
+        ));
     }
     for (name, version) in direct.as_obj().unwrap_or(&[]) {
         let version = version.as_str().unwrap_or("");
         if !version_pin(version) {
-            errors.push(format!("{name}: editor package requires an exact x.y.z pin"));
+            errors.push(format!(
+                "{name}: editor package requires an exact x.y.z pin"
+            ));
         }
-        let declared = lock.req("")?.req("dependencies")?.get(name).and_then(Value::as_str);
-        let locked = lock.get(&format!("node_modules/{name}")).and_then(|p| p.get("version")).and_then(Value::as_str);
+        let declared = lock
+            .req("")?
+            .req("dependencies")?
+            .get(name)
+            .and_then(Value::as_str);
+        let locked = lock
+            .get(&format!("node_modules/{name}"))
+            .and_then(|p| p.get("version"))
+            .and_then(Value::as_str);
         if declared != Some(version) || locked != Some(version) {
             errors.push(format!("{name}: editor package-lock drift"));
         }
@@ -84,7 +99,12 @@ fn run_checks(root: &Path, errors: &mut Vec<String>) -> Res<()> {
     let manifest = read_toml(&root.join("Cargo.toml"))?;
     let workspace = manifest.req("workspace")?;
     let pins = workspace.req("metadata")?.req("cortex-pins")?;
-    let channel = read_toml(&root.join("rust-toolchain.toml"))?.req("toolchain")?.req("channel")?.as_str().ok_or("channel")?.to_string();
+    let channel = read_toml(&root.join("rust-toolchain.toml"))?
+        .req("toolchain")?
+        .req("channel")?
+        .as_str()
+        .ok_or("channel")?
+        .to_string();
     if !version_pin(&channel) || Some(channel.as_str()) != pins.req("rust")?.as_str() {
         errors.push("Rust channel must be the reviewed exact stable version".into());
     }
@@ -92,35 +112,71 @@ fn run_checks(root: &Path, errors: &mut Vec<String>) -> Res<()> {
         errors.push("workspace rust-version differs from the toolchain".into());
     }
     let lock_bytes = read_bytes(&root.join("Cargo.lock"))?;
-    let lock = toml::parse(&String::from_utf8(lock_bytes.clone()).map_err(|_| "Cargo.lock is not UTF-8")?)?;
+    let lock = toml::parse(
+        &String::from_utf8(lock_bytes.clone()).map_err(|_| "Cargo.lock is not UTF-8")?,
+    )?;
     if Some(sha256_hex(&lock_bytes).as_str()) != pins.req("lock-sha256")?.as_str() {
         errors.push("Cargo.lock digest drift; review and refresh cortex-pins.lock-sha256".into());
     }
     let mut locked = BTreeSet::new();
     for package in lock.req("package")?.as_arr().ok_or("package")? {
-        locked.insert((package.req("name")?.as_str().ok_or("name")?.to_string(), package.req("version")?.as_str().ok_or("version")?.to_string()));
+        locked.insert((
+            package.req("name")?.as_str().ok_or("name")?.to_string(),
+            package
+                .req("version")?
+                .as_str()
+                .ok_or("version")?
+                .to_string(),
+        ));
     }
-    let members: Vec<&str> = workspace.req("members")?.as_arr().ok_or("members")?.iter().filter_map(Value::as_str).collect();
-    let defaults: Vec<&str> = workspace.req("default-members")?.as_arr().ok_or("default-members")?.iter().filter_map(Value::as_str).collect();
+    let members: Vec<&str> = workspace
+        .req("members")?
+        .as_arr()
+        .ok_or("members")?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let defaults: Vec<&str> = workspace
+        .req("default-members")?
+        .as_arr()
+        .ok_or("default-members")?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
     if !members.contains(&APP) || defaults.is_empty() || defaults.contains(&APP) {
         errors.push("Tauri must be a workspace member but not a default member".into());
     }
-    if defaults.iter().any(|member| !members.contains(member) || !member.starts_with("crates/")) {
+    if defaults
+        .iter()
+        .any(|member| !members.contains(member) || !member.starts_with("crates/"))
+    {
         errors.push("default members must explicitly select headless crates".into());
     }
     let mut manifests: Vec<(String, Value)> = Vec::new();
     let mut root_dependencies = Value::obj();
-    root_dependencies.set("dependencies", workspace.get("dependencies").cloned().unwrap_or_else(Value::obj));
+    root_dependencies.set(
+        "dependencies",
+        workspace
+            .get("dependencies")
+            .cloned()
+            .unwrap_or_else(Value::obj),
+    );
     manifests.push(("Cargo.toml".into(), root_dependencies));
     for member in &members {
-        manifests.push((format!("{member}/Cargo.toml"), read_toml(&root.join(member).join("Cargo.toml"))?));
+        manifests.push((
+            format!("{member}/Cargo.toml"),
+            read_toml(&root.join(member).join("Cargo.toml"))?,
+        ));
     }
     for (path, manifest) in &manifests {
         let mut tables = Vec::new();
         dependency_tables(manifest, &mut tables);
         for table in tables {
             for (name, spec) in table.as_obj().unwrap_or(&[]) {
-                if matches!(spec, Value::Obj(_)) && (spec.get("workspace").is_some_and(Value::truthy) || spec.get("path").is_some()) {
+                if matches!(spec, Value::Obj(_))
+                    && (spec.get("workspace").is_some_and(Value::truthy)
+                        || spec.get("path").is_some())
+                {
                     continue;
                 }
                 let version = match spec {
@@ -137,7 +193,9 @@ fn run_checks(root: &Path, errors: &mut Vec<String>) -> Res<()> {
                     _ => name,
                 };
                 if !locked.contains(&(package.to_string(), exact.to_string())) {
-                    errors.push(format!("{package}: exact manifest pin missing from Cargo.lock"));
+                    errors.push(format!(
+                        "{package}: exact manifest pin missing from Cargo.lock"
+                    ));
                 }
                 if let Some(reviewed) = pins.get(package).and_then(Value::as_str) {
                     if exact != reviewed {
@@ -151,12 +209,25 @@ fn run_checks(root: &Path, errors: &mut Vec<String>) -> Res<()> {
         let package = read_json(&root.join(desktop).join("package.json"))?;
         let npm_lock = read_json(&root.join(desktop).join("package-lock.json"))?;
         let npm_lock = npm_lock.req("packages")?;
-        let cli = package.req("devDependencies")?.req("@tauri-apps/cli")?.as_str().ok_or("cli")?;
+        let cli = package
+            .req("devDependencies")?
+            .req("@tauri-apps/cli")?
+            .as_str()
+            .ok_or("cli")?;
         if !version_pin(cli) || Some(cli) != pins.req("tauri-cli")?.as_str() {
-            errors.push(format!("{desktop}: Tauri CLI differs from the reviewed exact pin"));
+            errors.push(format!(
+                "{desktop}: Tauri CLI differs from the reviewed exact pin"
+            ));
         }
-        let declared = npm_lock.req("")?.req("devDependencies")?.req("@tauri-apps/cli")?.as_str();
-        let installed = npm_lock.req("node_modules/@tauri-apps/cli")?.req("version")?.as_str();
+        let declared = npm_lock
+            .req("")?
+            .req("devDependencies")?
+            .req("@tauri-apps/cli")?
+            .as_str();
+        let installed = npm_lock
+            .req("node_modules/@tauri-apps/cli")?
+            .req("version")?
+            .as_str();
         if declared != Some(cli) || installed != Some(cli) {
             errors.push(format!("{desktop}: Tauri CLI package-lock drift"));
         }
@@ -197,7 +268,10 @@ mod tests {
     use std::path::PathBuf;
 
     fn checkout() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap()
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap()
     }
 
     /// A complete, otherwise valid copy of every pin input.
@@ -205,8 +279,22 @@ mod tests {
         let root = checkout();
         let dir = crate::proc::TempDir::new("cw-pin-check-").unwrap();
         let workspace = read_toml(&root.join("Cargo.toml")).unwrap();
-        let mut files: Vec<String> = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "pinned-dependencies.json"].map(String::from).to_vec();
-        for member in workspace.req("workspace").unwrap().req("members").unwrap().as_arr().unwrap() {
+        let mut files: Vec<String> = [
+            "Cargo.toml",
+            "Cargo.lock",
+            "rust-toolchain.toml",
+            "pinned-dependencies.json",
+        ]
+        .map(String::from)
+        .to_vec();
+        for member in workspace
+            .req("workspace")
+            .unwrap()
+            .req("members")
+            .unwrap()
+            .as_arr()
+            .unwrap()
+        {
             files.push(format!("{}/Cargo.toml", member.as_str().unwrap()));
         }
         for desktop in DESKTOPS {
@@ -226,7 +314,10 @@ mod tests {
         let original = fs::read_to_string(&path).unwrap();
         assert!(original.contains(old), "{name} lacks {old}");
         fs::write(&path, original.replacen(old, new, 1)).unwrap();
-        assert!(check(dir).iter().any(|e| e.contains(diagnostic)), "{name}: no {diagnostic}");
+        assert!(
+            check(dir).iter().any(|e| e.contains(diagnostic)),
+            "{name}: no {diagnostic}"
+        );
         fs::write(&path, original).unwrap();
         assert_eq!(check(dir), Vec::<String>::new());
     }
@@ -240,8 +331,20 @@ mod tests {
     fn production_pin_drift_is_detected_in_a_complete_fixture() {
         let dir = fixture();
         assert_eq!(check(&dir.0), Vec::<String>::new());
-        drift(&dir.0, &format!("{APP}/Cargo.toml"), "=2.10.1", "^2.10.1", "exact =x.y.z");
-        drift(&dir.0, &format!("{DESKTOP}/package.json"), "\"@tauri-apps/cli\": \"2.10.1\"", "\"@tauri-apps/cli\": \"2.10.2\"", "reviewed exact pin");
+        drift(
+            &dir.0,
+            &format!("{APP}/Cargo.toml"),
+            "=2.10.1",
+            "^2.10.1",
+            "exact =x.y.z",
+        );
+        drift(
+            &dir.0,
+            &format!("{DESKTOP}/package.json"),
+            "\"@tauri-apps/cli\": \"2.10.1\"",
+            "\"@tauri-apps/cli\": \"2.10.2\"",
+            "reviewed exact pin",
+        );
         let lock = dir.0.join(DESKTOP).join("package-lock.json");
         let original = fs::read_to_string(&lock).unwrap();
         let start = original.find("\"node_modules/@tauri-apps/cli\"").unwrap();
@@ -249,9 +352,17 @@ mod tests {
         let mut drifted = original.clone();
         drifted.replace_range(version..version + 19, "\"version\": \"2.10.0\"");
         fs::write(&lock, drifted).unwrap();
-        assert!(check(&dir.0).iter().any(|e| e.contains("package-lock drift")));
+        assert!(check(&dir.0)
+            .iter()
+            .any(|e| e.contains("package-lock drift")));
         fs::write(&lock, original).unwrap();
         assert_eq!(check(&dir.0), Vec::<String>::new());
-        drift(&dir.0, "Cargo.toml", "default-members = [\"crates/workspace-protocol\"]", &format!("default-members = [\"{APP}\"]"), "not a default member");
+        drift(
+            &dir.0,
+            "Cargo.toml",
+            "default-members = [\"crates/workspace-protocol\"]",
+            &format!("default-members = [\"{APP}\"]"),
+            "not a default member",
+        );
     }
 }

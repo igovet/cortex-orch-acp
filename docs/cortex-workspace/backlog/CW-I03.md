@@ -1,6 +1,6 @@
 # CW-I03: Hash-checked save, create and rename
 
-**Status:** partly built: hash-checked save through the machine helper, with no lease. Create, rename and save-as remain planned · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: hash-checked save through the machine service, with no lease; create, rename and save-as are not implemented · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Make file save, create and rename service operations. Each one is checked against the base hash or an explicit non-existence precondition. Writes replace the target atomically. Conflicts return typed results with the choices compare, reload and save-as. A granted lease from CW-I02 is required.

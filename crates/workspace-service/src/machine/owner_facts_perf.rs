@@ -41,7 +41,12 @@ async fn owner_facts_timings_on_a_store_copy() {
         let _ = std::fs::remove_file(&marker);
         let body = json!({"channel":"dev","root":root,"uid":unsafe { libc::getuid() },"store":[m.dev(),m.ino()]});
         std::io::Write::write_all(
-            &mut std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&marker).unwrap(),
+            &mut std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&marker)
+                .unwrap(),
             &serde_json::to_vec(&body).unwrap(),
         )
         .unwrap();
@@ -93,7 +98,11 @@ async fn owner_facts_timings_on_a_store_copy() {
                 .await
                 .unwrap();
             let facts_ms = f.elapsed().as_millis();
-            let reply = if *op == "workers" { facts["workers"].clone() } else { facts.clone() };
+            let reply = if *op == "workers" {
+                facts["workers"].clone()
+            } else {
+                facts.clone()
+            };
             let workers = facts["workers"].as_array().map_or(0, Vec::len);
             let activity: usize = facts["workers"]
                 .as_array()
@@ -109,17 +118,116 @@ async fn owner_facts_timings_on_a_store_copy() {
             );
         }
     }
-    let t = Instant::now();
-    let observed = crate::native_effects::observe(root.clone()).await.map(|e| e.project_digest.is_some());
-    eprintln!("perf observe_ms={} ok={:?}", t.elapsed().as_millis(), observed.ok());
-    if let Some(out) = var("PERF_OUT") {
-        let saved = crate::machine::task_facts::native_saved(&root, &state, &project, &mut crate::machine::git::Git::new())
+    // The service's own `product.facts` read (machine.rs): the folder observation starts
+    // first and runs while the saved records and the store are read; rounds after the
+    // first reuse it while the folder is unchanged (`recent_observation`).
+    // BEGIN owner_workers
+    for round in 0..rounds {
+        let t = Instant::now();
+        let observing = tokio::spawn(crate::machine::task_facts::recent_observation(root.clone()));
+        let saved = crate::machine::task_facts::native_saved(
+            &root,
+            &state,
+            &project,
+            &mut crate::machine::git::Git::new(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("native_saved: {}", e.code));
+        let facts = runtime
+            .owner_facts_observed(&project, saved, reads[0].1.clone(), observing)
             .await
             .unwrap();
+        eprintln!(
+            "perf round={round} op=product.facts(service) total_ms={} workers={} bytes={}",
+            t.elapsed().as_millis(),
+            facts["workers"].as_array().map_or(0, Vec::len),
+            serde_json::to_vec(&facts).unwrap().len()
+        );
+    }
+    // END owner_workers
+    // The service's own `workers` read (machine.rs): the binding check, then the worker rows alone.
+    // BEGIN owner_workers
+    if let Some(task) = &task {
+        for round in 0..rounds {
+            let t = Instant::now();
+            crate::machine::task_facts::materialized(&root, &project)
+                .unwrap_or_else(|e| panic!("materialized: {}", e.code));
+            let workers = runtime
+                .owner_workers(&project, json!({"taskIds":[task]}))
+                .await
+                .unwrap();
+            eprintln!(
+                "perf round={round} op=workers(service) total_ms={} workers={} bytes={}",
+                t.elapsed().as_millis(),
+                workers.as_array().map_or(0, Vec::len),
+                serde_json::to_vec(&workers).unwrap().len()
+            );
+        }
+    }
+    // END owner_workers
+    // BEGIN owner_workers
+    for _ in 0..rounds {
+        let t = Instant::now();
+        let digest = crate::native_effects::observe_digest(root.clone()).await;
+        eprintln!(
+            "perf observe_digest_ms={} ok={}",
+            t.elapsed().as_millis(),
+            digest.is_ok()
+        );
+    }
+    // END owner_workers
+    let t = Instant::now();
+    let observed = crate::native_effects::observe(root.clone())
+        .await
+        .map(|e| e.project_digest.is_some());
+    eprintln!(
+        "perf observe_ms={} ok={:?}",
+        t.elapsed().as_millis(),
+        observed.ok()
+    );
+    if let Some(out) = var("PERF_OUT") {
+        let saved = crate::machine::task_facts::native_saved(
+            &root,
+            &state,
+            &project,
+            &mut crate::machine::git::Git::new(),
+        )
+        .await
+        .unwrap();
         let mut all = Vec::<Value>::new();
         for (_, params) in &reads {
-            all.push(runtime.owner_facts(&project, saved.clone(), params.clone()).await.unwrap());
+            all.push(
+                runtime
+                    .owner_facts(&project, saved.clone(), params.clone())
+                    .await
+                    .unwrap(),
+            );
         }
+        // BEGIN owner_workers
+        if let Some(task) = &task {
+            all.push(
+                runtime
+                    .owner_workers(&project, json!({"taskIds":[task]}))
+                    .await
+                    .unwrap(),
+            );
+        }
+        let observing = tokio::spawn(crate::machine::task_facts::recent_observation(root.clone()));
+        let saved = crate::machine::task_facts::native_saved(
+            &root,
+            &state,
+            &project,
+            &mut crate::machine::git::Git::new(),
+        )
+        .await
+        .unwrap();
+        all.push(
+            runtime
+                .owner_facts_observed(&project, saved, reads[0].1.clone(), observing)
+                .await
+                .unwrap(),
+        );
+        // END owner_workers
         std::fs::write(out, serde_json::to_vec(&all).unwrap()).unwrap();
     }
     runtime.shutdown().await;

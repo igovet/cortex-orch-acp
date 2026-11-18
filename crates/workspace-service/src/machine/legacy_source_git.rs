@@ -122,7 +122,142 @@ impl Drop for Scratch {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+/// Hides every private store or Git directory name of the tree from the selection's
+/// view (`EXCLUDED_TOP` at any depth, without looking inside one). A large tree is read
+/// by several threads and its masks are added in the order the ordered walk adds them
+/// (depth first, each directory in its read order), so the view is the same; when that
+/// walk would stop (an unreadable entry, the entry bound or the deadline) it is the
+/// ordered walk that runs and decides.
 fn mask(
+    command: &mut Command,
+    root: &Path,
+    remaining: &mut usize,
+    deadline: Instant,
+) -> io::Result<()> {
+    let Some(mut found) = mask_parallel(root, *remaining, deadline, MASK_WALKERS) else {
+        return mask_ordered(command, root, remaining, deadline);
+    };
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    for (_, path, directory) in found {
+        if directory {
+            command
+                .arg("--tmpfs")
+                .arg(&path)
+                .arg("--remount-ro")
+                .arg(&path);
+        } else {
+            command.arg("--ro-bind").arg("/dev/null").arg(&path);
+        }
+    }
+    Ok(())
+}
+/// Threads of one parallel mask walk.
+const MASK_WALKERS: usize = 8;
+/// One mask: where the ordered walk meets it (the read index of each entry on the way),
+/// its path and whether it is a directory. None when the ordered walk would stop.
+type Mask = (Vec<u32>, PathBuf, bool);
+fn mask_parallel(
+    root: &Path,
+    limit: usize,
+    deadline: Instant,
+    threads: usize,
+) -> Option<Vec<Mask>> {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Condvar, Mutex,
+    };
+    type Job = (PathBuf, Vec<u32>);
+    // Directories waiting to be read, and how many are being read right now.
+    let queue: Mutex<(Vec<Job>, usize)> = Mutex::new((vec![(root.to_owned(), Vec::new())], 0));
+    let ready = Condvar::new();
+    let seen = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let found = Mutex::new(Vec::new());
+    // Set under the queue lock, so a walker about to wait always sees it or is woken.
+    let fail = || {
+        let _queue = queue.lock();
+        failed.store(true, Ordering::SeqCst);
+        ready.notify_all();
+    };
+    let next = || -> Option<Job> {
+        let mut q = queue.lock().ok()?;
+        loop {
+            if failed.load(Ordering::SeqCst) {
+                return None;
+            }
+            if let Some(job) = q.0.pop() {
+                q.1 += 1;
+                return Some(job);
+            }
+            if q.1 == 0 {
+                return None;
+            }
+            q = ready.wait(q).ok()?;
+        }
+    };
+    let done = |children: Vec<Job>| match queue.lock() {
+        Ok(mut q) => {
+            q.0.extend(children);
+            q.1 -= 1;
+            ready.notify_all();
+        }
+        Err(_) => {
+            failed.store(true, Ordering::SeqCst);
+            ready.notify_all();
+        }
+    };
+    std::thread::scope(|scope| {
+        for _ in 0..threads.max(1) {
+            scope.spawn(|| {
+                let mut masks = Vec::new();
+                while let Some((dir, at)) = next() {
+                    let mut children = Vec::new();
+                    let read = (|| -> Option<()> {
+                        for (index, entry) in fs::read_dir(&dir).ok()?.enumerate() {
+                            // The ordered walk's bound: it stops before the entry past it.
+                            if seen.fetch_add(1, Ordering::SeqCst) >= limit
+                                || Instant::now() >= deadline
+                            {
+                                return None;
+                            }
+                            let entry = entry.ok()?;
+                            let kind = entry.file_type().ok()?;
+                            let mut place = at.clone();
+                            place.push(u32::try_from(index).ok()?);
+                            if super::legacy_source::EXCLUDED_TOP
+                                .iter()
+                                .any(|n| entry.file_name() == *n)
+                            {
+                                if kind.is_dir() {
+                                    masks.push((place, entry.path(), true));
+                                } else if !kind.is_symlink() {
+                                    masks.push((place, entry.path(), false));
+                                }
+                            } else if kind.is_dir() {
+                                children.push((entry.path(), place));
+                            }
+                        }
+                        Some(())
+                    })();
+                    if read.is_none() {
+                        fail();
+                        break;
+                    }
+                    done(children);
+                }
+                match found.lock() {
+                    Ok(mut found) => found.extend(masks),
+                    Err(_) => fail(),
+                }
+            });
+        }
+    });
+    if failed.load(Ordering::SeqCst) {
+        return None;
+    }
+    found.into_inner().ok()
+}
+fn mask_ordered(
     command: &mut Command,
     root: &Path,
     remaining: &mut usize,
@@ -149,7 +284,7 @@ fn mask(
                 command.arg("--ro-bind").arg("/dev/null").arg(entry.path());
             }
         } else if kind.is_dir() {
-            mask(command, &entry.path(), remaining, deadline)?;
+            mask_ordered(command, &entry.path(), remaining, deadline)?;
         }
     }
     Ok(())

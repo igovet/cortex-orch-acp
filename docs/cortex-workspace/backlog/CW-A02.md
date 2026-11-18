@@ -1,6 +1,6 @@
 # CW-A02: Android decision detail, discussion and desktop-synchronized outcomes
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Not implemented; no Android client exists; mobile is deferred behind Gate M · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Build the Android decision detail for questions and permissions, with the effect and rejection consequence of each decision. Answer, approve or reject with request IDs. Provide a bounded discussion view with structured steering. Keep decision state synchronized with the desktop through the event cursor. When a push opens a decision, show its current state without re-triggering an action that is already resolved. Push delivery itself (FCM registration, data-message handling and the push gateway) belongs to CW-P01 to CW-P03; this item consumes it.

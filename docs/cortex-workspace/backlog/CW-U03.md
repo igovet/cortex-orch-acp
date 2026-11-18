@@ -1,6 +1,6 @@
 # CW-U03: Desktop decision queue with typed conflicts
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Implemented: decision queue with batch answers in one form, no approve-all, and attachments ([screens](../SCREENS.md)); no-paid checks only · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Build the desktop queue of open decisions across projects. Questions, permissions and result acceptance are separate kinds. Each decision detail states its effect, scope and rejection consequence. Submissions carry a request ID and the expected entity version. Racing submissions resolve to one winner, and every losing or stale outcome is shown with a typed reason.

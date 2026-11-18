@@ -8,7 +8,8 @@ import {fileURLToPath} from "node:url";
 import {createHash} from "node:crypto";
 import {capabilities} from "../../workspace-contract/index.js";
 const root=fileURLToPath(new URL("../../../",import.meta.url));
-const label=process.argv[2]??"after";
+const label=process.argv[2]??"after", only=process.argv[3];
+if(only!==undefined&&only!=="finished"&&only!=="feeds")throw Error("Run all, finished or feeds");
 if(!/^(before|after|final)$/.test(label))throw Error("Use before, after or final");
 const out=root+".workspace-build/feed-scroll-ui/"+label;
 await mkdir(out,{recursive:true});
@@ -49,7 +50,7 @@ try{
    if(req.url==="/rpc"){
     let body="";for await(const chunk of req)body+=chunk;const {operation,message}=JSON.parse(body);let result;
     if(operation==="capabilities.get"){const p=await rpc("projects.status",{projectId:info.projectId});result=capabilities("fixture","0",p.capabilities.operations);}
-    else result=await rpc(["service.capabilities","projects.list","projects.status","machine.call"].includes(operation)?operation:"workspace",message);
+    else result=await rpc(["service.capabilities","projects.list","projects.status","machine.call","native.board","native.query"].includes(operation)?operation:"workspace",message);
     res.setHeader("Content-Type","application/json");res.end(JSON.stringify({result}));return;
    }
    const path=new URL(req.url,"http://localhost").pathname;if(path.includes(".."))throw Error("Invalid path");
@@ -59,7 +60,7 @@ try{
  });
  await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
  const url="http://127.0.0.1:"+server.address().port+"/";
- const child=spawn("timeout",["--kill-after=5","140","docker","run","--rm","-i","--network","host","-v",out+":/evidence","-v",fileURLToPath(new URL(".",import.meta.url))+":/driver:ro",(process.env.CW_RENDERED_IMAGE??"cortex-workspace-rendered:ubuntu26.04"),"node","/driver/feed-scroll.driver.mjs",url,label],{stdio:"inherit"});
+ const child=spawn("timeout",["--kill-after=5","480","docker","run","--rm","-i","--network","host","-v",out+":/evidence","-v",fileURLToPath(new URL(".",import.meta.url))+":/driver:ro",(process.env.CW_RENDERED_IMAGE??"cortex-workspace-rendered:ubuntu26.04"),"node","/driver/feed-scroll.driver.mjs",url,label,...(only?[only]:[])],{stdio:"inherit"});
  process.exitCode=await new Promise((resolve,reject)=>{child.on("error",reject);child.on("exit",code=>resolve(code??1));});
 }finally{
  if(server)await new Promise(resolve=>server.close(resolve));

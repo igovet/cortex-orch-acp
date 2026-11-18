@@ -1,6 +1,6 @@
 # CW-Q06a: Ubuntu pilot checklist and desktop qualified-support statement
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Not implemented; no owner pilot or qualified-support statement exists · **Phase:** 3+ · **Size:** M
 
 Split from [CW-Q06](CW-Q06.md) for the Ubuntu desktop release. The Android pilot is in [CW-Q06b](CW-Q06b.md).
 

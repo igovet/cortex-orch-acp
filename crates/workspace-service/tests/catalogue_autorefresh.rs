@@ -30,7 +30,15 @@ impl Fixture {
         fs::create_dir(&root).unwrap();
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let f = Self { root, child: None };
-        for name in ["home/.codex", "config", "state", "runtime", "bin", "assets/.git", "projects"] {
+        for name in [
+            "home/.codex",
+            "config",
+            "state",
+            "runtime",
+            "bin",
+            "assets/.git",
+            "projects",
+        ] {
             f.directory(&f.root.join(name));
         }
         symlink("/usr/bin/git", f.root.join("bin/git")).unwrap();
@@ -77,7 +85,8 @@ impl Fixture {
     /// The fixture's one codex connection and a peer that answers the model listing (or fails).
     fn engine(&self, peer_ok: bool) {
         let producer: Value =
-            serde_json::from_str(include_str!("fixtures/config-catalog-producer-python.json")).unwrap();
+            serde_json::from_str(include_str!("fixtures/config-catalog-producer-python.json"))
+                .unwrap();
         let case = &producer["cases"][0];
         let root = self.root.to_str().unwrap();
         let registry = case["initial"]["config/cortex/connections.json"]["content"]
@@ -96,18 +105,25 @@ impl Fixture {
     }
     async fn start(&mut self) {
         let mut command = Command::new(env!("CARGO_BIN_EXE_workspace-service"));
-        command.arg(self.root.join("projects")).arg(self.root.join("assets"))
+        command
+            .arg(self.root.join("projects"))
+            .arg(self.root.join("assets"))
             .env_clear()
             .env("HOME", self.root.join("home"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))
             .env("XDG_STATE_HOME", self.root.join("state"))
             .env("XDG_RUNTIME_DIR", self.root.join("runtime"))
             .env("PATH", self.root.join("bin"))
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         self.child = Some(command.spawn().unwrap());
         tokio::time::timeout(Duration::from_secs(10), async {
             while connect(&self.socket()).await.is_err() {
-                assert!(self.child.as_mut().unwrap().try_wait().unwrap().is_none(), "startup exited");
+                assert!(
+                    self.child.as_mut().unwrap().try_wait().unwrap().is_none(),
+                    "startup exited"
+                );
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -152,10 +168,15 @@ impl Drop for Fixture {
     }
 }
 fn models(read: &Value) -> usize {
-    read["config"]["catalogue"]["codex-acp"]["models"].as_array().unwrap().len()
+    read["config"]["catalogue"]["codex-acp"]["models"]
+        .as_array()
+        .unwrap()
+        .len()
 }
 fn seen(f: &Fixture) -> usize {
-    fs::read_to_string(f.root.join("bin/seen")).map(|s| s.lines().count()).unwrap_or(0)
+    fs::read_to_string(f.root.join("bin/seen"))
+        .map(|s| s.lines().count())
+        .unwrap_or(0)
 }
 
 #[tokio::test]
@@ -177,7 +198,10 @@ async fn a_connection_without_a_saved_list_is_observed_by_the_service_on_its_own
     assert!(calls > 0);
     for _ in 0..3 {
         let read = f.config_read().await;
-        assert_eq!(read["catalogueRefresh"], json!({"running": false, "failed": []}));
+        assert_eq!(
+            read["catalogueRefresh"],
+            json!({"running": false, "failed": []})
+        );
         assert_eq!(models(&read), 2);
     }
     assert_eq!(seen(&f), calls, "the saved list was observed again");
@@ -194,14 +218,27 @@ async fn a_retained_list_is_served_at_once_even_when_old_and_refreshed_behind_it
     let dir = f.catalog("cn_000000000001");
     let old = std::time::SystemTime::now() - Duration::from_secs(7 * 24 * 3600);
     for file in fs::read_dir(&dir).unwrap().flatten() {
-        if file.file_name().to_str().is_some_and(|n| n.starts_with("cs_")) {
-            fs::File::options().write(true).open(file.path()).unwrap().set_modified(old).unwrap();
+        if file
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.starts_with("cs_"))
+        {
+            fs::File::options()
+                .write(true)
+                .open(file.path())
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
         }
     }
     let before = seen(&f);
     f.start().await;
     let first = f.config_read().await;
-    assert_eq!(models(&first), 2, "an old list must still be shown: {first}");
+    assert_eq!(
+        models(&first),
+        2,
+        "an old list must still be shown: {first}"
+    );
     assert_eq!(first["catalogueRefresh"]["running"], true);
     let done = f.settled().await;
     assert_eq!(models(&done), 2);
@@ -218,11 +255,20 @@ async fn a_failed_observation_is_reported_and_not_retried_by_every_read() {
     let failed = done["catalogueRefresh"]["failed"].as_array().unwrap();
     assert_eq!(failed.len(), 1, "{done}");
     assert_eq!(failed[0]["connectionId"], "cn_000000000001");
-    assert!(failed[0]["reason"].as_str().unwrap().starts_with("engine_unreachable"), "{done}");
+    assert!(
+        failed[0]["reason"]
+            .as_str()
+            .unwrap()
+            .starts_with("engine_unreachable"),
+        "{done}"
+    );
     // Reading again neither relaunches the engine nor forgets the failure.
     let again = f.config_read().await;
     assert_eq!(again["catalogueRefresh"]["running"], false);
-    assert_eq!(again["catalogueRefresh"]["failed"], done["catalogueRefresh"]["failed"]);
+    assert_eq!(
+        again["catalogueRefresh"]["failed"],
+        done["catalogueRefresh"]["failed"]
+    );
 }
 
 /// A first launch whose refresh failed for a passing reason must not stay without that engine's

@@ -1,8 +1,8 @@
-import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, on, onCleanup, Show } from "solid-js";
 import { FEATURES, type DirectorySearch } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { CloneProject } from "./maintenance";
-import { I, Modal } from "./kit";
+import { I, Keyed, Modal } from "./kit";
 import { folderName, folderNameProblem, joinPath, matchesPath, moveActive, pickerPaths, shortenPath } from "./project-picker-model";
 
 type Page = { kind: "clone" } | { kind: "method" } | { kind: "search" } | { kind: "parent" } | { kind: "name"; parent: string };
@@ -181,19 +181,20 @@ export function ProjectPicker(props: { open: boolean; onClose: () => void }) {
         <Show when={!busy()} fallback={<p class="ws-pal-none">{busy()}</p>}>
           <Show when={error()}><p class="err ws-picker-note" role="alert">{error()}</p></Show>
           <Show when={failed()}><p class="err ws-picker-note" role="alert">{failed()}</p></Show>
-          <For each={rows()}>{(row, i) =>
-            <div id={`ws-pick-${i()}`} class="mi ws-pal-o" role="option" aria-selected={active() === i()} onMouseMove={() => { moved = true; setActive(i()); }} onClick={() => { setActive(i()); row.select(); }}>
-              <I n={row.icon} /><span class="grow trunc">{row.title}<Show when={row.subtitle}><span class="sub trunc">{row.subtitle}</span></Show></span>
-              <Show when={row.git}><span class="kbd">Git repository</span></Show>
-            </div>}</For>
+          {/* Kept by folder, so a background read of the machine leaves the rows and the list's scroll in place. */}
+          <Keyed each={rows()} by={row => row.id}>{(row, i) =>
+            <div id={`ws-pick-${i()}`} class="mi ws-pal-o" role="option" aria-selected={active() === i()} onMouseMove={() => { moved = true; setActive(i()); }} onClick={() => { setActive(i()); row().select(); }}>
+              <I n={row().icon} /><span class="grow trunc">{row().title}<Show when={row().subtitle}><span class="sub trunc">{row().subtitle}</span></Show></span>
+              <Show when={row().git}><span class="kbd">Git repository</span></Show>
+            </div>}</Keyed>
           <Show when={page().kind !== "clone" && rows().length === 0 && emptyText()}><p class="ws-pal-none">{emptyText()}</p></Show>
           <Show when={page().kind === "method" && ws.t("addProjectNote")}><p class="ws-pal-none">{ws.t("addProjectNote")}</p></Show>
         </Show>
       </div>
       <div class="ws-picker-f">
-        <span><span class="kbd">Up</span><span class="kbd">Down</span>Navigate</span>
+        <Show when={ws.keys("Enter")}><span><span class="kbd">Up</span><span class="kbd">Down</span>Navigate</span>
         <span><span class="kbd">Enter</span>Select</span>
-        <span><span class="kbd">Esc</span>{pages().length > 1 ? "Back" : "Close"}</span>
+        <span><span class="kbd">Esc</span>{pages().length > 1 ? "Back" : "Close"}</span></Show>
         <span class="ws-picker-s" role="status">{status()}</span>
       </div>
     </div>

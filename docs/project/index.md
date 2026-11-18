@@ -7,9 +7,13 @@ retains task metadata, immutable reports and newest-first pipeline editions.
 
 Feature behavior is documented one page per feature in the [feature index](../features/index.md).
 
+## Workspace feed following
+
+Task conversations, sprint planning conversations and worker activity follow the latest content by default, including streamed text and layout growth. Scrolling up pauses following and preserves the reading position. Returning to the bottom, pressing Latest, or enabling Follow resumes it. The shared Latest control counts new entries while paused; growth of an existing entry does not increase the count. Sending a message brings the conversation back to the latest content; expanding an activity row keeps that row in view.
+
 ## Project pages
 
-- [Planned: Cortex Workspace](../cortex-workspace/index.md)
+- [Cortex Workspace (desktop application)](../cortex-workspace/index.md)
 - [Architecture overview](architecture.md)
 - [Conventions](conventions.md)
 - [Decisions](decisions.md)

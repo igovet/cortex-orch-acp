@@ -1,6 +1,6 @@
 # CW-C02: Public project outbox + atomic snapshot cursor; no merged internal sequence IDs
 
-**Status:** planned · **Phase:** 3+ · **Size:** S
+**Status:** Partly implemented; see CW-C02a and CW-C02b · **Phase:** 3+ · **Size:** S
 
 ## Goal
 

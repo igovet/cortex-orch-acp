@@ -47,5 +47,6 @@ it("shows a running task's steering and Request changes text as user turns, in o
   try {
     await vi.waitFor(() => expect(reopened.said()).toEqual(["Also add a docstring", "Please rename the helper"]));
   } finally { reopened.dispose(); }
-  expect(s.calls.some(c => c.operation === "native.query" && (c.message as { operation: string }).operation === "history.page")).toBe(true);
+  // Read through the native history query: from its end (`history.earlier`), continued forward (`history.page`).
+  expect(s.calls.some(c => c.operation === "native.query" && ["history.page", "history.earlier"].includes((c.message as { operation: string }).operation))).toBe(true);
 });

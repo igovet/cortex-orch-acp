@@ -169,8 +169,17 @@ pub fn task_language_tx(db: &Transaction<'_>, task: &str) -> CoreResult<&'static
         .chars()
         .filter(|c| c.is_alphabetic())
         .take(400)
-        .fold((0, 0), |(ru, all), c| (ru + usize::from(('\u{400}'..='\u{4ff}').contains(&c)), all + 1));
-    Ok(if cyrillic.1 > 0 && cyrillic.0 * 2 >= cyrillic.1 { "ru" } else { "en" })
+        .fold((0, 0), |(ru, all), c| {
+            (
+                ru + usize::from(('\u{400}'..='\u{4ff}').contains(&c)),
+                all + 1,
+            )
+        });
+    Ok(if cyrillic.1 > 0 && cyrillic.0 * 2 >= cyrillic.1 {
+        "ru"
+    } else {
+        "en"
+    })
 }
 /// Plain-language form of runtime blockers whose raw code would otherwise reach
 /// an owner question, in the task's language. An unknown blocker is named as an
@@ -188,12 +197,32 @@ fn owner_readable_blocker(blocker: &str, ru: bool) -> String {
         "verification_failed" => ("the runtime verification failed", "проверка результата не прошла"),
         "review_blocked" => ("the independent review blocked the result", "независимое ревью заблокировало результат"),
         "review_cycle_limit" => ("the review cycle limit was reached", "достигнут предел циклов ревью"),
+        "review_incomplete" => (
+            "the independent review could not cover the whole change",
+            "независимое ревью не смогло охватить всё изменение",
+        ),
+        "verification_review_revision_changed" => (
+            "the files changed after the review",
+            "файлы изменились после ревью",
+        ),
+        "verification_revision_unavailable" | "review_revision_unavailable" => (
+            "the state of the project files could not be read",
+            "не удалось прочитать состояние файлов проекта",
+        ),
+        "project_revision_unavailable" => (
+            "the project's Git repository could not be read",
+            "не удалось прочитать Git-репозиторий проекта",
+        ),
+        b if b.starts_with("project_unobservable_") => (
+            "the project files could not be observed completely",
+            "не удалось полностью прочитать файлы проекта",
+        ),
+        "native_progress_limit" => ("the task reached its limit of steps", "задача достигла предела шагов"),
+        "coordinator_no_progress_limit" => ("the coordinator stopped making progress", "координатор перестал продвигаться"),
         "no_runnable_nodes" => ("no planned step can run", "ни один запланированный шаг не может выполниться"),
         "scheduler_capacity_timeout" => ("no capacity became free for the next step in time", "для следующего шага вовремя не освободилась мощность"),
-        "native_continuation_unavailable" => (
-            "no planned step could be started (its files may be reserved by other work, or its writes denied)",
-            "не удалось запустить ни один запланированный шаг (его файлы могут быть заняты другой работой или запись в них запрещена)",
-        ),
+        // What held the step is stated from recorded facts by `stop_notice`, never guessed here.
+        "native_continuation_unavailable" => ("no planned step could be started", "не удалось запустить ни один запланированный шаг"),
         "lost_worker_action_outcome_unknown" => (
             "a worker's turn ended without an accepted result, and whether some of its actions finished is not known",
             "ход воркера закончился без принятого результата, и неизвестно, завершились ли некоторые его действия",
@@ -207,6 +236,20 @@ fn owner_readable_blocker(blocker: &str, ru: bool) -> String {
         (false, true) => ruw.to_owned(),
         (true, false) => format!("an internal stop ({blocker})"),
         (true, true) => format!("внутренняя остановка ({blocker})"),
+    }
+}
+/// The first line of the runtime stop question: what stopped the task.
+pub fn stop_headline(blocker: &str, ru: bool) -> String {
+    if ru {
+        format!(
+            "Задача остановлена: {}.",
+            owner_readable_blocker(blocker, true)
+        )
+    } else {
+        format!(
+            "The task stopped: {}.",
+            owner_readable_blocker(blocker, false)
+        )
     }
 }
 /// The runtime stop question's options, in the task's language. Answers are matched against
@@ -304,23 +347,34 @@ pub fn stop_tx(db: &Transaction<'_>, task: &str, blocker: &str) -> CoreResult<Ta
         [task],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
+    let returns = source != TaskState::WaitingUser && work && (asked == 0 || answered > asked);
+    // The explanation reads the facts (which steps were pending, what held them)
+    // before the stop cancels anything; the question it replaces is named so the
+    // Conversation can say why that one was withdrawn.
+    let ru = task_language_tx(db, task)? == "ru";
+    let notice = if returns {
+        None
+    } else {
+        Some(super::stop_notice::explain_tx(db, task, blocker, ru)?)
+    };
     waits::cancel_tx(db, task, None, "task_stopped_for_question", "cancelled")?;
     cancel_nodes_tx(db, task, "task_stopped_for_question")?;
     revoke_tx(db, task, None)?;
-    if source != TaskState::WaitingUser && work && (asked == 0 || answered > asked) {
+    let Some(notice) = notice else {
         event_tx(db, task, "ASK_USER_REQUIRED", json!({"blocker":blocker}))?;
         state_tx(db, task, TaskState::Recovering, None)?;
         return Ok(TaskState::Recovering);
-    }
+    };
+    let supersedes = db
+        .prepare(
+            "SELECT id FROM pending_questions WHERE task_id=? AND status='open' ORDER BY rowid",
+        )?
+        .query_map([task], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
     db.execute("UPDATE pending_questions SET status='superseded',answered_at=? WHERE task_id=? AND status='open'",
         (crate::now(),task))?;
     let id = format!("pq_{}", uuid::Uuid::new_v4().simple());
-    let ru = task_language_tx(db, task)? == "ru";
-    let question = if ru {
-        format!("Задача остановлена: {}. Что делать дальше?", owner_readable_blocker(blocker, true))
-    } else {
-        format!("The task stopped: {}. What should happen next?", owner_readable_blocker(blocker, false))
-    };
+    let question = notice.text.clone();
     let options = json!(if ru { STOP_OPTIONS_RU } else { STOP_OPTIONS_EN });
     db.execute(
         "INSERT INTO pending_questions(id,task_id,dedup_key,text,options_json,status,created_at)
@@ -334,13 +388,12 @@ pub fn stop_tx(db: &Transaction<'_>, task: &str, blocker: &str) -> CoreResult<Ta
             crate::now(),
         ),
     )?;
-    event_tx(
-        db,
-        task,
-        "USER_QUESTION_REQUESTED",
-        json!({"question_id":id,"question":question,"options":options,
-        "resume_state":"RECOVERING","blocker":blocker,"revision":revision,"runtime_stop":true}),
-    )?;
+    let mut payload = json!({"question_id":id,"question":question,"options":options,
+        "resume_state":"RECOVERING","blocker":blocker,"revision":revision,"runtime_stop":true,"supersedes":supersedes});
+    if let (Some(p), Value::Object(n)) = (payload.as_object_mut(), notice.payload()) {
+        p.extend(n);
+    }
+    event_tx(db, task, "USER_QUESTION_REQUESTED", payload)?;
     state_tx(db, task, TaskState::WaitingUser, Some(blocker))?;
     Ok(TaskState::WaitingUser)
 }
@@ -774,22 +827,14 @@ pub fn propose_replan_tx(
             {
                 return refuse("invalid_scope");
             }
-            let denied=db.prepare("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_STEERING'")?
-                .query_map([task],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
-            for s in denied {
-                let v: Value = serde_json::from_str(&s)?;
-                if let Some(denials) = v["deny_write"].as_array() {
-                    if paths.iter().any(|p| {
-                        denials.iter().any(|d| {
-                            crate::scheduler::policy::overlaps(
-                                p.as_str().unwrap(),
-                                d.as_str().unwrap_or("."),
-                            )
-                        })
-                    }) {
-                        return refuse("scope_conflicts_with_user_policy");
-                    }
-                }
+            // The owner's write denials in force (lifted ones excluded).
+            let denials = super::steering::denials(db, task)?;
+            if paths.iter().any(|p| {
+                denials
+                    .iter()
+                    .any(|d| crate::scheduler::policy::overlaps(p.as_str().unwrap(), d))
+            }) {
+                return refuse("scope_conflicts_with_user_policy");
             }
         }
         waits::cancel_tx(db, task, None, "replanning", "cancelled")?;

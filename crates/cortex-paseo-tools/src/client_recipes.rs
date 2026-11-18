@@ -117,7 +117,11 @@ fn pretty(value: &Py, level: usize, out: &mut String) {
                 escape(key, out);
                 out.push_str(": ");
                 pretty(item, level + 1, out);
-                out.push_str(if index + 1 < entries.len() { ",\n" } else { "\n" });
+                out.push_str(if index + 1 < entries.len() {
+                    ",\n"
+                } else {
+                    "\n"
+                });
             }
             out.push_str(&close);
             out.push('}');
@@ -137,7 +141,10 @@ pub(crate) fn render(value: &Py) -> String {
 
 fn entry(binary: &Path) -> Py {
     let mut env = Py::dict();
-    env.set("CORTEX_ACP_RUNTIME_ROOT", Py::str(checkout_root().display().to_string()));
+    env.set(
+        "CORTEX_ACP_RUNTIME_ROOT",
+        Py::str(checkout_root().display().to_string()),
+    );
     let mut agent = Py::dict();
     agent.set("type", Py::str("custom"));
     agent.set("command", Py::str(binary.display().to_string()));
@@ -187,20 +194,42 @@ fn timestamp(seconds: u64) -> String {
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}{month:02}{day:02}T{:02}{:02}{:02}", rest / 3_600, rest % 3_600 / 60, rest % 60)
+    format!(
+        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}",
+        rest / 3_600,
+        rest % 3_600 / 60,
+        rest % 60
+    )
 }
 
 fn write_backup(path: &Path, mode: u32) -> Result<PathBuf, String> {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let stamp = timestamp(now);
     let data = fs::read(path).map_err(|e| e.to_string())?;
-    let name = path.file_name().and_then(|n| n.to_str()).ok_or("bad settings file name")?;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("bad settings file name")?;
     for suffix in 0u32.. {
-        let backup = path.with_file_name(if suffix == 0 { format!("{name}.bak.{stamp}") } else { format!("{name}.bak.{stamp}.{suffix}") });
-        match fs::OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&backup) {
+        let backup = path.with_file_name(if suffix == 0 {
+            format!("{name}.bak.{stamp}")
+        } else {
+            format!("{name}.bak.{stamp}.{suffix}")
+        });
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&backup)
+        {
             Ok(mut file) => {
                 file.write_all(&data).map_err(|e| e.to_string())?;
-                fs::set_permissions(&backup, fs::Permissions::from_mode(mode)).map_err(|e| e.to_string())?;
+                fs::set_permissions(&backup, fs::Permissions::from_mode(mode))
+                    .map_err(|e| e.to_string())?;
                 return Ok(backup);
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -213,14 +242,24 @@ fn write_backup(path: &Path, mode: u32) -> Result<PathBuf, String> {
 fn atomic_write_with_backup(path: &Path, text: &str) -> Result<(), String> {
     refuse_if_symlinked(path)?;
     let mode = if path.exists() {
-        let mode = fs::metadata(path).map_err(|e| e.to_string())?.permissions().mode() & 0o7777;
+        let mode = fs::metadata(path)
+            .map_err(|e| e.to_string())?
+            .permissions()
+            .mode()
+            & 0o7777;
         write_backup(path, mode)?;
         Some(mode)
     } else {
         None
     };
-    let name = path.file_name().and_then(|n| n.to_str()).ok_or("bad settings file name")?;
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("bad settings file name")?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     let token = fs::read_to_string("/proc/sys/kernel/random/uuid").map_err(|e| e.to_string())?;
     let temporary = parent.join(format!(".{name}.{}", token.trim().replace('-', "")));
     let written = fs::OpenOptions::new()
@@ -228,7 +267,10 @@ fn atomic_write_with_backup(path: &Path, text: &str) -> Result<(), String> {
         .create_new(true)
         .mode(0o600)
         .open(&temporary)
-        .and_then(|mut file| file.write_all(text.as_bytes()).and_then(|()| file.sync_all()))
+        .and_then(|mut file| {
+            file.write_all(text.as_bytes())
+                .and_then(|()| file.sync_all())
+        })
         .and_then(|()| fs::rename(&temporary, path));
     if let Err(error) = written {
         let _ = fs::remove_file(&temporary);
@@ -243,7 +285,8 @@ fn atomic_write_with_backup(path: &Path, text: &str) -> Result<(), String> {
 // ------------------------------------------------------------------ the tool
 
 fn existing(data: &Py) -> Option<&Py> {
-    data.get_opt("agent_servers").and_then(|servers| servers.get_opt(AGENT_NAME))
+    data.get_opt("agent_servers")
+        .and_then(|servers| servers.get_opt(AGENT_NAME))
 }
 
 fn same(a: &Py, b: &Py) -> bool {
@@ -260,7 +303,14 @@ struct Args {
 }
 
 fn parse(argv: &[String]) -> Result<Args, String> {
-    let mut args = Args { settings: None, apply: false, consent: false, replace: false, binary: None, codeg_only: false };
+    let mut args = Args {
+        settings: None,
+        apply: false,
+        consent: false,
+        replace: false,
+        binary: None,
+        codeg_only: false,
+    };
     let mut it = argv.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -276,7 +326,10 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                     args.binary = Some(PathBuf::from(value));
                 }
             }
-            "--python" | "--python3" => return Err("the Python entry was removed; Cortex registers only the native cortex-acp binary".into()),
+            "--python" | "--python3" => return Err(
+                "the Python entry was removed; Cortex registers only the native cortex-acp binary"
+                    .into(),
+            ),
             other => return Err(format!("unrecognized argument {other:?}")),
         }
     }
@@ -296,7 +349,10 @@ pub fn run(argv: &[String]) -> (String, i32) {
             return (String::new(), 2);
         }
     };
-    let binary = args.binary.clone().unwrap_or_else(|| checkout_root().join("target/debug/cortex-acp"));
+    let binary = args
+        .binary
+        .clone()
+        .unwrap_or_else(|| checkout_root().join("target/debug/cortex-acp"));
     if !binary.is_absolute() {
         eprintln!("error: Rust binary must be an absolute path");
         return (String::new(), 2);
@@ -339,8 +395,15 @@ fn settings_flow(args: &Args, binary: &Path) -> (String, i32) {
         if let Some(settings) = &args.settings {
             let (data, _) = read(settings);
             if data.is_none() && settings.exists() {
-                out.push_str(&format!("\n{} is not strict JSON; showing manual instructions instead:\n\n", settings.display()));
-                out.push_str(&JSONC_MANUAL.replace("{settings}", &settings.display().to_string()).replace("{entry}", &entry_text));
+                out.push_str(&format!(
+                    "\n{} is not strict JSON; showing manual instructions instead:\n\n",
+                    settings.display()
+                ));
+                out.push_str(
+                    &JSONC_MANUAL
+                        .replace("{settings}", &settings.display().to_string())
+                        .replace("{entry}", &entry_text),
+                );
                 out.push('\n');
                 return (out, 0);
             }
@@ -358,7 +421,9 @@ fn settings_flow(args: &Args, binary: &Path) -> (String, i32) {
         return (String::new(), 2);
     };
     if !args.consent {
-        eprintln!("error: --apply requires --i-consent-to-write (explicit consent for a real write).");
+        eprintln!(
+            "error: --apply requires --i-consent-to-write (explicit consent for a real write)."
+        );
         return (String::new(), 2);
     }
     if unbuilt {
@@ -369,7 +434,12 @@ fn settings_flow(args: &Args, binary: &Path) -> (String, i32) {
     let mut data = match data {
         None if settings.exists() => {
             eprintln!("refusing to write: {} is not strict JSON (Zed allows JSONC). Manual instructions:\n", settings.display());
-            return (JSONC_MANUAL.replace("{settings}", &settings.display().to_string()).replace("{entry}", &entry_text), 2);
+            return (
+                JSONC_MANUAL
+                    .replace("{settings}", &settings.display().to_string())
+                    .replace("{entry}", &entry_text),
+                2,
+            );
         }
         None => Py::dict(),
         Some(data) => data,
@@ -396,10 +466,22 @@ fn settings_flow(args: &Args, binary: &Path) -> (String, i32) {
     data.set("agent_servers", servers);
     let text = format!("{}\n", render(&data));
     if text == raw {
-        return (format!("{} already contains the exact Cortex entry; nothing to write.\n", settings.display()), 0);
+        return (
+            format!(
+                "{} already contains the exact Cortex entry; nothing to write.\n",
+                settings.display()
+            ),
+            0,
+        );
     }
     match atomic_write_with_backup(settings, &text) {
-        Ok(()) => (format!("wrote {} (backup created alongside it).\n", settings.display()), 0),
+        Ok(()) => (
+            format!(
+                "wrote {} (backup created alongside it).\n",
+                settings.display()
+            ),
+            0,
+        ),
         Err(error) => {
             eprintln!("error: {error}");
             (String::new(), 2)
@@ -439,9 +521,18 @@ mod tests {
     fn preview_never_writes_and_never_echoes_other_keys() {
         let dir = scratch("preview");
         let settings = dir.join("settings.json");
-        fs::write(&settings, "{\"secret\": \"hunter2\", \"agent_servers\": {}}").unwrap();
+        fs::write(
+            &settings,
+            "{\"secret\": \"hunter2\", \"agent_servers\": {}}",
+        )
+        .unwrap();
         let before = fs::read(&settings).unwrap();
-        let (out, code) = run(&args(&["--settings", settings.to_str().unwrap(), "--rust-binary", &binary(&dir)]));
+        let (out, code) = run(&args(&[
+            "--settings",
+            settings.to_str().unwrap(),
+            "--rust-binary",
+            &binary(&dir),
+        ]));
         assert_eq!(code, 0);
         assert!(out.contains("would add a new 'Cortex'") && !out.contains("hunter2"));
         assert_eq!(fs::read(&settings).unwrap(), before);
@@ -452,23 +543,55 @@ mod tests {
     fn apply_needs_consent_then_writes_with_a_backup_and_preserves_other_keys_and_mode() {
         let dir = scratch("apply");
         let settings = dir.join("settings.json");
-        fs::write(&settings, "{\"b\": 1, \"a\": \"é\", \"agent_servers\": {\"Other\": {}}}").unwrap();
+        fs::write(
+            &settings,
+            "{\"b\": 1, \"a\": \"é\", \"agent_servers\": {\"Other\": {}}}",
+        )
+        .unwrap();
         fs::set_permissions(&settings, fs::Permissions::from_mode(0o640)).unwrap();
         let bin = binary(&dir);
-        let base = ["--settings", settings.to_str().unwrap(), "--rust-binary", &bin, "--apply"];
+        let base = [
+            "--settings",
+            settings.to_str().unwrap(),
+            "--rust-binary",
+            &bin,
+            "--apply",
+        ];
         assert_eq!(run(&args(&base)).1, 2);
         let mut consented = base.to_vec();
         consented.push("--i-consent-to-write");
         assert_eq!(run(&args(&consented)).1, 0);
         let written = fs::read_to_string(&settings).unwrap();
-        assert!(written.find("\"b\"").unwrap() < written.find("\"a\"").unwrap(), "key order preserved");
-        assert!(written.contains("\\u00e9") && written.contains("\"Other\": {}") && written.contains("\"Cortex\""));
-        assert_eq!(fs::metadata(&settings).unwrap().permissions().mode() & 0o777, 0o640);
-        let backups = fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with("settings.json.bak.")).count();
+        assert!(
+            written.find("\"b\"").unwrap() < written.find("\"a\"").unwrap(),
+            "key order preserved"
+        );
+        assert!(
+            written.contains("\\u00e9")
+                && written.contains("\"Other\": {}")
+                && written.contains("\"Cortex\"")
+        );
+        assert_eq!(
+            fs::metadata(&settings).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        let backups = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.json.bak.")
+            })
+            .count();
         assert_eq!(backups, 1);
         // Idempotent, and a different existing entry needs --replace.
         assert!(run(&args(&consented)).0.contains("nothing to write"));
-        fs::write(&settings, "{\"agent_servers\": {\"Cortex\": {\"command\": \"/other\"}}}").unwrap();
+        fs::write(
+            &settings,
+            "{\"agent_servers\": {\"Cortex\": {\"command\": \"/other\"}}}",
+        )
+        .unwrap();
         assert_eq!(run(&args(&consented)).1, 2);
         consented.push("--replace");
         assert_eq!(run(&args(&consented)).1, 0);
@@ -481,7 +604,17 @@ mod tests {
         let bin = binary(&dir);
         let jsonc = dir.join("jsonc.json");
         fs::write(&jsonc, "{ // comment\n}").unwrap();
-        let apply = |path: &Path, bin: &str| run(&args(&["--settings", path.to_str().unwrap(), "--rust-binary", bin, "--apply", "--i-consent-to-write"])).1;
+        let apply = |path: &Path, bin: &str| {
+            run(&args(&[
+                "--settings",
+                path.to_str().unwrap(),
+                "--rust-binary",
+                bin,
+                "--apply",
+                "--i-consent-to-write",
+            ]))
+            .1
+        };
         assert_eq!(apply(&jsonc, &bin), 2);
         let link = dir.join("link.json");
         std::os::unix::fs::symlink(&jsonc, &link).unwrap();

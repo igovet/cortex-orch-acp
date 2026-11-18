@@ -1,0 +1,132 @@
+/* Android mockup sheet. Tokens, icons and base controls come from ../mockups/styles.css; this file lays out the phone frames
+   and holds the touch sizes proposed for a coarse pointer. Static design artifact, synthetic content only. */
+@font-face {
+  font-family: "Noto Sans Variable"; font-weight: 100 900; font-display: block;
+  src: url("../../../packages/workspace-ui/node_modules/@fontsource-variable/noto-sans/files/noto-sans-latin-wght-normal.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+2000-206F;
+}
+@font-face {
+  font-family: "Noto Sans Variable"; font-weight: 100 900; font-display: block;
+  src: url("../../../packages/workspace-ui/node_modules/@fontsource-variable/noto-sans/files/noto-sans-cyrillic-wght-normal.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+:root { --font: "Noto Sans Variable", system-ui, sans-serif; }
+html { height: auto; }
+body { display: block; height: auto; overflow: auto; user-select: text; background: var(--bg-sidebar); }
+
+.sheet-h { padding: 28px 32px 0; max-width: 900px; }
+.sheet-h h1 { font-size: 22px; line-height: 28px; font-weight: 600; }
+.sheet-h p { margin-top: 6px; color: var(--fg-2); }
+.sheet-h .theme { margin-top: 12px; }
+.sheet { display: flex; flex-wrap: wrap; gap: 36px 28px; padding: 24px 32px 48px; }
+.shot { width: 390px; }
+.shot.wide { width: 620px; }
+.shot h2 { height: 40px; display: flex; align-items: flex-end; padding-bottom: 8px; font-size: 14px; font-weight: 600; }
+.shot .why { margin-top: 10px; font-size: 13px; line-height: 19px; color: var(--fg-2); }
+
+/* ---------- Phone frame ---------- */
+.phone { position: relative; display: flex; flex-direction: column; width: 390px; height: 844px; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 28px; background: var(--bg-canvas); user-select: none; }
+.sys { display: flex; align-items: center; gap: 8px; flex: none; height: 32px; padding: 0 22px; font-size: 12px; font-weight: 500; color: var(--fg-2); }
+.gest { flex: none; height: 24px; position: relative; z-index: 5; }
+.gest::after { content: ""; position: absolute; left: 50%; top: 10px; width: 120px; height: 4px; margin-left: -60px; border-radius: 2px; background: var(--fg-3); opacity: .55; }
+.bar { display: flex; align-items: center; gap: 4px; flex: none; height: 52px; padding: 0 8px; border-bottom: 1px solid var(--line); }
+.bar .title { flex: 1 1 auto; min-width: 0; padding: 0 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 16px; font-weight: 500; }
+.tbar { display: flex; align-items: center; gap: 8px; flex: none; height: 44px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.p-body { flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 14px; padding: 20px 16px; font-size: 15px; line-height: 22px; }
+.p-body.flush { padding: 8px 0 16px; gap: 0; }
+.p-body.center { justify-content: center; padding: 24px; }
+.p-body.center h3 { font-size: 22px; line-height: 28px; font-weight: 600; }
+.p-foot { display: grid; gap: 10px; flex: none; padding: 12px 16px 8px; }
+.p-foot.in { padding: 12px 16px 4px; }
+.pad { padding-left: 16px; padding-right: 16px; }
+div.pad { padding-top: 12px; padding-bottom: 4px; }
+.logo { width: 56px; height: 56px; margin-bottom: 6px; }
+
+/* ---------- Touch sizes (the proposal: applied only on a coarse pointer) ---------- */
+.touch .btn { height: 40px; padding: 0 14px; font-size: 14px; }
+.touch .btn-sm { height: 32px; padding: 0 12px; font-size: 13px; }
+.touch .btn.wide { height: 48px; width: 100%; font-size: 15px; }
+.touch .ib { width: 44px; height: 44px; }
+.touch .ib .i { width: 20px; height: 20px; }
+.touch .nav { height: 44px; font-size: 15px; gap: 12px; }
+.touch .proj { height: 44px; font-size: 15px; }
+.touch .task-row { height: 40px; font-size: 14px; }
+.touch .inp { height: 44px; font-size: 15px; }
+.touch .sec-h { height: 40px; }
+.touch .sb-foot { height: 52px; }
+.touch .sb-usage { height: 40px; }
+
+/* ---------- Rows ---------- */
+.group { margin: 0 16px; border: 1px solid var(--line-strong); border-radius: var(--r-card); overflow: hidden; }
+.group > * + * { border-top: 1px solid var(--line); }
+.need3 { display: grid; gap: 2px; padding: 10px 12px; }
+.need3 .kind { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.need3 .age { margin-left: auto; color: var(--fg-3); }
+.need3 .ask { font-size: 14px; line-height: 20px; }
+.need3 .where { font-size: 12px; color: var(--fg-2); }
+.prow, .srow { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 12px; font-size: 15px; }
+.mrow { display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 8px 16px; }
+.group > .mrow { padding: 8px 12px; }
+.mrow.sel { background: var(--bg-selected); }
+.mrow.big { padding: 0; }
+.mrow .name, .desk .name { font-size: 15px; font-weight: 500; line-height: 20px; }
+.tile { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 36px; height: 36px; border-radius: 8px; background: var(--bg-input); color: var(--fg-2); }
+.steps { display: grid; gap: 12px; margin-top: 10px; }
+.steps li { display: flex; gap: 12px; font-size: 14px; line-height: 20px; }
+.steps .n { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 22px; height: 22px; border: 1px solid var(--line-ctl); border-radius: 50%; font-size: 12px; color: var(--fg-2); }
+.fpr.one code { font-size: 16px; }
+
+/* ---------- Camera ---------- */
+.cam { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; background: #0d0f0e; color: #d6d9d8; font-size: 13px; }
+.finder { position: relative; width: 232px; height: 232px; }
+.finder i { position: absolute; width: 34px; height: 34px; border: 3px solid #fafafa; }
+.finder i:nth-child(1) { left: 0; top: 0; border-right: 0; border-bottom: 0; border-top-left-radius: 12px; }
+.finder i:nth-child(2) { right: 0; top: 0; border-left: 0; border-bottom: 0; border-top-right-radius: 12px; }
+.finder i:nth-child(3) { left: 0; bottom: 0; border-right: 0; border-top: 0; border-bottom-left-radius: 12px; }
+.finder i:nth-child(4) { right: 0; bottom: 0; border-left: 0; border-top: 0; border-bottom-right-radius: 12px; }
+
+/* ---------- Drawer and bottom sheet ---------- */
+.under { flex: 1 1 auto; }
+.scrim { position: absolute; inset: 0; background: var(--scrim); }
+.drawer { position: absolute; left: 0; top: 0; bottom: 0; width: 318px; display: flex; flex-direction: column; padding-top: 32px; padding-bottom: 24px; background: var(--bg-sidebar); border-right: 1px solid var(--line-strong); }
+.machine-m { display: flex; align-items: center; gap: 12px; flex: none; height: 60px; padding: 0 16px; text-align: left; border-bottom: 1px solid var(--line); }
+.machine-m .grow { display: grid; }
+.machine-m .name { font-size: 15px; font-weight: 500; }
+.bar-u { display: inline-block; flex: 1 1 auto; height: 3px; border-radius: 2px; background: var(--line-ctl); overflow: hidden; }
+.bar-u i { display: block; height: 100%; background: var(--fg-2); }
+.drawer .sb-usage .um { display: flex; align-items: center; gap: 8px; }
+.bsheet { position: absolute; left: 0; right: 0; bottom: 0; padding-bottom: 28px; border-radius: 20px 20px 0 0; background: var(--bg-canvas); box-shadow: var(--shadow-menu); }
+.grab { width: 36px; height: 4px; margin: 10px auto 4px; border-radius: 2px; background: var(--line-ctl); }
+
+/* ---------- Conversation ---------- */
+.feed { gap: 12px; padding-top: 14px; }
+.feed.stale > * { opacity: .72; }
+.msg { font-size: 15px; line-height: 23px; }
+.fold { display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px; border-radius: 8px; background: var(--bg-input); font-size: 14px; color: var(--fg-2); }
+.qcard { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--warn-line); border-radius: var(--r-card); background: var(--warn-tint); font-size: 13px; }
+.qcard .q { font-size: 15px; line-height: 22px; margin-bottom: 2px; }
+.opt { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 6px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--bg-canvas); text-align: left; font-size: 14px; line-height: 19px; }
+.opt[aria-disabled="true"] { color: var(--fg-3); }
+.opt .k { flex: none; width: 14px; color: var(--fg-3); font-size: 12px; }
+.opt b { display: block; font-weight: 500; }
+.opt .cap { display: block; }
+.composer.m { padding: 10px 6px 4px 6px; box-shadow: none; }
+.composer.m .ph { padding: 0 8px 4px; font-size: 15px; line-height: 21px; color: var(--fg-3); }
+.composer.m .send { background: var(--primary); color: var(--primary-fg); border-radius: 50%; width: 36px; height: 36px; margin-right: 4px; }
+.composer.m.off .send { background: var(--bg-input); color: var(--fg-3); }
+.team { display: flex; align-items: center; gap: 8px; flex: none; height: 44px; padding: 0 16px; border-top: 1px solid var(--line); font-size: 13px; }
+.conn { display: flex; align-items: center; gap: 8px; flex: none; min-height: 44px; padding: 6px 8px 6px 16px; background: var(--warn-tint); border-bottom: 1px solid var(--warn-line); font-size: 13px; line-height: 18px; color: var(--warn); }
+
+/* ---------- Desktop page ---------- */
+.desk { display: grid; gap: 14px; padding: 24px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--bg-canvas); user-select: none; }
+.desk h3 { font-size: 18px; font-weight: 600; }
+.drow { display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 8px 12px; }
+.desk > .drow { border: 1px solid var(--line-strong); border-radius: var(--r-card); }
+.desk .group { margin: 0; }
+.pairbox { display: flex; gap: 18px; padding: 14px; border: 1px solid var(--line-strong); border-radius: var(--r-card); }
+.qr { flex: none; width: 132px; height: 132px; border-radius: 6px; background:
+  conic-gradient(var(--fg) 25%, transparent 0 50%, var(--fg) 0 75%, transparent 0) 0 0 / 12px 12px,
+  conic-gradient(transparent 25%, var(--fg) 0 50%, transparent 0) 6px 0 / 18px 18px; border: 8px solid var(--bg-canvas); outline: 1px solid var(--line-strong); }
+.pcode { margin: 8px 0 2px; font-family: var(--mono); font-size: 22px; letter-spacing: .06em; }
+.askbox { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--warn-line); border-radius: var(--r-card); background: var(--warn-tint); }
+.row.end { justify-content: flex-end; }

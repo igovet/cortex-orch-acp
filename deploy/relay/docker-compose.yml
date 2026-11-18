@@ -1,0 +1,51 @@
+# Self-hosted iroh relay behind an existing Traefik. See README.md.
+services:
+    iroh-relay:
+        image: n0computer/iroh-relay:${RELAY_IMAGE_TAG:-v1.4.1}
+        container_name: cortex-iroh-relay
+        restart: unless-stopped
+        user: '65532:65532'
+        read_only: true
+        cap_drop:
+            - ALL
+        security_opt:
+            - no-new-privileges:true
+        command: ['--config-path=/etc/iroh-relay/relay.toml']
+        environment:
+            RUST_LOG: ${RELAY_LOG:-info}
+        volumes:
+            - ./relay.toml:/etc/iroh-relay/relay.toml:ro
+        # No HTTP port is published; Traefik reaches the container on the network.
+        # OPTIONAL, OFF BY DEFAULT: QUIC address discovery. Requires a [tls] section
+        # with a certificate in relay.toml, enable_quic_addr_discovery = true and
+        # this UDP port. See README.md before enabling.
+        # ports:
+        #     - '7842:7842/udp'
+        healthcheck:
+            test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:8080/healthz']
+            interval: 30s
+            timeout: 5s
+            retries: 3
+            start_period: 10s
+        labels:
+            - 'traefik.enable=true'
+            - 'traefik.http.routers.cortex-relay.rule=Host(`${RELAY_HOST:?set RELAY_HOST in .env}`)'
+            - 'traefik.http.routers.cortex-relay.entrypoints=${TRAEFIK_ENTRYPOINTS:-websecure}'
+            - 'traefik.http.routers.cortex-relay.tls=${TRAEFIK_TLS:-true}'
+            # The certificate comes from Traefik's own store (a Cloudflare Origin certificate
+            # for the zone). To have Traefik issue one instead, add:
+            #   - 'traefik.http.routers.cortex-relay.tls.certresolver=le'
+            - 'traefik.http.services.cortex-relay.loadbalancer.server.port=8080'
+            - 'traefik.docker.network=${TRAEFIK_NETWORK:-traefik}'
+        logging:
+            driver: json-file
+            options:
+                max-size: '10m'
+                max-file: '3'
+        networks:
+            - traefik
+
+networks:
+    traefik:
+        name: ${TRAEFIK_NETWORK:-traefik}
+        external: true

@@ -1,6 +1,6 @@
 # CW-U11: Voice input for the task composer
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies; speech provider is an open question · **Phase:** 3+ · **Size:** M
+**Status:** Partly implemented: local dictation in the composer with a Russian-only on-device recognizer ([maintenance and controls](../maintenance-and-controls.md)); no provider choice; a real microphone is not verified · **Phase:** 3+ · **Size:** M
 
 ## Goal
 

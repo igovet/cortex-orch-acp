@@ -24,7 +24,9 @@ fn scheduler_owner_holder_child() {
     };
     use cortex_core::ownership::SchedulerOwner;
     use std::io::{BufRead, Write};
-    let key = cortex_core::ProjectKey::new(std::path::Path::new(&dir), cortex_core::StoreChannel::Dev).unwrap();
+    let key =
+        cortex_core::ProjectKey::new(std::path::Path::new(&dir), cortex_core::StoreChannel::Dev)
+            .unwrap();
     let _owner = SchedulerOwner::acquire(&key).unwrap();
     println!("holder-ready");
     std::io::stdout().flush().unwrap();
@@ -39,7 +41,12 @@ fn scheduler_owner_excludes_another_process_and_keeps_reads_available() {
     let p = Project::new();
     let s = p.open();
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "scheduler_owner_holder_child", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "scheduler_owner_holder_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env("CORTEX_FENCING_CHILD_DIR", &p.0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -49,7 +56,10 @@ fn scheduler_owner_excludes_another_process_and_keeps_reads_available() {
     let mut line = String::new();
     while !line.contains("holder-ready") {
         line.clear();
-        assert!(reader.read_line(&mut line).unwrap() > 0, "child exited before ready");
+        assert!(
+            reader.read_line(&mut line).unwrap() > 0,
+            "child exited before ready"
+        );
     }
     assert_eq!(
         StoreExecutor::open(p.key()).err().unwrap().code(),
@@ -139,7 +149,12 @@ fn shared_writer_hands_the_lease_over_only_while_idle() {
     assert_eq!(refused.err().unwrap().code(), "scheduler_owner_busy");
     // ... and retakes the lease once the other holder is gone.
     drop(other);
-    shared.write(|_| Ok(())).unwrap().blocking_recv().unwrap().unwrap();
+    shared
+        .write(|_| Ok(()))
+        .unwrap()
+        .blocking_recv()
+        .unwrap()
+        .unwrap();
     assert_eq!(
         SchedulerOwner::acquire(&p.key()).err().unwrap().code(),
         "scheduler_owner_busy"
@@ -173,7 +188,14 @@ fn idle_shared_writer_adopts_a_task_left_by_a_vanished_peer() {
         assert!(!b.take_orphaned());
     }
     assert!(!a.take_orphaned());
-    a.write(|_| Ok(())).unwrap().blocking_recv().unwrap().expect("the job runs; it is not refused");
-    assert!(a.take_orphaned(), "the orphaned task is reported for recovery once");
+    a.write(|_| Ok(()))
+        .unwrap()
+        .blocking_recv()
+        .unwrap()
+        .expect("the job runs; it is not refused");
+    assert!(
+        a.take_orphaned(),
+        "the orphaned task is reported for recovery once"
+    );
     assert!(!a.take_orphaned());
 }

@@ -1,6 +1,6 @@
 # Decision records
 
-**Status: planned; no implementation or qualification is implied.**
+**Status: each record states its own status: decided and implemented for the local desktop, partly implemented, or planned and not implemented.**
 
 - [Product task and execution](0001-product-task-and-execution.md)
 - [Independent machine service](0002-independent-machine-service.md)

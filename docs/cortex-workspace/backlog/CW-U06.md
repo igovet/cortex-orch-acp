@@ -1,6 +1,6 @@
 # CW-U06: Archive and purge UI
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies · **Phase:** 3+ · **Size:** M
+**Status:** Implemented: archive and guarded purge screens ([screens](../SCREENS.md)); no-paid checks only · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Archive and purge UI.

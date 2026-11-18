@@ -155,7 +155,10 @@ fn component(s: &str) -> Result<String> {
         )
     })
 }
-pub(super) fn snapshot(r: &Value, observation: Observation) -> Result<Value> {
+pub(super) fn snapshot(r: &Value, mut observation: Observation) -> Result<Value> {
+    observation
+        .models
+        .retain(|m| !m["value"].as_str().is_some_and(crate::native_routes::is_alias_model));
     if observation.models.is_empty() {
         return Err(refuse(
             "no_model_options_advertised",
@@ -290,5 +293,26 @@ mod tests {
                 .count(),
             4
         );
+    }
+    /// The engine's pure `default` alias is not a concrete model: a refreshed catalogue never lists it,
+    /// and a list holding only the alias is the same refusal as an empty one.
+    #[test]
+    fn the_default_alias_is_dropped_from_a_refreshed_catalogue() {
+        let model = |options: Value| {
+            json!([{"id":"model","name":"Model","category":"model","type":"select","currentValue":"default","options":options}])
+        };
+        let record = json!({"id":"cn_000000000002","approved_fingerprint":"fixture","state":"configured",
+            "engine":"claude-agent-acp","name":"Claude"});
+        let both = parse(&model(json!([
+            {"value":"default","name":"Default (recommended)","description":"Opus 5.5"},
+            {"value":"opus","name":"Opus 5.5"},
+        ])))
+        .unwrap();
+        let doc = snapshot(&record, both).unwrap();
+        let ids: Vec<_> = doc["entries"].as_array().unwrap().iter().map(|e| e["route"]["model"].clone()).collect();
+        assert_eq!(ids, [json!("opus")]);
+        let mut alias_only = parse(&model(json!([{"value":"default","name":"Default (recommended)"}]))).unwrap();
+        alias_only.models[0]["value"] = json!("Default");
+        assert_eq!(snapshot(&record, alias_only).unwrap_err().code, "no_model_options_advertised");
     }
 }

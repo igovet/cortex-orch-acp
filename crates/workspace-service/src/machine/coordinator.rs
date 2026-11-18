@@ -9,6 +9,12 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 const STEP: &str = "Workspace step: ";
+/// A call's newest retained updates up to a row, and its first one, through the store's
+/// `host_updates_by_call` index (its `json_valid` condition is what lets SQLite use it).
+/// Through the session index alone every tool row walked all earlier updates of the session,
+/// and one malformed update among them failed the whole page.
+const PRIOR_SQL: &str = "SELECT update_json FROM host_updates WHERE session_id=? AND seq<=? AND json_valid(update_json) AND json_extract(update_json,'$.toolCallId')=? ORDER BY seq DESC LIMIT 100";
+const FIRST_SQL: &str = "SELECT update_json FROM host_updates WHERE session_id=? AND seq<=? AND json_valid(update_json) AND json_extract(update_json,'$.toolCallId')=? ORDER BY seq LIMIT 1";
 fn digest(v: &Value) -> String {
     format!("{:x}", Sha256::digest(v.to_string().as_bytes()))
 }
@@ -246,7 +252,13 @@ fn page(
     let rows = query(
         db,
         &format!("SELECT * FROM ({sql}) WHERE seq>? AND seq<=? AND {OWN} ORDER BY seq LIMIT 101"),
-        &[session.clone(), session.clone(), json!(after), json!(high), json!(attempts)],
+        &[
+            session.clone(),
+            session.clone(),
+            json!(after),
+            json!(high),
+            json!(attempts),
+        ],
     )?;
     // A sequence at the end of the integer range cannot be paged; the history is
     // reported unavailable with the existing reopen outcome.
@@ -283,7 +295,11 @@ fn page(
                         Some("tool_call" | "tool_call_update")
                     )
                 {
-                    let prior=query(db,"SELECT update_json FROM host_updates WHERE session_id=? AND seq<=? AND json_extract(update_json,'$.toolCallId')=? ORDER BY seq DESC LIMIT 100",&[session.clone(),json!(seq),update["toolCallId"].clone()])?;
+                    let prior = query(
+                        db,
+                        PRIOR_SQL,
+                        &[session.clone(), json!(seq), update["toolCallId"].clone()],
+                    )?;
                     let mut merged = json!({});
                     let mut valid = true;
                     for r in prior.iter().rev() {
@@ -297,7 +313,11 @@ fn page(
                         }
                     }
                     if prior.len() >= 100 {
-                        let first=query(db,"SELECT update_json FROM host_updates WHERE session_id=? AND seq<=? AND json_extract(update_json,'$.toolCallId')=? ORDER BY seq LIMIT 1",&[session.clone(),json!(seq),update["toolCallId"].clone()])?;
+                        let first = query(
+                            db,
+                            FIRST_SQL,
+                            &[session.clone(), json!(seq), update["toolCallId"].clone()],
+                        )?;
                         let mut initial = object(first[0]["update_json"].as_str().unwrap_or(""));
                         merge(&mut initial, &merged);
                         merged = initial;
@@ -554,14 +574,46 @@ pub(super) fn read(db: &Connection, project: &str, params: &Value) -> CoreResult
         "status":status,"goal":"Coordinator for this task","now":null,"waitsFor":null,"scope":[],"route":route(db,&e["runtime_task_id"])?,
         "attempt":null,"elapsedMs":null,"runningSince":null,"context":null,"usage":null,"result":null,"messages":[]});
     item.as_object_mut().unwrap().extend(
-        page(db, project, task, &e["acp_session_id"], &params["cursor"], &e["runtime_task_id"])?
-            .as_object()
-            .unwrap()
-            .clone(),
+        page(
+            db,
+            project,
+            task,
+            &e["acp_session_id"],
+            &params["cursor"],
+            &e["runtime_task_id"],
+        )?
+        .as_object()
+        .unwrap()
+        .clone(),
     );
     let found = json!([item]);
     if bytes(&json!({"ok":true,"result":found})) > 786432 {
         return Err(CoreError::Refused("worker_snapshot_too_large"));
     }
     Ok(found)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// Both call lookups of a coordinator page are served by the store's call index.
+    #[test]
+    fn a_coordinator_rows_call_updates_are_read_through_the_call_index() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(cortex_core::store::schema::SQL).unwrap();
+        for sql in [PRIOR_SQL, FIRST_SQL] {
+            let plan = db
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(rusqlite::params!["s", 1000, "c"], |r| r.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert!(
+                plan.iter().any(|step| step.contains(
+                    "USING INDEX host_updates_by_call (session_id=? AND <expr>=? AND seq<?)"
+                )),
+                "{sql}: {plan:?}"
+            );
+        }
+    }
 }

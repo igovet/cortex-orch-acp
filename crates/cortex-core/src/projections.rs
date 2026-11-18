@@ -161,6 +161,16 @@ pub(super) fn task(
                     if reason.is_none() && raw == "RECOVERING" {
                         reason = native_recovery_reason(db, runtime, r)?;
                     }
+                    // A step queued behind another task's files waits, visibly, for
+                    // that task to release them; it is not stopped.
+                    if reason.is_none() && matches!(raw, "EXECUTING" | "REVIEWING") {
+                        if let Some(wait) =
+                            files_wait(db, runtime, field(r, "project_root").unwrap_or(""))?
+                        {
+                            reason = Some(wait);
+                            warnings.push("waiting_for_files".into());
+                        }
+                    }
                 }
             } else if valid_binding
                 && epoch >= number(&e, "owner_epoch")
@@ -221,6 +231,58 @@ pub(super) fn task(
 /// Native hosts never write task_orchestration. A recovery with a recorded
 /// blocker states its reason; one whose owned processes all settled is an
 /// ended turn waiting for the owner. Anything else stays unconfirmed.
+/// The recorded wait of a ready step for another unfinished task's files, as one
+/// sentence naming that task and the files, while no later plan, owner message or
+/// claimed step has ended it.
+fn files_wait(db: &Connection, runtime: &str, root: &str) -> CoreResult<Option<String>> {
+    let Some(w) = row(
+        db,
+        "SELECT json_extract(e.payload_json,'$.holder_task') AS holder,json_extract(e.payload_json,'$.paths') AS paths,
+            coalesce((SELECT d.description FROM workspace_tasks d JOIN workspace_executions x USING(task_id) WHERE x.runtime_task_id=h.task_id),h.goal) AS title
+         FROM runtime_events e JOIN runtime_tasks h ON h.task_id=json_extract(e.payload_json,'$.holder_task')
+         WHERE e.task_id=?1 AND e.type='NATIVE_WRITE_CONFLICT_WAITING' AND h.state NOT IN ('COMPLETED','CANCELLED','FAILED')
+         AND e.id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type IN
+            ('PLAN_ACCEPTED','USER_STEERING','USER_ANSWER_RECEIVED','ASSIGNMENT_CREATED')),0)
+         ORDER BY e.id DESC LIMIT 1",
+        [runtime],
+    )?
+    else {
+        return Ok(None);
+    };
+    let first = field(&w, "title")
+        .unwrap_or("")
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    let title: String = if first.chars().count() > 60 {
+        format!("{}…", first.chars().take(60).collect::<String>())
+    } else {
+        first.to_owned()
+    };
+    let paths: Vec<String> = serde_json::from_str::<Value>(field(&w, "paths").unwrap_or("[]"))
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(Value::as_str)
+        .map(|p| {
+            p.strip_prefix(root)
+                .map(|s| s.trim_start_matches('/'))
+                .unwrap_or(p)
+                .to_owned()
+        })
+        .collect();
+    let mut files = paths.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+    if paths.len() > 3 {
+        files.push_str(&format!(" and {} more", paths.len() - 3));
+    }
+    Ok(Some(if files.is_empty() {
+        format!("Waiting for the task “{title}” to release the files this step needs")
+    } else {
+        format!("Waiting for the task “{title}” to release {files}")
+    }))
+}
 fn native_recovery_reason(db: &Connection, runtime: &str, r: &Value) -> CoreResult<Option<String>> {
     let native = row(
         db,
@@ -382,7 +444,7 @@ impl ProjectionReader {
                     if ids.len()>1000 {return refuse("board_too_large");}
                     let items=ids.iter().map(|id|task(db,&self.project,self.store.key().root().to_str().unwrap_or(""),id)?
                         .ok_or(CoreError::Refused("snapshot_expired"))).collect::<CoreResult<Vec<_>>>()?;
-                    QueryReply::Board(ReadPage {items,next_cursor:None,high_watermark:high})
+                    QueryReply::Board(ReadPage {items,next_cursor:None,high_watermark:high,tail_cursor:None,prev_cursor:None})
                 },
                 CoreQuery::ProjectSnapshot(page)|CoreQuery::TasksPage(page)=>{
                     if page.target!=self.project {return refuse("invalid_project");}
@@ -400,7 +462,7 @@ impl ProjectionReader {
                         items.push(t); consumed=*seq;
                     }
                     let next_cursor=if rows.len()>items.len(){Some(format!("nt2.{binding}.{consumed}"))}else{None};
-                    QueryReply::Tasks(ReadPage {items,next_cursor,high_watermark:high})
+                    QueryReply::Tasks(ReadPage {items,next_cursor,high_watermark:high,tail_cursor:None,prev_cursor:None})
                 },
                 CoreQuery::TaskGet(t)=>{
                     let value=task(db,&self.project,self.store.key().root().to_str().unwrap_or(""),&t.id)?.ok_or(CoreError::Refused("not_found"))?;
@@ -408,6 +470,7 @@ impl ProjectionReader {
                 },
                 CoreQuery::TaskState(t)=>QueryReply::State(task(db,&self.project,self.store.key().root().to_str().unwrap_or(""),&t.id)?.ok_or(CoreError::Refused("not_found"))?),
                 CoreQuery::History(p)=>QueryReply::History(history::page(db,&self.project,&p)?),
+                CoreQuery::HistoryEarlier(p)=>QueryReply::History(history::earlier(db,&self.project,&p)?),
                 _=>return refuse("unsupported_operation"),
             };
             let reply=ReadReply {protocol:Protocol::default(),generation,project_id:self.project.clone(),version,high_watermark:high,data};
@@ -533,7 +596,7 @@ pub(super) fn parse_cursor(cursor: Option<&str>, prefix: &str, binding: &str) ->
     Ok(value)
 }
 mod history;
-pub use history::tool_step;
+pub use history::{tool_step, tool_step_from};
 
 #[cfg(test)]
 mod latency_diagnostic {
@@ -592,5 +655,58 @@ mod latency_diagnostic {
         }
         eprintln!("copied_store tasks={} bytes={} board_ms={:.3} eager_board_plus_history_ms={:.3} history_pages={} visible_history_rows={}",
             items.len(),bytes,board.as_secs_f64()*1000.,start.elapsed().as_secs_f64()*1000.,pages,rows);
+    }
+}
+#[cfg(test)]
+mod files_wait_tests {
+    use crate::{lifecycle, store::Store};
+    use serde_json::json;
+    /// A step queued behind another unfinished task's files reads as waiting for that
+    /// task by name, until the holder finishes or this task claims a step.
+    #[test]
+    fn a_step_queued_behind_another_tasks_files_names_the_holder() {
+        let root = std::env::temp_dir().join(format!("files-wait-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let store = Store::open(
+            crate::ProjectKey::new(&root, crate::StoreChannel::Dev).unwrap(),
+            crate::OpenMode::Initialize,
+        )
+        .unwrap();
+        let machine = lifecycle::TaskMachine::new(&store);
+        machine.create("t", "g", "o").unwrap();
+        machine
+            .create("h", "Format all tests\nwith the new style", "o")
+            .unwrap();
+        let base = root.to_string_lossy().into_owned();
+        store
+            .write(|db| {
+                db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1", [])?;
+                lifecycle::event_tx(db, "t", "ASSIGNMENT_CREATED", json!({}))?;
+                lifecycle::event_tx(
+                    db,
+                    "t",
+                    "NATIVE_WRITE_CONFLICT_WAITING",
+                    json!({"node":"reset","holder_task":"h","paths":[format!("{base}/test/a.js")]}),
+                )?;
+                assert_eq!(
+                    super::files_wait(db, "t", &base)?.as_deref(),
+                    Some("Waiting for the task “Format all tests” to release test/a.js")
+                );
+                db.execute(
+                    "UPDATE runtime_tasks SET state='COMPLETED' WHERE task_id='h'",
+                    [],
+                )?;
+                assert_eq!(super::files_wait(db, "t", &base)?, None);
+                db.execute(
+                    "UPDATE runtime_tasks SET state='EXECUTING' WHERE task_id='h'",
+                    [],
+                )?;
+                lifecycle::event_tx(db, "t", "ASSIGNMENT_CREATED", json!({}))?;
+                assert_eq!(super::files_wait(db, "t", &base)?, None);
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

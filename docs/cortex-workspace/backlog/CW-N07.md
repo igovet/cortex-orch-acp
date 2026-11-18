@@ -1,6 +1,6 @@
 # CW-N07: Network-change resilience: Android ConnectivityManager handler forces clean reconnect + cursor-based event resume on Wi-Fi↔cellular handover; handover test matrix
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Not implemented; there is no remote transport · **Phase:** 3+ · **Size:** L
 
 ## Goal
 On Android, detect network loss and transport changes (Wi-Fi to cellular and back). Force a clean re-dial of the paired desktop, then resume the event stream from the last confirmed cursor. Any gap triggers a resync and is never assumed away.

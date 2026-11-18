@@ -1,0 +1,21 @@
+[package]
+name = "workspace-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Machine-service bridge and request allowlist shared by the Cortex Workspace desktop and phone shells"
+
+[features]
+# The phone's connector over a paired `workspace_remote::RemoteConnection`.
+remote = ["dep:workspace-remote"]
+
+[dependencies]
+workspace-protocol = { path = "../workspace-protocol" }
+workspace-remote = { path = "../workspace-remote", optional = true }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+tokio = { version = "=1.54.1", features = ["rt", "macros", "io-util", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "=1.54.1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }

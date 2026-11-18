@@ -98,6 +98,25 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, (u32, Vec<u8>)> {
     }
     out
 }
+fn alias(v: &Value) -> bool {
+    v.as_str().is_some_and(|m| m.eq_ignore_ascii_case("default"))
+}
+fn without_alias_models(v: &mut Value) {
+    match v {
+        Value::Object(o) => {
+            for (k, c) in o.iter_mut() {
+                if k == "models" {
+                    if let Some(list) = c.as_array_mut() {
+                        list.retain(|m| !alias(&m["id"]));
+                    }
+                }
+                without_alias_models(c);
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(without_alias_models),
+        _ => {}
+    }
+}
 #[test]
 fn catalog_selector_and_composed_settings_match_the_oracle() {
     let c = corpus();
@@ -116,6 +135,23 @@ fn catalog_selector_and_composed_settings_match_the_oracle() {
         for route in expected["routes"]["routes"].as_array_mut().unwrap() {
             route["selectable"] = json!(route["selectable"] == true && route["disabled"] != true);
         }
+        // A pure alias entry (the Claude adapter's `default`) names no concrete model, so the
+        // native selector lists no route for it and does not count it for its engine.
+        let aliases: Vec<String> = expected["routes"]["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|r| alias(&r["model"]))
+            .map(|r| r["engine"].as_str().unwrap().to_owned())
+            .collect();
+        expected["routes"]["routes"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|r| !alias(&r["model"]));
+        for engine in expected["routes"]["engines"].as_array_mut().unwrap() {
+            let dropped = aliases.iter().filter(|e| engine["engine"] == e.as_str()).count() as u64;
+            engine["route_count"] = json!(engine["route_count"].as_u64().unwrap() - dropped);
+        }
         assert_eq!(
             r.catalog_selector(project).unwrap(),
             expected,
@@ -127,9 +163,12 @@ fn catalog_selector_and_composed_settings_match_the_oracle() {
         let actual = r
             .settings_with_catalog_readers(&input, 1800000000.0, project)
             .unwrap();
+        // The same alias is not an observed model in the settings view either.
+        let mut settings = f.expand(&case["settings"]);
+        without_alias_models(&mut settings);
         assert_eq!(
             actual.view,
-            f.expand(&case["settings"]),
+            settings,
             "settings: {}",
             case["name"]
         );

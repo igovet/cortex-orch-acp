@@ -1,6 +1,6 @@
 # CW-P05: Optional UnifiedPush receiver support for owners running their own distributor; strictly additive/opt-in
 
-**Status:** planned · **Phase:** Post-v1 · **Size:** M
+**Status:** Not implemented; post-v1 · **Phase:** Post-v1 · **Size:** M
 
 ## Goal
 Add optional UnifiedPush receiver support for owners who install an external distributor. It is additive, opt-in and never replaces FCM.

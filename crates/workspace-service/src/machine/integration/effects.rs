@@ -74,9 +74,30 @@ async fn stage_work(path: &Path, git: &mut Git) -> Result<()> {
 fn unknown_record() -> Refused {
     refuse("integration_unknown", "Git finished but the integration record could not be saved. Inspect the target history and refresh; do not repeat Merge blindly.")
 }
+/// The task fields integration writes; no other field of the saved record is touched.
+const OWNED: &[&str] = &[
+    "status",
+    "work",
+    "doneAt",
+    "integration",
+    "requiresFreshResult",
+    "conflict",
+    "merge",
+    "acceptance",
+    "automaticReady",
+    "prAttempt",
+];
+/// Only this task's record changes; the rest of the saved product is re-read under a
+/// short machine lock, so owner edits made while Git ran are kept.
 fn save(plan: &Plan<'_>, product: &Value) -> Result<()> {
-    settings::write_json(&product_path(plan.state, plan.project)?, product)
-        .map_err(|_| unknown_record())
+    settings::save_task(
+        plan.state,
+        plan.project,
+        plan.task,
+        &product["tasks"][plan.task],
+        OWNED,
+    )
+    .map_err(|_| unknown_record())
 }
 fn failed_commit(method: &str) -> Refused {
     refuse(

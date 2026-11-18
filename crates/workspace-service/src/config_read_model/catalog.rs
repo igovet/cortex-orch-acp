@@ -57,17 +57,12 @@ fn presented(entries: &[Value]) -> Vec<Value> {
     for e in entries {
         let mut e = e.clone();
         let model = e["route"]["model"].as_str().unwrap();
-        if model.eq_ignore_ascii_case("default") {
-            let Some(d) = e["model_description"].as_str() else {
-                continue;
-            };
-            if !super::matches(r"^[a-z][a-z0-9.]*(?:-[a-z0-9.]+)+(?:\[[a-z0-9]+\])?$", d)
-                || entries.iter().any(|other| other["route"]["model"] == d)
-            {
-                continue;
-            }
-            e["model_name"] = json!(display_name(d));
-        } else if e["model_name"].is_null() || e["model_name"] == model {
+        // A pure alias entry (the Claude adapter's `default`) names no concrete model: never offered,
+        // even from a catalogue saved before aliases were dropped.
+        if crate::native_routes::is_alias_model(model) {
+            continue;
+        }
+        if e["model_name"].is_null() || e["model_name"] == model {
             e["model_name"] = json!(display_name(model));
         }
         out.push(e);
@@ -316,5 +311,24 @@ impl ConfigurationReader {
         o["routes"] = catalog["routes"].clone();
         o["entries"] = catalog["entries"].clone();
         self.settings_with_management_readers(&o, now, project)
+    }
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+    /// A catalogue saved before aliases were dropped may still list `default`: it is never presented.
+    #[test]
+    fn a_saved_catalogue_listing_the_default_alias_does_not_present_it() {
+        let entry = |model: &str, description: Value| {
+            json!({"route":{"model":model},"model_name":model,"model_description":description})
+        };
+        let shown = presented(&[
+            entry("default", json!("claude-opus-5")),
+            entry("Default", json!(null)),
+            entry("claude-sonnet-5", json!(null)),
+        ]);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0]["route"]["model"], "claude-sonnet-5");
     }
 }

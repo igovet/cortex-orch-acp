@@ -557,16 +557,13 @@ always backed by that construction-time enforcement gate. Absent that,
 only the conservative `attempts`/`calls`/`tokens`/`concurrency` limits are
 surfaced.
 
-**MCP read.** A coordinator channel's `read_diagnostics` tool
- returns this same
-summary for `channel.task_id` — never a caller-supplied task id, same
-pattern as `read_capsule`/`read_large_output`. Not offered to worker
-channels (resource attribution is a coordinator-level concern here).
+**MCP read.** No model-facing tool returns this summary. The former runtime's
+coordinator-only `read_diagnostics` tool has no native implementation and is no
+longer in any role's catalogue; the summary is not available to models.
 
 ### Loop, re-investigation and write aggregates
 
-`diagnostics_summary`, and therefore the coordinator's `read_diagnostics`, adds
-four sections. Each has `unit`, `availability` and `basis`; an unobservable measure
+`diagnostics_summary` adds four sections. Each has `unit`, `availability` and `basis`; an unobservable measure
 is `unavailable_reason` with a reason, never 0.
 
 - **`loop_profile`** (per attempt). Gateway, project-read and external counts come

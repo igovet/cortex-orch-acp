@@ -41,10 +41,11 @@ for (const status of ["review", "done"] as const) it(`shared-branch ${status} st
   dispose = render(() => <Workspace port={p.port}/>,root);
   await settle(); p.emit(projection("1",s)); await settle();
   expect(root.querySelector(".rv-sum")?.textContent).toContain("Disposable_change inspected.");
-  const chip = root.querySelector(".tb-actions .chip");
-  expect(chip).not.toBeNull();
-  expect(chip!.textContent).not.toContain("Ready to merge");
-  if (status === "review") expect(chip!.textContent).toContain("Ready to finish");
+  // The state reads in the inspector, not in a title band chip.
+  expect(root.querySelector(".tb-actions .chip")).toBeNull();
+  const shown = root.querySelector(".inspector")?.textContent ?? "";
+  expect(shown).not.toContain("Ready to merge");
+  if (status === "review") expect(shown).toContain("Ready to finish");
   const state = root.querySelector(".inspector .ins-sec")?.textContent ?? "";
   if (status === "done") expect(state.match(/Committed to main/g)).toHaveLength(1);
 });

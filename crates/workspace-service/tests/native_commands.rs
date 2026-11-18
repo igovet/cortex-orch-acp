@@ -174,15 +174,22 @@ async fn native_reports_read_pages_a_bound_task_report_and_refuses_others() {
         let draft = api.create_draft(runtime, "owner", "general", key).unwrap();
         let marker = format!("Cortex draft ID: `{}`\n", draft.draft_id);
         let body = format!("{marker}\n# Report\n{}", "report body line\n".repeat(600));
-        api.write_draft(runtime, "owner", &draft.draft_id, &body).unwrap();
+        api.write_draft(runtime, "owner", &draft.draft_id, &body)
+            .unwrap();
         let published = api
-            .publish(runtime, "owner", &draft.draft_id, key, Publication {
-                title: "Worker report",
-                summary: "summary",
-                author: "worker",
-                source_revision: 0,
-                artifacts: json!([]),
-            })
+            .publish(
+                runtime,
+                "owner",
+                &draft.draft_id,
+                key,
+                Publication {
+                    title: "Worker report",
+                    summary: "summary",
+                    author: "worker",
+                    source_revision: 0,
+                    artifacts: json!([]),
+                },
+            )
             .unwrap();
         (published.report_id, body.chars().count())
     };
@@ -208,8 +215,16 @@ async fn native_reports_read_pages_a_bound_task_report_and_refuses_others() {
     assert_eq!(second["sha256"], first["sha256"]);
     assert!(second["markdown"].as_str().unwrap().chars().count() > 0);
     // A cursor is bound to its report; another task's report and unknown ids are not readable.
-    assert!(read(&other, None).await.unwrap_err().to_string().contains("not_found"));
-    assert!(read("r_missing", None).await.unwrap_err().to_string().contains("not_found"));
+    assert!(read(&other, None)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("not_found"));
+    assert!(read("r_missing", None)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("not_found"));
     assert!(read(&other, Some(&cursor)).await.is_err());
     s.stop().await.unwrap();
     runner.await.unwrap().unwrap();

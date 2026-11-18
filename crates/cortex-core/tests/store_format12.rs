@@ -161,6 +161,54 @@ fn optional_groups_absent_stay_absent_partial_fails_then_initialization_repairs(
         })
         .unwrap();
 }
+/// An existing format-12 store gains the conversation call index on its next writable open,
+/// even with a malformed retained update (the partial index never evaluates it), and keeps
+/// accepting one. Inspection never installs it.
+#[test]
+fn an_existing_store_gains_the_call_index_on_a_writable_open_only() {
+    let p = Project::new();
+    drop(p.open());
+    let has = |db: &Connection| {
+        db.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='index' AND name='host_updates_by_call'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+            == 1
+    };
+    let db = Connection::open(p.key().database()).unwrap();
+    db.execute_batch(
+        "DROP INDEX host_updates_by_call; PRAGMA foreign_keys=OFF;
+         INSERT INTO host_updates VALUES ('s',0,'not json','now');
+         INSERT INTO host_updates VALUES ('s',1,'{\"toolCallId\":\"c\"}','now');",
+    )
+    .unwrap();
+    drop(db);
+    // A store without the index is still accepted by every mode; only Initialize adds it.
+    drop(Store::open(p.key(), OpenMode::InspectImmutable).unwrap());
+    drop(Store::open(p.key(), OpenMode::LiveReadOnly).unwrap());
+    drop(Store::open(p.key(), OpenMode::RuntimeValidate).unwrap());
+    assert!(!has(&Connection::open(p.key().database()).unwrap()));
+    let s = p.open();
+    s.read(|db| {
+        assert!(has(db));
+        let calls: i64 = db.query_row(
+            "SELECT count(*) FROM host_updates INDEXED BY host_updates_by_call WHERE session_id='s' AND json_valid(update_json) AND json_extract(update_json,'$.toolCallId')='c'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(calls, 1);
+        Ok(())
+    })
+    .unwrap();
+    drop(s);
+    let db = Connection::open(p.key().database()).unwrap();
+    db.execute_batch(
+        "PRAGMA foreign_keys=OFF; INSERT INTO host_updates VALUES ('s',2,'still not json','now');",
+    )
+    .unwrap();
+}
 #[test]
 fn channels_never_read_or_import_the_other_store() {
     let p = Project::new();

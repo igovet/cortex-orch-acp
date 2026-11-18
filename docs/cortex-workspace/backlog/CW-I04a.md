@@ -1,6 +1,6 @@
 # CW-I04a: Desktop CodeMirror 6 editor with tabs and find/replace
 
-**Status:** partly built: editor, tabs, find and replace and save. Compare and save-as in the conflict choices, and a measurement on the reference machine, remain planned · **Phase:** 3+ · **Size:** M
+**Status:** Partly implemented: editor, tabs, find and replace and save. Compare and save-as in the conflict choices, and a measurement on the reference machine, are not implemented · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Provide the desktop editor in the Tauri webview, built on CodeMirror 6, with tabs, find and replace, and save through the CW-I03 contract. Unsaved buffers are held by the frontend independently of language-server state, so a language-server failure cannot discard edits. Language-server features are in CW-I04b and CW-I04c.

@@ -11,7 +11,10 @@ use std::{collections::BTreeMap, sync::Arc};
 /// Runs one task's recovery writes inside a savepoint. A failure rolls back only
 /// that task's writes and is returned to the caller, so one damaged or legacy task
 /// can never fail the recovery (and the opening) of the whole project.
-fn isolated<T>(db: &rusqlite::Transaction<'_>, body: impl FnOnce() -> CoreResult<T>) -> CoreResult<T> {
+fn isolated<T>(
+    db: &rusqlite::Transaction<'_>,
+    body: impl FnOnce() -> CoreResult<T>,
+) -> CoreResult<T> {
     db.execute_batch("SAVEPOINT native_recovery_task")?;
     match body() {
         Ok(value) => {
@@ -48,7 +51,10 @@ fn settled_event_tx(db: &rusqlite::Transaction<'_>, task: &str, payload: Value) 
 /// The process group and start time (`/proc/<pid>/stat` fields 5 and 22).
 fn process_stat(pid: i64) -> Option<(i64, String)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let fields: Vec<&str> = stat.get(stat.rfind(')')? + 1..)?.split_whitespace().collect();
+    let fields: Vec<&str> = stat
+        .get(stat.rfind(')')? + 1..)?
+        .split_whitespace()
+        .collect();
     Some((fields.get(2)?.parse().ok()?, (*fields.get(19)?).to_owned()))
 }
 
@@ -161,7 +167,10 @@ fn settle_released_unstarted_tx(
         .collect::<Result<Vec<_>, _>>()?;
     let mut per_task: BTreeMap<String, Vec<(String, String, Option<String>)>> = BTreeMap::new();
     for (task, key, status, attempt) in rows {
-        per_task.entry(task).or_default().push((key, status, attempt));
+        per_task
+            .entry(task)
+            .or_default()
+            .push((key, status, attempt));
     }
     for (task, rows) in per_task {
         let done = isolated(db, || {
@@ -211,7 +220,11 @@ fn settle_registered_tx(
              ORDER BY p.task_id,p.rowid",
         )?
         .query_map([boot], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     let mut per_task: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
@@ -376,10 +389,15 @@ fn settle_unlaunched_tx(
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut per_task: BTreeMap<String, Vec<(String, String, String, Option<String>, Option<String>)>> =
-        BTreeMap::new();
+    let mut per_task: BTreeMap<
+        String,
+        Vec<(String, String, String, Option<String>, Option<String>)>,
+    > = BTreeMap::new();
     for (task, key, status, attempt, phase, error) in rows {
-        per_task.entry(task).or_default().push((key, status, attempt, phase, error));
+        per_task
+            .entry(task)
+            .or_default()
+            .push((key, status, attempt, phase, error));
     }
     for (task, rows) in per_task {
         let done = isolated(db, || {
@@ -408,14 +426,19 @@ fn settle_unlaunched_tx(
 /// session's MCP relay endpoint, which names a `cortex-mcp-` broker directory), or
 /// OpenCode.
 fn engine_command(cmdline: &[u8]) -> bool {
-    cmdline.split(|b| *b == 0).filter(|a| !a.is_empty()).any(|arg| {
-        let arg = String::from_utf8_lossy(arg);
-        arg.contains("codex-acp")
-            || arg.contains("claude-agent-acp")
-            || arg.contains("--native-codex-runtime")
-            || arg.contains("/cortex-mcp-")
-            || std::path::Path::new(arg.as_ref()).file_name().is_some_and(|n| n == "opencode")
-    })
+    cmdline
+        .split(|b| *b == 0)
+        .filter(|a| !a.is_empty())
+        .any(|arg| {
+            let arg = String::from_utf8_lossy(arg);
+            arg.contains("codex-acp")
+                || arg.contains("claude-agent-acp")
+                || arg.contains("--native-codex-runtime")
+                || arg.contains("/cortex-mcp-")
+                || std::path::Path::new(arg.as_ref())
+                    .file_name()
+                    .is_some_and(|n| n == "opencode")
+        })
 }
 
 /// Whether any process of this user other than this service could be an engine
@@ -431,9 +454,15 @@ fn engine_process_in(roots: &[std::path::PathBuf]) -> bool {
     };
     let me = std::process::id();
     let uid = unsafe { libc::geteuid() };
-    let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ESRCH);
+    let gone = |e: &std::io::Error| {
+        e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ESRCH)
+    };
     for entry in entries.flatten() {
-        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
             continue;
         };
         if pid == me {
@@ -465,13 +494,22 @@ fn engine_process_in(roots: &[std::path::PathBuf]) -> bool {
 
 /// The roots an engine of these tasks could work in: the project and every task's
 /// own project root and workspace, each as recorded and canonical.
-fn engine_roots_tx(db: &rusqlite::Transaction<'_>, root: &std::path::Path) -> CoreResult<Vec<std::path::PathBuf>> {
+fn engine_roots_tx(
+    db: &rusqlite::Transaction<'_>,
+    root: &std::path::Path,
+) -> CoreResult<Vec<std::path::PathBuf>> {
     let mut roots: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
     let recorded = db
         .prepare("SELECT project_root FROM tasks UNION SELECT workspace_root FROM task_workspaces")?
         .query_map([], |r| r.get::<_, Option<String>>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    roots.extend(recorded.into_iter().flatten().filter(|r| !r.is_empty()).map(Into::into));
+    roots.extend(
+        recorded
+            .into_iter()
+            .flatten()
+            .filter(|r| !r.is_empty())
+            .map(Into::into),
+    );
     let canonical: Vec<_> = roots.iter().filter_map(|r| r.canonicalize().ok()).collect();
     roots.extend(canonical);
     roots.sort();
@@ -560,11 +598,19 @@ fn remove_stale_brokers(directory: &std::path::Path) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some(token) = name.strip_prefix("cortex-mcp-") else { continue };
-        if token.len() != 24 || !token.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+        let Some(token) = name.strip_prefix("cortex-mcp-") else {
+            continue;
+        };
+        if token.len() != 24
+            || !token
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
             continue;
         }
-        let Ok(meta) = entry.path().symlink_metadata() else { continue };
+        let Ok(meta) = entry.path().symlink_metadata() else {
+            continue;
+        };
         let old = meta
             .modified()
             .ok()
@@ -574,7 +620,10 @@ fn remove_stale_brokers(directory: &std::path::Path) {
             continue;
         }
         if let Err(error) = std::fs::remove_dir_all(entry.path()) {
-            eprintln!("workspace-service: a stale broker directory was kept ({})", error.kind());
+            eprintln!(
+                "workspace-service: a stale broker directory was kept ({})",
+                error.kind()
+            );
         }
     }
 }
@@ -669,32 +718,45 @@ fn recover_task_tx(
     legacy: bool,
     interrupted: bool,
 ) -> CoreResult<Option<(String, OwnerEpoch, TaskState)>> {
-        let state: TaskState = state.parse().map_err(CoreError::Refused)?;
-        let owner = if legacy {
-            let adopted = ownership::acquire_tx(db,&task,"native-recovery",Some(epoch))?;
-            // Preserve creation provenance; ownership transfer is a separate event.
-            lifecycle::event_tx(db,&task,"NATIVE_TASK_ADOPTED",json!({
+    let state: TaskState = state.parse().map_err(CoreError::Refused)?;
+    let owner = if legacy {
+        let adopted = ownership::acquire_tx(db, &task, "native-recovery", Some(epoch))?;
+        // Preserve creation provenance; ownership transfer is a separate event.
+        lifecycle::event_tx(
+            db,
+            &task,
+            "NATIVE_TASK_ADOPTED",
+            json!({
                 "execution_host":"rust","previous_host":"python","previous_owner":owner,
-                "previous_epoch":epoch,"owner_epoch":adopted.epoch,"replayed":false}))?;
-            db.execute("UPDATE workspace_executions SET owner_epoch=?,version=version+1
+                "previous_epoch":epoch,"owner_epoch":adopted.epoch,"replayed":false}),
+        )?;
+        db.execute(
+            "UPDATE workspace_executions SET owner_epoch=?,version=version+1
                 WHERE runtime_task_id=? AND owner_epoch=?",
-                (adopted.epoch,&task,epoch))?;
-            for mut w in waits::projection_tx(db,&task)? {
-                if matches!(w["status"].as_str(),Some("open"|"ready"|"resuming"))
-                    && w["owner_epoch"]==epoch {
-                    w["owner_epoch"]=json!(adopted.epoch);
-                    waits::change_tx(db,&mut w)?;
-                }
+            (adopted.epoch, &task, epoch),
+        )?;
+        for mut w in waits::projection_tx(db, &task)? {
+            if matches!(w["status"].as_str(), Some("open" | "ready" | "resuming"))
+                && w["owner_epoch"] == epoch
+            {
+                w["owner_epoch"] = json!(adopted.epoch);
+                waits::change_tx(db, &mut w)?;
             }
-            adopted
-        } else {OwnerEpoch{owner,epoch}};
-        // Even a committed result does not establish that its process exited.
-        // Keep reservations occupied until a real process observation settles them.
-        let unknown: bool = db.query_row("SELECT
+        }
+        adopted
+    } else {
+        OwnerEpoch { owner, epoch }
+    };
+    // Even a committed result does not establish that its process exited.
+    // Keep reservations occupied until a real process observation settles them.
+    let unknown: bool = db.query_row(
+        "SELECT
             EXISTS(SELECT 1 FROM delegation_provisioning WHERE task_id=? AND status!='terminated')
             OR EXISTS(SELECT 1 FROM capacity_reservations WHERE task_id=? AND state!='released')",
-            (&task,&task), |r|r.get(0))?;
-        let legacy_effect_unknown: bool = db.query_row("SELECT EXISTS(
+        (&task, &task),
+        |r| r.get(0),
+    )?;
+    let legacy_effect_unknown: bool = db.query_row("SELECT EXISTS(
             SELECT 1 FROM runtime_events i WHERE i.task_id=?
             AND ((i.type='CHECK_EXECUTION_STARTED' AND NOT EXISTS(
                 SELECT 1 FROM runtime_events f WHERE f.task_id=i.task_id AND f.id>i.id
@@ -705,123 +767,177 @@ fn recover_task_tx(
                 AND f.type='COMMAND_PROCESS_EXITED'
                 AND json_extract(f.payload_json,'$.tool_call_ref')=json_extract(i.payload_json,'$.tool_call_ref')))))",
             [&task], |r|r.get(0))?;
-        let verification_unknown: bool = db.query_row("SELECT EXISTS(
+    let verification_unknown: bool = db.query_row(
+        "SELECT EXISTS(
             SELECT 1 FROM runtime_requests i JOIN runtime_tasks t USING(task_id)
             WHERE i.task_id=? AND i.operation='native_verification_intent'
             AND json_extract(i.result_json,'$.revision')=t.revision
             AND NOT EXISTS(SELECT 1 FROM runtime_requests f WHERE f.task_id=i.task_id
                 AND f.actor='native-verifier-finish' AND f.request_key=i.request_key))",
-            [&task], |r|r.get(0))?;
-        db.execute("UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND revoked_at IS NULL",
-            (cortex_core::now(),&task))?;
-        db.execute("UPDATE delegation_provisioning SET status='ambiguous',updated_at=?
-            WHERE task_id=? AND status!='terminated'", (cortex_core::now(),&task))?;
-        db.execute("UPDATE capacity_reservations SET state='ambiguous',
+        [&task],
+        |r| r.get(0),
+    )?;
+    db.execute(
+        "UPDATE trusted_channels SET revoked_at=? WHERE task_id=? AND revoked_at IS NULL",
+        (cortex_core::now(), &task),
+    )?;
+    db.execute(
+        "UPDATE delegation_provisioning SET status='ambiguous',updated_at=?
+            WHERE task_id=? AND status!='terminated'",
+        (cortex_core::now(), &task),
+    )?;
+    db.execute("UPDATE capacity_reservations SET state='ambiguous',
             release_observation='termination_unconfirmed',updated_at=? WHERE task_id=? AND state!='released'",
             (cortex_core::now(),&task))?;
-        let delivery_unknown = waits::projection_tx(db,&task)?.iter().any(|w|
-            w["status"]=="resuming" || w["reason"]=="answer_continuation_unconfirmed");
-        waits::recover_deliveries_tx(db,&task)?;
-        for mut w in waits::projection_tx(db,&task)? {
-            // A wait an earlier restart already marked lost is not re-recorded.
-            if matches!(w["status"].as_str(),Some("open"|"ready"))
-                && !(w["continuation_required"]==true && w["reason"]=="native_session_lost") {
-                w["continuation_required"]=json!(true);
-                w["reason"]=json!("native_session_lost");
-                waits::change_tx(db,&mut w)?;
-            }
+    let delivery_unknown = waits::projection_tx(db, &task)?
+        .iter()
+        .any(|w| w["status"] == "resuming" || w["reason"] == "answer_continuation_unconfirmed");
+    waits::recover_deliveries_tx(db, &task)?;
+    for mut w in waits::projection_tx(db, &task)? {
+        // A wait an earlier restart already marked lost is not re-recorded.
+        if matches!(w["status"].as_str(), Some("open" | "ready"))
+            && !(w["continuation_required"] == true && w["reason"] == "native_session_lost")
+        {
+            w["continuation_required"] = json!(true);
+            w["reason"] = json!("native_session_lost");
+            waits::change_tx(db, &mut w)?;
         }
-        // Guidance can no longer reach the exact old session. Never replay it.
-        let guidance=db.prepare("SELECT json_extract(q.payload_json,'$.request') FROM runtime_events q
+    }
+    // Guidance can no longer reach the exact old session. Never replay it.
+    let guidance=db.prepare("SELECT json_extract(q.payload_json,'$.request') FROM runtime_events q
             WHERE q.task_id=? AND q.type='NATIVE_GUIDANCE_QUEUED'
             AND NOT EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=q.task_id
                 AND e.type='NATIVE_GUIDANCE_SETTLED'
                 AND json_extract(e.payload_json,'$.request')=json_extract(q.payload_json,'$.request'))")?
             .query_map([&task], |r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
-        for request in guidance {
-            lifecycle::event_tx(db,&task,"NATIVE_GUIDANCE_SETTLED",
-                json!({"request":request,"delivered":false,"reason":"service_restarted"}))?;
-        }
-        let control_unknown: bool = db.query_row("SELECT EXISTS(
+    for request in guidance {
+        lifecycle::event_tx(
+            db,
+            &task,
+            "NATIVE_GUIDANCE_SETTLED",
+            json!({"request":request,"delivered":false,"reason":"service_restarted"}),
+        )?;
+    }
+    let control_unknown: bool = db.query_row("SELECT EXISTS(
             SELECT 1 FROM runtime_requests i WHERE i.task_id=? AND i.operation='native_desktop_control'
             AND NOT EXISTS(SELECT 1 FROM runtime_requests f WHERE f.task_id=i.task_id
                 AND f.actor='native-desktop-finish' AND f.request_key=i.request_key))",
             [&task], |r|r.get(0))?;
-        if control_unknown {
-            // Surface each unfinished admission once. Its finish slot closes as an
-            // explicit unknown outcome bound to the current revision, so it cannot
-            // force RECOVERING again on every later restart. The same request keeps
-            // replaying as `native_control_outcome_unknown`; Retry clears the hold.
-            let (_, revision) = domain::task_tx(db, &task)?;
-            let pending = db.prepare("SELECT i.request_key,i.digest FROM runtime_requests i
+    if control_unknown {
+        // Surface each unfinished admission once. Its finish slot closes as an
+        // explicit unknown outcome bound to the current revision, so it cannot
+        // force RECOVERING again on every later restart. The same request keeps
+        // replaying as `native_control_outcome_unknown`; Retry clears the hold.
+        let (_, revision) = domain::task_tx(db, &task)?;
+        let pending = db
+            .prepare(
+                "SELECT i.request_key,i.digest FROM runtime_requests i
                 WHERE i.task_id=? AND i.operation='native_desktop_control'
                 AND NOT EXISTS(SELECT 1 FROM runtime_requests f WHERE f.task_id=i.task_id
-                    AND f.actor='native-desktop-finish' AND f.request_key=i.request_key)")?
-                .query_map([&task], |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?)))?
-                .collect::<Result<Vec<_>,_>>()?;
-            for (request, digest) in pending {
-                lifecycle::event_tx(db,&task,"NATIVE_CONTROL_OUTCOME_UNKNOWN",
-                    json!({"request":request,"reason":"service_restarted","revision":revision}))?;
-                db.execute("INSERT INTO runtime_requests VALUES (?,?,'native-desktop-finish','native_desktop_finished',?,?)",
+                    AND f.actor='native-desktop-finish' AND f.request_key=i.request_key)",
+            )?
+            .query_map([&task], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        for (request, digest) in pending {
+            lifecycle::event_tx(
+                db,
+                &task,
+                "NATIVE_CONTROL_OUTCOME_UNKNOWN",
+                json!({"request":request,"reason":"service_restarted","revision":revision}),
+            )?;
+            db.execute("INSERT INTO runtime_requests VALUES (?,?,'native-desktop-finish','native_desktop_finished',?,?)",
                     (&task,&request,&digest,json!({"outcome":"unknown","native":true,
                         "reason":"service_restarted","revision":revision,
                         "settledAt":cortex_core::now()}).to_string()))?;
-            }
         }
-        let outside_unknown:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=?
+    }
+    let outside_unknown:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=?
             AND operation IN ('outside_command','outside_write','command_run','project_write','project_edit','project_mkdir','project_delete','project_skill_link','draft_write','external_call') AND json_extract(result_json,'$.complete') IS NOT 1 AND json_extract(result_json,'$.status') IS NOT 'complete' AND json_extract(result_json,'$.settled') IS NOT 1)",
             [&task],|r|r.get(0))?;
-        let reason = if delivery_unknown {Some("native_answer_delivery_outcome_unknown")}
-            else if legacy_effect_unknown {Some("legacy_effect_outcome_unknown")}
-            else if outside_unknown {Some("native_outside_outcome_unknown")}
-            else if verification_unknown {Some("native_verification_outcome_unknown")}
-            else if control_unknown {Some("native_control_outcome_unknown")}
-            else if unknown || interrupted {
-                Some("native_session_outcome_unknown")
-            } else {None};
-        if let Some(reason)=reason {
-            // Already held for exactly this (the effective) reason in the state it
-            // would be held in: an earlier restart recorded it; record nothing again.
-            let held: Option<String> = db.query_row(
-                "SELECT blocker FROM runtime_tasks WHERE task_id=?", [task], |r| r.get(0))?;
-            let effective = match held.as_deref() {
-                Some(existing) if existing.ends_with("outcome_unknown") => existing,
-                _ => reason,
-            };
-            let target = if matches!(state, TaskState::Paused | TaskState::WaitingUser) {
-                state
-            } else {
-                TaskState::Recovering
-            };
-            if !(state == target && held.as_deref() == Some(effective)) {
-                lifecycle::event_tx(db,&task,"NATIVE_RECOVERY_REQUIRED",
-                    json!({"reason":reason,"previous":state,"replayed":false}))?;
-                domain::native_recovery_required_tx(db,&task,reason)?;
-            }
-        } else if matches!(state,TaskState::Planning|TaskState::PlanReady|TaskState::Executing|TaskState::Reviewing|
-            TaskState::Verifying|TaskState::Reconciling|TaskState::WaitingUser|TaskState::AnswerReady) {
-            lifecycle::event_tx(db,&task,"NATIVE_RECOVERY_RESUMED",json!({"state":state}))?;
-            return Ok(Some((task.to_owned(),owner,state)));
-        } else if state == TaskState::Recovering && descriptive_command_hold_tx(db, task)? {
-            // Earlier builds held a verified, synthesized result as interrupted when a
-            // worker's descriptive check command differed from its receipt. Completion
-            // no longer refuses that, so the held result is checked again with every
-            // evidence gate; a real gap takes the coordinator's stop path. A refused
-            // settle (an unconfirmed worker) leaves the hold exactly as it was.
-            if isolated(db, || domain::settle_recovery_tx(db, task, TaskState::Reconciling)).is_ok() {
-                lifecycle::event_tx(db,&task,"NATIVE_RECOVERY_RESUMED",
-                    json!({"state":TaskState::Reconciling,"reason":"completion_rechecked"}))?;
-                return Ok(Some((task.to_owned(),owner,TaskState::Reconciling)));
-            }
-        } else if state == TaskState::Recovering {
-            // Earlier builds stopped a task for a work blocker (a lost worker whose retry
-            // gave up, a failed check) into RECOVERING to wait for a Retry that no screen
-            // offers, and nothing ever asked the owner. Ask now, with the runtime's own
-            // stop question and its concrete answers, in the task's language.
-            if let Some(blocker) = unasked_stop_tx(db, task)? {
-                domain::stop_tx(db, task, &blocker)?;
-            }
+    let reason = if delivery_unknown {
+        Some("native_answer_delivery_outcome_unknown")
+    } else if legacy_effect_unknown {
+        Some("legacy_effect_outcome_unknown")
+    } else if outside_unknown {
+        Some("native_outside_outcome_unknown")
+    } else if verification_unknown {
+        Some("native_verification_outcome_unknown")
+    } else if control_unknown {
+        Some("native_control_outcome_unknown")
+    } else if unknown || interrupted {
+        Some("native_session_outcome_unknown")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        // Already held for exactly this (the effective) reason in the state it
+        // would be held in: an earlier restart recorded it; record nothing again.
+        let held: Option<String> = db.query_row(
+            "SELECT blocker FROM runtime_tasks WHERE task_id=?",
+            [task],
+            |r| r.get(0),
+        )?;
+        let effective = match held.as_deref() {
+            Some(existing) if existing.ends_with("outcome_unknown") => existing,
+            _ => reason,
+        };
+        let target = if matches!(state, TaskState::Paused | TaskState::WaitingUser) {
+            state
+        } else {
+            TaskState::Recovering
+        };
+        if !(state == target && held.as_deref() == Some(effective)) {
+            lifecycle::event_tx(
+                db,
+                &task,
+                "NATIVE_RECOVERY_REQUIRED",
+                json!({"reason":reason,"previous":state,"replayed":false}),
+            )?;
+            domain::native_recovery_required_tx(db, &task, reason)?;
         }
+    } else if matches!(
+        state,
+        TaskState::Planning
+            | TaskState::PlanReady
+            | TaskState::Executing
+            | TaskState::Reviewing
+            | TaskState::Verifying
+            | TaskState::Reconciling
+            | TaskState::WaitingUser
+            | TaskState::AnswerReady
+    ) {
+        lifecycle::event_tx(db, &task, "NATIVE_RECOVERY_RESUMED", json!({"state":state}))?;
+        return Ok(Some((task.to_owned(), owner, state)));
+    } else if state == TaskState::Recovering && descriptive_command_hold_tx(db, task)? {
+        // Earlier builds held a verified, synthesized result as interrupted when a
+        // worker's descriptive check command differed from its receipt. Completion
+        // no longer refuses that, so the held result is checked again with every
+        // evidence gate; a real gap takes the coordinator's stop path. A refused
+        // settle (an unconfirmed worker) leaves the hold exactly as it was.
+        if isolated(db, || {
+            domain::settle_recovery_tx(db, task, TaskState::Reconciling)
+        })
+        .is_ok()
+        {
+            lifecycle::event_tx(
+                db,
+                &task,
+                "NATIVE_RECOVERY_RESUMED",
+                json!({"state":TaskState::Reconciling,"reason":"completion_rechecked"}),
+            )?;
+            return Ok(Some((task.to_owned(), owner, TaskState::Reconciling)));
+        }
+    } else if state == TaskState::Recovering {
+        // Earlier builds stopped a task for a work blocker (a lost worker whose retry
+        // gave up, a failed check) into RECOVERING to wait for a Retry that no screen
+        // offers, and nothing ever asked the owner. Ask now, with the runtime's own
+        // stop question and its concrete answers, in the task's language.
+        if let Some(blocker) = unasked_stop_tx(db, task)? {
+            domain::stop_tx(db, task, &blocker)?;
+        }
+    }
     Ok(None)
 }
 
@@ -934,44 +1050,68 @@ impl Runtime {
             })?
             .await
             .map_err(|_| CoreError::Refused("native_host_closed"))??;
-        let (tasks, failures) = self.host.executor.write(move |db| {
-            let rows = db.prepare("SELECT t.task_id,t.state,o.owner_ref,o.epoch,
+        let (tasks, failures) = self
+            .host
+            .executor
+            .write(move |db| {
+                let rows = db
+                    .prepare(
+                        "SELECT t.task_id,t.state,o.owner_ref,o.epoch,
                 NOT EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=t.task_id
                     AND e.type IN ('TASK_CREATED','NATIVE_TASK_ADOPTED')
                     AND json_extract(e.payload_json,'$.execution_host')='rust')
                 FROM runtime_tasks t JOIN task_owners o USING(task_id)
                 WHERE t.state NOT IN ('COMPLETED','CANCELLED','FAILED')
-                ORDER BY t.rowid")?
-                .query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,
-                    r.get::<_,String>(2)?,r.get::<_,i64>(3)?,r.get::<_,bool>(4)?)))?
-                .collect::<Result<Vec<_>,_>>()?;
-            let mut ready = Vec::new();
-            let mut unrecovered = Vec::new();
-            for (task,state,owner,epoch,legacy) in rows {
-                // One task's recovery never fails the project: its writes roll back alone.
-                let held = interrupted.contains(&task);
-                match isolated(db, || recover_task_tx(db, &task, &state, owner, epoch, legacy, held)) {
-                    Ok(Some(driven)) => ready.push(driven),
-                    Ok(None) => {}
-                    Err(error) => unrecovered.push((task, error.code().to_owned())),
-                }
-            }
-            // A task whose recovery failed is held (never driven) with that reason, once.
-            for (task, code) in &unrecovered {
-                let _ = isolated(db, || {
-                    let held: Option<String> = db.query_row(
-                        "SELECT blocker FROM runtime_tasks WHERE task_id=?", [task], |r| r.get(0))?;
-                    if held.as_deref() == Some("native_recovery_failed") {
-                        return Ok(());
+                ORDER BY t.rowid",
+                    )?
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, i64>(3)?,
+                            r.get::<_, bool>(4)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut ready = Vec::new();
+                let mut unrecovered = Vec::new();
+                for (task, state, owner, epoch, legacy) in rows {
+                    // One task's recovery never fails the project: its writes roll back alone.
+                    let held = interrupted.contains(&task);
+                    match isolated(db, || {
+                        recover_task_tx(db, &task, &state, owner, epoch, legacy, held)
+                    }) {
+                        Ok(Some(driven)) => ready.push(driven),
+                        Ok(None) => {}
+                        Err(error) => unrecovered.push((task, error.code().to_owned())),
                     }
-                    lifecycle::event_tx(db,task,"NATIVE_RECOVERY_REQUIRED",
-                        json!({"reason":"native_recovery_failed","code":code,"replayed":false}))?;
-                    domain::native_recovery_required_tx(db,task,"native_recovery_failed")
-                });
-            }
-            failures.extend(unrecovered);
-            Ok((ready, failures))
-        })?.await.map_err(|_|CoreError::Refused("native_host_closed"))??;
+                }
+                // A task whose recovery failed is held (never driven) with that reason, once.
+                for (task, code) in &unrecovered {
+                    let _ = isolated(db, || {
+                        let held: Option<String> = db.query_row(
+                            "SELECT blocker FROM runtime_tasks WHERE task_id=?",
+                            [task],
+                            |r| r.get(0),
+                        )?;
+                        if held.as_deref() == Some("native_recovery_failed") {
+                            return Ok(());
+                        }
+                        lifecycle::event_tx(
+                            db,
+                            task,
+                            "NATIVE_RECOVERY_REQUIRED",
+                            json!({"reason":"native_recovery_failed","code":code,"replayed":false}),
+                        )?;
+                        domain::native_recovery_required_tx(db, task, "native_recovery_failed")
+                    });
+                }
+                failures.extend(unrecovered);
+                Ok((ready, failures))
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
         for (task, code) in failures {
             eprintln!("workspace-service: recovery left task {task} unsettled ({code})");
         }
@@ -992,8 +1132,13 @@ impl Runtime {
                     // A completion gap is not an unknown outcome: nothing was lost and
                     // nothing is running. It takes the same path as on a live driver, so
                     // the coordinator (then the owner) decides, never an "interrupted" hold.
-                    if !*cancelled.borrow() && !*runtime.stop.borrow() && error.code().starts_with("completion_") {
-                        runtime.stop_after_error(&task, &owner, error, cancelled.clone()).await;
+                    if !*cancelled.borrow()
+                        && !*runtime.stop.borrow()
+                        && error.code().starts_with("completion_")
+                    {
+                        runtime
+                            .stop_after_error(&task, &owner, error, cancelled.clone())
+                            .await;
                     } else if !*cancelled.borrow() && !*runtime.stop.borrow() {
                         let reason = error.code().to_owned();
                         if let Ok(reply) = runtime.host.executor.write(move |db| {

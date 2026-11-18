@@ -56,7 +56,9 @@ fn take_error(err: *mut GError, free: unsafe extern "C" fn(*mut GError)) -> Stri
     if err.is_null() {
         return "unknown error".into();
     }
-    let message = unsafe { CStr::from_ptr((*err).message) }.to_string_lossy().into_owned();
+    let message = unsafe { CStr::from_ptr((*err).message) }
+        .to_string_lossy()
+        .into_owned();
     unsafe { free(err) };
     message
 }
@@ -78,7 +80,19 @@ pub struct Gio {
     g_object_unref: unsafe extern "C" fn(P),
     g_variant_unref: unsafe extern "C" fn(P),
     bus_get: unsafe extern "C" fn(c_int, P, *mut *mut GError) -> P,
-    call_sync: unsafe extern "C" fn(P, *const c_char, *const c_char, *const c_char, *const c_char, P, P, c_int, c_int, P, *mut *mut GError) -> P,
+    call_sync: unsafe extern "C" fn(
+        P,
+        *const c_char,
+        *const c_char,
+        *const c_char,
+        *const c_char,
+        P,
+        P,
+        c_int,
+        c_int,
+        P,
+        *mut *mut GError,
+    ) -> P,
     v_double: unsafe extern "C" fn(f64) -> P,
     v_int32: unsafe extern "C" fn(i32) -> P,
     v_uint32: unsafe extern "C" fn(u32) -> P,
@@ -146,8 +160,12 @@ impl Arg {
                     (g.v_tuple)([v].as_ptr(), 1)
                 }
                 Arg::Doubles(a, b) => (g.v_tuple)([(g.v_double)(*a), (g.v_double)(*b)].as_ptr(), 2),
-                Arg::IntBool(a, b2) => (g.v_tuple)([(g.v_int32)(*a), (g.v_bool)(*b2 as c_int)].as_ptr(), 2),
-                Arg::UintBool(a, b2) => (g.v_tuple)([(g.v_uint32)(*a), (g.v_bool)(*b2 as c_int)].as_ptr(), 2),
+                Arg::IntBool(a, b2) => {
+                    (g.v_tuple)([(g.v_int32)(*a), (g.v_bool)(*b2 as c_int)].as_ptr(), 2)
+                }
+                Arg::UintBool(a, b2) => {
+                    (g.v_tuple)([(g.v_uint32)(*a), (g.v_bool)(*b2 as c_int)].as_ptr(), 2)
+                }
             }
         }
     }
@@ -189,13 +207,38 @@ impl Bus {
         Ok(Bus(conn))
     }
 
-    pub fn call(&self, dest: &str, path: &str, interface: &str, method: &str, arg: Option<Arg>, timeout_ms: i32) -> Res<Variant> {
+    pub fn call(
+        &self,
+        dest: &str,
+        path: &str,
+        interface: &str,
+        method: &str,
+        arg: Option<Arg>,
+        timeout_ms: i32,
+    ) -> Res<Variant> {
         let g = gio()?;
-        let (d, p, i, m) = (CString::new(dest).unwrap(), CString::new(path).unwrap(), CString::new(interface).unwrap(), CString::new(method).unwrap());
+        let (d, p, i, m) = (
+            CString::new(dest).unwrap(),
+            CString::new(path).unwrap(),
+            CString::new(interface).unwrap(),
+            CString::new(method).unwrap(),
+        );
         let params = arg.map(|a| a.build(g)).unwrap_or(std::ptr::null_mut());
         let mut err: *mut GError = std::ptr::null_mut();
         let reply = unsafe {
-            (g.call_sync)(self.0, d.as_ptr(), p.as_ptr(), i.as_ptr(), m.as_ptr(), params, std::ptr::null_mut(), 0, timeout_ms, std::ptr::null_mut(), &mut err)
+            (g.call_sync)(
+                self.0,
+                d.as_ptr(),
+                p.as_ptr(),
+                i.as_ptr(),
+                m.as_ptr(),
+                params,
+                std::ptr::null_mut(),
+                0,
+                timeout_ms,
+                std::ptr::null_mut(),
+                &mut err,
+            )
         };
         if reply.is_null() {
             return Err(take_error(err, g.g_error_free));
@@ -349,7 +392,13 @@ impl Acc {
             return Err("state set unavailable".into());
         }
         let has = |s: c_int| unsafe { (a.state_contains)(set, s) != 0 };
-        let out = [has(STATE_DEFUNCT), has(STATE_SHOWING), has(STATE_ENABLED), has(STATE_FOCUSED), has(STATE_SELECTED)];
+        let out = [
+            has(STATE_DEFUNCT),
+            has(STATE_SHOWING),
+            has(STATE_ENABLED),
+            has(STATE_FOCUSED),
+            has(STATE_SELECTED),
+        ];
         unsafe { (a.g_object_unref)(set) };
         Ok(out)
     }
@@ -367,7 +416,14 @@ impl Acc {
             for i in 0..(*array).len as usize {
                 let item = *items.add(i);
                 if !item.is_null() {
-                    names.push(CStr::from_ptr(item).to_string_lossy().rsplit('.').next().unwrap_or("").to_string());
+                    names.push(
+                        CStr::from_ptr(item)
+                            .to_string_lossy()
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or("")
+                            .to_string(),
+                    );
                     (a.g_free)(item as P);
                 }
             }
@@ -464,7 +520,8 @@ struct Gtk {
     alloc_w: unsafe extern "C" fn(P) -> c_int,
     alloc_h: unsafe extern "C" fn(P) -> c_int,
     timeout_add: unsafe extern "C" fn(c_uint, P, P) -> c_uint,
-    filename_to_uri: unsafe extern "C" fn(*const c_char, *const c_char, *mut *mut GError) -> *mut c_char,
+    filename_to_uri:
+        unsafe extern "C" fn(*const c_char, *const c_char, *mut *mut GError) -> *mut c_char,
     clipboard_get: unsafe extern "C" fn(P) -> P,
     clipboard_set_text: unsafe extern "C" fn(P, *const c_char, c_int),
 }
@@ -521,14 +578,24 @@ struct DragState {
 }
 
 fn touch(path: &std::path::Path) {
-    let _ = std::fs::OpenOptions::new().create(true).append(true).open(path);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path);
 }
 
 fn marker(ready: &std::path::Path, suffix: &str) -> std::path::PathBuf {
-    let mut name = ready.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    let mut name = ready
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
     // Path.with_suffix: replace an existing suffix, otherwise append.
     let text = name.to_string_lossy().into_owned();
-    let stem = text.rsplit_once('.').filter(|(s, _)| !s.is_empty()).map(|(s, _)| s.to_string()).unwrap_or(text);
+    let stem = text
+        .rsplit_once('.')
+        .filter(|(s, _)| !s.is_empty())
+        .map(|(s, _)| s.to_string())
+        .unwrap_or(text);
     name = format!("{stem}.{suffix}").into();
     ready.with_file_name(name)
 }
@@ -575,7 +642,11 @@ pub fn drag_source(fixture: &std::path::Path, ready: &std::path::Path, x11: bool
         (g.container_add)(area, (g.label_new)(text.as_ptr()));
         (g.container_add)(window, area);
         let target = CString::new("text/uri-list").unwrap();
-        let entry = TargetEntry { target: target.as_ptr(), flags: 0, info: 0 };
+        let entry = TargetEntry {
+            target: target.as_ptr(),
+            flags: 0,
+            info: 0,
+        };
         (g.drag_source_set)(area, 1 << 8, &entry, 1, 2);
         let path = CString::new(fixture.to_string_lossy().as_bytes()).unwrap();
         let mut err: *mut GError = std::ptr::null_mut();
@@ -585,7 +656,12 @@ pub fn drag_source(fixture: &std::path::Path, ready: &std::path::Path, x11: bool
         }
         let uri_text = CStr::from_ptr(uri).to_owned();
         (gio()?.g_free)(uri as P);
-        let state = Box::leak(Box::new(DragState { uri: uri_text, ready: ready.to_path_buf(), backend_x11: x11, window }));
+        let state = Box::leak(Box::new(DragState {
+            uri: uri_text,
+            ready: ready.to_path_buf(),
+            backend_x11: x11,
+            window,
+        }));
         let user = state as *mut DragState as P;
         let connect = |obj: P, sig: &str, cb: P, data: P| {
             let c = CString::new(sig).unwrap();

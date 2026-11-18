@@ -16,6 +16,10 @@ import { useDraft } from "./settings-state";
 import { Updates } from "./maintenance";
 import { duration } from "./session-model";
 import { VoiceSettings } from "./voice-settings";
+import { share } from "./stable";
+import { RemoteAccessBody } from "./remote-access";
+import { ToolSearchPath } from "./tool-path";
+import { NotificationKinds } from "./notifications";
 
 /** A settings page: its title and lead, its sections, and its save bar pinned under it. Only the page scrolls. */
 const Page = (props: { title: string; lead: string; children: unknown; bar?: unknown }) => <Frame class="l-work set-page" scroll="none" foot={props.bar as never}>
@@ -36,7 +40,8 @@ function Appearance() {
           <button aria-current={ws.theme.pref() === t.id ? "true" : "false"} aria-pressed={ws.theme.pref() === t.id} onClick={() => ws.theme.setPref(t.id)}><I n={t.icon} s={14} />{t.label}</button>
         }</For></div>
       </Srow>
-      <Srow t="Notifications" d="Notify when a question arrives outside the open task or sprint. The desktop notification service must be available."><Sw label="Desktop notifications" checked={ws.panels.notifications()} disabled={ws.notify ? undefined : "Desktop notifications require the native app"} onChange={on => ws.panels.setNotifications(on)} /></Srow>
+      <Srow t="Notifications" d="Notify when something needs you outside the task or sprint on view: a question, a stopped task, a result to review, a failed task, a planning question or a paused sprint. Clicking one opens it. The desktop notification service must be available."><Sw label="Desktop notifications" checked={ws.panels.notifications()} disabled={ws.notify ? undefined : "Desktop notifications require the native app"} onChange={on => ws.panels.setNotifications(on)} /></Srow>
+      <Show when={ws.notify && ws.panels.notifications()}><NotificationKinds /></Show>
       <Srow t="Autosave" d="Saves a file about a second after you stop typing. It waits while a task works in the checkout and after any conflict. Off by default."><Sw label="Autosave files" checked={ws.panels.autosave()} onChange={on => ws.panels.setAutosave(on)} /></Srow>
     </div>
   </Page>;
@@ -58,23 +63,23 @@ function Machines() {
   useWantOverview();
   return <Page title="Machines" lead="A machine is a running copy of this app. Projects live on a machine. You work on one at a time, while Inbox and Archive cover them all.">
     <SetH title={<>{list().length} machine{list().length === 1 ? "" : "s"}</>}><button class="btn btn-primary" {...ws.needs("pair_machine")} onClick={() => ws.open({ kind: "add-machine" })}><I n="plus" s={14} />Add remote machine…</button></SetH>
-    <div class="surface"><For each={list()}>{m => <div class="mcard">
-      <span class="mi2"><I n={machineIcon(m)} /></span>
-      <span class="ws-free"><span class="tt">{m.name}</span><span class="ds">
-        <span>{m.kind === "local" ? "Local" : "Remote, through the server connector"}</span>
-        <span>{count(m)} project{count(m) === 1 ? "" : "s"}{m.connection === "connected" ? "" : ", last known"}</span>
-        <Show when={m.version && ws.store.overviewLoaded()}><span>Version {plainVersion(m.version!)}</span></Show>
-        <Show when={m.latencyMs !== null && m.connection === "connected"}><span>{m.latencyMs} ms observed</span></Show>
+    <div class="surface"><Keyed each={list()} by={m => m.id}>{m => <div class="mcard">
+      <span class="mi2"><I n={machineIcon(m())} /></span>
+      <span class="ws-free"><span class="tt">{m().name}</span><span class="ds">
+        <span>{m().kind === "local" ? "Local" : "Remote, through the server connector"}</span>
+        <span>{count(m())} project{count(m()) === 1 ? "" : "s"}{m().connection === "connected" ? "" : ", last known"}</span>
+        <Show when={m().version && ws.store.overviewLoaded()}><span>Version {plainVersion(m().version!)}</span></Show>
+        <Show when={m().latencyMs !== null && m().connection === "connected"}><span>{m().latencyMs} ms observed</span></Show>
       </span></span>
       <span class="row">
-        <Show when={m.connection === "connected"} fallback={<span class="st st-idle"><I n="wifi-off" s={12} />Offline, last seen {clock(m.lastConfirmedAt)}</span>}><span class="st st-ok"><I n="check-circle" s={12} />Connected</span></Show>
-        <Show when={m.connection === "connected"} fallback={<button class="btn btn-line btn-sm" onClick={() => reconnect(m)}>Retry now</button>}>
-          <Show when={m.id === ws.machine().id} fallback={<button class="btn btn-line btn-sm" onClick={() => ws.go({ name: "home", machine: m.id })}>Switch</button>}>
-            <A class="btn btn-line btn-sm" to={{ name: "settings", section: "overview", machine: m.id }}>Settings</A>
+        <Show when={m().connection === "connected"} fallback={<span class="st st-idle"><I n="wifi-off" s={12} />Offline, last seen {clock(m().lastConfirmedAt)}</span>}><span class="st st-ok"><I n="check-circle" s={12} />Connected</span></Show>
+        <Show when={m().connection === "connected"} fallback={<button class="btn btn-line btn-sm" onClick={() => reconnect(m())}>Retry now</button>}>
+          <Show when={m().id === ws.machine().id} fallback={<button class="btn btn-line btn-sm" onClick={() => ws.go({ name: "home", machine: m().id })}>Switch</button>}>
+            <A class="btn btn-line btn-sm" to={{ name: "settings", section: "overview", machine: m().id }}>Settings</A>
           </Show>
         </Show>
       </span>
-    </div>}</For></div>
+    </div>}</Keyed></div>
     <div class="cap faint">While a machine is offline its projects stay visible with their last known state, and anything that needs the machine is turned off with the reason.</div>
   </Page>;
 }
@@ -111,7 +116,8 @@ function Overview() {
 function Connections() {
   const ws = useWs();
   const m = () => ws.machine(), off = useReadOnly();
-  const limits = createMemo(() => engineLimits(ws.store.state(), m()));
+  // Read again at every machine read: equal limits stay the old objects, so the rows are not drawn again.
+  const limits = createMemo<ReturnType<typeof engineLimits>>(prev => share(prev!, engineLimits(ws.store.state(), m())));
   const stateOf = (c: Machine["connections"][number]) => c.state === "connected" ? { text: "Configured", tone: "st-ok", icon: "check-circle" } : c.state === "needs_login" ? { text: "Sign in needed", tone: "st-warn", icon: "alert" } : { text: "Unavailable", tone: "st-idle", icon: "x-circle" };
   const waiting = () => m().connections.filter(c => c.state !== "connected");
   const guard = (run: () => void) => () => { if (!off()) run(); };
@@ -142,9 +148,9 @@ function Connections() {
       </div>}</Keyed>
     </div></div>
     <A class="lnk" to={{name:"settings", section:"orchestration", machine:m().id, page:"models"}}>Engine models and observed context</A>
-    <For each={m().connections}>{c => <Adv id={`conn-${c.id}`} label={`Details of ${c.label}`}><div class="surface ws-pad ws-kv">
-      <For each={[["Engine", engineLabel(CONNECTION_ENGINE[c.engine])], ["Provider", c.detail.provider], ["Sign-in", c.detail.authMode], ["Key kind", c.detail.keyKind], ["Endpoint", c.detail.endpoint], ["Launch command", c.detail.launchCommand], ["Credential", c.detail.credential], ["Qualified", c.detail.qualified ? "Yes" : "No"], ["Created", c.detail.createdAt], ["Updated", c.detail.updatedAt]].filter(([, v]) => v)}>{([k, v]) => <><span class="cap muted">{k}</span><span class="cap mono trunc">{v}</span></>}</For>
-    </div></Adv>}</For>
+    <Keyed each={m().connections} by={c => c.id}>{c => <Adv id={`conn-${c().id}`} label={`Details of ${c().label}`}><div class="surface ws-pad ws-kv">
+      <For each={[["Engine", engineLabel(CONNECTION_ENGINE[c().engine])], ["Provider", c().detail.provider], ["Sign-in", c().detail.authMode], ["Key kind", c().detail.keyKind], ["Endpoint", c().detail.endpoint], ["Launch command", c().detail.launchCommand], ["Credential", c().detail.credential], ["Qualified", c().detail.qualified ? "Yes" : "No"], ["Created", c().detail.createdAt], ["Updated", c().detail.updatedAt]].filter(([, v]) => v)}>{([k, v]) => <><span class="cap muted">{k}</span><span class="cap mono trunc">{v}</span></>}</For>
+    </div></Adv>}</Keyed>
     <SetH title="Limits" />
     <Show when={limits().rows.length > 0} fallback={<div class="surface ws-empty">{limits().note}</div>}>
       <div class="surface"><div class="gt">
@@ -193,7 +199,7 @@ function Storage() {
   return <Page title="Storage and archive" lead="How long this machine keeps finished work, and what it uses." bar={<SaveBar d={d} />}>
     <SetH title="Archive rules" />
     <div class="surface"><OverviewShown>
-      <Srow t="Auto archive" d="Tasks move from Done to Archive after this many days. Unmerged work asks you first."><Stepper label="Auto archive" value={d.value().auto} suffix="days" min={1} max={90} disabled={off()} onChange={auto => d.set({ ...d.value(), auto })} /></Srow>
+      <Srow t="Auto archive" d="Tasks move from Done to Archive after this many days. Archiving never asks and never deletes work."><Stepper label="Auto archive" value={d.value().auto} suffix="days" min={1} max={90} disabled={off()} onChange={auto => d.set({ ...d.value(), auto })} /></Srow>
       <Srow t="Retention" d="Archived tasks are cleaned up after this many days. 30 by default, set per machine."><Stepper label="Retention" value={d.value().retention} suffix="days" min={1} max={365} disabled={off()} onChange={retention => d.set({ ...d.value(), retention })} /></Srow>
       <Srow t="Space reclamation failures" d="Deleted records whose SQLite space could not be reclaimed. Deletion is not rolled back; close readers before maintenance."><span class={m().reclamationFailures ? "st st-warn" : "cap muted"}>{m().reclamationFailures ?? 0} records</span></Srow>
       </OverviewShown>
@@ -215,7 +221,7 @@ function Diagnostics() {
   const m = () => ws.machine(), off = useReadOnly();
   const run = () => m().diagnostics;
   const items = () => run()?.items ?? [];
-  const recovery = (item: NonNullable<NonNullable<Machine["diagnostics"]>["items"]>[number]) => item.action || (item.ok ? "" : item.name === "npm" ? "Make npm available to the desktop service (not just your terminal), restart the service, then run diagnostics again." : "Run diagnostics again for current details and recovery steps.");
+  const recovery = (item: NonNullable<NonNullable<Machine["diagnostics"]>["items"]>[number]) => item.action || (item.ok ? "" : item.name === "npm" ? "Install npm, or add the folder that holds it under Tool search path below, then run diagnostics again." : "Run diagnostics again for current details and recovery steps.");
   useWantOverview();
   const wait = useOverviewWait();
   const report = () => `Diagnostics. Machine: ${m().name}. Runtime: ${m().version ?? "unknown"}. Result: ${run()?.status ?? "not run"}, ${run()?.checks ?? 0} checks.\n${items().map(item => `${item.name}: ${item.ok ? "OK" : "Needs attention"}. ${item.detail}. ${recovery(item)}`).join("\n")}${!items().length && run() ? "\nDetails were not retained. Run diagnostics again." : ""}${ws.t("reportNote")}`;
@@ -234,13 +240,14 @@ function Diagnostics() {
       <For each={m().connections}>{c => <Srow t={`${c.label} connection`} d="Identifier for support."><span class="mono cap">{c.detail.connectionId}</span></Srow>}</For>
       <Srow t="Logs" d="Private, rotating service events only: timestamps and fixed status categories. No prompts, environment, commands or credentials."><button class="btn btn-line btn-sm" aria-disabled={ws.noOpener("workspace.open_logs", "noLogOpener") ? "true" : undefined} data-why={ws.noOpener("workspace.open_logs", "noLogOpener")} onClick={() => { if (!ws.noOpener("workspace.open_logs", "noLogOpener")) ws.run({ type: "open_logs", machineId: m().id }); }}>Open logs</button></Srow>
     </div>
+    <Show when={ws.store.mode === "real" && m().kind === "local"}><ToolSearchPath /></Show>
   </Page>;
 }
 
 const PAIR_SECONDS = 252;
 function RemoteAccess() {
   const ws = useWs();
-  if (ws.store.mode === "real") return <Page title="Remote access" lead="Remote machine pairing needs a relay server selected by the owner."><div class="note-box plain">Remote pairing is not implemented. No machine code, fingerprint or reachable-server claim is fabricated. Local projects continue to work.</div></Page>;
+  if (ws.store.mode === "real") return <Page title="Remote access" lead="Lets your phone or another computer work with the projects on this machine. Traffic is encrypted end to end; the relay only forwards it."><RemoteAccessBody /></Page>;
   const m = () => ws.machine(), off = useReadOnly();
   const access = () => m().remoteAccess;
   const [left, setLeft] = createSignal(PAIR_SECONDS);
@@ -294,7 +301,11 @@ function labelTableCells(root: HTMLElement) {
 }
 
 export function SettingsPage(props: { route: Extract<Route, { name: "settings" }> }) {
+  const ws = useWs();
+  // A phone keeps its own app settings outside the workspace, and has no keyboard to list shortcuts for.
+  const phoneApp = () => ws.shell.kind === "phone" && ["appearance", "voice", "updates", "shortcuts", "machines"].includes(props.route.section);
   return <div class="set-wrap" ref={labelTableCells}><Switch>
+    <Match when={phoneApp()}><Overview /></Match>
     <Match when={props.route.section === "appearance"}><Appearance /></Match>
     <Match when={props.route.section === "voice"}><VoiceSettings /></Match>
     <Match when={props.route.section === "updates"}><Updates /></Match>

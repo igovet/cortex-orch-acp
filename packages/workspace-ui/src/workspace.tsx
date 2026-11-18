@@ -7,8 +7,8 @@ import { createBuffers } from "./editor-buffers";
 import { QuestionNotifications } from "./notifications";
 import { NewPage } from "./newtask";
 import { COPY, type CopyKey } from "./copy";
-import { useWs, WsContext, type DemoSlot, type WindowChrome, type Ws } from "./ctx";
-import { FrameMenus, Inspector, Nav, Terminal, TitleBar } from "./frame";
+import { useWs, WsContext, type DemoSlot, type Shell, type WindowChrome, type Ws } from "./ctx";
+import { FrameMenus, Inspector, Nav, PhoneBar, PhoneConnection, PhoneDrawerHead, Terminal, TitleBar } from "./frame";
 import { onScreen, ScreenActive, UnsentRegistry } from "./freshness";
 import { Home } from "./home";
 import { I, place } from "./kit";
@@ -20,23 +20,25 @@ import { Inbox, NotFound } from "./pages";
 import { Help, Palette } from "./palette";
 import { createPanels } from "./prefs";
 import { createPress } from "./press";
-import { needsOverride } from "./review-model";
+import { acceptNeedsTick } from "./review-model";
 import { parseRoute, type Route, type Router } from "./router";
 import { TaskPage } from "./session";
 import { routeLabel, sessionModel } from "./session-model";
 import { SettingsPage } from "./settings";
 import { createSettingsState } from "./settings-state";
 import { SprintPage } from "./sprint";
-import { createWorkspaceStore, type StoreOptions } from "./store";
+import { createWorkspaceStore, SAVE_ATTACHMENT, type StoreOptions } from "./store";
 import { CloseDialog, ExternalDoneDialog } from "./task-chrome";
 import { sprintView } from "./selectors";
 import { tabTitle } from "./tabs";
-import { createTheme } from "./theme";
+import { createTheme, type Theme } from "./theme";
+import { dropHover } from "./touch";
 import { createTabs, parkPane, TabStrip } from "./workspace-tabs";
 import "./fonts.css";
 import "./mockup-styles.css";
 import "./workspace.css";
 import "./layout.css";
+import "./phone.css";
 import type { TerminalPort } from "./terminal-client";
 
 const typing = (el: Element | null) => el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement
@@ -114,11 +116,24 @@ function ConnectionNotice() {
   return <Show when={lost()}><Strip class="ws-conn" role="alert" tone="info" icon={<I n="wifi-off" s={14} class="faint" />} action={<button class="btn btn-sm" onClick={() => void ws.store.reload()}>Retry</button>}>{ws.t("disconnected")}</Strip></Show>;
 }
 
-export type WorkspaceProps = StoreOptions & { notify?: (label: string) => Promise<void>; port: WorkspacePort; demo?: DemoSlot; chrome?: WindowChrome; terminal?: TerminalPort; voice?: import("./voice-client").VoicePort;
+export type WorkspaceProps = StoreOptions & { notify?: import("./notification-target").Notify;
+  /** Clicks on the host's desktop notifications, each opening its place. */
+  notificationClicks?: import("./notification-target").NotificationClicks;
+  /** The machine service's own notifications, when the host reaches a service that raises them. */
+  notificationService?: import("./notification-target").NotificationService; port: WorkspacePort; demo?: DemoSlot; chrome?: WindowChrome; terminal?: TerminalPort; voice?: import("./voice-client").VoicePort;
   /** A host notice, shown with the connection notice at the top of the main area so it never takes a frame row. */
   notice?: JSX.Element;
   /** The logo shown until the first coherent read. A host that already painted it hands over that element, so nothing is drawn twice. */
-  logo?: JSX.Element };
+  logo?: JSX.Element;
+  /** The shell around the interface. Without one it is the desktop, unchanged. */
+  shell?: Shell;
+  /** A theme the shell already holds, so one choice of theme is applied by one owner. */
+  theme?: Theme };
+/** What a phone never offers, whatever the machine can do: a terminal, editing files, the system folder chooser, programs on the
+ *  computer's own screen, and saving a file to disk. Code stays a viewer. */
+export const PHONE_WITHHELD: readonly string[] = [FEATURES.terminal, FEATURES.editFiles, FEATURES.pickFolder, SAVE_ATTACHMENT, "workspace.open_editor", "workspace.open_vscode", "workspace.open_logs"];
+/** Words for a control that needs the machine while it is not connected. Nothing is queued, so nothing looks sent. */
+export const OFFLINE_REASON = "Not connected to the machine. Nothing is sent until it is reachable again.";
 /** What a tab keeps to itself besides its route. */
 type TabLocal = {
   selected: Accessor<string | null>; select: (taskId: string | null) => void;
@@ -142,11 +157,23 @@ function TabBody(props: { make: () => Ws; shown: Accessor<boolean>; unsent: (che
     if (r.name === "root") ws.go({ name: "home", machine: ws.machine().id }, { replace: true });
     else if (r.name === "project" && r.view === null) ws.go({ ...r, view: "board" }, { replace: true });
   });
-  // A parked Git tab must reread when shown again, not only when its component first mounts.
-  createEffect(on(() => {
+  // What this tab shows, while it is on view: one project's facts, or its Git data too. The port reads in the background
+  // only what some screen on view holds; opening one reads it once, and a parked tab shown again reads again.
+  const interest = createMemo(() => {
+    if (!props.shown()) return null;
     const r = ws.router.route();
-    return props.shown() && r.name === "project" && (r.view === "git" || r.view === "worktrees") ? r.project : null;
-  }, projectId => { if (projectId) void ws.store.refreshProjectFacts(projectId); }));
+    const project = r.name === "project" || r.name === "sprint" ? r.project : r.name === "task" ? ws.store.state().tasks.find(t => t.id === r.task)?.projectId : undefined;
+    if (!project) return null;
+    const git = (r.name === "project" && ["code", "git", "worktrees"].includes(r.view ?? "")) || (r.name === "task" && (r.tab === "changes" || r.tab === "code"));
+    // The task on view (its page, or the one previewed on a board) is the only one whose worker rows are read.
+    const task = r.name === "task" ? r.task : r.name === "project" ? ws.selected() ?? "" : "";
+    return `${git ? "git" : "facts"}|${project}|${task}`;
+  });
+  createEffect(on(interest, key => {
+    if (!key) return;
+    const [kind, project, task] = key.split("|");
+    onCleanup(ws.store.interest(project, kind as "facts" | "git", task || undefined));
+  }));
   // A preview belongs to the view it was made in.
   createEffect(on(() => ws.router.path(), () => ws.select(null), { defer: true }));
   return <WsContext.Provider value={ws}><ScreenActive.Provider value={props.shown}><UnsentRegistry.Provider value={props.unsent}>
@@ -176,8 +203,16 @@ function TabPane(props: { id: number; shown: Accessor<boolean>; make: () => Ws; 
 export function Workspace(props: WorkspaceProps) {
   const press = createPress();
   onCleanup(press.dispose);
-  const store = createWorkspaceStore(props.port, { now: props.now, initial: props.initial, track: press.track });
+  const around: Shell = props.shell ?? { kind: "desktop" };
+  const phone = around.kind === "phone" ? around : undefined;
+  const store = createWorkspaceStore(props.port, { now: props.now, initial: props.initial, track: press.track, ...(phone ? { withhold: PHONE_WITHHELD } : {}) });
   const tabs = createTabs();
+  // The phone shell marks the root, so its touch sizes apply there and nowhere else.
+  if (phone) {
+    document.documentElement.dataset.shell = "phone";
+    onCleanup(() => { delete document.documentElement.dataset.shell; });
+  }
+  const [drawer, setDrawer] = createSignal(false);
   const router = tabs.active;
   const locals = new Map<number, TabLocal>();
   const localOf = (id: number) => { let held = locals.get(id); if (!held) { held = createTabLocal(); locals.set(id, held); } return held; };
@@ -189,9 +224,10 @@ export function Workspace(props: WorkspaceProps) {
   const onNarrow = () => { setNarrow(!!narrowQuery?.matches); if (!narrowQuery?.matches) setInsisted(false); };
   narrowQuery?.addEventListener("change", onNarrow);
   const sidebarOwner = {};
-  createEffect(() => panels.yieldSidebar(sidebarOwner, narrow() && !insisted() && !panels.sidebarHidden() ? "room" : null, () => setInsisted(true)));
+  // On a phone the sidebar is a drawer over the page, never a column beside it.
+  createEffect(() => panels.yieldSidebar(sidebarOwner, phone ? "room" : narrow() && !insisted() && !panels.sidebarHidden() ? "room" : null, () => phone ? setDrawer(true) : setInsisted(true)));
   onCleanup(() => { narrowQuery?.removeEventListener("change", onNarrow); panels.yieldSidebar(sidebarOwner, null); });
-  const theme = createTheme();
+  const theme = props.theme ?? createTheme();
   const demo = props.demo;
   const drafts = new Map<string, string>();
   const unique = () => demo?.unique() ?? (globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`).slice(0, 8);
@@ -221,7 +257,7 @@ export function Workspace(props: WorkspaceProps) {
       const wanted = "machine" in r && r.machine ? r.machine : panels.lastMachine();
       return machines.find(m => m.id === wanted) ?? machines.find(m => m.id === panels.lastMachine()) ?? machines.find(m => m.kind === "local") ?? machines[0];
     });
-    const terminalAvailable = () => (props.terminal !== undefined || store.can(FEATURES.terminal)) && (route().name === "project" || route().name === "task");
+    const terminalAvailable = () => !phone && (props.terminal !== undefined || store.can(FEATURES.terminal)) && (route().name === "project" || route().name === "task");
     // A section with unsaved changes asks first. Browser Back still goes, and the draft waits in the section for its return.
     const go: Ws["go"] = (to, opts) => {
       if (!opts?.force && route().name === "settings" && settings.leaving(to)) { settings.setPending(to); return; }
@@ -244,23 +280,24 @@ export function Workspace(props: WorkspaceProps) {
     };
   };
   const t = (key: CopyKey) => demo?.copy[key] ?? COPY[key];
-  const gate = (type: WorkspaceCommand["type"]) => store.can(capabilityOf(type)) ? undefined : ["pair_machine", "set_remote_access", "revoke_device"].includes(type) ? "Remote pairing is unavailable until the owner selects a relay server. No connection is attempted." : t("notOffered");
+  const offline = () => { const s = store.connection().state; return s === "unavailable" || s === "disconnected" || (s === "connecting" && store.ready()); };
+  const gate = (type: WorkspaceCommand["type"]) => store.can(capabilityOf(type)) ? undefined : offline() ? OFFLINE_REASON : ["pair_machine", "set_remote_access", "revoke_device"].includes(type) ? "Remote pairing is unavailable until the owner selects a relay server. No connection is attempted." : t("notOffered");
   const ws: Ws = {
+    shell: around, keys: hint => phone ? undefined : hint,
     ...scopedTo(router, () => localOf(tabs.activeId()), store.state),
     notify: props.notify, store, panels, theme, buffers, demo, chrome, drafts, terminal: props.terminal, voice: props.voice, settings, t, gate,
     can: store.can,
     needs(type) { const reason = gate(type); return reason ? { "aria-disabled": "true", "data-why": reason } : {}; },
     noOpener: (capability, reason) => store.can(capability) ? undefined : store.connection().state === "connected" ? t(reason) : t("notOffered"),
     externalLabel: () => store.can("workspace.open_editor") && !store.can("workspace.open_vscode") ? "Open in default app" : "Open in VS Code",
-    route: value => routeLabel(value, store.state().options),
+    route: value => routeLabel(value, store.state().options, store.state().machines),
     newId: kind => demo?.newId(kind) ?? `${kind}-${unique()}`,
     unique,
     ok(command, then) { void store.dispatch(command).then(receipt => { if (receipt.ok) then(receipt); }); },
     busy: (work, control) => press.track(work, control),
+    // One command and nothing else: the task goes to the Archive with its work, with no question or dialog.
     archiveTask(taskId) {
-      ws.ok({ type: "archive_task", taskId, now: store.clock() }, () => {
-        if (store.state().tasks.find(t => t.id === taskId)?.archiveQuestion) setDialog({ kind: "unmerged", taskId });
-      });
+      void store.dispatch({ type: "archive_task", taskId, now: store.clock() });
     },
     stopTask(taskId) {
       void store.dispatch({ type: "stop_task", taskId, confirmed: demo?.stopConfirmed() ?? true, now: store.clock() });
@@ -269,9 +306,9 @@ export function Workspace(props: WorkspaceProps) {
     run: (command: WorkspaceCommand) => store.dispatch(command),
     dialog, open: setDialog, closeDialog: () => setDialog(null),
     accept(taskId) {
-      const result = store.state().tasks.find(t => t.id === taskId)?.result;
-      if (!result) return;
-      if (needsOverride(result.checks) && !(result.kind === "answer" && result.acceptanceAvailable && result.checks.length === 0)) setDialog({ kind: "accept", taskId });
+      const task = store.state().tasks.find(t => t.id === taskId), result = task?.result;
+      if (!task || !result) return;
+      if (acceptNeedsTick(task)) setDialog({ kind: "accept", taskId });
       else void store.dispatch({ type: "accept_result", taskId, digest: result.digest, now: store.clock() });
     },
     openPalette: () => setPaletteOpen(true),
@@ -364,8 +401,11 @@ export function Workspace(props: WorkspaceProps) {
     if (e.code === "KeyT" || e.key === "t") return act(tabs.add);
     if (e.code === "KeyW" || e.key === "w") return act(() => askClose(tabs.activeId()));
   };
-  window.addEventListener("keydown", onTabKey, true);
-  onCleanup(() => window.removeEventListener("keydown", onTabKey, true));
+  // A phone has no tabs to move between.
+  if (!phone) {
+    window.addEventListener("keydown", onTabKey, true);
+    onCleanup(() => window.removeEventListener("keydown", onTabKey, true));
+  }
   // The quiet focus line belongs to keyboard movement alone, so the last way of moving decides it, and any pointer press clears it.
   const keyboard = (on: boolean) => document.documentElement.toggleAttribute("data-keyboard", on);
   const onMoveKey = (e: KeyboardEvent) => { if (e.key === "Tab" || e.key.startsWith("Arrow")) keyboard(true); };
@@ -387,24 +427,62 @@ export function Workspace(props: WorkspaceProps) {
   lost.observe(document.body, { childList: true, subtree: true });
   onCleanup(() => { document.removeEventListener("focusin", onFocusIn, true); lost.disconnect(); });
 
+  if (phone) {
+    // The drawer closes on any navigation.
+    createEffect(on(() => router.path(), () => setDrawer(false), { defer: true }));
+    // The page is as tall as what the on-screen keyboard leaves, so the composer stays above it. visualViewport is what the
+    // WebView reports whether or not it resizes the layout itself; the root takes its height as --ws-vh.
+    onCleanup(dropHover());
+    const viewport = window.visualViewport;
+    const fit = () => document.documentElement.style.setProperty("--ws-vh", `${Math.round(viewport?.height ?? window.innerHeight)}px`);
+    fit();
+    viewport?.addEventListener("resize", fit);
+    window.addEventListener("resize", fit);
+    onCleanup(() => { viewport?.removeEventListener("resize", fit); window.removeEventListener("resize", fit); document.documentElement.style.removeProperty("--ws-vh"); });
+    phone.attach({ back: phoneBack, openMachineSettings: () => go({ name: "settings", section: "overview", machine: machine().id }) });
+    onCleanup(() => phone.attach(null));
+  }
+  /**
+   * Android Back: the top-most menu, dialog or drawer closes first; otherwise the page goes back. False when there was nothing
+   * left to close or go back to, so the phone can leave the app.
+   */
+  function phoneBack(): boolean {
+    const openPop = [...document.querySelectorAll<HTMLElement>("[popover]")].reverse().find(p => { try { return p.matches(":popover-open"); } catch { return false; } });
+    if (openPop) { openPop.hidePopover?.(); return true; }
+    if (paletteOpen()) { setPaletteOpen(false); return true; }
+    if (helpOpen()) { setHelpOpen(false); return true; }
+    const modal = [...document.querySelectorAll<HTMLDialogElement>("dialog[open]")].at(-1);
+    if (modal) {
+      // A modal closes the way Escape closes it, so whatever owns it hears that it went.
+      if (modal.dispatchEvent(new Event("cancel", { cancelable: true }))) modal.close?.();
+      return true;
+    }
+    if (drawer()) { setDrawer(false); return true; }
+    if (panels.overlayOpen()) { panels.closeOverlay(); return true; }
+    if (router.canBack()) { router.back(); return true; }
+    const r = route();
+    if (r.name !== "home" && r.name !== "root") { go({ name: "home", machine: machine().id }); return true; }
+    return false;
+  }
+
   // The logo stands only while the machine has not been heard from, or answered without a view to show. A service that cannot be
   // reached is the offline workspace: the frame with its Offline notice and Retry, as on any later disconnect. Once built, the
   // frame stays, so a retry never drops back to the logo.
-  const offline = () => { const s = store.connection().state; return s === "unavailable" || s === "disconnected"; };
+  const unreachable = () => { const s = store.connection().state; return s === "unavailable" || s === "disconnected"; };
   // The machine's own settings (the composer's models and efforts) are part of the first screen: the logo stays until they are in, or
   // until waiting for them has run out, so the interface is never first shown with its pickers still empty.
-  const framed = createMemo<boolean>(was => was || store.loaded() || offline(), false);
+  const framed = createMemo<boolean>(was => was || store.loaded() || unreachable(), false);
   // The frame is built whole, in the same update that ends the logo, so no partial interface is ever painted.
   return <WsContext.Provider value={ws}><Show when={framed()} fallback={<StartupScreen logo={props.logo} notice={props.notice} />}>
-    <div class="ws-app" data-sidebar={panels.sidebarShown() ? "shown" : "hidden"} data-inspector={panels.inspectorHidden() || !inspectable() || !store.ready() ? "hidden" : "shown"}
+    <div class="ws-app" data-shell={phone ? "phone" : undefined} data-drawer={phone ? (drawer() ? "open" : "closed") : undefined} data-sidebar={panels.sidebarShown() ? "shown" : "hidden"} data-inspector={panels.inspectorHidden() || !inspectable() || !store.ready() ? "hidden" : "shown"}
       data-overlay={panels.overlayOpen() && inspectable() ? "open" : "closed"} data-terminal={panels.terminalOpen() ? "open" : "closed"} style={{ "--sidebar-w": `${panels.sidebarWidth()}px` }}>
       <div class="ws-shell" ref={shell}>
-        <TitleBar />
+        <Show when={phone} fallback={<TitleBar />}><PhoneBar title={titleOf(tabs.activeId())} openDrawer={() => setDrawer(true)} /></Show>
         <div class="workspace">
-          <Nav />
+          <Show when={!phone}><Nav /></Show>
           <main class="main" ref={main} tabindex="-1">
-            <TabStrip tabs={tabs} title={titleOf} onSelect={selectTab} onClose={askClose} />
-            <ConnectionNotice />
+            <Show when={!phone}><TabStrip tabs={tabs} title={titleOf} onSelect={selectTab} onClose={askClose} /></Show>
+            <Show when={phone} fallback={<ConnectionNotice />}><PhoneConnection /></Show>
             <Show when={store.ready() && store.syncing()}>
               <div class="ws-sync" role="status">Updating confirmed state…</div>
             </Show>
@@ -423,7 +501,7 @@ export function Workspace(props: WorkspaceProps) {
                 <button class="lnk" onClick={() => void store.reload()}>Retry</button>
               </div>
             </Show>
-            <QuestionNotifications />
+            <QuestionNotifications tabs={tabs} clicks={props.notificationClicks} service={props.notificationService} />
             {props.notice}
             {/* In a fixed order: moving a mounted pane in the document would lose its scroll positions. */}
             <div class="ws-panes"><For each={[...tabs.ids()].sort((a, b) => a - b)}>{id => {
@@ -433,6 +511,15 @@ export function Workspace(props: WorkspaceProps) {
           </main>
           <Show when={store.ready()}><Inspector /></Show>
         </div>
+        <Show when={phone && drawer()}>
+          <div class="ws-drawer-layer">
+            {/* The menu takes the whole screen: a phone is too narrow to share it. It folds back with its own button, with Back, or by going somewhere. */}
+            <div class="ws-drawer" role="dialog" aria-label="Menu">
+              <div class="ws-drawer-h"><button class="ib" aria-label="Close menu" onClick={() => setDrawer(false)}><I n="panel-left" /></button><PhoneDrawerHead onOpen={() => setDrawer(false)} /></div>
+              <Nav />
+            </div>
+          </div>
+        </Show>
         <FrameMenus />
         <TaskMenu taskId={menuTask()} ref={el => { taskMenu = el; }} />
       </div>

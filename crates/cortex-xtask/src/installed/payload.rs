@@ -22,7 +22,11 @@ fn octal(field: &[u8]) -> Res<u64> {
         }
         return Ok(v);
     }
-    let text: String = field.iter().take_while(|b| **b != 0).map(|b| *b as char).collect();
+    let text: String = field
+        .iter()
+        .take_while(|b| **b != 0)
+        .map(|b| *b as char)
+        .collect();
     let text = text.trim();
     if text.is_empty() {
         return Ok(0);
@@ -31,15 +35,20 @@ fn octal(field: &[u8]) -> Res<u64> {
 }
 
 fn cstr(field: &[u8]) -> String {
-    String::from_utf8_lossy(&field[..field.iter().position(|b| *b == 0).unwrap_or(field.len())]).into_owned()
+    String::from_utf8_lossy(&field[..field.iter().position(|b| *b == 0).unwrap_or(field.len())])
+        .into_owned()
 }
 
 fn pax(data: &[u8]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut at = 0;
     while at < data.len() {
-        let Some(space) = data[at..].iter().position(|b| *b == b' ') else { break };
-        let Ok(len) = String::from_utf8_lossy(&data[at..at + space]).parse::<usize>() else { break };
+        let Some(space) = data[at..].iter().position(|b| *b == b' ') else {
+            break;
+        };
+        let Ok(len) = String::from_utf8_lossy(&data[at..at + space]).parse::<usize>() else {
+            break;
+        };
         if len == 0 || at + len > data.len() {
             break;
         }
@@ -69,7 +78,11 @@ pub fn verify(archive: &Path, root: &Path) -> Res<Result> {
         .spawn()
         .map_err(|e| format!("dpkg-deb: {e}"))?;
     let mut stream = std::io::BufReader::new(child.stdout.take().unwrap());
-    let mut result = Result { files: 0, links: 0, mismatches: Vec::new() };
+    let mut result = Result {
+        files: 0,
+        links: 0,
+        mismatches: Vec::new(),
+    };
     let (mut long_name, mut long_link): (Option<String>, Option<String>) = (None, None);
     let mut pax_name: Option<String> = None;
     let mut pax_link: Option<String> = None;
@@ -141,7 +154,9 @@ pub fn verify(archive: &Path, root: &Path) -> Res<Result> {
                     let expected = sha256_hex(&data);
                     let meta = std::fs::symlink_metadata(&target);
                     let ok = meta.as_ref().is_ok_and(|m| m.file_type().is_file())
-                        && std::fs::read(&target).map(|d| sha256_hex(&d) == expected).unwrap_or(false);
+                        && std::fs::read(&target)
+                            .map(|d| sha256_hex(&d) == expected)
+                            .unwrap_or(false);
                     if !ok {
                         result.mismatches.push(name.clone());
                     }
@@ -152,7 +167,10 @@ pub fn verify(archive: &Path, root: &Path) -> Res<Result> {
                     match other {
                         b'2' => {
                             result.links += 1;
-                            if std::fs::read_link(&target).map(|t| t.to_string_lossy() != link).unwrap_or(true) {
+                            if std::fs::read_link(&target)
+                                .map(|t| t.to_string_lossy() != link)
+                                .unwrap_or(true)
+                            {
                                 result.mismatches.push(name.clone());
                             }
                         }
@@ -164,7 +182,10 @@ pub fn verify(archive: &Path, root: &Path) -> Res<Result> {
                         b'1' => {
                             result.links += 1;
                             let other_path = root.join(safe(&link)?);
-                            let same = match (std::fs::metadata(&target), std::fs::metadata(&other_path)) {
+                            let same = match (
+                                std::fs::metadata(&target),
+                                std::fs::metadata(&other_path),
+                            ) {
                                 (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
                                 _ => false,
                             };

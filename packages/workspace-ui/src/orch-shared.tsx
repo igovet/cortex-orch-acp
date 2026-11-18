@@ -6,6 +6,7 @@ import { Page, revealCutIn, StatusLane, Toolbar, type StripItem } from "./layout
 import type { OrchestrationPage, Route } from "./router";
 import { clock, projectsOn } from "./selectors";
 import { Pick, SaveBar } from "./settings-kit";
+import { share } from "./stable";
 import { useDraft, type Draft } from "./settings-state";
 
 export const slug = (text: string) => text.replace(/[^a-zA-Z0-9]+/g, "-");
@@ -97,7 +98,8 @@ function Context(props: { scoped?: boolean; offId: string; scopeId: string }) {
   const m = () => ws.machine(), scope = () => ws.settings.scope(), c = () => m().config;
   const projects = createMemo(() => projectsOn(ws.store.index(), m().id));
   const state = () => profileState(c(), sessionsOf(m()));
-  const diffs = createMemo(() => profileChanges(m()));
+  // Equal differences stay the old objects, so a machine read leaves the open list and its scroll alone.
+  const diffs = createMemo<ReturnType<typeof profileChanges>>(prev => share(prev, profileChanges(m())), []);
   const count = () => diffs().reduce((n, d) => n + d.lines.length, 0);
   createEffect(() => { const id = ws.settings.scope(); if (id && !projects().some(p => p.project.id === id)) ws.settings.setScope(null); });
   return <Toolbar small class="set-ctx" label="Machine and profile"

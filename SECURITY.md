@@ -1,5 +1,7 @@
 # Security policy
 
+Conversation fallback text grants no decision authority. Answers still require the existing decision identity, capability and runtime validation.
+
 Workspace model catalogues distinguish connection readiness from policy permission:
 engine/model denials make routes unselectable for new work. Displayed unknown
 usage is Unavailable, not zero; it grants no quota or execution authority.
@@ -126,7 +128,8 @@ replacement receipts never replay an ambiguous file effect. Schema discovery
 exposes only the effective channel catalogue with channel-bound cursors; it does
 not grant an unavailable tool. Oversized authorized JSON replies are retained
 whole for bounded output paging and marked incomplete until read. Native input
-redaction remains unavailable and refuses explicitly.
+redaction is unavailable, so the document tools no longer advertise
+`redact_values`; a call that sends it fails schema validation.
 Native project writes additionally enforce current channel authority, read coverage,
 whole-file hashes, no-follow parent descriptors and owner denials. Interrupted
 file/command intents remain non-replayable. File intents bind both hashes and
@@ -573,8 +576,46 @@ mandatory and failure reports `native_verification_sandbox_unavailable`; plan
 preflight preserves that reason rather than claiming the executable is missing.
 Plan preflight looks a bare program name up on the same command search path the
 verifier launch and worker commands use (the project's `.venv/bin`, `venv/bin` and
-`node_modules/.bin`, then the service's inherited `PATH`), and probes the found file
-inside that read-only sandbox; it never widens what the verifier can read or write.
+`node_modules/.bin`, then the owner's tool search path described below), and probes
+the found file inside that read-only sandbox; it never widens what the verifier can
+read or write.
+
+**Tool search path.** The installed service is started by the systemd user manager
+with a fixed minimal `PATH`, which lacks what the owner's terminal adds (nvm,
+`~/.local/bin`, `~/.cargo/bin` and similar). At start, and when the owner chooses
+Re-read from my shell, the service runs the owner's own login shell (from the
+password database) once as an interactive login shell (`-l -i -c` for bash, zsh and
+POSIX shells, `--login --interactive --command` for fish), so the same startup files
+a terminal runs are executed. This is the owner's own code at the same trust as
+their terminal. It runs with no terminal, in a new session, stdin closed, stderr
+discarded, cwd = home, an environment of only `HOME`, `USER`, `LOGNAME`, `SHELL`,
+`PATH`, `LANG`, `TERM=dumb` and the XDG base directories (no Cortex or credential
+variables), and a 5-second limit, after which its whole process group is killed;
+anything the startup files leave running in that group is killed as well. Only the
+`PATH` value between per-run random markers is kept; banner output is ignored and
+nothing else is retained or logged. If the shell cannot be read (timeout, error,
+no markers, an unsupported shell), the service uses its inherited `PATH` plus the
+existing well-known per-user tool directories (`~/.local/bin`, `~/.cargo/bin`,
+`~/bin`, nvm's default version from `~/.nvm/alias/default`, `~/.volta/bin`,
+`~/.bun/bin`, `~/.deno/bin`, `~/go/bin`, pnpm's home, pyenv and asdf shims) and
+records the reason, shown in Settings and Diagnostics. Service start never waits
+for or fails on this read. Each entry is accepted only if it is an absolute,
+existing directory without `..`, is not world-writable unless sticky, and is not
+in Cortex's private state (any `.cortex`/`.cortex-dev` component, the service's
+state directory, its configuration and state folders); entries are de-duplicated
+by real directory in order and capped at 64 entries and 16 KiB. Owner-added extra
+folders (at most 16, validated the same way and also refused inside a registered
+project) follow, then `/usr/local/bin`, `/usr/bin` and `/bin`. Every launch
+re-validates the list, and the sandbox's command path additionally drops any entry
+inside the command's own project, so a project can never add a program directory
+beyond its fixed `.venv/bin`, `venv/bin` and `node_modules/.bin`. No mount is
+added for these directories and no write access is widened: every command view
+already mounts the whole host filesystem (except masked private stores), so the
+tool directories and their symlink targets (for example nvm's `bin/npm` into its
+version's `lib`) are readable; they are read-only to the verifier and read-only
+roles, and worker commands keep exactly the write access their access mode
+already has. Engine launches keep their own fixed environment and bundled
+Node; the systemd unit's minimal `PATH` is unchanged.
 There is no unsandboxed retry. The host/project is read-only except existing
 Git-ignored directories, explicit caches and temp. Private stores remain hidden,
 Git stays read-only, networking is disabled and procfs is private. This does not
@@ -637,9 +678,9 @@ Pre-save MCP discovery now executes in Rust, never through the Python migration 
 
 Owner `product.task` deletion actions `purge` and `clear_old` now use the native machine action lane and shared Rust Core retention boundary. Explicit confirmation, finite numeric cutoff and finished/unarchived preview checks precede deletion. Archive and unmerged-work checks retain their refusal order; discard consent uses the exact legacy manifest digest, not the distinct native verification digest. No unavailable observation establishes consent. Core holds its exclusive cooperative store-access fence across committed deletion intent and teardown, rejects unknown starts, active/process-protected work and running worker nodes, and emits the public removal in the deletion transaction. The running-node refusal is deliberately stricter than the legacy Python purge. Worktrees without Cortex ownership evidence or with dirty contents remain retained; removal is never forced. Adapter-only deletion also attempts space reclamation; its failure is an explicit outcome of an already-committed deletion. Overlay-save failure never invokes Python or recreates the deleted task on retry. These actions do not certify results, acquire scheduler ownership or settle unknown effects. Legacy unmaterialized projections still delegate only before effects; explicit retained startup and other retained operations still require Python.
 
-Owner `product.task / accept` now shares Rust's native result-evidence validator and rechecks the current completed execution, root/session/owner binding, unknown Start, digest, fresh-result marker, evidence version and required literal acknowledgement. Its immediate Core writer transaction stays held through the private overlay replacement; it does not complete the scheduler, authorize a different owner or manufacture receipts. Acceptance captures the exact legacy checkout digest. `answer_archive` records digest-bound discard consent only on literal confirmation, or postpones the question using the retained setting; it deletes nothing. Unobservable work establishes no consent, and purge independently rechecks source and deletion fences. Both handlers preserve the existing reply/state shapes in offline Python comparisons and refuse real overlay-write/store-exclusion failures without helper replay. Unsupported legacy projection/evidence still delegates only before effects. Manual file-conflict choices (`resolve_block`) now use the native machine lock, literal pathspecs and the descriptor-relative revision-checked writer; private paths and linked file/parent writes refuse. A durable intent precedes file/index effects; any later failure remains unknown, including overlay-save failure, and never invokes Python. Supplied request identities replay the saved reply or unknown outcome before legacy projection fallback; changed payloads conflict. No force, automatic restoration, result certification or scheduler transition is performed. The native Git error envelope intentionally excludes stderr. Merge finish/abort now also use the native machine lock and durable intent on the materialized-checkout boundary. Finish validates unmerged entries and staged whitespace/markers before a normal hook-enabled commit; abort invokes only Git's non-forcing merge abort. Success checks the observed commit parents or unchanged abort HEAD and absence of MERGE_HEAD. Any failure after attempting Git or overlay replacement stays unknown, never claims rollback, and cannot select Python or replay by key. These are private task presentation updates, not runtime completion or new acceptance. The machine lock is cooperative, not atomicity between Git and SQLite or protection against external same-user writers. Unported configuration is refused natively; the explicit retained startup was removed. See [native owner review decisions](docs/cortex-workspace/local-task-execution.md#native-owner-review-decisions).
+Owner `product.task / accept` now shares Rust's native result-evidence validator and rechecks the current completed execution, root/session/owner binding, unknown Start, digest, fresh-result marker, evidence version and required literal acknowledgement. Its immediate Core writer transaction stays held through the private overlay replacement; it does not complete the scheduler, authorize a different owner or manufacture receipts. Acceptance captures the exact legacy checkout digest. Archiving (manual or automatic) never asks and never discards; `confirm_discard` on an archived task records digest-bound consent to delete its work at cleanup and deletes nothing. Unobservable work establishes no consent, and purge independently rechecks source and deletion fences. Both handlers preserve the existing reply/state shapes in offline Python comparisons and refuse real overlay-write/store-exclusion failures without helper replay. Unsupported legacy projection/evidence still delegates only before effects. Manual file-conflict choices (`resolve_block`) now use the native machine lock, literal pathspecs and the descriptor-relative revision-checked writer; private paths and linked file/parent writes refuse. A durable intent precedes file/index effects; any later failure remains unknown, including overlay-save failure, and never invokes Python. Supplied request identities replay the saved reply or unknown outcome before legacy projection fallback; changed payloads conflict. No force, automatic restoration, result certification or scheduler transition is performed. The native Git error envelope intentionally excludes stderr. Merge finish/abort now also use the native machine lock and durable intent on the materialized-checkout boundary. Finish validates unmerged entries and staged whitespace/markers before a normal hook-enabled commit; abort invokes only Git's non-forcing merge abort. Success checks the observed commit parents or unchanged abort HEAD and absence of MERGE_HEAD. Any failure after attempting Git or overlay replacement stays unknown, never claims rollback, and cannot select Python or replay by key. These are private task presentation updates, not runtime completion or new acceptance. The machine lock is cooperative, not atomicity between Git and SQLite or protection against external same-user writers. Unported configuration is refused natively; the explicit retained startup was removed. See [native owner review decisions](docs/cortex-workspace/local-task-execution.md#native-owner-review-decisions).
 
-Integration admission reads the private overlay under the machine lock and uses
+Integration admission reads the private overlay, checks it again under the machine lock, and uses
 Core live read-only state and private-index containment inspection. Unconfirmed or
 stale requests, observed already-landed content and absent/non-result execution
 bindings retain the Python refusal shape without a helper launch. A completed
@@ -648,7 +689,9 @@ native local squash path also validates reports/review/checks, the legacy source
 fresh-result and accepted-revision fences. It requires a clean, committed
 project-folder source and an existing clean target worktree already ancestral to
 the source, with no cleanup request. Git retains normal hooks. The machine lock
-covers the saved overlay and a durable intent precedes the first effect. A known
+covers admission and each overlay save, and a durable intent precedes the first
+effect; Git, hooks and GitHub run outside the lock, while the task's other owner
+actions are refused with `operation_in_progress`. A known
 failed commit restores the prior target index only if HEAD is unchanged. A real
 squash content conflict is undone with `git reset --merge` and reported as a
 conflict; the prior index is restored only when the target is then clean, and
@@ -658,6 +701,16 @@ a reason to retry through Python. No runtime ownership or check receipt is
 invented. Unsupported validation, staging, same-branch commits, target updates,
 temporary targets, PRs, cleanup and legacy input shapes are refused before effects. These cooperative observations do
 not freeze external same-user Git writers or provide hostile-code isolation.
+
+Core's native project digest of a plain project folder (one in no Git repository)
+is made by a no-follow walk instead of Git listings. The walk is selected only when
+fixed installed Git, run without inherited configuration, answers "not a git
+repository" and the folder holds no `.git` entry; any other Git failure (a damaged,
+locked, foreign-owned or untrusted repository) stays the `project_revision_unavailable`
+refusal and is never observed as a plain folder. The walk skips the private stores,
+hashes every other non-directory entry with the same descriptor-relative no-follow
+reads and limits as a repository observation, refuses an unreadable directory, and
+returns no partial listing. Its digest is domain-separated from every repository digest.
 
 Unactivated machine task facts validate current legacy verification against a
 fresh Rust observation for plain and Git task roots. This uses the legacy manifest
@@ -765,7 +818,7 @@ or renamed, including when the default worktree root changes. A worktree home ma
 Result cards and whole opened reports render Markdown as text nodes and known elements, never supplied HTML. Relative, HTTP(S) and mailto links are active; executable and unknown URL schemes remain text. Link creation is not permission to access a file, execute a command or change report-read authorization.
 Workspace review and worker overviews exclude withdrawn checks only when the runtime can rederive their
 withdrawal from retained receipts and provisioning; presentation fields alone do not
-suppress failures. Ready results retain explicit Accept controls in Conversation and diff review; those controls record acceptance only and never commit, merge or close the task. Accept sends the reviewed source version and digest, not its display sequence;
+suppress failures. Ready results that are not yet accepted retain explicit Accept controls in Conversation and diff review; those controls record acceptance only and never commit, merge or close the task. A result accepted by an Automatic sprint's queue shows no Accept control; that automatic acceptance uses the same validator, applies only while the sprint's current run mode is Automatic and likewise never commits, merges or closes the task (see [local task execution](docs/cortex-workspace/local-task-execution.md)). Accept sends the reviewed source version and digest, not its display sequence;
 the service still revalidates both before recording acceptance. Accept and check reruns take that identity from the result the screen displays (the delivered machine facts), using the raw wire result only when no result fact is supplied; this changes no server authority, and server acceptance still revalidates current evidence. Result versions follow runtime evidence events, not unrelated progress/transcript invalidations. The UI respects service review blockers and source-drift warnings; a failed or unknown acceptance retains a task-local reason and refresh action. Unverified reviewer claims with recorded commands receive real automatic check attempts, never invented passes; commandless legacy gaps are separate manual items, not acceptance blockers. Availability probes use the same read-only launch preparation and final argument compaction as verification, never execute proposed programs, and distinguish sandbox/launch failure from an observed missing executable. Policy/consent refusals are not technical acknowledgement authority. External completion is an explicit owner-confirmed machine record, not runtime acceptance or integration. The service refuses a live or unobservable execution; it never fabricates checks or performs Git operations to close it. Content containment uses a disposable index/object directory and reverse-patch checking against the local target, not commit ancestry. Unknown or oversized comparisons never assert containment. Target push status is separate, last-fetched information and never close authority; no fetch or push runs implicitly.
 Accepting a result in a non-Git folder never initializes Git,
 commits or pushes. Explicit Git initialization runs only `git init` in the registered
@@ -949,22 +1002,34 @@ Worker batches require all answers in one Core transaction; a single permission
 choice or partial submission cannot resume the worker.
 Only Guarded access and eligible configured native routes are offered. This is
 not full legacy permission, skill-proposal or client-integration parity.
-claude-agent-acp asks for every tool in its `default` floor (coordinators always,
-workers outside Auto), so the runtime answers its permission requests itself,
+No Cortex session runs in an engine mode that skips the engine's permission
+requests, in any access mode: every Claude session (coordinator, every worker,
+reviewer and auxiliary session) runs in claude-agent-acp's `default` mode, a
+read-only channel (the coordinator, a read-only profile or a review-stage
+session) runs Codex in codex-acp's `read-only` mode, and a writing Codex worker
+runs in `workspace-write` (see [Native engine tools](#native-engine-tools)). A read-only
+session whose adapter offers no such mode does not start
+(`restricted_mode_unavailable`). claude-agent-acp asks for every tool Claude Code
+does not run on its own, so the runtime answers its permission requests itself,
 identifying tools only by the engine-declared name, kind, locations and command
 text. Cortex gateway and attached external MCP tools pass for every channel,
 because the gateway or relay re-checks the channel and operation. Native subagent
 and native question tools, and every non-Cortex tool of the consultant, are refused
-with an offered reject option (cancelled when none is offered). Read-only channels
-keep the read/search-only native fence in every mode. Auto selects an offered
-allow option. Outside Auto a declared deletion (`delete`/`move` kinds or a declared
-`rm`) asks the client with a `Removal blocked pending confirmation: ...` card and
-accepts only an offered allow option; without a client it is refused. Development
-allows other native requests except edits of protected control-plane targets.
-Guarded allows reads, searches and fetches and edits whose declared locations are
-all inside the project and unprotected; anything else asks the client or is
-refused. Unlike Python, no engine jail bounds native tools here, so Guarded never
-approves a native shell command without a client. Nor does a jail mount the
+with an offered reject option (cancelled when none is offered). The runtime
+answers codex-acp's requests (its `read-only`/`workspace-write` sandbox
+escalations) the same way. Every other native request is decided by the access
+mode's [decision table](#native-engine-tools): Cortex private state is refused in
+every mode; Auto allows everything else and records it; Development allows reads
+outside the project and asks the owner for writes outside the project, credential
+and key material, Git control and engine/Cortex configuration writes and
+deletions; Guarded also asks before reads outside the project and native web
+fetches. Read-only channels keep the read/search-only native fence in every mode.
+An owner card for a declared deletion (`delete`/`move` kinds or a declared `rm`)
+keeps its `Removal blocked pending confirmation: ...` title, other cards are titled
+`Owner decision: ...`; only an offered one-shot option is accepted, and without a
+connected owner client the request is refused. No engine process is
+sandboxed as a whole, so Guarded never approves a native shell command without
+a client. Nor does a jail mount the
 owner's Codex `config.toml` read-only: the native Codex launcher instead starts
 App Server with a non-persistent `-c` layer trusting its own working directory,
 the project root codex-acp already marks trusted for every session thread, so
@@ -1030,9 +1095,11 @@ no seccomp, no network restriction and no `no_new_privs`. Its `read_paths`,
 `write_paths`, `network`, `runtime_dir_env` and worker scopes are not enforced or
 applied, and the per-file project walk that builds the Landlock policy is
 skipped. What still holds: it launches only the registry's own absolute (or
-`/usr/bin`/`/bin`) executable with the registry environment plus the owner's
-`HOME`, a built `PATH` (the executable's directory, `~/.local/bin`, `~/bin` and the
-system directories) and the Cortex process's `XDG_RUNTIME_DIR`; channel secrets
+`/usr/bin`/`/bin`) executable, or a bare name found on the owner's tool search
+path, with the registry environment plus the owner's
+`HOME`, a built `PATH` (the executable's directory, the owner's tool search path,
+`~/.local/bin`, `~/bin` and the system directories) and the Cortex process's
+`XDG_RUNTIME_DIR`; channel secrets
 are never passed; engines reach it only through the channel-bound relay, whose
 explicit tool grants, role/consultant narrowing, reservation and no-replay rules
 are unchanged. It runs in its own process group, which Cortex kills when the
@@ -1048,18 +1115,25 @@ Audio is not uploaded or persisted; only explicitly inserted/sent text enters th
 ordinary prompt path. First-use model downloads have fixed size/content hashes;
 no webview-supplied URL, path or executable is accepted. See [dictation authority](docs/cortex-workspace/security.md#local-dictation-built-local-linux).
 
-Workspace attachment input carries bytes, not arbitrary client filesystem paths.
-The service validates base64, names, MIME syntax, eight-file count and a 4 MiB
-combined decoded-byte cap. Queued bytes live in owner-private service state;
+Workspace attachment input carries bytes, not arbitrary client filesystem paths, and
+only once: the `product.attachment` upload. The service validates base64, names, MIME
+syntax, eight-file count and a 4 MiB combined decoded-byte cap, stores each body as a
+private file `<state>/attachments/<sha256>` (directory 0700, file 0600, written
+atomically, never through a symlink) and answers references `{name, mimeType, size,
+sha256}`. Every other command (task create and edit, answers, prompts, queue, comments,
+sprint notes) carries references and refuses inline bytes (`inline_attachment_refused`);
+the desktop bridge refuses them too. One body is read back only by digest (64 lowercase
+hex characters, no path from the client), at most 4 MiB and verified against its
+digest. Unreferenced bodies are removed under the machine lock (unsent uploads after 24
+hours). Queued messages keep references in owner-private service state;
 task creation retains bytes in private SQLite options until Start; prompt, answer and direct-worker resources use the existing private source-block store.
-Sprint creation and planning notes retain validated bytes in atomically replaced private product state and send ACP image/resource blocks to the existing tool-less auxiliary planner, never base64 inside prompt text. A sprint's cumulative planning resources share the eight-file/4-MiB budget. Product-state writes refuse before exceeding the bounded response budget; local frames are capped at 8 MiB. This is a bounded transport, not an unbounded upload service.
+Sprint creation and planning notes retain references in atomically replaced private product state; the planner prompt reads their bodies when it is built and sends ACP image/resource blocks to the existing tool-less auxiliary planner, never base64 inside prompt text. A sprint's cumulative planning resources share the eight-file/4-MiB budget. Product-state writes refuse before exceeding the bounded response budget; local frames are capped at 8 MiB. This is a bounded transport, not an unbounded upload service.
 Question answers and their resource references commit together. The Linux bridge
 reads clipboard image bytes (PNG, or another image GTK can decode, re-encoded as PNG)
 only on an owner paste with no plain text, and reads no clipboard text or file path.
 URI-only native drops use files observed by GTK, not paths supplied by JavaScript,
-through an expiring one-use byte buffer. Sent conversation messages keep a recorded
-copy of their files in the same private product state, the first content given up
-when that bounded state fills. `native.save_attachment` accepts only a name and
+through an expiring one-use byte buffer. Sent conversation messages keep references to their
+files in the same private product state. `native.save_attachment` accepts only a name and
 bounded bytes from the webview and writes them to the path the owner chooses in the
 system's save dialog; the webview never names a path. Files are never
 executed or fetched by their resource URI; unavailable capture refuses delivery.
@@ -1165,6 +1239,21 @@ it cannot bypass authority or create duplicate nodes. This is tested with
 disposable stores, not evidence of a historical transaction's outcome.
 See [MCP tool errors](docs/features/failures-and-cancellation/index.md#mcp-tool-errors).
 
+Native tool failures are reported by their stable code without changing what is
+enforced. After channel authentication a handler failure is a structured tool
+error (`code`, the offending `field` when known, a fixed `hint`); a channel that
+is no longer current, a tool not offered to the role or stage, a read-only role,
+an owner-protected path and a missing owner confirmation stay JSON-RPC `-32001`
+refusals that name the same code. Hints are fixed strings: no reply echoes
+another task's data, a path outside the project or a credential. `project_mkdir`,
+`project_delete` and `project_skill_link` hold exactly `project_write`'s
+authority and `command_run`'s deletion consent; no new write authority exists.
+`read_batch` grants nothing beyond its members: it accepts only six evidence
+reads the channel is itself offered, runs each through the handler a direct call
+uses, and rechecks the channel's exact identity between members, withholding
+every body when authority is lost. The runtime-owned `pipeline.md` is published
+under a runtime principal no channel holds; models cannot create or edit it.
+
 Recognized `gateway_read_required`, `gateway_complete_read_required` and
 `gateway_stale_read` errors reject before file mutation; they are read
 preconditions, not authorization decisions. Guidance directs a current same-channel
@@ -1205,7 +1294,8 @@ and forwarding are not evidence of discovery, invocation or success.
 A separate built-in discovery roster is derived from role tool offers, not
 external MCP configuration. Worker commands can inspect authorized outside data;
 `project_read` remains project-only and assignment-local `access_request` reserves
-project work paths, not external grants. Unknown source locations do not authorize
+project work paths, not external grants; it is served to writing workers only, so
+a read-only or review channel is not offered a route it could never be granted. Unknown source locations do not authorize
 unbounded host searches. Host-history discovery must establish a supported
 read-only route and exact session identity, without resumption, creation,
 credential access or production mutation; unavailable or incomplete evidence stays
@@ -1315,8 +1405,17 @@ engine). An unbound broker's token is single-use. The file is removed with the b
 PID isolation applies only to the read-only profile, not to writing workers.
 
 A natural-language request such as "do not modify X" creates no write denial. Only an
-explicit `deny-write: <path>` does, and it is matched after path normalization. A denial stored by
+explicit `deny-write: <path>` in an owner message does, and it is matched after path normalization. A denial stored by
 an earlier runtime with wildcard characters still guards writes (matched as a glob).
+The denial is recorded in the same transaction as the message (`lifecycle::steering::parse_denials`,
+stored in the steering event's `deny_write` field) and applies at once to every write not yet made,
+whether the message waits for the coordinator's next boundary or restarts it: project file tools
+refuse the path at each write (`write_denied`), a writing command already running is stopped
+(`authority_changed`), plans, scope and access requests touching it are refused. A path outside the
+project or a private path (`.git`, `.cortex`, ...) refuses the whole message (`gateway_path_denied`)
+and nothing is recorded. Only the owner lifts a denial: an explicit `allow-write: <path>` in a message (parsed and confined exactly like `deny-write:`), or Remove on the task's Write denials list (`allow_write` control, refused as `write_denial_unknown` for a path not denied). A lift removes only that exact recorded denial; it never widens a grant, the jail, a private path, a read-only role or another task, and natural language lifts nothing. A message that both denies and allows a path refuses (`write_rule_conflict`). An owner message to a
+working task no longer cancels running workers, review or verification; stopping work stays the
+explicit Stop, worker Stop and command stop.
 
 Owner-triggered retention removes session access-default rows before deleted host
 sessions, without changing surviving defaults or explicit access choices. The
@@ -1566,21 +1665,23 @@ native command receipts. These measurements do not relax authorization, independ
 review or final verification.
 A well-shaped `tool_call_ref` alone never verifies a check.
 
-Cortex's read-only `read_skill` route can read shared skill/reference IDs and
-exact `SKILL.md` paths listed in that engine session's sent prompt, bound to the
-session and attempt for both coordinator and worker channels. Binding occurs
-after the engine session opens, and reads consult the current persisted channel
-binding rather than a cached pre-launch context. Compaction advances only that
-same session's generation; older persisted generations, revoked/expired channels
-and terminated session snapshots cannot authorize reads. A channel cannot move
-to another engine session: fallback and recovery require a fresh channel.
-Only observed sent metadata (or OpenCode's observed launch prompt), not a
-reconstructed payload, can grant paths. It accepts no glob or arbitrary path, and does not
-grant general file access. Listed paths are read from their original canonical
-files with bounded UTF-8 regular-file checks and symlink-safe traversal; changed
-targets and unlisted paths fail closed. The route is not available as a
-session-path grant when that session did not receive the corresponding skill
-catalog. See [the unified system prompt](docs/features/unified-system-prompt/index.md).
+Cortex's read-only `read_skill` route reads a Cortex shared/reference id within
+the channel's role allowlist, or a project skill (`<dir>/<name>/SKILL.md` directly
+below the project's `.agents/skills`, `.claude/skills` or `.codex/skills`) by
+name, directory or file path. Only channels that are served `project_read` can
+read project skills, so the route grants nothing beyond reading a project file
+the same channel could already read; the senior consultant cannot. Cortex ids
+always win: a same-named project file cannot replace a Cortex protocol skill's
+body or lift its role restriction, and is read only by its path. Path forms
+apply the `project_read` path rules (no `..`, empty or `.` parts, no `.git`,
+`.cortex`, `.cortex-dev` or workspace owner files), absolute paths must lie
+inside the project, symbolic links are never followed, and the file must be a
+regular single-link UTF-8 file of at most 65,536 bytes. No glob, sibling file or
+user-home path is read. Project skill text is returned labelled as project
+content; it is model input and grants no tool access, scope or permission.
+After channel authentication succeeds, an unreadable skill is a correctable
+tool error naming the accepted forms, not an authority refusal. See
+[the unified system prompt](docs/features/unified-system-prompt/index.md#project-skills).
 
 Owner-initiated force-finish is a separate, non-acceptance outcome: an exact
 `/cortex-finish` command captured from the ACP/Paseo host or an exact answered
@@ -1789,17 +1890,20 @@ Internal `.gitignore` reconciliation uses an exact, unnumbered, non-truncated sn
 
 The Cortex Workspace desktop slice has a user-level machine service that owns the Cortex ACP child. It is not released, and its design lives in [Cortex Workspace](docs/cortex-workspace/index.md).
 
-- The service listens only on a Unix domain socket in a private per-user runtime directory (directory mode 0700, socket mode 0600). Both ends compare the peer's effective user with their own. It opens no TCP, loopback HTTP or WebSocket listener.
+- The service listens only on a Unix domain socket in a private per-user runtime directory (directory mode 0700, socket mode 0600). Both ends compare the peer's effective user with their own. It opens no TCP, loopback HTTP or WebSocket listener. The one network listener it can open is the iroh UDP endpoint of remote access, described below, bound only while the owner has turned remote access on (off by default).
 - The service's own private folders (runtime directory and, in the dev channel, the config, state, cache and data folders it gives started processes) must be real directories owned by the current user. One that is merely too permissive (for example 0775 under the user's own primary group from a 002 umask, or 0755) is made 0700 in place through the opened directory; a world-writable folder, a folder group-writable by another group or a foreign-owned folder stays refused, and the owner sees a refusal naming the folder and the problem instead of a generic filesystem failure.
 - The actor of a Workspace request is the authenticated peer. Client-supplied actor values are replaced, and the ACP child receives a cleared environment.
 - Cortex exposes the `_cortex/workspace` extension method alongside the unchanged standard ACP methods. Its operations are a closed set; the desktop shell has a closed bridge command forwarding that set and a separate bounded native notification command.
 - Owner file saves run through that same fixed helper. A save names the revision the owner read and writes only over it, through a temporary file and a rename. It reaches the file without following any link, refuses `.git`, `.cortex` and `.cortex-dev` at any depth, is bounded to 512 KiB of UTF-8 text, and is refused while the project store does not show every task on that checkout stopped. See [editing files](docs/cortex-workspace/local-task-execution.md#editing-files). This is a check of recorded runtime state, not a lease: a model writer is not held back by it, and one running without that record could still race a save.
 - Git, file reads, Cortex settings and the owner's task records run through a fixed helper the service starts with a cleared environment. The desktop shell names an operation from a closed set, a registered project and parameters; the service supplies every root and directory. Paths stay inside the checkout and outside `.git`, `.cortex` and `.cortex-dev`, links cannot leave it, a push never forces, and the helper has no arbitrary-command operation. See [security design](docs/cortex-workspace/security.md).
+- Code's file tree shows the owner every file and folder in the project folder, including dot-files, secret-named files such as `.env` and everything Git ignores (marked as ignored), and opens and saves them under the same rules as any other file. This is the owner's own window, not a disclosure to a model: it sends nothing to an engine or provider, and the commit message and pull request texts still leave out secret-named files and read only what Git reports, which never includes ignored files. Still never listed or opened: `.git` at any depth, `.cortex`, `.cortex-dev` and the other Cortex private names (`.cortex-dev-owner.json`, `.cortex-workspace-dev.json`, `.cortex-workspace.json`), anything outside the checkout, and any folder reached through a link (a link is listed, never followed). Folders are read one level at a time on demand (`repo.list`), at most 500 entries each, by descriptor and without following links.
+- A composer's `/` list reads the project's own skills with `repo.skills`: the same read-only index the coordinator's instructions list and `read_skill` reads (`.agents/skills`, `.claude/skills`, `.codex/skills`, one level each, at most 64 skills, by descriptor and without following links, each SKILL.md a regular single-link file of at most 64 KiB, outside `.git` and the Cortex private names). It returns only each skill's folder name, project-relative path and front-matter description cut to 300 characters, never a skill body, and activates nothing. The composer's `@` list filters the file names the repository snapshot already returned (`git ls-files --cached` and `--others --exclude-standard`, at most 20,000), in the window; it adds no file read. Picking a file or a skill writes plain text into the owner's message; nothing is sent until the owner sends it.
 - Folder search for adding a project takes only the text the owner typed, through closed Rust request types in both bridge and service. The service chooses the roots and limits and runs a fixed helper with a cleared environment. It reveals folder names and whether `.git` exists, never file contents, and it never offers `.cortex`, `.cortex-dev` or the service's private directories.
 - The owner terminal is a separate, intentional same-user execution grant. Only terminal.open/read/write/resize/close are exposed, validated by shared closed Rust request types in both bridge and service. Initial cwd comes from the registered project, never the webview; the service selects the user's interactive shell. There is no one-shot exec, executable, argv, cwd or environment override API. Input is still full shell authority, including the user's files, accounts and network: compromised trusted webview content can exercise that authority. This is not model-gateway containment or protection from same-user code. At most eight PTYs retain 64 KiB each; read pages, writes, dimensions, UI scrollback and input queues are bounded. Output/input are not journaled or logged. Hide/window close detaches; Close shell, project removal and service stop send TERM then KILL to the dedicated session's job groups and reap the shell. Lost sessions and uncertain input are never replayed. Daemonized jobs that escape the session, abrupt service death and shell CPU/memory use remain outside cleanup guarantees. See [owner terminal reasoning](docs/cortex-workspace/security.md#owner-terminal-built-local-linux).
-- The desktop window loads bundled local content only, under a content security policy that allows Tauri IPC connections alone. It has no shell, filesystem or process capability, and external navigation and new windows are refused. It draws its own frame, so the main window may minimize, maximize, close and drag itself and read its maximized state, and nothing else.
+- The desktop window loads bundled local content only, under a content security policy that allows Tauri IPC connections alone. It has no shell, filesystem or process capability, and external navigation and new windows are refused.
+- Code previews checkout files inside that policy. Pictures, video and sound play from in-memory `blob:` URLs (`media-src 'self' blob:`, the only media source); their bytes come through the guarded file read, chosen by file name from a fixed list of picture, video and sound types, at most 4 MiB, never through a link and never for saving. SVG is shown only through an image element, which runs no script and loads nothing. HTML is parsed into an inert document and rebuilt from structural tags alone, dropping scripts, styles, forms, frames, links, event and style attributes and every non-inline image; links in a preview are never followed. Markdown uses the conversation renderer, which does not interpret HTML. PDF and other binary files are not rendered; frames and objects stay blocked. See [viewing files](docs/cortex-workspace/local-task-execution.md#viewing-files). It draws its own frame, so the main window may minimize, maximize, close and drag itself and read its maximized state, and nothing else.
 - Default/release ACP uses `.cortex`; Workspace Dev uses `.cortex-dev` in the same project folder. Release data never prevents Dev registration and is never opened or migrated by Dev. The `.cortex-dev/owner.json` reservation binds the dev directory by device/inode at registration; an unowned, linked or replaced dev store is refused. A validated old `.cortex-dev-owner.json` is moved inside the dev store; a matching private `.cortex-workspace-dev.json` is retained there as `legacy-workspace.json`. Unknown or foreign legacy workspace files are not removed, and no old database is read. Missing sprint members can be restored as drafts only from an exactly matched saved plan and dependency mapping; the queue pauses, and no old execution, verification or acceptance is inferred. Private-path, Git and snapshot rules exclude both stores. This is accidental cross-channel protection, not isolation from a same-user shell. See [CW-S12](docs/cortex-workspace/backlog/CW-S12.md).
-- Only the bundled main window can submit native notifications. The fixed session-bus Notify request sends a bounded, markup-escaped work label, never question text, paths, commands or credentials. New questions notify outside the open task/sprint when enabled; unavailable desktop delivery remains an explicit error. Notifications confer no execution or answering authority.
+- Desktop notifications come from the machine service, which opens the owner's own session bus (the per-user `DBUS_SESSION_BUS_ADDRESS` `unix:path=` socket, else `$XDG_RUNTIME_DIR/bus`) with EXTERNAL authentication and makes only `Hello`, one `AddMatch` for the notification server's signals, `Notify` and `CloseNotification`, every call with NO_AUTO_START; it answers no method call and needs no display. A notification carries a bounded, markup-escaped work label and, for a stopped task or a paused sprint, the runtime's one-line reason, never question text, paths, commands or credentials. Notifications confer no execution or answering authority. Each raised notification keeps one target of a closed shape (`question`, `planning`, `result`, `task` or `sprint` with bounded project, task or sprint and decision ids, no other field) against the id the server returned. Only `ActionInvoked(id, "default")` for an id the service raised, from the server that returned that id, once, acts: the service sends the kept target to subscribed windows as `notification_open` with a random nonce (never the token), and the desktop shell checks the exact shape (`policy::notification_target`), claims the click with `notifications.opened` and only then receives the activation token, which it passes to GTK solely to raise its window. A click carries no data of its own, so another session-bus client can at most reopen a place the service itself named. If no window claims the click within two seconds, the service starts the app with `systemd-run --user` running the desktop entry's fixed binary path, with the token (ASCII graphic characters only, at most 512) as `DESKTOP_STARTUP_ID` and `XDG_ACTIVATION_TOKEN` and no other input; the target waits in memory for that window's `notifications.take`, once, for one minute. The window's `notifications.report` carries only the focused task or sprint ids and the enabled kinds (closed shapes in the desktop request allowlist and again in the service); the service keeps the kinds and the newest 1000 announced item states in `notifications.json` (0600) in its state folder. `notifications.*` is outside the remote allowlist and the phone's request policy, and the phone bridge drops `notification_open`. The window's capability is still the same three commands; no URI scheme, MIME handler, D-Bus service or desktop-entry change is added. The service withdraws its notifications when it stops. A service that does not raise notifications leaves the window's own question notifications: only the bundled main window can submit them, through the same closed target shape, with clicks handled by the window's process alone, and the window withdraws them when it closes.
 - Workspace invalidation hooks are connection-local to supported Store writers, not a security boundary on arbitrary SQLite clients. Independent/older writers do not need Workspace tables or callbacks; their writes are not guaranteed to publish notifications. Normal writable initialization retires legacy persistent outbox hooks; inspection leaves the durable schema untouched.
 - Both channels ship a root-owned runtime under `/usr/lib/<package>/runtime`. Units ignore legacy `service.env` files and use fixed absolute launch paths. Login-start symlinks and minimal best-effort maintainer scripts start/restart/stop only the matching user unit; they never access Paseo or delete user data. The native service-start path runs absolute `/usr/bin/systemctl --user` with fixed reload/start arguments, not webview-supplied commands. The separate editor action accepts only a registered project identity and fixed VS Code arguments. Dev XDG isolation and unchanged native account references remain in force.
 - The package depends on bubblewrap but does not weaken AppArmor or kernel policy. A namespace refusal blocks sandboxed engine execution and remains an explicit qualification limit; see [platforms](docs/cortex-workspace/platforms.md).
@@ -1813,6 +1917,8 @@ The Cortex Workspace desktop slice has a user-level machine service that owns th
 - Service status events are retained in the channel's private state directory under logs: directory 0700, files 0600, service.log and one rotated backup, about 64 KiB each. Records contain only a timestamp and a fixed category (helper success/refusal/failure, agent start/stop or scheduler failure), never prompt bodies, environment, command lines, credentials, stdout or stderr. Logging failure does not undo a committed action. Open logs asks the trusted service for that directory and invokes the fixed native folder opener; the webview cannot provide an arbitrary path.
 - Shared-checkout tasks whose checkout and target branches match never use a merge or PR. Successful channel-bound write hashes are compared with bounded local branch content/history; unknown evidence never claims containment. A confirmed same-branch commit stages only matching task-recorded pending files, refuses ambiguous same-file staging/modes/links, and preserves unrelated staged files. Native/command-only changes without attributable file receipts require explicit external/as-is closure or manual Git work, never silent staging of the shared checkout. This is content evidence, not hostile-same-user isolation.
 - Post-merge cleanup uses Git without force only after the integration is recorded. A retained dirty/failed cleanup never masquerades as a failed merge. Source updates retain the previous result identity/version and require different, passing runtime evidence before renewed acceptance. Large and non-text conflicts retain bounded metadata and explicit manual Git instructions rather than writing placeholder text into a file.
+- Task titles, commit messages and pull request texts are written by a model, so their inputs leave the machine for the chosen connection's provider (Anthropic for Claude, OpenAI for Codex), under the owner's existing native account: a task's description for its title; for a commit or pull request text the task description, the result summary, changed file names with line counts and a diff excerpt of at most 12,000 bytes. New files are sent by name only, and a file whose name looks private never contributes content: `.env*`, SSH keys (`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`), `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`, `*.kdbx`, `.netrc`, `.npmrc`, `.pypirc`, `.htpasswd`, `*.tfvars`, `*.tfstate`, `kubeconfig*`, `.kube/config`, `credentials`, `credentials.json`, `service-account*`, and names containing secret, credential, password or token. This is a name check, so a secret inside an ordinary source file that changed can still be in the excerpt. The text is written in a minimal ACP engine session started with the route's ordinary engine-session launch (cleared environment, real `HOME` and the connection's native directory; for Codex the native launcher that turns the owner's Codex MCP servers off and verifies that and the disabled shell, plugin, hook and app features before App Server starts; a Codex connection without that launcher is not used). The session gets an empty private scratch directory, no ACP MCP servers and the engine's read-only mode; every permission request is denied, and a permission request or tool call discards the answer. A Claude session gets the same native tool restriction as every Cortex Claude session (no native shell, edit, subagent, hook, plugin or owner-configured MCP server; see [Native engine tools](#native-engine-tools)). Denying permissions does not stop a tool the engine runs without asking (Claude's own read and search tools in its working directory); a tool call is detected and the answer discarded, but only after the tool has run, so the prompt asks for text only and this is not containment. The session has no runtime task, writes no project store and is not shown in any history; it ends after 25 seconds at most and its process group is reaped. Unicode format characters (bidirectional controls, zero-width characters, the byte order mark) are removed from every generated text. The answer is shown to the owner as editable text and is never committed, merged or pushed without the owner's confirmation. `short-text.log` (file 0600 in the private log folder) records route identity, reason and outcome codes only, never prompts, descriptions, diffs or answers. See [short model texts](docs/cortex-workspace/local-task-execution.md#short-model-texts).
+- Remote access (built, no-paid tests only, not qualified; nothing verified on a physical Android device or through a relay): when the owner turns it on, the service binds an iroh UDP endpoint that uses no n0 public relay and no n0 address lookup, with either no relay or exactly one configured relay. The machine identity is a 32-byte key in a 0600 file (`remote-host.key`) in the service's private state directory, and a phone's key is a 0600 file in the app's private data with Android backup off; neither is wrapped by an OS keyring or the Android Keystore. Pairing uses a single-use link (QR code or copied text; 5 minutes; the fifth wrong secret cancels it) followed by a fingerprint on both sides and an explicit Allow on the computer; there is no short pairing code, and only Allow stores the device. Revoking a device closes its connections at once. Each remote stream goes to a fresh local-socket connection, and every request first passes a closed, fail-closed allowlist (`crates/workspace-service/src/remote_policy.rs`): every `remote.*` method, `service.stop`, `terminal.*`, `voice.*`, file saves, all Git write actions, native login, package install and rollback, and unknown methods are refused. A paired phone can still start and steer work and change machine and project settings, which is command execution authority on the machine. A relay sees endpoint identities, timing, volume and client IP addresses, not content. See [remote access security](docs/cortex-workspace/security.md#remote-access-built-not-qualified).
 - The same OS user is local trust, not isolation from hostile code running as that user. The different-OS-user peer check is not yet verified.
 
 ## Tool access and containment
@@ -1839,100 +1945,200 @@ gateway are not claimed to be isolated by it. A request acknowledgement means
 only that the durable request was accepted, not that the process has exited.
 See [command-stop controls](docs/features/steering-and-questions/index.md#stop-one-worker-command-with-a-reason).
 
-Each channel-bound engine process runs in a Linux `bwrap` engine jail. Codex's
-remaining native tools stay jail-bounded: the per-process launcher and the
-verified private adapter's session-config patch both force Codex's own
-`shell_tool` and `view_image` features off (`-c features.shell_tool=false -c
-features.view_image=false`, re-forced in every generated session config so
-App Server's own thread/start config cannot restore them), verified against
-the installed Codex CLI 0.154.0's `features list`; Codex then runs shell commands
-and reads images only through the scoped Cortex `command_run`/`project_read`/
-`read_source` tools. Native `apply_patch` remains on for file edits -- the installed Codex
-CLI exposes no supported off switch for it, and it is not even listed by
-`features list` -- and a separate `unified_exec` feature was found still
-enabled after this change, with neither `-c features.unified_exec=false` nor
-`--disable unified_exec` having any observed effect; whether it still offers a
-residual native exec/read path once `shell_tool` is off is not established
-without a live qualification check (not requested for this change). In Claude
-Cortex sessions, adapter-level `disallowedTools` also disallows native Bash,
-file/search/edit, notebook edit and Skill alternatives so scoped Cortex MCP
-tools provide the corresponding workflow and command receipts; native
-subagents remain excluded. The jail remains a backstop for tools the engine
-still exposes. Effective exclusion in a real
-Claude 0.81.2 turn still requires a new owner-authorized live check. The host is mounted read-only, but `/run/user` remains visible inside the
-engine jail (including session-bus, audio, display and keyring sockets); this
-is an accepted exposure, not a permission boundary. `/tmp` is explicitly bound
-as the host's real, writable path (a screenshot the owner points at, a file the
-process leaves for the owner both need the same real path on both sides of the
-jail), while `/var/tmp` -- which has no such
-interop use, and can be a read-only mount or absent entirely once the whole
-host is bound read-only -- is instead a private, writable, per-run directory
-backed by the process's own scratch, never the host's shared one; `HOME` and
-`TMPDIR`/`TMP`/`TEMP` are that same private scratch. Cortex creates that scratch
-and its other temporary files under the host's `/var/tmp`
-rather than a RAM-backed `/tmp`. The private
-`/var/tmp` is mounted before the scratch, so a sandbox sees its own scratch but
-not the other Cortex scratch directories there, which previously sat in the
-shared `/tmp`. The verified install an engine launches from (its Node binary,
-the adapter's `node_modules` tree, Codex's bundled binary and Cortex's private
-Codex adapter and launcher) is mounted read-only over itself, so an owned
-engine root under `/var/tmp` stays launchable; this adds no write access. The project mount follows
-the engine's existing launch-time jail grant: writing workers can have the
-whole project writable even when their runtime-declared assignment work area is
-narrower. That declared area coordinates parallel writers; it is not a gateway
-write boundary. The gateway enforces assignment/role authority, user-protected
-paths, private-path restrictions and path safety, but does not compare ordinary
-writes with the declared work area. An `access_request` reserves additional
-work for coordination; it does not remount or widen the OS jail. A directory path with one
-trailing slash (`.next/`) is that directory, `[`/`]` are literal path characters, and an
-absolute or `..` path is refused as `outside_project` with guidance; generated build/test
-output needs no request. `command_run` defaults to a 30-minute limit; on a timeout or stop
-the command and every process it started are killed, including children in their own process
-group, and commands never inherit the MCP server's stdin. Writer conflicts
-receive bounded delayed runtime rechecks (1/2/4 seconds), then a runtime grant or
-denial without a user question. Private, unsafe, deny-write and read-only refusals
-are immediate runtime decisions. Retained old access cards are cancelled; late
-user answers cannot grant access. Retry scheduling is retained runtime state,
-not a synthesized user answer; authority loss fences the wait.
-The advertised worker question tool is reserved for genuine user decisions,
-not missing project access. Its question and options must use the selected chat
+### Native engine tools
+
+No engine process is sandboxed as a whole: Claude Code, codex-acp and Codex App
+Server run as the owner with the launch environment's `HOME` and the
+connection's native directory, can read what the owner can read, and share the
+host network. What bounds a model's native tools is the engine session's own
+mode and tool configuration plus the runtime's answer to each permission request
+the engine sends. Model work that changes the project or runs commands is meant
+to go through the scoped Cortex MCP tools (`command_run`, `project_write`,
+`project_edit`, `project_delete`, `outside_write`, `outside_command`), which
+check role, assignment, deny-write paths, deletion consent and protected targets
+and record receipts.
+
+**Claude (claude-agent-acp).** Every Claude session Cortex starts (coordinator,
+every worker profile, reviewers, sprint planning and short model texts) passes
+`session/new` `_meta.claudeCode.options` that the installed adapter merges into
+its SDK options: `disallowedTools` removes native `Bash`, `BashOutput`,
+`KillShell`, `PowerShell`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit` and
+`Skill`, native subagent and scheduling tools (`Agent`, `Task`, `Workflow`, team,
+`SendMessage`, `ScheduleWakeup`, `Monitor`, cron and `RemoteTrigger`) and
+lifecycle/outward tools (`EnterWorktree`, `ExitWorktree`, `EnterPlanMode`,
+`ExitPlanMode`, `TaskStop`, `PushNotification`, `Artifact`, `SendFeedback`) from
+the model's context; `allowDangerouslySkipPermissions: false` makes
+`bypassPermissions` unavailable; `strictMcpConfig: true` limits MCP servers to
+the ones Cortex attaches (its own `cortex` relay and the owner-registered external
+servers the runtime attaches to that channel), so MCP servers from the owner's
+Claude settings, project `.mcp.json` and plugins do not start; `plugins` and
+`skills` are empty; hooks and auto-memory are off (`disableAllHooks`,
+`autoMemoryEnabled: false`, in both the session's flag settings and its
+SDK-parent policy settings, which an administrator's managed-settings tier can
+override). The session runs in `default` mode in every access mode. Native
+`Read`, `Grep`, `Glob`, `WebFetch` and `WebSearch` remain. Claude Code runs reads
+and searches inside its working directory (the project) without asking; deny
+rules in the session settings keep `.cortex/**`, `.cortex-dev/**` and the dev
+state files out of those reads, and `ask` rules make Claude Code send a permission
+request before reading a credential or key file name inside the project (the
+names of the private-name list below). Allow rules in the owner's own Claude
+settings still apply before any request is sent; Cortex does not override them.
+
+**Codex (codex-acp behind the native Codex launcher).** The launcher forces
+Codex's `shell_tool` and `view_image` features off, with subagents, plugins, hooks
+and apps, and verifies that with `codex features list` before App Server starts;
+codex-acp's thread config carries the same switches. Codex then runs commands and
+reads images only through Cortex tools, and has no native read tool. Native
+`apply_patch` stays on (Codex has no supported switch for it). A read-only channel
+runs in codex-acp's `read-only` mode (read-only sandbox, approval on request), so
+every `apply_patch` asks and is refused. A writing worker runs in `workspace-write`
+in every access mode: a sandbox whose writable root is the project, with approval
+requests (codex-acp's file-change approval with the changed paths, and its
+additional-sandbox-permission request with the requested paths) going to Cortex
+rather than to Codex's automatic reviewer as in `agent`. `agent` and
+`agent-full-access` are never selected. Codex's `unified_exec` feature stays listed
+as enabled: in the installed Codex CLI 0.166.0 neither
+`-c features.unified_exec=false`, a `config.toml` entry nor `--disable unified_exec`
+changes it, and whether it offers a native exec path while `shell_tool` is off is
+not established without a live check.
+
+**OpenCode** sessions run in the `cortex` mode, whose permissions ask for every
+tool (see [OpenCode](#opencode-optional-engine)).
+
+**Decision table.** The runtime answers every native permission request Claude
+and Codex send by this table, for every role allowed the operation kind:
+
+| Target | Guarded | Development | Auto |
+| --- | --- | --- | --- |
+| Read or search inside the project | allow | allow | allow |
+| Read or search outside the project | ask the owner | allow, recorded | allow, recorded |
+| Write or edit inside the project (writing workers) | allow | allow | allow |
+| Write or edit outside the project (writing workers) | ask the owner | ask the owner | allow, recorded |
+| Deletion (`delete`/`move` kinds or a declared `rm`) | ask the owner | ask the owner | allow, recorded |
+| Credential and key material anywhere, read or write | ask the owner | ask the owner | allow, recorded (`auto_credential`) |
+| Git control files, engine and Cortex configuration, write | ask the owner | ask the owner | allow, recorded (`auto_control`) |
+| Cortex private state, read or write | refused | refused | refused |
+| Web fetch | ask the owner | allow | allow |
+
+Credential and key material is a private file name anywhere (`.env*`, SSH key
+names, `*.pem`, `*.key`, `*.p12`, `*.pfx`, keystores, `.netrc`, `.npmrc`,
+`.pypirc`, `credentials*`, Terraform state and variables, kubeconfig, names
+containing secret, credential, password or token) and the owner's home
+credential locations (`~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`,
+`~/.config/gcloud`, `~/.docker/config.json`, `~/.kube`, `~/.git-credentials`,
+package-manager token files, keyrings and `~/.password-store`, shell and REPL
+histories, the Codex and Claude credential files). The name rule
+(`private_name` in `crates/workspace-service/src/machine/short_text.rs`) looks at
+the file name only, case-insensitively, and matches well-known names exactly,
+not anywhere inside a name: `.env` and SSH key names as a prefix (`id_rsa`,
+`id_rsa.pub` and `id_rsa_backup` match, `old_id_rsa` and `fake_id_rsa` do not),
+`.netrc`, `.npmrc`, `.pypirc`, `.htpasswd`, `credentials` and
+`credentials.json` as the whole name, the key and state extensions as a suffix,
+and only the four words secret, credential, password and token anywhere in the
+name. A key copied to an unusual name is therefore an ordinary file to this
+rule; broader substring matching would misclassify ordinary files such as
+`rsa_test.py`. Git control files and
+engine/Cortex configuration are the runtime's protected control-plane targets.
+Cortex private state is the project's `.cortex`, `.cortex-dev` and dev owner
+files and the service state directory. A path that cannot be resolved asks the
+owner outside Auto. Read-only roles (the coordinator, the consultant, architect,
+ux-designer, explorer, planner, security-auditor, accessibility-auditor,
+database-architect, performance-engineer, the runtime-reserved build-verification
+profile, the code reviewer and every review-stage session) get only the read rows;
+their native write, delete and execute requests are refused in every mode under the
+`read_only` rule. Every native request of the consultant is refused. The table
+narrows native engine tools only: a command run through `command_run` can still
+read anywhere the owner can (see
+[Attack-surface review and limits](#attack-surface-review-and-limits)).
+
+"Ask the owner" is a card titled `Owner decision: <role> wants to
+<read|write|delete|run|fetch> <paths> because <reason>` with only Allow once and
+Deny ("Allow for this task" is not offered: the consent model has no task-scoped
+grant of a path class). An incoming ACP client (Paseo, Zed) shows it as its
+permission card. A native Workspace task has no such client: its request becomes
+an owner decision of kind `permission` in the task's decisions projection, kept as
+one `pending_questions` row (options Allow once / Deny) and a
+`NATIVE_PERMISSION_DECISION_OPENED` event naming the role, operation, exact paths,
+reason (`outside_project`, `credential`, `control`, `deletion`,
+`unresolvable_path`, `network`) and access mode, without a store format change.
+The desktop shows it in the task's Conversation as "Asked by <role>", the task
+reads as needing the owner, and the desktop notification for a waiting question
+covers it. The engine's request stays pending while the decision is open; neither
+claude-agent-acp nor codex-acp puts a time limit on a pending permission request,
+and only a cancelled turn ends it. Allow once passes the engine's allow option;
+Deny, or any other answer, its own reject option (ACP carries no reason text). A
+pause, stop or ended worker session withdraws the decision with its reason and
+cancels the engine's request; a decision a stopped service left open is withdrawn
+when the service starts again (`service_restarted`), so it is never answered into
+the void, and the worker's recovery follows the normal lost-worker rules. Every
+answer is a `NATIVE_PERMISSION_DECIDED` (or `NATIVE_PERMISSION_CANCELLED`) event
+with its rule and its decider: `owner`, `mode:<access mode>` for an allowance,
+`runtime` for a policy refusal, `withdrawn:<reason>`, or `no_owner_client` when the
+task has neither an ACP client nor a Workspace binding, in which case the request
+is refused. An owner-decided request also leaves a `permission_receipts` row
+(`allow_once`, `reject_once` or `cancelled`). Cortex's own `outside_write` and
+`outside_command` follow the same table and card: Cortex private state is refused,
+Auto allows and records, Guarded and Development ask (a write outside the project
+asks in Development too), with their existing path and scope checks first.
+
+**Where the table cannot be enforced.** A tool the engine runs without asking has
+no runtime decision and no receipt:
+
+| Cell | Claude (`default`) | Codex (`workspace-write`) | Codex (`read-only`) |
+| --- | --- | --- | --- |
+| Read/search inside the project | runs without asking (allowed anyway) | no native read tool | no native read tool |
+| Read/search outside the project | asks | no native read tool | no native read tool |
+| Credential read inside the project | asks through the `ask` rules | no native read tool | no native read tool |
+| Write inside the project | no native write tool | `apply_patch` writes without asking | asks; refused |
+| Write outside the project | no native write tool | asks | asks; refused |
+| Credential or Git control write inside the project | no native write tool | written without asking unless Codex's own sandbox keeps the path read-only (not verified) | asks; refused |
+| Cortex private state inside the project | read denied by deny rules | written without asking, not enforced | asks; refused |
+
+So for Codex writing workers an in-project `apply_patch` into `.cortex`,
+`.cortex-dev`, a credential file or a Git control file inside the writable root
+is not prevented: codex-acp offers no way to exclude a path from the writable root.
+That Claude Code asks before a read outside its working directory, honours the
+`ask` and deny rules, and that Codex asks for every write outside its writable
+root follows from the installed adapters' code and documented behavior; it has not
+been observed in a live run.
+
+**Gateway boundaries.** A writing worker's runtime-declared assignment work area
+coordinates parallel writers; it is not a gateway write boundary. The gateway
+enforces assignment/role authority, user-protected paths, private-path
+restrictions and path safety, but does not compare ordinary writes with the
+declared work area. An `access_request` reserves additional work for
+coordination. A directory path with one trailing slash (`.next/`) is that
+directory, `[`/`]` are literal path characters, and an absolute or `..` path is
+refused as `outside_project` with guidance; generated build/test output needs no
+request. `command_run` defaults to a 30-minute limit; on a timeout or stop the
+command and every process it started are killed, including children in their own
+process group, and commands never inherit the MCP server's stdin. Writer
+conflicts receive bounded delayed runtime rechecks (1/2/4 seconds), then a
+runtime grant or denial without a user question. Private, unsafe, deny-write and
+read-only refusals are immediate runtime decisions. Retained old access cards are
+cancelled; late user answers cannot grant access. Retry scheduling is retained
+runtime state, not a synthesized user answer; authority loss fences the wait. The
+advertised worker question tool is reserved for genuine user decisions, not
+missing project access. Its question and options must use the selected chat
 language while internal worker communication stays English; these are generation
-instructions, not runtime translation or semantic enforcement of arbitrary prose. See
-[the access flow](docs/features/orchestration/index.md#worker-questions-and-additional-access). The engine
-jail also leaves the host's real `/tmp` writable and the engine state directory
-writable apart from protected session-configuration files, so these locations
-are residual write surfaces, not denied by the project gateway. `.cortex` is hidden (for a task bound to a linked worktree, the jail root is that worktree
-and the main repository's shared `.cortex` is masked too); the project's
-`.codex` and `.claude` are ordinary project paths; `.git` is read-only except the
-repository data git needs for a writing worker (see
-[Git and tool state in the project](#git-and-tool-state-in-the-project)). The coordinator, reviewers and
-read-only roles get no project write grant. Database-architect and
-performance-engineer are also read-only roles, as is the runtime-reserved
-build-verification profile (not dispatched; the runtime executes verification).
-The engine's state directory (`CODEX_HOME`
-or `CLAUDE_CONFIG_DIR`, the owner's real one for a native account) stays writable
-except the files and directories that configure later sessions (settings, hooks,
-instructions, skills, agents, commands, rules); absent ones are first created
-neutral on the host so none can be planted, and installed plugins are hidden. A
-revoked or expired channel terminates the process. The one bounded exception is a
-worker channel revoked by acceptance of that attempt's own current result: the
+instructions, not runtime translation or semantic enforcement of arbitrary prose.
+See [the access flow](docs/features/orchestration/index.md#worker-questions-and-additional-access).
+The coordinator, reviewers and read-only roles get no Cortex project write tool.
+
+A revoked or expired channel terminates the process. The one bounded exception is
+a worker channel revoked by acceptance of that attempt's own current result: the
 watchdog lets the in-flight turn end for at most 20 seconds so its final token
 report can arrive, and the post-result settlement normally tears the engine down
-when the turn ends, within 15. Native tools can still act in that window; such late project changes
-invalidate the digest-bound review, verification or completion gate as above.
-Explicit cancellation, stop and replanning terminate at once. Inside the jail Codex runs with
-full access, since its own sandbox cannot start there; its approval policy is
-pinned to `untrusted` so each command still reaches the permission bridge, which
-allows it unless it deletes (see [Access mode](#access-mode-development-guarded-and-auto)).
+when the turn ends, within 15. Native tools can still act in that window; such
+late project changes invalidate the digest-bound review, verification or
+completion gate as above. Explicit cancellation, stop and replanning terminate at
+once.
 
-Excluded regardless of the jail: native subagents (Claude `Agent`, `Task`,
-`Workflow` and team tools are disallowed and refused at the permission bridge;
-Codex agents and multi-agent features are forced off), user and project MCP
-servers (strict MCP config; native Codex MCP entries disabled), hooks, plugins,
-and (Codex only) the `shell_tool` and `view_image` features described above.
-The host network is shared, which also exposes abstract Unix sockets of the host
-network namespace. The engine binary itself is trusted, runs as the owner and can
-read what the owner can read.
+Unverified without a live run: that a real Claude turn lists no native `Bash`,
+`Edit` or `Write` tool, that an attempted native edit is impossible, that the
+attached MCP servers stay reachable under `strictMcpConfig`, that Claude Code asks
+before a read outside the project, and which reads it performs on its own outside
+the project (for example its own session files).
 
 ### OpenCode (optional engine)
 
@@ -2124,7 +2330,7 @@ read-only profile (`read_only`), while their project stays read-only -- verifica
 git-ignored directories in place and every other project write to a discarded overlay (refused
 without host overlay support), and a check whose project digest changes is incomplete. A mode switch
 does not stop a read-only command or a verification check. Only a host-writable (Development or
-Auto) writing-worker command is stopped by a mode switch or a denial change. Engines themselves stay jailed.
+Auto) writing-worker command is stopped by a mode switch or a denial change. Engine processes themselves are not sandboxed (see [Native engine tools](#native-engine-tools)).
 
 This is **trusted local development, not hostile-code isolation**. Direct masks
 hide the bound task's private runtime storage and protect Git configuration,
@@ -2155,17 +2361,22 @@ Literal non-shell argv arguments containing separators and `rm` text do not
 request deletion consent. Refused, absent or malformed approval starts no process.
 This lexical classifier
 is not a semantic firewall: interpreters, scripts and daemon operations can hide
-effects. `project_delete` and `outside_command` consent remains. In Development
-an `outside_write` needs no card unless its target, as named or through a
-symlinked parent, is or lies beneath a protected control-plane location
-(`sandbox.control_plane_paths`, existing or not); those still ask.
-Development keeps the worker engine floor.
+effects. `project_delete` and `outside_command` consent remains. An `outside_write`
+asks the owner in Development as in Guarded and is allowed and recorded in Auto; a
+target in Cortex private state is refused in every mode.
+The access mode never changes an engine session's own mode.
 
 **Guarded** remains the explicit restrictive command profile (host/HOME mostly
 read-only, writable project and tool caches) with consent for every outside
 write and outside command. **Auto** uses the Development host-writable command
-profile for writing workers, runtime auto-approval of every consent card and the
-most permissive offered worker engine mode.
+profile for writing workers and runtime auto-approval of every consent card and
+of every native permission request except one reaching Cortex private state,
+each recorded with its rule (see the [decision table](#native-engine-tools)); the
+engine session mode stays the same as in the other modes, and read-only roles and
+reviewers stay read-only. Development allows native reads outside the project and
+asks the owner for native writes outside it, credential and key material, Git
+control and engine/Cortex configuration writes and deletions; Guarded also asks
+before native reads outside the project.
 None of these modes lifts channel/role/epoch/revocation, owner denial, review,
 completion, native-subagent or paid-probe gates.
 
@@ -2256,8 +2467,8 @@ same command in the same attempt
 
 ### Git and tool state in the project
 
-With a whole-project grant, git run by a worker (`command_run`, or its native
-shell in the engine jail) may update the project's own repository: the `.git`
+With a whole-project grant, git run by a writing worker through `command_run` (no Cortex engine session
+has a native shell) may update the project's own repository: the `.git`
 directory, or a linked worktree's own `worktrees/<name>/` plus the shared common
 directory even when that lies outside the project. Its data (objects, refs,
 logs, index, HEAD, packed-refs, locks, merge/rebase/stash state, `info/`) is
@@ -2332,7 +2543,7 @@ writes a file, never follows a symlinked `.claude`, `.claude/skills` or
 different existing link only after the user confirms (see
 [Project skill links](docs/features/permissions-and-containment/index.md#project-skill-links)).
 
-`/skill-management <request>` is the explicit coordinator command for creating, revising, or importing project skills. Imported files are untrusted input; source URL, exact revision, and license information are recorded, and the runtime retains independent review. Skill instructions do not expand assignment scopes. Repeated work may be proposed to the user through a durable question (`user_question_request` with `skill_proposal`). The runtime requires 2 to 5 retained reports as evidence, refuses duplicate proposals, and accepts only explicit, action-matched English or Russian approval/decline option pairs before persistence. A stored pair is checked again when an answer is interpreted, including after restart; reversed, misleading or unknown labels cannot approve even through text option `1`. A decline or unclear answer changes nothing in the project. Skills are never installed automatically or activated merely because files exist. Once present in the supported project layout, a skill is listed by name, description and path in the [unified system prompt](docs/features/unified-system-prompt/index.md) of every Cortex engine session, which replaces the engines' own skill catalogs with the union of the project and owner skill directories either engine reads; Cortex does not guarantee selection or use. Skill text is model input and grants no additional tool access, filesystem scope, or permission. Cortex's conditional `read_skill` trigger catalogue is role-scoped guidance in the prompt and advertised tool schema; it likewise grants no access and does not cause runtime-side skill loading. Tool state inside the project (`.venv`, `node_modules/.cache`,
+`/skill-management <request>` is the explicit coordinator command for creating, revising, or importing project skills. Imported files are untrusted input; source URL, exact revision, and license information are recorded, and the runtime retains independent review. Skill instructions do not expand assignment scopes. Repeated work may be proposed to the user through a durable question (`user_question_request` with `skill_proposal`). The runtime requires 2 to 5 retained reports as evidence, refuses duplicate proposals, and accepts only explicit, action-matched English or Russian approval/decline option pairs before persistence. A stored pair is checked again when an answer is interpreted, including after restart; reversed, misleading or unknown labels cannot approve even through text option `1`. A decline or unclear answer changes nothing in the project. Skills are never installed automatically or activated merely because files exist. Once present in the supported project layout, a skill is listed by name, description and path in the [project skills](docs/features/unified-system-prompt/index.md#project-skills) section of every Cortex engine session whose role can read project files (owner-home skill directories are not listed); Cortex does not guarantee selection or use. Skill text is model input and grants no additional tool access, filesystem scope, or permission. Cortex's conditional `read_skill` trigger catalogue is role-scoped guidance in the prompt and advertised tool schema; it likewise grants no access and does not cause runtime-side skill loading. Tool state inside the project (`.venv`, `node_modules/.cache`,
 `.pytest_cache`, `__pycache__`, `.mypy_cache`, `target/`, build caches) is
 writable because a writing worker's grant is the whole project, with no list of
 tools. Internal-only writable hardlinks remain linked. Guarded/engine launches
@@ -2467,6 +2678,19 @@ pins.
 - The model sees the user's project data and can attempt prompt injection.
 - A subagent cannot bypass the runtime permissions because subagents are disabled.
 - Sandboxing assumes Linux user/mount/PID/network namespaces and bubblewrap.
+- **Known exposure: the command sandbox limits writes, not reads.** Every sandbox
+  view for worker and verification commands mounts the whole host filesystem
+  read-only, masking only Cortex's private stores. A command run on behalf of a
+  model can therefore read anything the owner's account can read outside the
+  project: the rest of the home directory, other projects, and credential files
+  such as `~/.ssh`, cloud and package-manager tokens and shell history. Where the
+  command's network access is permitted, it could also send that data elsewhere.
+  Assignment scope, write denials and deletion consent do not restrict these
+  reads. Reads are not narrowed to the project folder and tool directories in this
+  release, and no access request is needed to read outside the project. Treat
+  every project opened in Cortex as able to expose the owner's readable files to
+  the selected model providers, and do not keep secrets readable by the account
+  that runs Cortex if that is not acceptable.
 - Scope strings are not treated as proof of authorization; they are validated and
   checked at each operation boundary.
 

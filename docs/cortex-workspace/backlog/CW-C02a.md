@@ -1,6 +1,6 @@
 # CW-C02a: Public project outbox appended in the same transaction as runtime state changes
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Partly implemented: runtime state changes append to a transactional invalidation journal ([protocol](../protocol.md)); a public project outbox for other clients is not confirmed in code · **Phase:** 3+ · **Size:** M
 
 Split from [CW-C02](CW-C02.md) to keep each part within the two-day limit.
 

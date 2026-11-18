@@ -1,6 +1,6 @@
 # CW-N02: Integrate iroh Android bindings through the selected mobile stack; store device key with Android Keystore and validate the bridge
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: the Android app embeds the iroh client through the Tauri/Solid stack; the device key is a 0600 file in the app's private data, not wrapped by the Android Keystore; not verified on a device · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Run the phone-side iroh endpoint through the official iroh-ffi Kotlin bindings inside the selected Android stack. The device NodeId key is wrapped at rest by Android Keystore (StrongBox where the device supports it).

@@ -310,10 +310,141 @@ fn scan_selected(
 /// Unobservable sources (very deep trees, oversized Git selections, races) are
 /// explicit None, never drift or an absent source.
 pub(super) fn capture(root: &Path) -> CoreResult<Option<String>> {
-    match scan(root, &mut Budget::default(), &mut |_, _| {}) {
-        Ok((digest, _)) => Ok(Some(digest)),
-        Err(ScanError::Unavailable) => Ok(None),
+    if let Some(seen) = MEMO.with(|m| m.borrow().as_ref().and_then(|m| m.get(root).cloned())) {
+        return Ok(seen);
     }
+    let captured = if RECENT_READ.with(|r| r.get()) {
+        recent_capture(root)
+    } else {
+        fresh(root)
+    };
+    MEMO.with(|m| {
+        if let Some(m) = m.borrow_mut().as_mut() {
+            m.insert(root.to_owned(), captured.clone());
+        }
+    });
+    Ok(captured)
+}
+fn fresh(root: &Path) -> Option<String> {
+    #[cfg(test)]
+    if let Ok(mut scans) = SCANS.lock() {
+        *scans.entry(root.to_owned()).or_default() += 1;
+    }
+    match scan(root, &mut Budget::default(), &mut |_, _| {}) {
+        Ok((digest, _)) => Some(digest),
+        Err(ScanError::Unavailable) => None,
+    }
+}
+#[cfg(test)]
+static SCANS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, usize>>,
+> = std::sync::LazyLock::new(Default::default);
+/// How many legacy walks of `root` ran so far (tests only).
+#[cfg(test)]
+pub(super) fn scans(root: &Path) -> usize {
+    SCANS
+        .lock()
+        .map(|s| s.get(root).copied().unwrap_or(0))
+        .unwrap_or(0)
+}
+/// A presentation read's capture (`memoized_recent`): the last one of this folder while
+/// it is younger than `task_facts::RECENT`, whatever changed since, so a folder edited
+/// all the time is walked at most once per that interval. One capture of a folder runs
+/// at a time; a read arriving meanwhile takes the previous capture without waiting
+/// (only a folder never captured before waits for its first).
+fn recent_capture(root: &Path) -> Option<String> {
+    let last = || CAPTURED.lock().ok().and_then(|c| c.get(root).cloned());
+    let previous = last();
+    if let Some((captured, at)) = &previous {
+        if at.elapsed() < super::task_facts::RECENT {
+            return captured.clone();
+        }
+    }
+    let Some(gate) = CAPTURING
+        .lock()
+        .ok()
+        .map(|mut g| g.entry(root.to_owned()).or_default().clone())
+    else {
+        return fresh(root);
+    };
+    let _held = match gate.try_lock() {
+        Ok(held) => held,
+        // Another capture is running: a previous one at most twice the reuse window
+        // old is handed out; an older one is not, this read waits for the running one.
+        Err(std::sync::TryLockError::WouldBlock)
+            if previous
+                .as_ref()
+                .is_some_and(|(_, at)| at.elapsed() < super::task_facts::RECENT * 2) =>
+        {
+            return previous.and_then(|(captured, _)| captured);
+        }
+        Err(_) => match gate.lock() {
+            Ok(held) => held,
+            Err(_) => return fresh(root),
+        },
+    };
+    // A capture that finished while this one waited is the answer.
+    if let Some((captured, at)) = last() {
+        if at.elapsed() < super::task_facts::RECENT {
+            return captured;
+        }
+    }
+    let at = Instant::now();
+    let captured = fresh(root);
+    if let Ok(mut recent) = CAPTURED.lock() {
+        // Bounded: a folder not read for twice the reuse window is forgotten.
+        recent.retain(|_, (_, seen)| seen.elapsed() < super::task_facts::RECENT * 2);
+        recent.insert(root.to_owned(), (captured.clone(), at));
+    }
+    drop(_held);
+    if let Ok(mut gates) = CAPTURING.lock() {
+        // A gate nobody holds or waits for is dropped.
+        gates.retain(|_, gate| std::sync::Arc::strong_count(gate) > 1);
+    }
+    captured
+}
+type Memo = std::collections::HashMap<std::path::PathBuf, Option<String>>;
+thread_local! {
+    static MEMO: std::cell::RefCell<Option<Memo>> = const { std::cell::RefCell::new(None) };
+    static RECENT_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Recent presentation captures: the capture and when it started (`recent_capture`).
+type Captured = std::collections::HashMap<std::path::PathBuf, (Option<String>, Instant)>;
+static CAPTURED: std::sync::LazyLock<std::sync::Mutex<Captured>> =
+    std::sync::LazyLock::new(Default::default);
+/// The capture in progress of each folder (`recent_capture`).
+type Capturing =
+    std::collections::HashMap<std::path::PathBuf, std::sync::Arc<std::sync::Mutex<()>>>;
+static CAPTURING: std::sync::LazyLock<std::sync::Mutex<Capturing>> =
+    std::sync::LazyLock::new(Default::default);
+/// `memoized` for presentation reads: a folder reuses its last capture for up to
+/// `task_facts::RECENT`, even if it changed since, instead of walking and hashing it
+/// again (`recent_capture`). Accepting a result,
+/// integration and reruns never run inside it: they always capture fresh.
+pub(super) fn memoized_recent<T>(read: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            RECENT_READ.with(|r| r.set(self.0));
+        }
+    }
+    let _restore = Restore(RECENT_READ.with(|r| r.replace(true)));
+    memoized(read)
+}
+/// Runs one synchronous read on this thread with one capture per folder: every
+/// `capture` of the same root inside `read` is the first one's observation. A read
+/// that reviews several results of one folder (each review compares the folder twice)
+/// walks it once instead of once per comparison. Nothing outlives the read.
+pub(super) fn memoized<T>(read: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Memo>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            MEMO.with(|m| *m.borrow_mut() = previous);
+        }
+    }
+    let _restore = Restore(MEMO.with(|m| m.borrow_mut().replace(Memo::new())));
+    read()
 }
 
 #[cfg(test)]
@@ -416,6 +547,40 @@ mod tests {
             .output()
             .unwrap();
         assert!(result.status.success(), "fixture Git failed");
+    }
+    /// A folder that keeps changing is captured at most once per `RECENT` by presentation
+    /// reads, one capture at a time; every other capture stays fresh.
+    #[test]
+    fn presentation_reads_capture_a_changing_folder_at_most_once_per_interval() {
+        let root = Root::new();
+        fs::write(root.0.join("a.txt"), "one").unwrap();
+        let scans = || SCANS.lock().unwrap().get(&root.0).copied().unwrap_or(0);
+        let first = memoized_recent(|| capture(&root.0).unwrap());
+        assert!(first.is_some());
+        assert_eq!(scans(), 1);
+        // Concurrent presentation reads of the changed folder share the earlier capture.
+        let mut readers = Vec::new();
+        for n in 0..4 {
+            fs::write(root.0.join("a.txt"), format!("edit {n}")).unwrap();
+            let path = root.0.clone();
+            readers.push(std::thread::spawn(move || {
+                memoized_recent(|| capture(&path).unwrap())
+            }));
+        }
+        for reader in readers {
+            assert_eq!(reader.join().unwrap(), first);
+        }
+        assert_eq!(scans(), 1);
+        // Acceptance, integration and reruns capture outside it: always fresh.
+        let current = capture(&root.0).unwrap();
+        assert_ne!(current, first);
+        assert_eq!(scans(), 2);
+        assert_eq!(memoized(|| capture(&root.0).unwrap()), current);
+        assert_eq!(scans(), 3);
+        // Past the interval the next presentation read captures again.
+        CAPTURED.lock().unwrap().get_mut(&root.0).unwrap().1 -= super::super::task_facts::RECENT;
+        assert_eq!(memoized_recent(|| capture(&root.0).unwrap()), current);
+        assert_eq!(scans(), 4);
     }
     #[test]
     fn offline_oracle_git_manifests_and_live_fallback_match() {

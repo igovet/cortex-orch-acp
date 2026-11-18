@@ -5,6 +5,7 @@ import { A, I, MenuItem, Pop } from "./kit";
 import { HELP } from "./orch-help";
 import { Bar, orchTo, Shell, slug, SourceStrips, useRouting, useRoutingOff } from "./orch-shared";
 import { Err, Hint, Lock, Pick, Seg, SetH, Tabs, Tags } from "./settings-kit";
+import { share } from "./stable";
 
 type Ctx = { rules: () => RoutingRules; set: (r: RoutingRules) => void; off: () => string | undefined; problems: () => { path: string; message: string }[] };
 const pinText = (p: RoutePin, label: string) => [engineLabel(p.engine), label, p.effort ? effortLabel(p.effort) : null].filter(Boolean).join(" · ");
@@ -70,7 +71,9 @@ function Roles(props: { c: Ctx }) {
 function WorkKinds(props: { c: Ctx }) {
   const ws = useWs();
   const r = () => props.c.rules(), cat = () => ws.machine().config.catalogue;
-  const models = () => ENGINE_KEYS.flatMap(e => r().engines[e].enabled.map(id => ({ engine: e, id, label: modelLabel(cat(), e, id) })));
+  // One list for every reader, held as the old objects while it reads the same: the chips and the open Add menu are not drawn
+  // again at each machine read, and `preferred().includes(x)` compares the same objects.
+  const models = createMemo<{ engine: EngineKey; id: string; label: string }[]>(prev => share(prev, ENGINE_KEYS.flatMap(e => r().engines[e].enabled.map(id => ({ engine: e, id, label: modelLabel(cat(), e, id) })))), []);
   const lean = (kind: string, builtIn: EngineKey | null) => <Pick id={`m-lean-${slug(kind)}`} label={`${kind} engine lean`} width="160px" value={kind in r().affinity ? r().affinity[kind] ?? "none" : "builtin"} disabled={props.c.off()}
     options={[{ id: "builtin", label: builtIn ? `Built in (${engineLabel(builtIn)})` : "Built in (no lean)" }, ...ENGINES.map(e => ({ id: e.id as string, label: e.label })), { id: "none", label: "No lean" }]} onPick={x => props.c.set(setAffinity(r(), kind, x === "builtin" ? "builtin" : x === "none" ? null : x as EngineKey))} />;
   return <>
@@ -112,7 +115,7 @@ function Quota(props: { c: Ctx }) {
   return <>
     <div class="note-box plain"><I n="lock" s={14} /><span>Hot at {HOT_PERCENT}%: ranked behind cooler routes. 100%: excluded. There is no setting for this.</span></div>
     <For each={ENGINES.filter(e => e.usage)}>{e => {
-      const rows = () => r().engines[e.id].quota, unmapped = () => unmappedWindows(m(), e.id, r());
+      const rows = () => r().engines[e.id].quota, unmapped = createMemo<ReturnType<typeof unmappedWindows>>(prev => share(prev, unmappedWindows(m(), e.id, r())), []);
       return <>
         <SetH title={<>{e.label}</>}><Hint text={HELP.quotaWindows} label="quota windows" /><button class="btn btn-line btn-sm" aria-disabled={props.c.off() ? "true" : undefined} data-why={props.c.off()} onClick={() => { if (!props.c.off()) edit(e.id, q => [...q, { window: "", models: null }]); }}><I n="plus" s={12} />Add window</button></SetH>
         <Show when={rows().length > 0} fallback={<div class="surface ws-empty">No windows mapped. Every reported window counts for every model.</div>}>

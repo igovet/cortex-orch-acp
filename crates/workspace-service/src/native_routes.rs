@@ -10,6 +10,7 @@ mod grammar_data;
 mod policy;
 mod presentation;
 mod quota;
+pub mod short_text;
 use cortex_core::{CoreError, CoreResult};
 use cortex_engine::environment::{CodexLauncher, EngineKind, LaunchSpec};
 use serde_json::{json, Value};
@@ -32,6 +33,11 @@ pub(crate) fn reserved_policy_word(word: &str) -> bool {
 fn digest(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
+}
+/// An engine's pure alias entry (the Claude adapter's `default`) names no concrete model, so it is
+/// never offered, listed in a catalogue or chosen by a route decision: every route is a concrete model.
+pub(crate) fn is_alias_model(id: &str) -> bool {
+    id.eq_ignore_ascii_case("default")
 }
 /// Python `portable.identity.route_fingerprint` over a stored catalog route.
 /// Pairs are sorted, never deduplicated: claude-agent-acp advertises several
@@ -466,6 +472,11 @@ impl RouteResolver {
                             .map_err(|_| CoreError::Refused("invalid_catalog_snapshot"))?;
                     if r["id"] != catalog_route_id(&r["engine"], &json!(id), &r["model"], pairs) {
                         return refuse("invalid_catalog_snapshot");
+                    }
+                    // A snapshot saved before aliases were dropped may still list one: it is
+                    // never a candidate, so no route decision selects it or sends it to an engine.
+                    if r["model"].as_str().is_some_and(is_alias_model) {
+                        continue;
                     }
                     let facts = entry["evidence"]
                         .as_object()

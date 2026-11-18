@@ -19,15 +19,14 @@
     ],
     "enabled": {
       "claude-agent-acp": [
-        "default",
         "opus",
         "fable",
         "claude-sonnet-5",
         "haiku"
       ],
       "codex-acp": [
-        "gpt-6.1-sol",
-        "gpt-6-astra",
+        "gpt-6.2-sol",
+        "gpt-6.2-astra",
         "gpt-6-luna",
         "gpt-6.1-terra"
       ],
@@ -41,7 +40,6 @@
     "models": {
       "claude-agent-acp": {
         "auto": [
-          "default",
           "opus",
           "fable",
           "claude-sonnet-5",
@@ -53,9 +51,6 @@
           ],
           "claude-sonnet-5": [
             "standard",
-            "deep"
-          ],
-          "default": [
             "deep"
           ],
           "haiku": [
@@ -94,14 +89,6 @@
               "analysis",
               "operations"
             ],
-            "request_names": null
-          },
-          "default": {
-            "also_standard_for": null,
-            "effort_floor": "medium",
-            "effort_ladder": null,
-            "max_effort": "xhigh",
-            "preferred_for": null,
             "request_names": null
           },
           "haiku": {
@@ -150,19 +137,19 @@
       },
       "codex-acp": {
         "auto": [
-          "gpt-6.1-sol",
-          "gpt-6-astra",
+          "gpt-6.2-sol",
+          "gpt-6.2-astra",
           "gpt-6-luna",
           "gpt-6.1-terra"
         ],
         "tiers": {
-          "gpt-6-astra": [
+          "gpt-6.2-astra": [
             "flagship"
           ],
           "gpt-6-luna": [
             "light"
           ],
-          "gpt-6.1-sol": [
+          "gpt-6.2-sol": [
             "standard",
             "deep"
           ],
@@ -171,7 +158,7 @@
           ]
         },
         "policy": {
-          "gpt-6-astra": {
+          "gpt-6.2-astra": {
             "also_standard_for": null,
             "effort_floor": "low",
             "effort_ladder": null,
@@ -206,7 +193,7 @@
             ],
             "request_names": null
           },
-          "gpt-6.1-sol": {
+          "gpt-6.2-sol": {
             "also_standard_for": null,
             "effort_floor": "medium",
             "effort_ladder": null,

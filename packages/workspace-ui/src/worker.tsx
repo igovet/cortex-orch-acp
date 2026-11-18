@@ -1,7 +1,6 @@
-import { createComputed, createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show, Switch, untrack, type Accessor, type Setter } from "solid-js";
+import { createComputed, createEffect, createMemo, createSignal, For, Index, Match, on, onCleanup, Show, Switch, untrack, type Accessor, type Setter } from "solid-js";
 import { createOpenState, DiffBox, Fold, OutputBox, StepRow, type OpenState } from "./feed";
 import { FEATURES, type Activity, type Check, type Message, type Worker } from "@cortex/workspace-domain";
-import { reportHeight } from "./autogrow";
 import { AttachChips, createAttachments, createDictation, MessageComposer } from "./composer";
 import { useWs } from "./ctx";
 import { createBodyMark, createTicker, createUnsent } from "./freshness";
@@ -10,14 +9,18 @@ import { ActionBar, Toolbar } from "./layout";
 import type { Route } from "./router";
 import { clock, refusalReason } from "./selectors";
 import { displayStep, feedOf, isHiddenActivity, oneRowPerCall, stepFailed, viewOfActivity, type FeedItem, type FeedRun } from "./tool-names";
-import { contextLine, duration, elapsedOf, isFinished, recordedCoordinatorRoute, tokens, verificationFace, workerState, type SessionModel } from "./session-model";
+import { contextLine, duration, elapsedOf, isFinished, recordedCoordinatorRoute, tokens, verificationFace, workerModel, workerState, type SessionModel } from "./session-model";
 
 import { ResultText } from "./result-text";
+import { CopySource, MessageTools } from "./message-copy";
+import { SentMessages } from "./sent";
 
 export const CORTEX = "cortex", VERIFICATION = "verification";
 
-export function WorkingIndicator(props: { activity?: Activity[] }) {
+/** The live line. A worker's page derives it from that worker's `activity`; the Conversation passes the coordinator's own `text`. */
+export function WorkingIndicator(props: { activity?: Activity[]; text?: string }) {
   const label = () => {
+    if (props.text !== undefined) return props.text;
     const last = props.activity?.filter(a => !isHiddenActivity(a)).at(-1);
     if (last?.command?.state === "running") return "Running command…";
     const detail = displayStep(last?.args);
@@ -49,7 +52,8 @@ const fallbacks = (w: Worker, label: (r: Worker["route"]) => string | null) => (
 function Grid(props: { w: Worker; now: number }) {
   const ws = useWs();
   return <div class="d-grid">
-  <Figure label="Model" value={ws.route(props.w.route)} />
+  <Figure label="Model" value={workerModel(props.w, ws.route)} />
+  <Figure label="Why this model" value={props.w.route?.why ?? null} />
   <Figure label="Attempts" value={fallbacks(props.w, ws.route)} />
   <Show when={props.w.attempt}>{a => <Fact label="Attempt">{`${a().n} of ${a().of}`}</Fact>}</Show>
   <Show when={elapsedOf(props.w, props.now) !== null}><Fact label="Elapsed">{duration(elapsedOf(props.w, props.now))}</Fact></Show>
@@ -82,6 +86,7 @@ function MessageBubble(props: { m: Accessor<Message>; item: Activity; workerActi
             <button class="lnk" {...ws.needs("withdraw_message")} onClick={() => ws.run({ type: "withdraw_message", messageId: m().id })}>Discard</button>
           </span></Match>
       </Switch>
+      <CopySource text={m().text} />
     </div>
   </div>;
 }
@@ -114,7 +119,8 @@ function StepExtra(props: { a: Activity; w: Worker; onStopCommand: (a: Activity)
       <Show when={hasInput(a().args)}><div class="ev-dh">Input</div><div class="args">{a().args}</div></Show>
       <Show when={a().output}>{out => <><div class="ev-dh">Output</div><OutputBox label="Output">{out()}</OutputBox></>}</Show>
     </div></Show>
-    <Show when={a().rows}>{rows => <div class="card2"><div class="toolrows"><For each={rows()}>{r => <div><I n={r.icon} s={12} class="faint" /><code>{r.code}</code><span class="r">{r.note}</span></div>}</For></div></div>}</Show>
+    {/* By place, not by object: a refreshed record of the step rebuilds its rows, and they must not redraw under a reader selecting text. */}
+    <Show when={a().rows}>{rows => <div class="card2"><div class="toolrows"><Index each={rows()}>{r => <div><I n={r().icon} s={12} class="faint" /><code>{r().code}</code><span class="r">{r().note}</span></div>}</Index></div></div>}</Show>
     <Show when={!detail() && a().diff}>{d => <DiffBox label="Diff" lines={d().lines} />}</Show>
     <Show when={!detail() && (a().command?.tail || a().command?.state === "running")}>
       <OutputBox label="Command output" class="tail">{a().command!.tail || "Waiting for output…"}</OutputBox>
@@ -155,7 +161,10 @@ function Row(props: { item: Activity; w: Worker; message: (id: string) => Messag
   const a = () => props.item;
   const message = () => a().messageId ? props.message(a().messageId!) : undefined;
   return <Switch fallback={<div class="ev-note"><div class="tx ai">{a().text}<Show when={a().code}>{" "}<code>{a().code}</code></Show></div></div>}>
-    <Match when={a().kind === "note"}><div class="ev-note"><div class="tx ai"><ResultText text={a().text.replace(/^.*?\[(?:worker message|final response)\] /, "")} /></div></div></Match>
+    <Match when={a().kind === "note"}>{(() => {
+      const text = () => a().text.replace(/^.*?\[(?:worker message|final response)\] /, "");
+      return <><div class="ev-note"><div class="tx ai"><ResultText text={text()} /></div></div><MessageTools text={text()} /></>;
+    })()}</Match>
     <Match when={a().kind === "divider"}><div class="divide">{a().text}</div></Match>
     <Match when={message()}>{m => <MessageBubble m={m} item={a()} workerActive={props.w.status === "working"} attempt={props.w.attempt?.n ?? null} />}</Match>
   </Switch>;
@@ -180,12 +189,23 @@ function WorkerComposer(props: { model: Accessor<SessionModel>; w: Worker }) {
   const send = (value: string) => {
     if (!value.trim() || closed() || files.busy()) return;
     const taskId = props.model().view.id, now = ws.store.clock();
-    ws.ok(direct() ? { type: "send_message", taskId, workerId: props.w.id, text: value, mode: "send_now", now, attachments:files.files() } : { type: "send_message", taskId, text: `For ${props.w.role}: ${value}`, mode: "send_now", now, attachments:files.files() }, () => { write(""); files.clear(); });
+    // A direct message reads in this feed from the press, and leaves the field then; one that did not arrive keeps its text
+    // and files on its line, with Retry and Edit. Through the coordinator it reads in the task's conversation, so the field
+    // keeps it until the machine has it.
+    if (direct()) { const attachments = files.files(); write(""); files.clear(); void ws.run({ type: "send_message", taskId, workerId: props.w.id, text: value, mode: "send_now", now, attachments }); return; }
+    ws.ok({ type: "send_message", taskId, text: `For ${props.w.role}: ${value}`, mode: "send_now", now, attachments:files.files() }, () => { write(""); files.clear(); });
   };
+  createEffect(() => {
+    const back = ws.store.sends.returned({ kind: "worker", taskId: props.model().view.id, workerId: props.w.id });
+    if (!back) return;
+    ws.store.sends.take();
+    write(untrack(text).trim() ? `${untrack(text).trimEnd()}\n${back.text}` : back.text); files.add(back.attachments ?? []);
+  });
   createEffect(() => { if (closed()) mic.stop(); });
   // The worker's recorded model and effort: read-only, because a message never changes a worker's route.
   const route = () => ws.route(props.w.route);
-  return <MessageComposer label={`Message ${props.w.role}`} placeholder={direct() ? `Message ${props.w.role} directly…` : `Message ${props.w.role}…`} text={text()} onText={write} files={files} mic={mic} off={closed()}
+  return <MessageComposer label={`Message ${props.w.role}`} placeholder={direct() ? `Message ${props.w.role} directly, tag @files…` : `Message ${props.w.role}, tag @files…`} text={text()} onText={write} files={files} mic={mic} off={closed()}
+    suggest={{ projectId: props.model().view.project.id, taskId: props.model().view.id }}
     attachOff={direct() && !ws.can(FEATURES.workerAttachments) ? "Files can't be sent to one worker. Attach them to a message about the task instead." : undefined}
     effect={direct() ? `To ${props.w.role}, this attempt only. It does not widen scope or access.` : `To the coordinator about ${props.w.role}. It decides how to pass it on and does not widen scope or access.`}
     route={<div class="c-route"><Show when={route()}>{r => <span class="sel mc-fixed" role="note" aria-label={`Recorded model: ${r()}`}><I n="cpu" s={14} /><span class="sel-t">{r()}</span></span>}</Show></div>}
@@ -211,7 +231,9 @@ function ReasonField(props: { label: string; value: string; onText: (value: stri
 export function StopCommand(props: { target: { worker: Worker; item: Activity } | null; onClose: () => void }) {
   const ws = useWs();
   const [reason, setReason] = createSignal("");
-  createEffect(() => { if (props.target) setReason(""); });
+  // Keyed by the command, not by the object a refresh replaces: what the owner typed survives a background update.
+  const commandKey = createMemo(() => props.target ? `${props.target.worker.id}/${props.target.item.sequence}` : "");
+  createEffect(on(commandKey, key => { if (key) setReason(""); }));
   const stop = () => {
     const t = props.target!;
     ws.ok({ type: "stop_command", workerId: t.worker.id, sequence: t.item.sequence, reason: reason() }, () => { props.onClose(); });
@@ -233,7 +255,8 @@ export function StopCommand(props: { target: { worker: Worker; item: Activity } 
 function StopWorker(props: { worker: Worker | null; onClose: () => void }) {
   const ws = useWs();
   const [reason, setReason] = createSignal("");
-  createEffect(() => { if (props.worker) setReason(""); });
+  const workerKey = createMemo(() => props.worker?.id ?? "");
+  createEffect(on(workerKey, key => { if (key) setReason(""); }));
   return <Modal open={!!props.worker} onClose={props.onClose} label="Stop this worker?">
     <Show when={props.worker}>{w => <>
       <div class="dlg-h"><h2>Stop {w().role}?</h2><button class="ib" aria-label="Keep working" onClick={() => props.onClose()}><I n="x" /></button></div>
@@ -298,17 +321,20 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
     }
     return arrivals;
   });
-  const follow = createFollow(() => scroller, observed);
-  const [height, setHeight] = createSignal(0);
+  // A message sent here counts from the press; its record taking its place is not a second arrival.
+  const sentHere = () => ({ kind: "worker" as const, taskId: props.model().view.id, workerId: props.w.id });
+  const follow = createFollow(() => scroller, () => observed() + ws.store.sends.shown(sentHere()).length);
+  // What the owner just sent comes into view above the composer, even from a reader who had scrolled up.
+  let sentSeen = ws.store.sends.shown(sentHere()).length;
+  createEffect(() => { const n = ws.store.sends.shown(sentHere()).length; if (n > sentSeen) follow.jump(); sentSeen = n; });
   let dock!: HTMLDivElement;
-  reportHeight(() => dock, setHeight);
   // A row or block the reader opens stays in view: following the end would otherwise scroll it up and away as it grows.
   // A plain listener, not a click target of its own: it only watches the rows' own toggles, after they have run.
   const keepOpenedInView = (e: MouseEvent) => {
     const toggle = (e.target as Element | null)?.closest?.("button[aria-expanded]");
     if (!toggle || !scroller?.contains(toggle)) return;
     queueMicrotask(() => {
-      if (toggle.isConnected && toggle.getAttribute("aria-expanded") === "true") follow.reveal(toggle.closest(".step, .fold-block") ?? toggle, height() + 16);
+      if (toggle.isConnected && toggle.getAttribute("aria-expanded") === "true") follow.reveal(toggle.closest(".step, .fold-block") ?? toggle, () => dock.querySelector(".pill-band")?.getBoundingClientRect().height ?? 0);
     });
   };
   const nextCursor = () => cursor() === undefined ? props.w.activityCursor : cursor();
@@ -367,6 +393,7 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
       return <Show when={entry()}>{e => "run" in e() ? <Run run={(e() as { run: FeedRun<Activity> }).run} runKey={key} state={opened} w={props.w} forceOpen={needle().trim() !== ""} onStopCommand={stop} />
         : <Row item={(e() as { item: Activity }).item} w={props.w} message={message} />}</Show>;
     }}</For>
+    <Show when={!needle().trim()}><SentMessages place={sentHere()} worker /></Show>
     <Show when={keys().length === 0}><div class="cap faint">{needle().trim() ? "No activity matches this search." : "No activity recorded yet."}</div></Show>
     {typing()}
   </>;
@@ -377,7 +404,7 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
       <button class="ib" aria-label="Find in this activity" aria-pressed={finding()} onClick={() => { if (finding()) setNeedle(""); setFinding(!finding()); }}><I n="search" s={14} /></button>
       <Show when={!isFinished(props.w)}><label class="sw-l"><span class="sw"><input type="checkbox" aria-label="Follow new activity" checked={follow.following()} onChange={e => follow.set(e.currentTarget.checked)} /><i></i></span>Follow</label></Show>
     </>} />
-    <div class="stream" ref={el => { scroller = el; el.addEventListener("click", keepOpenedInView); }} style={{ "--dock-clear": `${height() + 16}px` }} onScroll={follow.onScroll}><div class="stream-in">
+    <div class="stream" ref={el => { scroller = el; el.addEventListener("click", keepOpenedInView); }} onScroll={follow.onScroll}><div class="stream-in">
       {rows()}
       <Show when={isFinished(props.w) && !props.readOnly}><Finished w={props.w} onAsk={props.onAsk} /></Show>
     </div></div>
@@ -385,8 +412,9 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
     <StopCommand target={command()} onClose={() => setCommand(null)} />
   </>;
 }
-/** The follow pill stands in its own opaque band above the composer, a row the timeline reserves below its content: it never
- *  lies over an option, a result footer or any other control, which scroll behind the band as they do behind the composer. */
+/** The follow pill stands in its own opaque band just above the dock, over the feed's bottom edge and out of the dock's flow,
+ *  so showing it never resizes the feed or moves the end. Content scrolls behind the band; the band shows only while the reader
+ *  is away from the end. */
 export const Pill = (props: { follow: ReturnType<typeof createFollow> }) => <Show when={!props.follow.following()}>
   <div class="pill-band"><button class="new-pill ws-pill" onClick={() => props.follow.jump()}><I n="arrow-down" s={12} />{props.follow.missed() ? `${props.follow.missed()} new` : "Latest"}</button></div>
 </Show>;
@@ -395,10 +423,12 @@ type TaskRoute = Extract<Route, { name: "task" }>;
 /** A goal longer than this shows its first lines with a way to read the rest, so the activity below keeps its room. */
 const GOAL_FOLD_CHARS = 280, GOAL_FOLD_LINES = 4;
 export const longGoal = (goal: string) => goal.length > GOAL_FOLD_CHARS || goal.split("\n").length > GOAL_FOLD_LINES;
-function Head(props: { w: Worker; now: number; onStop: () => void }) {
+export function Head(props: { w: Worker; now: number; onStop: () => void }) {
   const ws = useWs();
   const [goalOpen, setGoalOpen] = createSignal(false);
-  createEffect(on(() => props.w.id, () => setGoalOpen(false)));
+  // A memo, so a refreshed worker record with the same id does not fold a goal the owner opened; only another worker does.
+  const workerId = createMemo(() => props.w.id);
+  createEffect(on(workerId, () => setGoalOpen(false), { defer: true }));
   const folds = () => longGoal(props.w.goal);
   return <div class="d-h">
     <div class="d-title">{props.w.role}<Face w={props.w} />
@@ -464,7 +494,7 @@ function Finished(props: { w: Worker; onAsk?: () => void }) {
       </div>
     </Modal>
     <div class="rcard ws-worker-result">
-      <div class="rcard-h"><I n={face().icon} s={14} class={face().tone === "st-idle" ? "faint" : face().tone} />{r()?.outcome === "failed" ? "Reported failure" : "Worker result"}<Show when={r()?.reportId}><span class="r"><button class="btn btn-line btn-sm" onClick={() => void read()}>Open report</button></span></Show></div>
+      <div class="rcard-h"><I n={face().icon} s={14} class={face().tone === "st-idle" ? "faint" : face().tone} />{r()?.outcome === "failed" ? "Reported failure" : "Worker result"}<Show when={r()?.reportId}><span class="r"><button class="btn btn-line btn-sm" onClick={() => void read()}>Open report</button></span></Show><Show when={r()?.summary}>{summary => <CopySource text={summary()} label="Copy the worker result as Markdown" />}</Show></div>
       <div class="rcard-b"><ResultText text={r()?.summary ?? noResult(props.w.endedReason)} />
         <Show when={props.w.resultRefusals}>{x => <div class="cap st-bad ws-mt4">{`Its result was refused ${x().count === 1 ? "once" : `${x().count} times`}: ${refusalReason(x().code)}.`}</div>}</Show></div>
       <div class="res-sec"><div class="res-h">Checks</div>

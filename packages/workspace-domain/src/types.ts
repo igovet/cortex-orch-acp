@@ -97,7 +97,7 @@ export type Result = { kind?: "answer" | "work" | "unknown"; acceptanceAvailable
 /** `failed` and `cancelled` are runtime ends. Neither is Done: Done is an owner decision. */
 export type TaskStatus = "draft" | "working" | "needs_you" | "stopping" | "paused" | "review" | "ready_to_merge" | "done" | "failed" | "cancelled";
 /** Exactly what the owner accepted. `open` keeps the checks that had not passed, so an override can never read as a clean pass. */
-export type Acceptance = { version: number; digest: string; at?: number | null; open?: { failed: number; not_run: number; unverified: number } | null };
+export type Acceptance = { automatic?: boolean; version: number; digest: string; at?: number | null; open?: { failed: number; not_run: number; unverified: number } | null };
 export type Integration = { method: "squash" | "pr" | "commit"; targetBranch: string; digest: string; mock?: true; message?: string; title?: string; draft?: boolean };
 /** One side of a conflict block as the three-way view shows it. `hit` lists the lines that differ. */
 export type CodeSide = { ref: string; start: number; lines: string[]; hit: number[] };
@@ -122,15 +122,17 @@ export type Task = {
   status: TaskStatus; resumeStatus: "working" | "needs_you"; issue: string | null;
   executionId: string | null; result: Result | null; workspaceDigest: string | null;
   acceptance: Acceptance | null;
-  reviewActions?: { accept: boolean; reason: string | null; unblockAction: "wait" | "request_changes" | "rerun_checks" | "refresh" | null };
+  /** `pending`: the machine had not finished checking this result against the project folder when it answered; Accept stays off with that reason until a later read settles it. */
+  reviewActions?: { accept: boolean; reason: string | null; unblockAction: "wait" | "request_changes" | "rerun_checks" | "refresh" | null; pending?: boolean;
+    /** The machine accepts this version only with the owner's explicit acknowledgement of its open checks. */
+    acknowledgeOpenChecks?: boolean };
   conflict: "none" | "conflict" | "resolving" | "failed";
   merge: MergeState | null; resolvedBy: "cortex" | "you" | null;
   integration: Integration | null;
-  /** `noChanges`: the machine found an answer-only result that changed no files, so there is nothing to commit. */
-  integrationFacts?: { targetBranch: string; alreadyInTarget: boolean; sameBranch?: boolean; commitAvailable?: boolean; noChanges?: boolean; pendingPaths?: string[]; otherUncommitted?: boolean; reason?: string | null; pushStatus: "pushed" | "not_pushed" | "unknown" | null };
+  /** `noChanges`: the machine found an answer-only result that changed no files, so there is nothing to commit. `pending`: its files are still being checked (no facts yet); `refreshing`: these are the last facts, being checked again. */
+  integrationFacts?: { targetBranch: string; alreadyInTarget: boolean; sameBranch?: boolean; commitAvailable?: boolean; noChanges?: boolean; pendingPaths?: string[]; otherUncommitted?: boolean; reason?: string | null; pushStatus: "pushed" | "not_pushed" | "unknown" | null; pending?: boolean; refreshing?: boolean };
   closedAs: "as_is" | "cancel" | "external" | null; notVerifiedByCortex: boolean;
   doneAt: number | null; archive: { at: number; previousStatus: "done"; sizeMb?: number | null } | null;
-  archiveQuestion: boolean; archiveAskAfter: number | null;
   /** What unmerged work there is, when the worktree was read. Absent facts stay absent. */
   workFacts?: { commits: number; files: number; sizeMb: number } | null;
   work: "unmerged" | "merged" | "discard_confirmed"; process: "live" | "stopped" | "unknown";
@@ -140,6 +142,8 @@ export type Task = {
   observedPhase?: string; warnings?: string[];
   /** Confirmed runtime route, separate from editable task settings. */
   coordinatorRoute?: { model: string; effort: string } | null;
+  /** The owner's `deny-write` paths in force for this task (runtime facts), with when each was set; Remove lifts one. */
+  writeDenials?: { path: string; setAt: number | null }[];
 };
 /** The route and access of one task. Machine defaults fill a new task; changing them here never touches other tasks. */
 export type TaskSettings = { model: string; effort: string; mode: "development" | "guarded" | "auto"; language: "auto" | "en" | "ru" };
@@ -184,14 +188,20 @@ export type WorkerResult = {
   edits?: { path: string; add: number; del: number }[];
   attempts?: { n: number; ok: boolean; detail: string; at: number | null }[];
 };
+/** A recorded route. `engine` is the engine key (`claude-agent-acp`, `codex-acp`, `opencode`) when the machine recorded it. */
+/** `why`: for a reviewer, why it got this route, as the runtime recorded it. */
+/** `modelLabel`: the engine's own display name for the model, recorded when the session was configured (absent in older records). */
+export type WorkerRoute = { model: string; effort: string; engine?: string; why?: string; modelLabel?: string };
 export type Worker = {
   id: string; taskId: string; executionId: string; role: string; status: WorkerStatus;
   lane: "execution" | "review"; goal: string;
   /** What it is doing now, one line. Null when nothing has been reported. */
   now: string | null; waitsFor: string | null; scope: string[];
-  route: { model: string; effort: string } | null; attempt: { n: number; of: number } | null;
+  /** The engine, model and effort this worker's own engine session was configured with, as the machine recorded them
+   *  once the engine confirmed them. Null while none is confirmed: it is never the coordinator's route. */
+  route: WorkerRoute | null; attempt: { n: number; of: number } | null;
   /** Each engine fallback within this work attempt, oldest first; unconfirmed routes stay null. */
-  routeAttempts?: { n: number; route: { model: string; effort: string } | null }[];
+  routeAttempts?: { n: number; route: WorkerRoute | null }[];
   elapsedMs: number | null; runningSince: number | null;
   context: { used: number; window: number } | null; usage: number | null;
   activity: Activity[]; result: WorkerResult | null; messages?: Message[]; activityPartial?: boolean; activityCursor?: string | null; mock?: true;
@@ -206,8 +216,10 @@ export type Worker = {
 };
 export type Delivery = "queued" | "sending" | "recorded" | "delivered" | "failed" | "unverified" | "withdrawn";
 export type Attachment = { name: string; mimeType: string; data: string };
-/** Name-only fixtures belong to demo mode; real submissions require bytes. */
-export type AttachmentInput = Attachment | string;
+/** A saved file: what every command, record and reply carries. Its bytes are read only when it is opened. */
+export type AttachmentRef = { name: string; mimeType: string; size: number; sha256: string };
+/** Name-only fixtures belong to demo mode; real submissions carry references to uploaded files. */
+export type AttachmentInput = Attachment | AttachmentRef | string;
 export type Message = {
   id: string; taskId: string; workerId: string | null; text: string;
   mode: "send_now" | "queue"; delivery: Delivery;
@@ -216,15 +228,29 @@ export type Message = {
   attachments?: AttachmentInput[]; mock?: true;
 };
 export type PlanNode = { id: string; title: string; who: string; workerId: string | null };
+/** What the runtime's stop question names that the desktop can open: the task holding the files, the review report, the denied path. */
+export type DecisionTarget = { kind: "task"; taskId: string; title: string } | { kind: "report"; reportId: string; role: string } | { kind: "rule"; path: string };
 export type Decision = {
   id: string; kind: "question" | "permission"; from: string; workerId: string | null; at: number | null;
-  text: string; unavailable?: string; options: { label: string; sub?: string; optionId?: string }[];
+  /** `sub` says what choosing the option does; `recommended` marks the runtime's recommended answer. */
+  text: string; unavailable?: string; options: { label: string; sub?: string; optionId?: string; recommended?: true }[];
   effect?: string; scope?: string; ifDenied?: string;
-  answer: { text: string; at: number | null } | null; withdrawn: boolean; suspended?: boolean;
+  /** `attachments`: the files the owner attached to this answer, as saved references. */
+  answer: { text: string; at: number | null; attachments?: AttachmentRef[] } | null; withdrawn: boolean; suspended?: boolean;
+  /** Its options act by themselves (the runtime's stop question, a skill proposal): an option answer takes no added words. */
+  optionsOnly?: true;
   /** The answer waits in the app for the rest of its batch: it has not reached the machine. */
   held?: true;
   /** Questions asked together share this. The owner reads them as tabs of one card. */
+  /** A batch member's optional short subject label (1 to 24 characters), as the asker gave it. */
+  topic?: string;
   batchId?: string | null;
+  /** The runtime's own stop question: its one-line reason, and what it names that can be opened. */
+  headline?: string; targets?: DecisionTarget[];
+  /** A withdrawn question the runtime replaced with a later one names that one. */
+  replacedBy?: string;
+  /** A native engine permission request waiting for the owner: what it does, where, why it needs the owner, under which access mode. */
+  permission?: { operation: string; paths: string[]; reason: string; reasonText: string; access: string };
 };
 export type TimelineEntry =
   | { id: string; kind: "cortex"; text: string }
@@ -242,6 +268,15 @@ export type TaskSession = {
   taskId: string; createdAt: number | null; base: { branch: string; commit: string } | null;
   plan: { revision: number; note: string; nodes: PlanNode[] } | null;
   timeline: TimelineEntry[]; decisions: Decision[];
+  /** Whether the retained conversation behind `timeline` has been read. Absent: it has, and `timeline` holds all of it.
+   *  `loading`: the first read is under way, so an empty timeline says nothing yet. `failed`: the last read did not complete;
+   *  `timeline` keeps what an earlier read confirmed, and the read is retried. */
+  historyRead?: { state: "loading" } | { state: "failed"; reason: string };
+  /** Whether earlier conversation exists before what `timeline` holds. Absent: `timeline` starts at the conversation's
+   *  beginning. Present: only the latest part was read; `since` is when its first held row was recorded (null when unknown),
+   *  and nothing derived from the timeline speaks for what came before it. `available`: earlier rows can be read on
+   *  request; `loading`: they are being read; `failed`: the last such read did not complete, with its reason. */
+  historyEarlier?: { state: "available" | "loading"; since: number | null } | { state: "failed"; reason: string; since: number | null };
   context: { used: number; window: number } | null; tokens: number | null;
   planUsage: { percent: number; observedAt: number } | null;
   coordinator: { note: string; elapsedMs: number | null; usage: number | null };
@@ -288,6 +323,11 @@ export type WorkspaceState = {
   repos: ProjectRepo[]; reviews: TaskChanges[];
 };
 export type NewTask = { projectId: string; description: string; attachments?: AttachmentInput[]; checkout: CheckoutChoice; sprintId?: string; settings?: TaskSettings };
+/**
+ * One answer of questions asked together. An answer command that carries `answers` sends every one of them at once, as the
+ * one answer of their batch; its own `decisionId` and `answer` name the first of them.
+ */
+export type DecisionAnswer = { decisionId: string; answer: string; optionId?: string | null; attachments?: AttachmentInput[] };
 export type WorkspaceCommand =
   | ({ type: "add_project"; createFolder?: boolean; newFolder?: boolean } & Omit<Project, "mock">)
   | { type: "activate_project"; projectId: string }
@@ -357,7 +397,7 @@ export type WorkspaceCommand =
   | { type: "delete_worktree"; checkoutId: string; confirmed: boolean; discard: boolean; now?: number }
   | { type: "attach_worktree"; checkoutId: string }
   | { type: "create_sprint"; projectId: string; description: string; attachments?: AttachmentInput[]; runMode: Sprint["runMode"]; checkout?: Sprint["checkout"]; settings?: TaskSettings; targetBranch?: string | null }
-  | { type: "answer_planning"; sprintId: string; answer: string; attachments?: AttachmentInput[]; now?: number; decisionId?: string; optionId?: string | null }
+  | { type: "answer_planning"; sprintId: string; answer: string; attachments?: AttachmentInput[]; now?: number; decisionId?: string; optionId?: string | null; answers?: DecisionAnswer[] }
   | { type: "plan_message"; sprintId: string; text: string; attachments?: AttachmentInput[]; now?: number }
   | { type: "edit_plan"; sprintId: string; items: PlanItem[]; now?: number }
   | { type: "materialize_plan"; sprintId: string; version: number; now?: number }
@@ -370,7 +410,7 @@ export type WorkspaceCommand =
   | { type: "set_run_mode"; sprintId: string; runMode: Sprint["runMode"] }
   | ({ type: "set_target"; branch: string | null } & ({ taskId: string; sprintId?: never } | { sprintId: string; taskId?: never }))
   | { type: "archive_task"; taskId: string; now: number }
-  | { type: "answer_archive"; taskId: string; discard: boolean; now: number }
+  | { type: "confirm_discard"; taskId: string; now: number }
   | { type: "purge_task"; taskId: string; confirmed: boolean; now: number }
   | { type: "purge_many"; taskIds: string[]; confirmed: boolean; now: number }
   | { type: "run_cleanup"; machineId: string; now: number }
@@ -383,6 +423,7 @@ export type WorkspaceCommand =
   | { type: "send_queued"; messageId: string; resume?: boolean; now?: number }
   | { type: "withdraw_message"; messageId: string }
   | { type: "redirect_message"; messageId: string; now?: number }
-  | { type: "answer_decision"; taskId: string; decisionId: string; answer: string; attachments?: AttachmentInput[]; optionId?: string | null; now?: number }
+  | { type: "answer_decision"; taskId: string; decisionId: string; answer: string; attachments?: AttachmentInput[]; optionId?: string | null; now?: number; answers?: DecisionAnswer[] }
   | { type: "stop_worker"; workerId: string; reason?: string; now?: number }
+  | { type: "allow_write"; taskId: string; path: string; now?: number }
   | { type: "stop_command"; workerId: string; sequence: number; reason: string }

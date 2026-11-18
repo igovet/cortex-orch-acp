@@ -33,20 +33,51 @@ pub const PAYLOAD_ENTRIES: &[&str] = &[
     "packaging/voice",
 ];
 
-const PAYLOAD_EXCLUDED_DIRS: &[&str] =
-    &[".cache", ".git", ".next", ".turbo", "__pycache__", "build", "coverage", "dist", "node_modules", "out", "target"];
+const PAYLOAD_EXCLUDED_DIRS: &[&str] = &[
+    ".cache",
+    ".git",
+    ".next",
+    ".turbo",
+    "__pycache__",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "out",
+    "target",
+];
 const PASEO_EXCLUDED_DIRS: &[&str] = &[
-    ".cache", ".git", ".next", ".tmp", ".turbo", "__pycache__", "build", "cache", "coverage", "dist",
-    "node_modules", "out", "target", "temp", "tmp",
+    ".cache",
+    ".git",
+    ".next",
+    ".tmp",
+    ".turbo",
+    "__pycache__",
+    "build",
+    "cache",
+    "coverage",
+    "dist",
+    "node_modules",
+    "out",
+    "target",
+    "temp",
+    "tmp",
 ];
 const UNSAFE_PARTS: &[&str] = &[".git", "tests", "prototypes", "node_modules"];
 
 fn is_symlink(p: &Path) -> bool {
-    std::fs::symlink_metadata(p).map(|m| m.file_type().is_symlink()).unwrap_or(false)
+    std::fs::symlink_metadata(p)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
 }
 
 fn rel(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root).unwrap().components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/")
+    path.strip_prefix(root)
+        .unwrap()
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// Every payload file in a stable order, as (relative, path).
@@ -97,7 +128,10 @@ fn assert_no_symlink_tree(path: &Path) -> Res<()> {
     }
     let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+        for entry in std::fs::read_dir(&dir)
+            .map_err(|e| e.to_string())?
+            .flatten()
+        {
             let p = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
             let meta = std::fs::symlink_metadata(&p).map_err(|e| e.to_string())?;
@@ -137,7 +171,16 @@ pub fn payload_digest(root: &Path) -> Res<String> {
         if relative == "package-identity.json" {
             let mut value = parse(&String::from_utf8(body).map_err(|_| "identity not UTF-8")?)?;
             value.set("version", Value::str(BASE));
-            body = dumps(&value, &Format { sort_keys: true, ensure_ascii: true, indent: None, compact: true })?.into_bytes();
+            body = dumps(
+                &value,
+                &Format {
+                    sort_keys: true,
+                    ensure_ascii: true,
+                    indent: None,
+                    compact: true,
+                },
+            )?
+            .into_bytes();
         }
         digest.update(relative.as_bytes());
         digest.update([0u8]);
@@ -149,8 +192,10 @@ pub fn payload_digest(root: &Path) -> Res<String> {
 }
 
 pub fn paseo_payload_digest(root: &Path) -> Res<String> {
-    let mut files: Vec<(String, PathBuf)> =
-        walk_files(root, PASEO_EXCLUDED_DIRS)?.into_iter().map(|p| (rel(root, &p), p)).collect();
+    let mut files: Vec<(String, PathBuf)> = walk_files(root, PASEO_EXCLUDED_DIRS)?
+        .into_iter()
+        .map(|p| (rel(root, &p), p))
+        .collect();
     files.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
     let mut digest = Sha256::new();
     for (relative, path) in files {
@@ -175,7 +220,10 @@ fn stamp_paseo_plugin(root: &Path) -> Res<()> {
     let mut value = Value::obj();
     value.set("algorithm", Value::str("sha256"));
     value.set("payload_sha256", Value::str(digest));
-    write_text(&plugin.join("plugin-integrity.json"), &pretty_ascii(&value)?)
+    write_text(
+        &plugin.join("plugin-integrity.json"),
+        &pretty_ascii(&value)?,
+    )
 }
 
 pub fn stamp(root: &Path) -> Res<String> {
@@ -204,56 +252,102 @@ pub fn validate(root: &Path) -> Res<String> {
             return Err("missing Paseo plugin integrity stamp".into());
         }
         let value = parse(&read_text(&integrity)?)?;
-        if value.get("payload_sha256").and_then(Value::as_str) != Some(paseo_payload_digest(&paseo)?.as_str()) {
+        if value.get("payload_sha256").and_then(Value::as_str)
+            != Some(paseo_payload_digest(&paseo)?.as_str())
+        {
             return Err("stale Paseo plugin integrity stamp".into());
         }
     }
     let catalogue = parse(&read_text(&root.join("profiles.json"))?)?;
-    let profile_list = catalogue.req("profiles")?.as_arr().ok_or("invalid profiles")?;
+    let profile_list = catalogue
+        .req("profiles")?
+        .as_arr()
+        .ok_or("invalid profiles")?;
     let mut skill_count = 0;
-    for entry in std::fs::read_dir(root.join("skills")).map_err(|e| e.to_string())?.flatten() {
-        if entry.file_name().to_string_lossy().starts_with("worker-") && entry.path().join("SKILL.md").exists() {
+    for entry in std::fs::read_dir(root.join("skills"))
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
+        if entry.file_name().to_string_lossy().starts_with("worker-")
+            && entry.path().join("SKILL.md").exists()
+        {
             skill_count += 1;
         }
     }
-    let names: BTreeSet<&str> = profile_list.iter().filter_map(|p| p.get("name").and_then(Value::as_str)).collect();
+    let names: BTreeSet<&str> = profile_list
+        .iter()
+        .filter_map(|p| p.get("name").and_then(Value::as_str))
+        .collect();
     if profile_list.len() != 23 || skill_count != 23 || names.len() != 23 {
         return Err("profile count".into());
     }
     for profile in profile_list {
         let source = profile.req("source")?.as_str().ok_or("invalid source")?;
-        let stem = Path::new(source).file_stem().and_then(|s| s.to_str()).ok_or("invalid source")?;
-        let text = read_text(&root.join("skills").join(format!("worker-{stem}")).join("SKILL.md"))?;
-        if text.contains("## Attached worker guidance") || text.contains("../skills/") || text.contains(".codex/plugins/") {
-            return Err("profiles must not contain copied skill bundles or installation paths".into());
+        let stem = Path::new(source)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or("invalid source")?;
+        let text = read_text(
+            &root
+                .join("skills")
+                .join(format!("worker-{stem}"))
+                .join("SKILL.md"),
+        )?;
+        if text.contains("## Attached worker guidance")
+            || text.contains("../skills/")
+            || text.contains(".codex/plugins/")
+        {
+            return Err(
+                "profiles must not contain copied skill bundles or installation paths".into(),
+            );
         }
         if !text.contains("`context-compaction`") {
             return Err("missing recovery skill requirement".into());
         }
-        if !["## Role and responsibility", "## Specialist workflow", "## Report class selection"]
-            .iter()
-            .all(|s| text.contains(s))
+        if ![
+            "## Role and responsibility",
+            "## Specialist workflow",
+            "## Report class selection",
+        ]
+        .iter()
+        .all(|s| text.contains(s))
         {
             return Err("incomplete specialist structure".into());
         }
     }
     let declared = parse(&read_text(&root.join("runtime-payload.json"))?)?;
-    if !declared.req("files")?.as_arr().ok_or("invalid manifest")?.is_empty() {
+    if !declared
+        .req("files")?
+        .as_arr()
+        .ok_or("invalid manifest")?
+        .is_empty()
+    {
         return Err("runtime payload manifest must not declare Python modules".into());
     }
     forbid_python(&payload_paths(root)?)?;
     let mut templates = BTreeSet::new();
-    for entry in std::fs::read_dir(root.join("report-templates")).map_err(|e| e.to_string())?.flatten() {
+    for entry in std::fs::read_dir(root.join("report-templates"))
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
         let p = entry.path();
         if p.extension().and_then(|e| e.to_str()) == Some("md") {
             templates.insert(p.file_stem().unwrap().to_string_lossy().into_owned());
         }
     }
-    let expected_templates: BTreeSet<String> =
-        ["general", "planning", "investigation", "implementation", "verification", "documentation", "synthesis", "pipeline"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+    let expected_templates: BTreeSet<String> = [
+        "general",
+        "planning",
+        "investigation",
+        "implementation",
+        "verification",
+        "documentation",
+        "synthesis",
+        "pipeline",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
     if templates != expected_templates {
         return Err("draft template set".into());
     }
@@ -266,13 +360,19 @@ pub fn forbid_python(files: &[(String, PathBuf)]) -> Res<()> {
         .iter()
         .map(|(name, _)| name.as_str())
         .filter(|name| {
-            name.starts_with("src/") || name.ends_with(".py") || name.ends_with(".pyc") || name.ends_with(".pyo")
+            name.starts_with("src/")
+                || name.ends_with(".py")
+                || name.ends_with(".pyc")
+                || name.ends_with(".pyo")
         })
         .collect();
     if bad.is_empty() {
         Ok(())
     } else {
-        Err(format!("runtime payload must contain no Python: {}", bad.join(", ")))
+        Err(format!(
+            "runtime payload must contain no Python: {}",
+            bad.join(", ")
+        ))
     }
 }
 
@@ -299,11 +399,15 @@ pub fn payload_files(root: &Path) -> Res<Vec<(String, PathBuf)>> {
     }
     let canonical_root = root.canonicalize().map_err(|e| e.to_string())?;
     for (name, path) in &files {
-        let resolved = path.canonicalize().map_err(|_| format!("unsafe or missing runtime file: {name}"))?;
+        let resolved = path
+            .canonicalize()
+            .map_err(|_| format!("unsafe or missing runtime file: {name}"))?;
         if is_symlink(path)
             || !path.is_file()
             || !resolved.starts_with(&canonical_root)
-            || Path::new(name).components().any(|c| UNSAFE_PARTS.contains(&c.as_os_str().to_string_lossy().as_ref()))
+            || Path::new(name)
+                .components()
+                .any(|c| UNSAFE_PARTS.contains(&c.as_os_str().to_string_lossy().as_ref()))
         {
             return Err(format!("unsafe or missing runtime file: {name}"));
         }

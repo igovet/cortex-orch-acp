@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-phone-pair-finish"
+description = "Enables the phone_pair_finish command without any pre-configured scope."
+commands.allow = ["phone_pair_finish"]
+
+[[permission]]
+identifier = "deny-phone-pair-finish"
+description = "Denies the phone_pair_finish command without any pre-configured scope."
+commands.deny = ["phone_pair_finish"]

@@ -1,8 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { applyFacts, applyMachineFacts, applyProjection, compareVersions, emptyWorkspace, LOCAL_MACHINE_ID, overlayTask, projectionKey, type Project, type ProjectFacts, type ProjectionUpdate, type Sprint, type Task } from "../src";
+import { applyFacts, applyMachineFacts, applyProjection, compareVersions, emptyWorkspace, LOCAL_MACHINE_ID, overlayTask, projectionKey, type Project, type ProjectFacts, type ProjectionUpdate, type Sprint, type Task, type WorkspaceState } from "../src";
 import { canRun, capabilityOf, noCapabilities, WIRE_OPERATIONS } from "../src/capabilities";
 
 const project: Project = { id: "p", machineId: LOCAL_MACHINE_ID, name: "P", repository: "/p", openBranch: "", defaultBranch: "" };
+
+it("keeps a normalized history message once while retaining its attachment facts", () => {
+  const state = emptyWorkspace();
+  state.tasks = [{id:"t",projectId:"p",status:"working",process:"live",checkout:{kind:"main",branch:"main"},acceptance:null,result:null} as Task];
+  state.sessions = [{taskId:"t",timeline:[{id:"h",kind:"said",text:"Look here"}],decisions:[]} as unknown as WorkspaceState["sessions"][number]];
+  const facts: ProjectFacts = {projectId:"p",openBranch:"main",defaultBranch:"main",repo:null,workers:[],reviews:[],sprints:[],overlays:{},
+    messages:[{id:"sent",taskId:"t",workerId:null,text:" Look here\n",mode:"send_now",delivery:"recorded",at:1,deliveredAt:1,failure:null,attachments:["clipboard.png"]}]};
+  const next = applyFacts(state, facts);
+  expect(next.sessions[0].timeline).toHaveLength(1);
+  expect(next.messages[0].attachments).toEqual(["clipboard.png"]);
+  expect(applyFacts(next, facts).sessions[0].timeline).toHaveLength(1);
+});
+
+it("does not add a message sent before the part of a conversation that was read as if it had just been said", () => {
+  const state = emptyWorkspace();
+  state.tasks = [{id:"t",projectId:"p",status:"working",process:"live",checkout:{kind:"main",branch:"main"},acceptance:null,result:null} as Task];
+  state.sessions = [{taskId:"t",timeline:[{id:"h",kind:"said",text:"Later"}],decisions:[],historyEarlier:{state:"available",since:1000}} as unknown as WorkspaceState["sessions"][number]];
+  const message = (id: string, text: string, at: number) => ({id,taskId:"t",workerId:null,text,mode:"send_now" as const,delivery:"delivered" as const,at,deliveredAt:at,failure:null});
+  const facts: ProjectFacts = {projectId:"p",openBranch:"main",defaultBranch:"main",repo:null,workers:[],reviews:[],sprints:[],overlays:{},
+    messages:[message("old","Long ago",500), message("new","Just now",2000)]};
+  const ids = (s: WorkspaceState) => s.sessions[0].timeline.map(e => e.id);
+  expect(ids(applyFacts(state, facts))).toEqual(["h", "facts:message:new"]);
+  // Read to its beginning, the conversation holds every message it does not record.
+  state.sessions = [{...state.sessions[0], historyEarlier: undefined}];
+  expect(ids(applyFacts(state, facts))).toEqual(["h", "facts:message:old", "facts:message:new"]);
+});
 
 describe("machine facts", () => {
   it("lets an overview-only update leave engine usage and the composer's options as they were", () => {
@@ -16,6 +42,24 @@ describe("machine facts", () => {
     // A settings read that does carry usage still replaces it.
     expect(applyMachineFacts(next, { machineId: LOCAL_MACHINE_ID, engineUsage: [], patch: {} }).engineUsage).toEqual([]);
   });
+});
+
+it("projects one automatic acceptance history entry and removes it with the acceptance overlay", () => {
+  const state=emptyWorkspace();
+  state.tasks=[{id:"t",projectId:"p",status:"review",process:"stopped",checkout:{kind:"main",branch:"main"},acceptance:null,result:null} as Task];
+  state.sessions=[{taskId:"t",timeline:[],decisions:[]} as unknown as WorkspaceState["sessions"][number]];
+  const facts: ProjectFacts={projectId:"p",openBranch:"main",defaultBranch:"main",repo:null,workers:[],reviews:[],sprints:[],
+    overlays:{t:{status:"ready_to_merge",acceptance:{version:1,digest:"d",automatic:true,at:123}}}};
+  const next=applyFacts(state,facts);
+  expect(next.sessions[0].timeline).toEqual([{id:"facts:automatic-acceptance",kind:"line",icon:"check-circle",text:"Automatically accepted v1",at:123,rule:false}]);
+  expect(applyFacts(next,facts).sessions[0].timeline).toHaveLength(1);
+  expect(applyFacts(next,{...facts,overlays:{t:{acceptance:null}}}).sessions[0].timeline).toEqual([]);
+});
+
+it("keeps the automatic acceptance marker through the owner overlay", () => {
+  const task = {id:"t",status:"review",process:"stopped",checkout:{kind:"main",branch:"main"},acceptance:null,result:null} as Task;
+  const next = overlayTask(task, {status:"ready_to_merge",acceptance:{version:7,digest:"d",automatic:true}}, "main");
+  expect(next.acceptance).toEqual({version:7,digest:"d",automatic:true});
 });
 
 describe("versions", () => {

@@ -1,6 +1,6 @@
 # CW-H02: Project registration and authenticated local RPC; explicit Cortex activation
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Implemented: project registration, authenticated local RPC and explicit Cortex activation ([protocol](../protocol.md)); no-paid checks only · **Phase:** 3+ · **Size:** M
 
 ## Goal
 

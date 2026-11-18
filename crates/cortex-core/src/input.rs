@@ -215,7 +215,10 @@ fn decode_base64(data: &str) -> Option<Vec<u8>> {
                 if !last || c & 3 != 0 {
                     return None;
                 }
-                out.extend([((a << 2) | (b >> 4)) as u8, (((b & 15) << 4) | (c >> 2)) as u8]);
+                out.extend([
+                    ((a << 2) | (b >> 4)) as u8,
+                    (((b & 15) << 4) | (c >> 2)) as u8,
+                ]);
             } else {
                 let d = sextet(chunk[3])?;
                 out.extend([
@@ -248,7 +251,9 @@ pub fn capture_from_wire(items: &Value) -> CoreResult<Capture> {
         if name.trim().is_empty()
             || name == "."
             || name == ".."
-            || name.chars().any(|c| c == '/' || c == '\\' || c.is_control())
+            || name
+                .chars()
+                .any(|c| c == '/' || c == '\\' || c.is_control())
         {
             return Err(invalid_attachments());
         }

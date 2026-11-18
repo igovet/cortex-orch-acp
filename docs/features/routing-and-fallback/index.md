@@ -87,6 +87,29 @@ which then lost to pins (2026-10-22). Without such a request its route comes fro
 1. an owner pin for `worker-code-reviewer`, its alias, or `*`;
 2. failing that, automatic ranking with the cross-provider review preference.
 
+Automatic review routing (`review_candidates` in
+`crates/workspace-service/src/native_routes/policy.rs`, used for every node whose
+work kind is `review`) keeps only the models the owner marked `preferred_for:
+review` (with their `preferred_when` condition) whenever one is usable: enabled,
+automatic, not blocked and below 100 % of its quota. A model not preferred for
+review reviews only when none is (`no_review_preferred_model`). Among the kept
+models, independence from the reviewed work's authors (the routes of the
+revision's execution nodes, each with the number of files its sessions recorded
+changing) applies in this order: a model different from every author
+(`different_from_all_authors`); else a model different from the dominant author,
+the node with the most changed files (ties: the first in plan order), preferring
+another engine than that author's (`different_from_dominant_author`); else the
+authors' own review model in a fresh session (`same_model_fresh_session`, also
+recorded as the review independence `mode`). A rerun after an incomplete review
+prefers a model no earlier review of the revision used. Quota and usage still
+decide among equally good candidates. Review effort targets `high` (`xhigh` for
+high-complexity work, one step more per rerun), always within the model's floor
+and maximum; plan nodes carry no effort hint. The rule, the authors, the dominant
+author, the kept routes and the effort target are recorded under
+`decision.review_route` on `NATIVE_ROUTE_SELECTED`, and the worker page shows why
+the reviewer got its model. A hinted model that review routing set aside reads
+`ignored:owner_preferred` or `ignored:review_independence`.
+
 For a policy-only guarantee across the workload, the owner pins the reviewer
 role to the selected route. A recorded purpose-scoped request can also select
 that reviewer at dispatch, but this preflight does not read task sources.
@@ -501,6 +524,17 @@ when it is absent (no cached snapshot, no matching entry, or no evidence
 beyond the alias itself), shows the routing id explicitly marked as an
 alias (`opus[1m] (alias)`) rather than presenting it as though it were the
 concrete model. Never a guessed version string.
+
+On the native runtime (`crates/workspace-service`), a worker's route is
+selected per dispatch and recorded as `NATIVE_ROUTE_SELECTED` before its session
+starts (`native_runtime.rs`). The session is then launched on that route's engine
+and configured with its model and parameters. Each `configure` reply must echo the
+exact value sent, or the start fails. Once configuration succeeds,
+`NATIVE_SESSION_CONFIGURED` records the engine, model and parameters
+(`native_sessions.rs`). The desktop's worker route is read only from that
+record of the worker's own channel (`worker_route` in `native_owner_controls.rs`).
+A worker therefore never displays the coordinator's model, and a worker without
+the record shows an unconfirmed route, not a stand-in.
 
 ## Pre-dispatch enforcement
 
@@ -1535,3 +1569,25 @@ The public policy/model-settings-default.json is validated install-only data. Fr
 ### Settings-only quota applicability
 
 Model-window associations are optional `quota_windows` settings, never a built-in family/version substring table. Exact per-engine labels map to `models: null` (shared), exact model lists, or an explicit empty exclusion list; duplicate labels are refused. Unmapped windows conservatively apply to every model, including exhausted windows; no numeric evidence remains unknown rather than zero. The same effective first-existing routing file governs route menus, automatic selection and failure reset lookup. Invalid reset policy cannot erase a genuine engine refusal: availability retains its bounded default expiry. Provider time/cache/authentication algorithms are unchanged; ranking compares plan usage whenever every candidate's usage is known. See [exact field, diagnostics and migration semantics](../../configuration.md#exact-quota-window-associations). The route menu includes `quota_window_policy` with effective rules and its conservative-unmapped decision, while raw status remains provider evidence.
+
+## Short model texts: cheapest model of the least-used connection
+
+Task titles, commit messages and pull request texts are not worker dispatches
+and do not pass through role tiers, consent grants or fallback. Each is written
+by one route: among routes allowed for automatic choice (enabled, not denied,
+listed in `auto`, with a tier placement) on Claude or Codex native connections,
+each connection offers its cheapest model by tier (`light`, then `standard`,
+`deep`, `flagship`; equal tiers by model id), and the connection whose plan
+limit is least used wins. The plan reading is the same one ranking uses (the
+highest used percentage of the connection's live windows, honouring
+`quota_windows`). Connections with a reading below 95 % come first, lowest
+first; then those without a reading, which is unknown and never zero; then those
+at or above 95 %. Equal keys keep the fixed order Claude, then Codex, then
+connection id. A model with no tier placement has no known cost and is never
+chosen. The chosen route runs one prompt in a minimal ACP engine session
+launched exactly as the route's engine sessions are (for Codex only through
+Cortex's verified native launcher), read-only, with no MCP servers and every
+permission denied. When it fails, times out or returns nothing usable, a
+fallback text is used and no other route is tried.
+The choice and its reason are in the service's `short-text.log`; see
+[short model texts](../../cortex-workspace/local-task-execution.md#short-model-texts).

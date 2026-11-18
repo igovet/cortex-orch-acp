@@ -10,7 +10,10 @@ use crate::json::Res;
 
 /// How libatspi refuses a node the page has since removed: the application object is gone once it has disposed it, or the
 /// application answers that the path no longer exists.
-pub const STALE_NODE: [&str; 2] = ["The application no longer exists", "Object does not exist at path"];
+pub const STALE_NODE: [&str; 2] = [
+    "The application no longer exists",
+    "Object does not exist at path",
+];
 
 pub fn is_stale_text(error: &str) -> bool {
     STALE_NODE.iter().any(|text| error.contains(text))
@@ -35,12 +38,18 @@ impl Node {
 
 /// Every node of the applications whose process group is `group`, depth-first. An unreadable subtree is skipped, never widened.
 pub fn tree(group: i32) -> Vec<Node> {
-    let Ok(desktop) = Acc::desktop() else { return Vec::new() };
+    let Ok(desktop) = Acc::desktop() else {
+        return Vec::new();
+    };
     // The desktop child list itself can expire during a window relaunch: no match, and the caller's bounded wait finds the new app.
-    let Ok(count) = desktop.child_count() else { return Vec::new() };
+    let Ok(count) = desktop.child_count() else {
+        return Vec::new();
+    };
     let mut found = Vec::new();
     for index in 0..count {
-        let Ok(Some(app)) = desktop.child(index) else { continue };
+        let Ok(Some(app)) = desktop.child(index) else {
+            continue;
+        };
         let Ok(pid) = app.process_id() else { continue };
         if pid <= 0 || unsafe { libc::getpgid(pid) } != group {
             continue;
@@ -63,34 +72,77 @@ fn walk(node: Acc, depth: usize, out: &mut Vec<Node>) {
             kids.push(child);
         }
     }
-    out.push(Node { acc: node, name, role });
+    out.push(Node {
+        acc: node,
+        name,
+        role,
+    });
     for child in kids {
         walk(child, depth + 1, out);
     }
 }
 
 pub fn find(group: i32, name: &str, role: Option<&str>) -> Option<Node> {
-    tree(group).into_iter().find(|n| n.name == name && role.is_none_or(|r| n.role == r))
+    tree(group)
+        .into_iter()
+        .find(|n| n.name == name && role.is_none_or(|r| n.role == r))
+}
+
+/// The node named `name` inside the subtree of the region named `region`, only when it is the one node of that name
+/// in the whole window: a stale match elsewhere (a title band, a closed menu) never stands in for it.
+pub fn find_within(group: i32, region: &str, name: &str) -> Option<Node> {
+    let button = |n: &Node| {
+        n.name == name && matches!(n.role.as_str(), "push button" | "button" | "toggle button")
+    };
+    let all = tree(group);
+    if all.iter().filter(|n| button(n)).count() != 1 {
+        return None;
+    }
+    let area = all.into_iter().find(|n| n.name == region)?;
+    let mut inside = Vec::new();
+    walk(area.acc, 0, &mut inside);
+    inside.into_iter().find(|n| button(n))
 }
 
 pub fn find_containing(group: i32, name: &str, role: &str) -> Option<Node> {
-    tree(group).into_iter().find(|n| n.role == role && n.name.contains(name))
+    tree(group)
+        .into_iter()
+        .find(|n| n.role == role && n.name.contains(name))
 }
 
 /// Whether some node's name, or its text, contains `text`.
 pub fn text_seen(group: i32, text: &str) -> bool {
-    tree(group).iter().any(|n| n.name.contains(text) || n.acc.interfaces().is_ok_and(|i| i.iter().any(|x| x == "Text")) && n.text().contains(text))
+    tree(group).iter().any(|n| {
+        n.name.contains(text)
+            || n.acc
+                .interfaces()
+                .is_ok_and(|i| i.iter().any(|x| x == "Text"))
+                && n.text().contains(text)
+    })
 }
 
 /// Names and roles from the tree, for a failure diagnostic only; never raw logs.
 pub fn names(group: i32, limit: usize) -> Vec<(String, String)> {
-    tree(group).into_iter().filter(|n| !n.name.is_empty()).take(limit).map(|n| (n.role, n.name.chars().take(180).collect())).collect()
+    tree(group)
+        .into_iter()
+        .filter(|n| !n.name.is_empty())
+        .take(limit)
+        .map(|n| (n.role, n.name.chars().take(180).collect()))
+        .collect()
 }
 
 pub fn focus_states(acc: &Acc) -> Vec<String> {
     match acc.states() {
-        Ok(s) => ["defunct", "showing", "enabled", "focused", "selected"].iter().zip(s).filter(|(_, on)| *on).map(|(n, _)| n.to_string()).collect(),
-        Err(error) => vec![format!("unreadable:{}", error.chars().take(40).collect::<String>())],
+        Ok(s) => ["defunct", "showing", "enabled", "focused", "selected"]
+            .iter()
+            .zip(s)
+            .filter(|(_, on)| *on)
+            .map(|(n, _)| n.to_string())
+            .collect(),
+        Err(error) => vec![format!(
+            "unreadable:{}",
+            error.chars().take(40).collect::<String>()
+        )],
     }
 }
 
@@ -102,7 +154,6 @@ pub fn grab_focus(node: &Node) -> Res<bool> {
     node.acc.grab_focus()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,7 +161,9 @@ mod tests {
     #[test]
     fn only_the_two_libatspi_refusals_of_a_replaced_node_are_stale() {
         assert!(is_stale_text("The application no longer exists"));
-        assert!(is_stale_text("GDBus.Error: Object does not exist at path '/org/a11y/atspi/accessible/12'"));
+        assert!(is_stale_text(
+            "GDBus.Error: Object does not exist at path '/org/a11y/atspi/accessible/12'"
+        ));
         assert!(!is_stale_text("control_missing:Add project"));
         assert!(!is_stale_text("Did not receive a reply"));
     }

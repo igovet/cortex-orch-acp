@@ -10,6 +10,7 @@ import { Page, StatusLane, Toolbar, type StripItem } from "./layout";
 import { defaultCheckout, repoOf, taskCheckout } from "./review-model";
 import type { ProjectView, Route, Scope } from "./router";
 import { age, awaitsOwner, bySprint, cardFact, clock, columnsOf, COLUMNS, decisionRoute, inScope, nothingToCommit, rowIcon, sameBranch, sprintRoute, sprintTitle, sprintView, type ColumnId, type GroupedRow, type ProjectSummary, type TaskView } from "./selectors";
+import { archiveBlocked } from "./git-actions-model";
 import { closeBlocked, sessionModel } from "./session-model";
 import { KnowledgePage, ProjectSettingsPage } from "./project-pages";
 import { createQueueStrip, QueueButton, QueueHelp, RunMode, SprintTarget, TargetChoices } from "./sprint";
@@ -221,8 +222,8 @@ function ScopeMenu(props: { summary: ProjectSummary; route: Extract<Route, { nam
   return <>
     <button class="scope-btn l-scope" popovertarget="m-scope" aria-label={`Board scope: ${label()}`}><I n="layers" s={14} class="faint" /><span class="trunc">{label()}</span><I n="chevron-down" s={14} /></button>
     <Pop id="m-scope" class="pop-anchor" align="left" label="Board scope">
-      <MenuItem icon="board" label="All work" keys={String(props.summary.views.length)} onSelect={() => pick({ kind: "all" })} />
-      <MenuItem icon="list" label="Standalone" keys={String(standalone())} onSelect={() => pick({ kind: "standalone" })} />
+      <MenuItem icon="board" label="All work" count={String(props.summary.views.length)} onSelect={() => pick({ kind: "all" })} />
+      <MenuItem icon="list" label="Standalone" count={String(standalone())} onSelect={() => pick({ kind: "standalone" })} />
       <Show when={props.summary.sprints.length > 0}><div class="mi-h">Sprints</div></Show>
       <For each={props.summary.sprints}>{s => {
         const view = () => sprintView(ws.store.index(), s);
@@ -361,10 +362,12 @@ export function TaskMenu(props: { taskId: string | null; ref: (el: HTMLDivElemen
       <Show when={taskEditable(v().task)}><MenuItem icon="pencil" label="Edit task…" needs="edit_task" disabled={blocked()} onSelect={() => ws.open({kind:"edit-task",taskId:v().id})} /></Show>
       <Show when={v().task.status === "draft"}><MenuItem icon="play" label="Start" disabled={blocked() ?? (startable(v()) ? undefined : "Start is controlled by its dependencies or the sprint queue")} needs="start_task" onSelect={() => ws.run({ type: "start_task", taskId: v().id, now: ws.store.clock() })} /></Show>
       <Show when={["working", "needs_you"].includes(v().task.status)}><MenuItem icon="stop" label="Stop" keys="Ctrl+." disabled={blocked()} needs="stop_task" onSelect={() => ws.stopTask(v().id)} /></Show>
+      {/* A held task's Continue (the runtime's Retry), as in its title band. */}
+      <Show when={v().task.observedPhase === "recovery" && v().task.process === "live"}><MenuItem icon="play" label="Continue" disabled={blocked()} needs="retry_task" onSelect={() => ws.run({ type: "retry_task", taskId: v().id, now: ws.store.clock() })} /></Show>
       <Show when={v().task.status === "paused"}><MenuItem icon="play" label="Resume" disabled={blocked()} needs="continue_task" onSelect={() => ws.run({ type: "continue_task", taskId: v().id, now: ws.store.clock() })} /></Show>
       <Show when={v().task.status === "stopping" && v().machine.connection === "connected"}><MenuItem icon="check" label={ws.t("confirmStop")} needs="confirm_stop" onSelect={() => ws.run({ type: "confirm_stop", taskId: v().id, now: ws.store.clock() })} /></Show>
       <MenuItem icon="x" label="Close task…" disabled={closeReason()} needs="close_task" onSelect={() => ws.closeTask(v().id)} />
-      <MenuItem icon="archive" label="Archive" disabled={v().task.status === "done" && !v().task.archive ? undefined : "Available when the task is done"} needs="archive_task" onSelect={() => ws.archiveTask(v().id)} />
+      <MenuItem icon="archive" label="Archive" disabled={archiveBlocked(v().task)} needs="archive_task" onSelect={() => ws.archiveTask(v().id)} />
       <MenuItem icon="pin" label={ws.panels.pins().includes(v().id) ? "Unpin" : "Pin"} onSelect={() => ws.panels.togglePin(v().id)} />
       <div class="mi-sep"></div>
       <MenuItem icon="external" label={ws.externalLabel()} sub={ws.noOpener("workspace.open_editor", "noExternal") ?? (v().task.checkout.kind === "worktree" && !taskCheckout(ws.store.state(), v().task) ? "This task’s worktree is no longer available. Refresh the project." : undefined)} disabled={ws.noOpener("workspace.open_editor", "noExternal") ?? (v().task.checkout.kind === "worktree" && !taskCheckout(ws.store.state(), v().task) ? "Worktree unavailable" : undefined)} onSelect={() => { const c = taskCheckout(ws.store.state(), v().task); ws.run({ type: "open_editor", projectId: v().project.id, ...(c ? { checkoutId: c.id } : {}) }); }} />

@@ -1,6 +1,6 @@
 # CW-N01: Embed iroh Endpoint in the desktop service; persistent NodeId keypair in OS keyring; reject any debug listener bound to 0.0.0.0
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Partly implemented: the iroh endpoint is embedded in the desktop service (off by default, no n0 relay or lookup); the machine key is a 0600 file, not an OS keyring entry; not verified through a relay or with a real phone · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Give the Ubuntu machine service one long-lived iroh Endpoint whose NodeId is the stable desktop identity. The secret key lives only in the OS keyring, and no debug or diagnostic listener can be reached from all interfaces.

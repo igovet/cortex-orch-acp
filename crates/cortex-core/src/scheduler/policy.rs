@@ -185,21 +185,9 @@ fn pending_tx(db: &Transaction<'_>) -> CoreResult<Vec<Value>> {
     out.sort_by_key(|w| w["created_at"].as_str().unwrap_or("").to_owned());
     Ok(out)
 }
+/// The owner's write denials in force (lifted ones excluded).
 fn denied_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Vec<String>> {
-    let rows = db
-        .prepare(
-            "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_STEERING'",
-        )?
-        .query_map([task], |r| r.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut denied = Vec::new();
-    for s in rows {
-        let v: Value = serde_json::from_str(&s)?;
-        if !v["deny_write"].is_null() {
-            denied.extend(strings(&v["deny_write"])?);
-        }
-    }
-    Ok(denied)
+    crate::lifecycle::steering::denials(db, task)
 }
 /// Always applied by claim_ready, even when the adapter supplies extra policy.
 pub struct NativePolicy {
@@ -296,7 +284,10 @@ pub fn write_conflict_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Option<
         if read_only(&role, &node_stage) {
             continue;
         }
-        let paths = absolute(&root, &effective_scope_tx(db, task, assignment.as_deref(), &scope)?);
+        let paths = absolute(
+            &root,
+            &effective_scope_tx(db, task, assignment.as_deref(), &scope)?,
+        );
         for h in holdings.iter().filter(|h| h.task != task) {
             let held: Vec<&String> = h
                 .paths
@@ -309,6 +300,135 @@ pub fn write_conflict_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Option<
         }
     }
     Ok(None)
+}
+/// Why each dependency-ready node of the task's current revision is not claimed,
+/// by the same rules and in the same order as `NativePolicy::may_claim`, so that a
+/// stop names what really holds the step. Read-only; nothing is recorded. Each item
+/// is `{"node","role","objective","scope","reason",..}` with `reason` one of
+/// `retry_backoff`, `denied` (`paths` of the step, owner `rules` they overlap),
+/// `held` (`holder_task`, `holder_assignment`, `holder_role`, `paths`; the holder
+/// may be an earlier step of this same task), `access_wait` (`holder_task`) or
+/// `claimable`. No ready node gives one `{"reason":"no_ready_nodes"}` item.
+pub fn claim_obstacles_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    now_seconds: f64,
+) -> CoreResult<Vec<Value>> {
+    let Some((state, revision)): Option<(String, i64)> = db
+        .query_row(
+            "SELECT state,revision FROM runtime_tasks WHERE task_id=?",
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+    else {
+        return Ok(Vec::new());
+    };
+    let stage = if state == "REVIEWING" {
+        "review"
+    } else {
+        "execution"
+    };
+    let nodes = db
+        .prepare("SELECT node_id,stage,status,dependencies_json FROM runtime_nodes WHERE task_id=? AND revision=? ORDER BY rowid")?
+        .query_map((task, revision), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|(id, stage, status, deps)| Ok(super::Node { id, stage, status, dependencies: serde_json::from_str(&deps)? }))
+        .collect::<CoreResult<Vec<_>>>()?;
+    let ready = super::dependency_ready(&nodes, stage)?;
+    if ready.is_empty() {
+        return Ok(vec![json!({"reason":"no_ready_nodes"})]);
+    }
+    let root = root_tx(db, task)?;
+    let holdings = holdings_tx(db)?;
+    let denied = denied_tx(db, task)?;
+    let pending = pending_tx(db)?;
+    let mut out = Vec::new();
+    for node in ready {
+        let (role, node_stage, scope, assignment, objective): (String, String, String, Option<String>, String) = db.query_row(
+            "SELECT role,stage,scope_json,assignment_ref,objective FROM runtime_nodes WHERE task_id=? AND revision=? AND node_id=?",
+            (task, revision, &node),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )?;
+        let scope = effective_scope_tx(db, task, assignment.as_deref(), &scope)?;
+        let mut item = json!({"node":node,"role":role,"objective":objective,"scope":scope});
+        let backoff: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='ASSIGNMENT_RETRIED'
+             AND json_extract(payload_json,'$.revision')=? AND json_extract(payload_json,'$.node')=?
+             AND json_extract(payload_json,'$.retry_not_before')>?)",
+            (task, revision, &node, now_seconds),
+            |r| r.get(0),
+        )?;
+        let reason = if backoff {
+            json!("retry_backoff")
+        } else if read_only(&role, &node_stage) {
+            json!("claimable")
+        } else if let Some(rules) = Some(
+            denied
+                .iter()
+                .filter(|b| scope.iter().any(|a| overlaps(a, b)))
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+        .filter(|r| !r.is_empty())
+        {
+            item["rules"] = json!(rules);
+            item["paths"] = json!(scope
+                .iter()
+                .filter(|a| rules.iter().any(|b| overlaps(a, b)))
+                .collect::<Vec<_>>());
+            json!("denied")
+        } else {
+            let paths = absolute(&root, &scope);
+            let holder = holdings.iter().find_map(|h| {
+                let held: Vec<&String> = h
+                    .paths
+                    .iter()
+                    .filter(|b| paths.iter().any(|a| overlaps(a, b)))
+                    .collect();
+                (!held.is_empty()).then_some((h, held))
+            });
+            if let Some((h, held)) = holder {
+                let holder_role: Option<String> = match &h.assignment {
+                    Some(a) => db
+                        .query_row(
+                            "SELECT role FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",
+                            (&h.task, a),
+                            |r| r.get(0),
+                        )
+                        .optional()?,
+                    None => None,
+                };
+                item["holder_task"] = json!(h.task);
+                item["holder_assignment"] = json!(h.assignment);
+                item["holder_role"] = json!(holder_role);
+                item["paths"] = json!(held);
+                json!("held")
+            } else if let Some(w) = pending.iter().find(|w| {
+                waits::field(w, "task_id")
+                    .ok()
+                    .zip(strings(&w["paths"]).ok())
+                    .is_some_and(|(t, p)| {
+                        root_tx(db, t).is_ok_and(|r| {
+                            absolute(&r, &p)
+                                .iter()
+                                .any(|b| paths.iter().any(|a| overlaps(a, b)))
+                        })
+                    })
+            }) {
+                item["holder_task"] = w["task_id"].clone();
+                json!("access_wait")
+            } else {
+                json!("claimable")
+            }
+        };
+        item["reason"] = reason;
+        out.push(item);
+    }
+    Ok(out)
 }
 fn safe_path(root: &str, path: &str) -> bool {
     if path.is_empty()

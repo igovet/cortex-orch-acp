@@ -10,6 +10,8 @@ mod peer;
 use cortex_core::{CoreResult, OpenMode, Store};
 use cortex_engine::environment::{EngineKind, LaunchSpec as EngineLaunch};
 use namespace_host::native_effects;
+#[allow(unused_imports)]
+use namespace_host::tool_path;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -43,16 +45,24 @@ impl NativeRoutes for Routes {
         let exe = std::env::current_exe()?;
         // The installed gate launches the packaged peer as `desktop-auto`, which infers the role
         // from each prompt; the batch journey exercises that same peer mode.
-        let auto = std::fs::read_to_string(root.join("scenario.txt")).is_ok_and(|s| s.trim() == "batch");
+        let auto =
+            std::fs::read_to_string(root.join("scenario.txt")).is_ok_and(|s| s.trim() == "batch");
         let mode = match role {
             _ if auto => "desktop-auto",
             "orchestrator" => "desktop-coordinator",
             "worker-code-reviewer" => "desktop-reviewer",
             _ => "desktop-worker",
         };
+        // `worker-route.txt` routes every worker and reviewer to another engine and model
+        // than the coordinator's, as runtime routing does on a real machine.
+        let other = role != "orchestrator" && root.join("worker-route.txt").exists();
         Ok(SessionRoute {
             launch: EngineLaunch {
-                engine: EngineKind::Codex,
+                engine: if other {
+                    EngineKind::Claude
+                } else {
+                    EngineKind::Codex
+                },
                 executable: exe.clone(),
                 args: vec![mode.into()],
                 cwd: root.into(),
@@ -69,7 +79,12 @@ impl NativeRoutes for Routes {
             }),
             connection: "qualified-fake".into(),
             connection_limit: 4,
-            model: "fixture-model".into(),
+            model: if other {
+                "fixture-other"
+            } else {
+                "fixture-model"
+            }
+            .into(),
             parameters: BTreeMap::new(),
             instructions: "No-paid fixture.".into(),
             deadline: Duration::from_secs(3),
@@ -132,11 +147,15 @@ impl Drop for Fixture {
         // still working inside this fixture so no run leaves peers behind.
         if let Ok(entries) = std::fs::read_dir("/proc") {
             for entry in entries.flatten() {
-                let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else { continue };
+                let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
+                    continue;
+                };
                 if pid as u32 == std::process::id() {
                     continue;
                 }
-                if std::fs::read_link(entry.path().join("cwd")).is_ok_and(|cwd| cwd.starts_with(&self.0)) {
+                if std::fs::read_link(entry.path().join("cwd"))
+                    .is_ok_and(|cwd| cwd.starts_with(&self.0))
+                {
                     unsafe { libc::kill(pid, libc::SIGKILL) };
                 }
             }
@@ -335,9 +354,11 @@ async fn journey() {
     assert_eq!(visible["result"]["digest"], visible["workspaceDigest"]);
     // Live run: after a relaunch a project-folder task created since the private overlay was
     // last written had no checkout, so it read "Ready to merge". The store owns its options.
-    assert!(!std::fs::read_to_string(f.0.join("state/product").join(format!("{id}.json")))
-        .unwrap_or_default()
-        .contains(created["target"].as_str().unwrap()));
+    assert!(
+        !std::fs::read_to_string(f.0.join("state/product").join(format!("{id}.json")))
+            .unwrap_or_default()
+            .contains(created["target"].as_str().unwrap())
+    );
     assert_eq!(visible["checkout"]["kind"], "main", "{visible}");
     assert!(visible["checkout"]["branch"].is_string(), "{visible}");
     assert_eq!(facts["result"]["product"]["hasGit"], true);
@@ -761,26 +782,45 @@ async fn waiting_worker(variant: &str) {
     )
     .unwrap();
     std::fs::write(f.0.join("project/record-prompts"), "").unwrap();
-    let service = Service::bind_native(f.config(), Arc::new(Routes)).await.unwrap();
-    let registered = service.register(&f.0.join("project"), "Waiting worker").await.unwrap();
+    let service = Service::bind_native(f.config(), Arc::new(Routes))
+        .await
+        .unwrap();
+    let registered = service
+        .register(&f.0.join("project"), "Waiting worker")
+        .await
+        .unwrap();
     let id = registered["projectId"].as_str().unwrap();
     service.activate(id).await.unwrap();
     let runner = tokio::spawn(service.clone().serve());
     let store = f.store();
     let created = service
-        .workspace(command(id, "tasks.create", json!(id), "create",
-            json!({"description":"Waiting worker","checkout":{"kind":"main"}})))
+        .workspace(command(
+            id,
+            "tasks.create",
+            json!(id),
+            "create",
+            json!({"description":"Waiting worker","checkout":{"kind":"main"}}),
+        ))
         .await
         .unwrap();
     let started = service
-        .workspace(command(id, "tasks.start", created["target"].clone(), "start", json!({})))
+        .workspace(command(
+            id,
+            "tasks.start",
+            created["target"].clone(),
+            "start",
+            json!({}),
+        ))
         .await
         .unwrap();
     let execution = started["target"].as_str().unwrap();
     async fn wait_for(store: &Store, sql: &str) {
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
-                if store.read(|db| Ok(db.query_row(sql, [], |r| r.get::<_, bool>(0))?)).unwrap() {
+                if store
+                    .read(|db| Ok(db.query_row(sql, [], |r| r.get::<_, bool>(0))?))
+                    .unwrap()
+                {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -791,23 +831,39 @@ async fn waiting_worker(variant: &str) {
     }
     if variant == "preempt" {
         wait_for(&store, "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-backend-dev' AND status='ready')").await;
-        let call = serde_json::from_value(json!({"op":"product.facts","projectId":id,"params":{}})).unwrap();
+        let call = serde_json::from_value(json!({"op":"product.facts","projectId":id,"params":{}}))
+            .unwrap();
         let facts = service.machine(call).await.unwrap();
-        let worker = facts["result"]["workers"].as_array().unwrap().iter()
-            .find(|w| w["role"] == "backend-dev").unwrap()["id"].clone();
+        let worker = facts["result"]["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["role"] == "backend-dev")
+            .unwrap()["id"]
+            .clone();
         let send = |text: &'static str, request: &'static str| {
-            service.control_execution(json!({"action":"worker_message","workerId":worker,"text":text,
-                "attachments":[],"projectId":id,"executionId":execution,"requestId":request}))
+            service.control_execution(
+                json!({"action":"worker_message","workerId":worker,"text":text,
+                "attachments":[],"projectId":id,"executionId":execution,"requestId":request}),
+            )
         };
         send("First guidance", "guide-1").await.unwrap();
         // The first guidance prompt is active (held by the fixture) when the second arrives.
         tokio::time::timeout(Duration::from_secs(15), async {
-            while !std::fs::read_to_string(f.0.join("project/prompt-log.jsonl")).is_ok_and(|l| l.contains("First guidance")) {
+            while !std::fs::read_to_string(f.0.join("project/prompt-log.jsonl"))
+                .is_ok_and(|l| l.contains("First guidance"))
+            {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
-        }).await.expect("first guidance prompt never reached the worker");
+        })
+        .await
+        .expect("first guidance prompt never reached the worker");
         send("Second guidance", "guide-2").await.unwrap();
-        wait_for(&store, "SELECT (SELECT count(*) FROM runtime_events WHERE type='NATIVE_GUIDANCE_SETTLED')>=2").await;
+        wait_for(
+            &store,
+            "SELECT (SELECT count(*) FROM runtime_events WHERE type='NATIVE_GUIDANCE_SETTLED')>=2",
+        )
+        .await;
         let settled: Vec<(String, bool, bool)> = store.read(|db| {
             let mut q = db.prepare("SELECT json_extract(payload_json,'$.request'),json_extract(payload_json,'$.delivered'),
                 coalesce(json_extract(payload_json,'$.preempted'),0) FROM runtime_events WHERE type='NATIVE_GUIDANCE_SETTLED' ORDER BY id")?;
@@ -815,20 +871,38 @@ async fn waiting_worker(variant: &str) {
             Ok(rows)
         }).unwrap();
         // The pre-empted guidance reached the worker: delivered, and marked as replaced.
-        assert_eq!(settled[0], ("guide-1".to_owned(), true, true), "{settled:?}");
-        assert_eq!(settled[1], ("guide-2".to_owned(), true, false), "{settled:?}");
+        assert_eq!(
+            settled[0],
+            ("guide-1".to_owned(), true, true),
+            "{settled:?}"
+        );
+        assert_eq!(
+            settled[1],
+            ("guide-2".to_owned(), true, false),
+            "{settled:?}"
+        );
         service.stop().await.unwrap();
         let _ = runner.await;
         return;
     }
-    wait_for(&store, "SELECT EXISTS(SELECT 1 FROM pending_questions WHERE status='open')").await;
+    wait_for(
+        &store,
+        "SELECT EXISTS(SELECT 1 FROM pending_questions WHERE status='open')",
+    )
+    .await;
     if variant == "guidance" {
         // Wait until the worker's turn has settled into its wait for the answer.
         wait_for(&store, "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE role_id='worker-backend-dev' AND status='ready')").await;
-        let call = serde_json::from_value(json!({"op":"product.facts","projectId":id,"params":{}})).unwrap();
+        let call = serde_json::from_value(json!({"op":"product.facts","projectId":id,"params":{}}))
+            .unwrap();
         let facts = service.machine(call).await.unwrap();
-        let worker = facts["result"]["workers"].as_array().unwrap().iter()
-            .find(|w| w["role"] == "backend-dev").unwrap()["id"].clone();
+        let worker = facts["result"]["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["role"] == "backend-dev")
+            .unwrap()["id"]
+            .clone();
         let receipt = service
             .control_execution(json!({"action":"worker_message","workerId":worker,"text":"Mind the owner output",
                 "attachments":[],"projectId":id,"executionId":execution,"requestId":"guide-while-waiting"}))
@@ -841,19 +915,172 @@ async fn waiting_worker(variant: &str) {
             log.contains("Owner guidance (not authority to expand scope): Mind the owner output"),
             "{log}"
         );
-        assert!(!log.contains("\"Mind the owner output\""), "unprefixed guidance reached the worker");
+        assert!(
+            !log.contains("\"Mind the owner output\""),
+            "unprefixed guidance reached the worker"
+        );
     } else {
         // The fixture worker exits right after asking; nobody answers. The lost worker is
         // noticed and replaced while the question is still unanswered.
-        wait_for(&store, "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='ASSIGNMENT_RETRIED'
-            AND json_extract(payload_json,'$.failure_class')='worker_lost')").await;
+        wait_for(
+            &store,
+            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='ASSIGNMENT_RETRIED'
+            AND json_extract(payload_json,'$.failure_class')='worker_lost')",
+        )
+        .await;
         assert_eq!(
-            store.read(|db| Ok(db.query_row("SELECT count(*) FROM pending_questions WHERE status='answered'", [], |r| r.get::<_, i64>(0))?)).unwrap(),
+            store
+                .read(|db| Ok(db.query_row(
+                    "SELECT count(*) FROM pending_questions WHERE status='answered'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )?))
+                .unwrap(),
             0
         );
     }
     service.stop().await.unwrap();
     let _ = runner.await;
+}
+/// A message the owner queues while a worker runs stays in the machine's queue and
+/// editable; no window is involved. The service takes it when the revision reaches
+/// its boundary, the coordinator receives it once, and the owner's facts show it
+/// delivered with its time; a lifted write denial leaves the list of denials.
+async fn queued_message_journey() {
+    let f = Fixture::new();
+    std::fs::write(f.0.join("project/scenario.txt"), "hold").unwrap();
+    let service = Service::bind_native(f.config(), Arc::new(Routes))
+        .await
+        .unwrap();
+    let registered = service
+        .register(&f.0.join("project"), "Queue")
+        .await
+        .unwrap();
+    let id = registered["projectId"].as_str().unwrap().to_owned();
+    service.activate(&id).await.unwrap();
+    let runner = tokio::spawn(service.clone().serve());
+    let store = f.store();
+    let created = service
+        .workspace(command(
+            &id,
+            "tasks.create",
+            json!(id),
+            "create",
+            json!({"description":"Queue fixture","checkout":{"kind":"main"}}),
+        ))
+        .await
+        .unwrap();
+    let draft = created["target"].as_str().unwrap().to_owned();
+    let started = service
+        .workspace(command(
+            &id,
+            "tasks.start",
+            created["target"].clone(),
+            "start",
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    let execution = started["target"].as_str().unwrap().to_owned();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !f.0.join("project/worker-entered").exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the worker did not start");
+    // A denial set by a message, then lifted with the Remove control.
+    service
+        .prompt_execution(
+            &id,
+            &execution,
+            "deny-write: secrets",
+            Some("deny"),
+            json!([]),
+        )
+        .await
+        .unwrap();
+    let denials = |facts: &Value| facts["product"]["tasks"][&draft]["writeDenials"].clone();
+    let facts = machine(&service, "product.facts", &id, json!({"taskIds":[draft]})).await;
+    assert_eq!(denials(&facts)[0]["path"], "secrets", "{}", denials(&facts));
+    assert!(denials(&facts)[0]["setAt"].is_i64());
+    service.control_execution(json!({"projectId":id,"executionId":execution,"requestId":"lift","action":"allow_write","path":"secrets"})).await.unwrap();
+    let facts = machine(&service, "product.facts", &id, json!({"taskIds":[draft]})).await;
+    assert_eq!(denials(&facts), json!([]));
+    // Queued while the worker runs: kept in the queue, still the owner's to edit.
+    machine(&service, "product.message", &id, json!({"action":"add","message":{"id":"queued-1","taskId":draft,"workerId":null,
+        "text":"Queued owner note","mode":"queue","delivery":"queued","at":1,"deliveredAt":null,"failure":null}})).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    machine(
+        &service,
+        "product.message",
+        &id,
+        json!({"action":"edit","messageId":"queued-1","text":"Queued owner note, edited"}),
+    )
+    .await;
+    let steering = |store: &cortex_core::Store, sql: &str| {
+        store
+            .read(|db| Ok(db.query_row(sql, [], |r| r.get::<_, i64>(0))?))
+            .unwrap()
+    };
+    assert_eq!(steering(&store, "SELECT count(*) FROM runtime_events WHERE type='USER_STEERING' AND json_extract(payload_json,'$.request')='queued-1'"), 0);
+    assert_eq!(
+        steering(
+            &store,
+            "SELECT count(*) FROM runtime_events WHERE type='TURN_INTERRUPTED'"
+        ),
+        0
+    );
+    // The worker finishes; the service sends the queued message at the boundary.
+    std::fs::write(f.0.join("project/scenario.txt"), "complete").unwrap();
+    tokio::time::timeout(Duration::from_secs(25), async {
+        loop {
+            let state: String = store
+                .read(|db| Ok(db.query_row("SELECT state FROM runtime_tasks", [], |r| r.get(0))?))
+                .unwrap();
+            if state == "COMPLETED" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the queued message journey did not complete");
+    assert_eq!(steering(&store, "SELECT count(*) FROM runtime_events WHERE type='USER_STEERING' AND json_extract(payload_json,'$.request')='queued-1'
+        AND json_extract(payload_json,'$.delivery')='boundary' AND json_extract(payload_json,'$.text')='Queued owner note, edited'"), 1);
+    assert_eq!(
+        steering(
+            &store,
+            "SELECT count(*) FROM runtime_events WHERE type='STEERING_DELIVERED'"
+        ),
+        2
+    );
+    let synthesis: String = store
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT coalesce(synthesis,'') FROM runtime_tasks",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert!(
+        synthesis.contains("Owner guidance applied (deny-write: secrets)"),
+        "{synthesis}"
+    );
+    // The owner's facts: the queue row became the runtime's delivered record.
+    let facts = machine(&service, "product.facts", &id, json!({"taskIds":[draft]})).await;
+    let row = facts["product"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "queued-1")
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert_eq!(row["delivery"], "delivered", "{row}");
+    assert!(row["deliveredAt"].is_i64(), "{row}");
+    service.stop().await.unwrap();
+    runner.await.unwrap().unwrap();
 }
 async fn controls(scenario: &str, action: &str) {
     let f = Fixture::new();
@@ -875,7 +1102,10 @@ async fn controls(scenario: &str, action: &str) {
             "tasks.create",
             json!(id),
             "create",
-            json!({"description":"Control fixture","checkout":{"kind":"main"}}),
+            // The fake coordinator's reconcile journeys check that the retained goal
+            // keeps the owner's constraint, so those journeys state one.
+            json!({"description":if scenario.starts_with("reconcile-") {"Control fixture. Never lose constraint α."} else {"Control fixture"},
+                "checkout":{"kind":"main"}}),
         ))
         .await
         .unwrap();
@@ -913,7 +1143,12 @@ async fn controls(scenario: &str, action: &str) {
             if ready && (scenario!="hold" || f.0.join("project/worker-entered").exists()) {break;}
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.expect("control fixture did not reach its checkpoint");
+    }).await.unwrap_or_else(|_| {
+        let events=store.read(|db|Ok(db.query_row(
+            "SELECT (SELECT state FROM runtime_tasks)||' '||coalesce((SELECT group_concat(type||CASE WHEN type IN ('NATIVE_DRIVER_STOPPED','ASSIGNMENT_RETRIED','TASK_STATE_CHANGED') THEN payload_json ELSE '' END,',') FROM (SELECT type,payload_json FROM runtime_events ORDER BY id DESC LIMIT 40)),'')",
+            [],|r|r.get::<_,String>(0))?)).unwrap();
+        panic!("control fixture did not reach its checkpoint: {events}")
+    });
     let current = read_page(&service, query.clone()).await;
     let version = current["data"]["value"]["items"][0]["version"].clone();
     if action == "ambiguous" {
@@ -1046,29 +1281,53 @@ async fn controls(scenario: &str, action: &str) {
         // answerable, and nothing is interrupted, cancelled or replanned.
         let ask = json!({"protocol":{"major":1,"minor":8},"projectId":id,"requestId":"questions","operation":"decisions.list","target":execution,"cursor":null,"limit":100});
         let open = |page: &Value| -> Value {
-            page["items"].as_array().unwrap().iter().find(|d| d["status"] == "pending").cloned().unwrap_or(Value::Null)
+            page["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|d| d["status"] == "pending")
+                .cloned()
+                .unwrap_or(Value::Null)
         };
         let before = open(&service.workspace(ask.clone()).await.unwrap());
         assert!(before.is_object(), "no pending question before Pause");
-        assert_eq!(before["scope"] == "task", scenario == "reconcile-question",
-            "the {scenario} fixture asked the wrong kind of question");
-        let interrupts = |store: &cortex_core::Store| store.read(|db| Ok(db.query_row(
+        assert_eq!(
+            before["scope"] == "task",
+            scenario == "reconcile-question",
+            "the {scenario} fixture asked the wrong kind of question"
+        );
+        let interrupts = |store: &cortex_core::Store| {
+            store.read(|db| Ok(db.query_row(
             "SELECT count(*) FROM runtime_events WHERE type IN ('TURN_INTERRUPTED','REPLAN_REQUEST_ACCEPTED','RETURNED_TO_COORDINATOR')",
-            [], |r| r.get::<_, i64>(0))?)).unwrap();
+            [], |r| r.get::<_, i64>(0))?)).unwrap()
+        };
         let interrupted_before = interrupts(&store);
         let pause = json!({"projectId":id,"executionId":execution,"requestId":"pause-keep","action":"pause","expectedVersion":version});
         service.control_execution(pause).await.unwrap();
         let paused = read_page(&service, query.clone()).await;
-        assert_eq!(paused["data"]["value"]["items"][0]["runtimeState"], "PAUSED");
+        assert_eq!(
+            paused["data"]["value"]["items"][0]["runtimeState"],
+            "PAUSED"
+        );
         // The preserved question is visible but cannot be answered while paused.
         let held = service.workspace(ask.clone()).await.unwrap();
-        let held = held["items"].as_array().unwrap().iter().find(|d| d["questionId"] == before["questionId"]).unwrap().clone();
+        let held = held["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["questionId"] == before["questionId"])
+            .unwrap()
+            .clone();
         assert_eq!(held["status"], "pending");
         assert_eq!(held["allowedOperations"], json!([]));
         std::fs::write(f.0.join("project/scenario.txt"), "complete").unwrap();
         let resume = json!({"projectId":id,"executionId":execution,"requestId":"resume-keep","action":"resume","expectedVersion":paused["data"]["value"]["items"][0]["version"]});
         service.control_execution(resume).await.unwrap();
-        assert_eq!(interrupts(&store), interrupted_before, "Resume must not interrupt or replan");
+        assert_eq!(
+            interrupts(&store),
+            interrupted_before,
+            "Resume must not interrupt or replan"
+        );
         let after = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 let page = service.workspace(ask.clone()).await.unwrap();
@@ -1078,14 +1337,32 @@ async fn controls(scenario: &str, action: &str) {
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-        }).await.expect("the preserved question did not stay answerable after Resume");
-        assert_eq!(after["questionId"], before["questionId"], "a different question appeared");
-        assert_eq!(store.read(|db| Ok(db.query_row("SELECT status FROM pending_questions WHERE id=?",
-            [after["questionId"].as_str().unwrap()], |r| r.get::<_, String>(0))?)).unwrap(), "open");
-        let mut answer = command(id, "decisions.answer", after["decisionId"].clone(), "answer-after-resume",
+        })
+        .await
+        .expect("the preserved question did not stay answerable after Resume");
+        assert_eq!(
+            after["questionId"], before["questionId"],
+            "a different question appeared"
+        );
+        assert_eq!(
+            store
+                .read(|db| Ok(db.query_row(
+                    "SELECT status FROM pending_questions WHERE id=?",
+                    [after["questionId"].as_str().unwrap()],
+                    |r| r.get::<_, String>(0)
+                )?))
+                .unwrap(),
+            "open"
+        );
+        let mut answer = command(
+            id,
+            "decisions.answer",
+            after["decisionId"].clone(),
+            "answer-after-resume",
             json!({"executionId":execution,"acpSessionId":after["acpSessionId"],"batchId":null,"answers":[{
                 "decisionId":after["decisionId"],"questionId":after["questionId"],"expectedVersion":after["version"],
-                "optionId":after["options"][0]["optionId"],"text":after["options"][0]["label"]}]}));
+                "optionId":after["options"][0]["optionId"],"text":after["options"][0]["label"]}]}),
+        );
         answer["expectedVersion"] = after["version"].clone();
         answer["ownerEpoch"] = after["ownerEpoch"].clone();
         service.workspace(answer).await.unwrap();
@@ -1163,7 +1440,11 @@ async fn controls(scenario: &str, action: &str) {
         );
         service.control_execution(resume).await.unwrap();
     } else if action == "prompt" {
-        std::fs::write(f.0.join("project/scenario.txt"), "complete").unwrap();
+        // Sent while the worker still runs: it keeps running, nothing is interrupted,
+        // and the task stays EXECUTING. The coordinator receives the message once, after
+        // the worker, review and verification finished.
+        let worker: String = store.read(|db| Ok(db.query_row(
+            "SELECT attempt_id FROM delegation_provisioning WHERE role_id!='orchestrator' AND status='ready'", [], |r| r.get(0))?)).unwrap();
         let receipt = service
             .prompt_execution(
                 id,
@@ -1198,6 +1479,26 @@ async fn controls(scenario: &str, action: &str) {
                 .unwrap(),
             1
         );
+        let running = |store: &cortex_core::Store| {
+            store.read(|db| Ok(db.query_row(
+            "SELECT (SELECT state FROM runtime_tasks)||':'||(SELECT status FROM delegation_provisioning WHERE attempt_id=?1)
+             ||':'||(SELECT count(*) FROM runtime_nodes WHERE status='running')
+             ||':'||(SELECT count(*) FROM runtime_events WHERE type IN ('TURN_INTERRUPTED','LIVE_ASSIGNMENTS_CANCELLED','STEERING_APPLIED'))",
+            [&worker], |r| r.get::<_, String>(0))?)).unwrap()
+        };
+        assert_eq!(
+            running(&store),
+            "EXECUTING:ready:1:0",
+            "the message disturbed the running worker"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            running(&store),
+            "EXECUTING:ready:1:0",
+            "the message disturbed the running worker"
+        );
+        // The worker finishes its own turn.
+        std::fs::write(f.0.join("project/scenario.txt"), "complete").unwrap();
     } else {
         std::fs::write(f.0.join("project/scenario.txt"), "complete").unwrap();
         let request = json!({"projectId":id,"executionId":execution,"requestId":"control","action":action,"confirmed":true,"expectedVersion":version});
@@ -1242,11 +1543,34 @@ async fn controls(scenario: &str, action: &str) {
         }
     }).await.unwrap_or_else(|_| {
         let diagnostics=store.read(|db|Ok(db.query_row(
-            "SELECT coalesce(group_concat(type||':'||payload_json),'') FROM runtime_events WHERE type IN ('NATIVE_DRIVER_STOPPED','NATIVE_SESSION_START_FAILED')",[],|r|r.get::<_,String>(0))?)).unwrap();
+            "SELECT (SELECT state FROM runtime_tasks)||' '||coalesce((SELECT group_concat(type,',') FROM (SELECT type FROM runtime_events ORDER BY id DESC LIMIT 40)),'')
+              ||' capsules='||coalesce((SELECT group_concat(recipient||':'||state||':'||updated_at,',') FROM capsule_deliveries),'')||' handed='||coalesce((SELECT group_concat(created_at,',') FROM runtime_events WHERE type='STEERING_HANDED'),'')
+             ||' '||coalesce(group_concat(type||':'||payload_json),'') FROM runtime_events WHERE type IN ('NATIVE_DRIVER_STOPPED','NATIVE_SESSION_START_FAILED','ASSIGNMENT_RETRIED','WORKER_RESULT_REFUSED')",[],|r|r.get::<_,String>(0))?)).unwrap();
         panic!("native control did not reach terminal state: {diagnostics}");
     });
     if action == "retry" {
         assert!(store.read(|db|Ok(db.query_row("SELECT count(*) FROM delegation_provisioning WHERE role_id='worker-backend-dev'",[],|r|r.get::<_,i64>(0))?)).unwrap()>=2);
+    }
+    if action == "prompt" {
+        // The held worker's own result was kept (revision 1 completed), the message was
+        // applied after it and handed to exactly one coordinator turn, and nothing was
+        // interrupted on the way.
+        let (completed, applied, delivered, interrupted): (i64, i64, i64, i64) = store.read(|db| Ok(db.query_row(
+            "SELECT (SELECT count(*) FROM runtime_nodes WHERE revision=1 AND stage='execution' AND status='completed'),
+                    (SELECT count(*) FROM runtime_events WHERE type='STEERING_APPLIED'),
+                    (SELECT count(*) FROM runtime_events WHERE type='STEERING_DELIVERED'),
+                    (SELECT count(*) FROM runtime_events WHERE type='TURN_INTERRUPTED')",
+            [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?)).unwrap();
+        assert_eq!((completed, applied, delivered, interrupted), (1, 1, 1, 0));
+        // The fixture coordinator answers with the first message its prompt listed.
+        let (answers, synthesis): (i64, String) = store.read(|db| Ok(db.query_row(
+            "SELECT (SELECT count(*) FROM runtime_events WHERE type='ANSWER_SUBMITTED'),(SELECT coalesce(synthesis,'') FROM runtime_tasks)",
+            [], |r| Ok((r.get(0)?, r.get(1)?)))?)).unwrap();
+        assert_eq!(answers, 1);
+        assert!(
+            synthesis.contains("Owner guidance applied (Use the other output)"),
+            "{synthesis}"
+        );
     }
     if action == "answer" {
         store.write(|db| {
@@ -1702,11 +2026,138 @@ async fn worker_language() {
     .await
     .unwrap_or_else(|_| panic!("no reviewer session was observed: {:?}", observed()));
     let seen = observed();
-    assert!(seen.iter().any(|t| t.starts_with("desktop-worker")), "{seen:?}");
+    assert!(
+        seen.iter().any(|t| t.starts_with("desktop-worker")),
+        "{seen:?}"
+    );
     assert!(
         seen.iter().all(|t| t.ends_with("language observed: true.")),
         "a worker or reviewer session lacked the owner's language: {seen:?}"
     );
+    service.stop().await.unwrap();
+    runner.await.unwrap().unwrap();
+}
+/// Workers routed to another engine and model than their coordinator start on exactly
+/// that route, and the desktop's worker facts carry that route, never the coordinator's.
+async fn worker_route() {
+    let f = Fixture::new();
+    std::fs::write(f.0.join("project/scenario.txt"), "language-ru").unwrap();
+    std::fs::write(f.0.join("project/worker-route.txt"), "").unwrap();
+    let service = Service::bind_native(f.config(), Arc::new(Routes))
+        .await
+        .unwrap();
+    let registered = service
+        .register(&f.0.join("project"), "Routes")
+        .await
+        .unwrap();
+    let id = registered["projectId"].as_str().unwrap();
+    service.activate(id).await.unwrap();
+    let runner = tokio::spawn(service.clone().serve());
+    let created = service
+        .workspace(command(
+            id,
+            "tasks.create",
+            json!(id),
+            "create",
+            json!({"description":"Routed task","checkout":{"kind":"main"},
+                "settings":{"model":"fixture-model","effort":"","mode":"guarded","language":"ru"}}),
+        ))
+        .await
+        .unwrap();
+    service
+        .workspace(command(
+            id,
+            "tasks.start",
+            created["target"].clone(),
+            "start",
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    let store = f.store();
+    // Every configured session: its principal, assignment and the engine and model the
+    // engine confirmed in `configure` (the reply must echo the exact value sent).
+    let configured = || {
+        store.read(|db| {
+            let mut q = db.prepare("SELECT c.role,coalesce(c.assignment_id,''),json_extract(e.payload_json,'$.engine'),json_extract(e.payload_json,'$.model')
+                FROM runtime_events e JOIN trusted_channels c ON c.channel_id=json_extract(e.payload_json,'$.channel_id')
+                WHERE e.type='NATIVE_SESSION_CONFIGURED' ORDER BY e.id")?;
+            let rows = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        }).unwrap()
+    };
+    let roles = |role: &str| {
+        store.read(|db| Ok(db.query_row(
+        "SELECT count(*) FROM delegation_provisioning WHERE role_id=? AND engine_session_ref IS NOT NULL", [role], |r| r.get::<_, i64>(0))?)).unwrap()
+    };
+    tokio::time::timeout(Duration::from_secs(25), async {
+        while roles("worker-backend-dev") == 0 || roles("worker-code-reviewer") == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "no worker and reviewer sessions were configured: {:?}",
+            configured()
+        )
+    });
+    let sessions = configured();
+    let coordinators: Vec<_> = sessions.iter().filter(|s| s.0 == "coordinator").collect();
+    let workers: Vec<_> = sessions.iter().filter(|s| s.0 == "worker").collect();
+    assert!(
+        !coordinators.is_empty() && workers.len() >= 2,
+        "{sessions:?}"
+    );
+    assert!(
+        coordinators
+            .iter()
+            .all(|s| s.2 == "codex-acp" && s.3 == "fixture-model"),
+        "{sessions:?}"
+    );
+    assert!(
+        workers
+            .iter()
+            .all(|s| s.2 == "claude-agent-acp" && s.3 == "fixture-other"),
+        "{sessions:?}"
+    );
+    // The route routing chose for each worker is the one its session was configured with.
+    let selected = store.read(|db| {
+        let mut q = db.prepare("SELECT json_extract(payload_json,'$.assignment_ref'),json_extract(payload_json,'$.engine'),json_extract(payload_json,'$.model')
+            FROM runtime_events WHERE type='NATIVE_ROUTE_SELECTED' ORDER BY id")?;
+        let rows = q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }).unwrap();
+    for w in &workers {
+        let chosen = selected
+            .iter()
+            .rfind(|s| s.0 == w.1)
+            .unwrap_or_else(|| panic!("no route selected for {w:?}: {selected:?}"));
+        assert_eq!(
+            (chosen.1.as_str(), chosen.2.as_str()),
+            (w.2.as_str(), w.3.as_str())
+        );
+    }
+    // The desktop's worker facts: each worker shows its own configured route.
+    let facts = machine(&service, "product.facts", id, json!({})).await;
+    let shown = facts["workers"].as_array().unwrap();
+    for role in ["backend-dev", "code-reviewer"] {
+        let w = shown
+            .iter()
+            .find(|w| w["role"] == role)
+            .unwrap_or_else(|| panic!("no {role} worker: {shown:?}"));
+        assert_eq!(
+            w["route"],
+            json!({"engine":"claude-agent-acp","model":"fixture-other","effort":"","modelLabel":"Other fixture"}),
+            "{role}: {w}"
+        );
+        assert!(
+            workers.iter().any(|s| json!(s.1) == w["id"]),
+            "{role} has no configured session of its own"
+        );
+    }
     service.stop().await.unwrap();
     runner.await.unwrap().unwrap();
 }
@@ -1970,8 +2421,13 @@ async fn restart_signal(store: &Store, sql: &str) {
 /// or one such task hides every task's conversation details in the desktop.
 async fn completed_legacy_questions_are_readable() {
     let f = Fixture::new();
-    let service = Service::bind_native(f.config(), Arc::new(Routes)).await.unwrap();
-    let registered = service.register(&f.0.join("project"), "Legacy").await.unwrap();
+    let service = Service::bind_native(f.config(), Arc::new(Routes))
+        .await
+        .unwrap();
+    let registered = service
+        .register(&f.0.join("project"), "Legacy")
+        .await
+        .unwrap();
     let id = registered["projectId"].as_str().unwrap().to_owned();
     {
         let store = Store::open(
@@ -1988,7 +2444,9 @@ async fn completed_legacy_questions_are_readable() {
         )
         .unwrap();
         let machine = cortex_core::lifecycle::TaskMachine::new(&store);
-        let owner = machine.create("legacy-done", "Old work", "python-owner").unwrap();
+        let owner = machine
+            .create("legacy-done", "Old work", "python-owner")
+            .unwrap();
         store.write(|db| {
             db.execute("UPDATE runtime_tasks SET state='COMPLETED' WHERE task_id='legacy-done'", [])?;
             db.execute("INSERT INTO pending_questions(id,task_id,dedup_key,text,options_json,status,created_at)
@@ -2005,12 +2463,20 @@ async fn completed_legacy_questions_are_readable() {
         }).unwrap();
     }
     service.activate(&id).await.unwrap();
-    let page = service.workspace(json!({"protocol":{"major":1,"minor":8},"projectId":id,"requestId":"old-questions",
-        "operation":"decisions.list","target":"we-old","cursor":null,"limit":100})).await
+    let page = service
+        .workspace(
+            json!({"protocol":{"major":1,"minor":8},"projectId":id,"requestId":"old-questions",
+        "operation":"decisions.list","target":"we-old","cursor":null,"limit":100}),
+        )
+        .await
         .expect("a completed legacy execution's questions are readable");
     let items = page["items"].as_array().unwrap();
     assert_eq!(items.len(), 1, "{page}");
-    assert_eq!(items[0]["allowedOperations"], json!([]), "never answerable here");
+    assert_eq!(
+        items[0]["allowedOperations"],
+        json!([]),
+        "never answerable here"
+    );
     assert_ne!(items[0]["status"], "pending");
     service.stop().await.unwrap();
     println!("completed legacy questions: listed read-only");
@@ -2363,8 +2829,14 @@ async fn binary_journey(scenario: &str) {
             tokio::time::timeout(Duration::from_secs(60), async {
                 loop {
                     if let Ok(mut stream) = workspace_service::connect(&socket).await {
-                        if workspace_service::write_frame(&mut stream, &json!({"jsonrpc":"2.0","id":1,
-                            "method":"projects.status","params":{"projectId":id}})).await.is_ok() {
+                        if workspace_service::write_frame(
+                            &mut stream,
+                            &json!({"jsonrpc":"2.0","id":1,
+                            "method":"projects.status","params":{"projectId":id}}),
+                        )
+                        .await
+                        .is_ok()
+                        {
                             if let Ok(reply) = workspace_service::read_frame(&mut stream).await {
                                 if reply["result"]["ready"] == true {
                                     break;
@@ -2763,9 +3235,13 @@ fn main() {
     }
     if mode == "attachments-probe" {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
-            tokio::time::timeout(Duration::from_secs(60), attachments_journey()).await.expect("attachments journey timeout");
+            tokio::time::timeout(Duration::from_secs(60), attachments_journey())
+                .await
+                .expect("attachments journey timeout");
             if !namespace_host::assert_unavailable_view() {
-                tokio::time::timeout(Duration::from_secs(60), answer_attachments_journey()).await.expect("answer attachments journey timeout");
+                tokio::time::timeout(Duration::from_secs(60), answer_attachments_journey())
+                    .await
+                    .expect("answer attachments journey timeout");
             }
         });
         println!("owner attachments: draft Start, follow-up message and answer retained and delivered to the engine");
@@ -2798,11 +3274,40 @@ fn main() {
                 .expect("batch control journey timeout");
             return;
         }
+        // One owner-control journey alone: `control-probe=<scenario>:<action>`.
+        if let Some((scenario, action)) = mode.strip_prefix("control-probe=").and_then(|s| s.split_once(':')) {
+            workspace_service::native_runtime::set_retry_window((scenario == "exit").then_some(
+                cortex_core::scheduler::retry::RetryWindow { first_delay: 0.0, max_delay: 0.0, window: 0.5 },
+            ));
+            tokio::time::timeout(Duration::from_secs(35), controls(scenario, action))
+                .await
+                .expect("control journey timeout");
+            println!("native desktop control {scenario}:{action} passed");
+            return;
+        }
+        if mode == "steering-probe" {
+            tokio::time::timeout(Duration::from_secs(35), controls("hold", "prompt"))
+                .await
+                .expect("steering control journey timeout");
+            println!("owner message during a running worker: nothing interrupted, delivered once at the boundary");
+            tokio::time::timeout(Duration::from_secs(40), queued_message_journey())
+                .await
+                .expect("queued message journey timeout");
+            println!("queued owner message: editable until taken, sent by the service at the boundary, delivered once");
+            return;
+        }
         tokio::time::timeout(Duration::from_secs(40), worker_language())
             .await
             .expect("worker language journey timeout");
         if mode == "language-probe" {
             println!("owner task language line: delivered to every worker and reviewer session");
+            return;
+        }
+        tokio::time::timeout(Duration::from_secs(40), worker_route())
+            .await
+            .expect("worker route journey timeout");
+        if mode == "worker-route-probe" {
+            println!("worker routes: each worker session configured and shown on its own routed engine and model");
             return;
         }
         if mode == "legacy-recovery-probe" {
@@ -2925,8 +3430,13 @@ fn main() {
 async fn controls_after_a_paused_task() {
     let f = Fixture::new();
     std::fs::write(f.0.join("project/scenario.txt"), "guidance").unwrap();
-    let service = Service::bind_native(f.config(), Arc::new(Routes)).await.unwrap();
-    let registered = service.register(&f.0.join("project"), "Serial controls").await.unwrap();
+    let service = Service::bind_native(f.config(), Arc::new(Routes))
+        .await
+        .unwrap();
+    let registered = service
+        .register(&f.0.join("project"), "Serial controls")
+        .await
+        .unwrap();
     let id = registered["projectId"].as_str().unwrap().to_owned();
     service.activate(&id).await.unwrap();
     let runner = tokio::spawn(service.clone().serve());
@@ -2948,25 +3458,52 @@ async fn controls_after_a_paused_task() {
         let id = id.clone();
         async move {
             let created = service
-                .workspace(command(&id, "tasks.create", json!(id), if title.starts_with("Guidance") {"create-a"} else {"create-b"},
-                    json!({"description":title,"checkout":{"kind":"main"}})))
+                .workspace(command(
+                    &id,
+                    "tasks.create",
+                    json!(id),
+                    if title.starts_with("Guidance") {
+                        "create-a"
+                    } else {
+                        "create-b"
+                    },
+                    json!({"description":title,"checkout":{"kind":"main"}}),
+                ))
                 .await
                 .unwrap();
             let started = service
-                .workspace(command(&id, "tasks.start", created["target"].clone(), if title.starts_with("Guidance") {"start-a"} else {"start-b"}, json!({})))
+                .workspace(command(
+                    &id,
+                    "tasks.start",
+                    created["target"].clone(),
+                    if title.starts_with("Guidance") {
+                        "start-a"
+                    } else {
+                        "start-b"
+                    },
+                    json!({}),
+                ))
                 .await
                 .unwrap();
-            (created["target"].as_str().unwrap().to_owned(), started["target"].as_str().unwrap().to_owned())
+            (
+                created["target"].as_str().unwrap().to_owned(),
+                started["target"].as_str().unwrap().to_owned(),
+            )
         }
     };
     let worker_of = |task_title: &'static str| {
         let service = service.clone();
         let id = id.clone();
         async move {
-            let call = serde_json::from_value(json!({"op":"product.facts","projectId":id,"params":{}})).unwrap();
+            let call =
+                serde_json::from_value(json!({"op":"product.facts","projectId":id,"params":{}}))
+                    .unwrap();
             let facts = service.machine(call).await.unwrap();
             let _ = task_title;
-            facts["result"]["workers"].as_array().unwrap().iter()
+            facts["result"]["workers"]
+                .as_array()
+                .unwrap()
+                .iter()
                 .filter(|w| w["status"] == "working")
                 .map(|w| w["id"].as_str().unwrap().to_owned())
                 .last()
@@ -2983,27 +3520,42 @@ async fn controls_after_a_paused_task() {
         .unwrap();
     let query = json!({"protocol":{"major":2,"mapping":2},"requestId":"page","projectId":id,"operation":"tasks.page","payload":{"target":id,"cursor":null,"limit":50}});
     let page = read_page(&service, query).await;
-    let version = page["data"]["value"]["items"].as_array().unwrap().iter()
-        .find(|t| t["id"] == json!(draft)).map(|t| t["version"].clone()).unwrap_or(Value::Null);
-    tokio::time::timeout(Duration::from_secs(20), service.control_execution(json!({"action":"pause","projectId":id,
-        "executionId":execution,"requestId":"pause","expectedVersion":version})))
-        .await
-        .expect("pause hung: the serial control lane stays held")
-        .unwrap();
+    let version = page["data"]["value"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == json!(draft))
+        .map(|t| t["version"].clone())
+        .unwrap_or(Value::Null);
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        service.control_execution(json!({"action":"pause","projectId":id,
+        "executionId":execution,"requestId":"pause","expectedVersion":version})),
+    )
+    .await
+    .expect("pause hung: the serial control lane stays held")
+    .unwrap();
     std::fs::write(f.0.join("project/scenario.txt"), "stop-siblings").unwrap();
     let (_, execution) = start("Stop one worker").await;
-    wait_for(&store, "SELECT EXISTS(SELECT 1 FROM runtime_nodes WHERE node_id='second' AND status='completed')
-        AND EXISTS(SELECT 1 FROM runtime_nodes WHERE node_id='work' AND status='running')").await;
+    wait_for(
+        &store,
+        "SELECT EXISTS(SELECT 1 FROM runtime_nodes WHERE node_id='second' AND status='completed')
+        AND EXISTS(SELECT 1 FROM runtime_nodes WHERE node_id='work' AND status='running')",
+    )
+    .await;
     let worker = worker_of("Stop one worker").await;
     // The owner reaches Stop worker after the sibling peer has given up waiting for its
     // release signal (5 s): the stop must still complete.
     tokio::time::sleep(Duration::from_secs(7)).await;
     let began = std::time::Instant::now();
-    tokio::time::timeout(Duration::from_secs(20), service.control_execution(json!({"action":"worker_stop","workerId":worker,
-        "projectId":id,"executionId":execution,"requestId":"stop-one"})))
-        .await
-        .expect("worker stop hung after a paused task")
-        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        service.control_execution(json!({"action":"worker_stop","workerId":worker,
+        "projectId":id,"executionId":execution,"requestId":"stop-one"})),
+    )
+    .await
+    .expect("worker stop hung after a paused task")
+    .unwrap();
     eprintln!("worker stop took {:?}", began.elapsed());
     service.stop().await.unwrap();
     let _ = runner.await;
@@ -3014,19 +3566,47 @@ fn wire_file(name: &str, mime: &str, bytes: &[u8]) -> Value {
     use base64::Engine as _;
     json!({"name":name,"mimeType":mime,"data":base64::engine::general_purpose::STANDARD.encode(bytes)})
 }
+/// The one upload of an owner file: its reference is what every later command carries.
+async fn sent_file(service: &Service, name: &str, mime: &str, bytes: &[u8]) -> Value {
+    let refs = machine(
+        service,
+        "product.attachment",
+        "",
+        json!({"action":"upload","files":[wire_file(name, mime, bytes)]}),
+    )
+    .await;
+    assert!(!refs.to_string().contains("\"data\""), "{refs}");
+    refs[0].clone()
+}
 /// The engine's prompt blocks recorded by the fixture peer, oldest first.
 fn engine_prompts(f: &Fixture) -> Vec<Value> {
-    std::fs::read_to_string(f.0.join("project/prompt-log.jsonl")).map(|log| {
-        log.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()["prompt"].clone()).collect()
-    }).unwrap_or_default()
+    std::fs::read_to_string(f.0.join("project/prompt-log.jsonl"))
+        .map(|log| {
+            log.lines()
+                .map(|l| serde_json::from_str::<Value>(l).unwrap()["prompt"].clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 fn carries_image(prompt: &Value) -> bool {
     use base64::Engine as _;
-    prompt.as_array().is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "image" && b["mimeType"] == "image/png"
-        && b["data"] == base64::engine::general_purpose::STANDARD.encode(PNG_BYTES)))
+    prompt.as_array().is_some_and(|blocks| {
+        blocks.iter().any(|b| {
+            b["type"] == "image"
+                && b["mimeType"] == "image/png"
+                && b["data"] == base64::engine::general_purpose::STANDARD.encode(PNG_BYTES)
+        })
+    })
 }
 fn carries_text(prompt: &Value, needle: &str) -> bool {
-    prompt.as_array().is_some_and(|blocks| blocks.iter().any(|b| b["resource"]["text"] == needle || b["text"].as_str().is_some_and(|t| t.contains(&format!("\n{needle}\n")))))
+    prompt.as_array().is_some_and(|blocks| {
+        blocks.iter().any(|b| {
+            b["resource"]["text"] == needle
+                || b["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains(&format!("\n{needle}\n")))
+        })
+    })
 }
 /// Owner files, end to end through the real service entry: the service advertises
 /// attachments, a draft keeps its files, Start retains them as private bodies and the
@@ -3034,10 +3614,16 @@ fn carries_text(prompt: &Value, needle: &str) -> bool {
 /// file retains and delivers it too; invalid files refuse before anything is kept.
 async fn attachments_journey() {
     let f = Fixture::new();
-    std::fs::write(f.0.join("project/scenario.txt"), "saved-settings").unwrap();
+    // The coordinator plans; its worker holds until the follow-up message is recorded.
+    std::fs::write(f.0.join("project/scenario.txt"), "hold").unwrap();
     std::fs::write(f.0.join("project/record-prompts"), "").unwrap();
-    let service = Service::bind_native(f.config(), Arc::new(Routes)).await.unwrap();
-    let registered = service.register(&f.0.join("project"), "Files").await.unwrap();
+    let service = Service::bind_native(f.config(), Arc::new(Routes))
+        .await
+        .unwrap();
+    let registered = service
+        .register(&f.0.join("project"), "Files")
+        .await
+        .unwrap();
     let id = registered["projectId"].as_str().unwrap().to_owned();
     service.activate(&id).await.unwrap();
     let runner = tokio::spawn(service.clone().serve());
@@ -3046,25 +3632,88 @@ async fn attachments_journey() {
     let status = service.project_status(&id).await.unwrap();
     assert_eq!(status["capabilities"]["attachments"], true, "{status}");
     workspace_protocol::validate("Capabilities", &status["capabilities"]).unwrap();
-    // Invalid files refuse the draft; nothing is stored.
-    for (n, bad) in [wire_file("../x.png", "image/png", PNG_BYTES),
-        json!({"name":"x.png","mimeType":"image/png","data":"not base64!"})].into_iter().enumerate() {
-        let refused = service.workspace(command(&id, "tasks.create", json!(id), &format!("bad-{n}"),
-            json!({"description":"Bad files","attachments":[bad],"checkout":{"kind":"main"}}))).await.unwrap_err().to_string();
-        assert!(matches!(refused.as_str(), "invalid_attachments" | "invalid_workspace_request"), "{refused}");
+    // Invalid files refuse their upload; a command with inline bytes or an unknown
+    // reference refuses the draft; nothing is stored.
+    for bad in [
+        wire_file("../x.png", "image/png", PNG_BYTES),
+        json!({"name":"x.png","mimeType":"image/png","data":"not base64!"}),
+    ] {
+        let reply = service
+            .machine(
+                serde_json::from_value(
+                    json!({"op":"product.attachment","params":{"action":"upload","files":[bad]}}),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply["code"], "invalid_attachments", "{reply}");
     }
-    let created = service.workspace(command(&id, "tasks.create", json!(id), "create",
-        json!({"description":"Look at the screenshot","checkout":{"kind":"main"},
-            "attachments":[wire_file("shot.png","image/png",PNG_BYTES), wire_file("notes.txt","text/plain",b"read me first")]}))).await.unwrap();
+    let unknown = json!({"name":"x.png","mimeType":"image/png","size":3,"sha256":"0".repeat(64)});
+    for (n, (bad, code)) in [
+        (
+            wire_file("x.png", "image/png", PNG_BYTES),
+            "inline_attachment_refused",
+        ),
+        (unknown, "attachment_unavailable"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let refused = service
+            .workspace(command(
+                &id,
+                "tasks.create",
+                json!(id),
+                &format!("bad-{n}"),
+                json!({"description":"Bad files","attachments":[bad],"checkout":{"kind":"main"}}),
+            ))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(refused, code);
+    }
+    let shot = sent_file(&service, "shot.png", "image/png", PNG_BYTES).await;
+    let notes = sent_file(&service, "notes.txt", "text/plain", b"read me first").await;
+    let created = service
+        .workspace(command(
+            &id,
+            "tasks.create",
+            json!(id),
+            "create",
+            json!({"description":"Look at the screenshot","checkout":{"kind":"main"},
+            "attachments":[shot.clone(), notes]}),
+        ))
+        .await
+        .unwrap();
     // The saved draft reads its files back for editing.
-    let saved = machine(&service, "product.read", &id, json!({"taskId":created["target"],"attachments":true})).await;
+    let saved = machine(
+        &service,
+        "product.read",
+        &id,
+        json!({"taskId":created["target"],"attachments":true}),
+    )
+    .await;
     assert_eq!(saved.as_array().unwrap().len(), 2);
-    let started = service.workspace(command(&id, "tasks.start", created["target"].clone(), "start", json!({}))).await
+    assert_eq!(saved[0], shot, "the draft reads back references, not bytes");
+    let started = service
+        .workspace(command(
+            &id,
+            "tasks.start",
+            created["target"].clone(),
+            "start",
+            json!({}),
+        ))
+        .await
         .unwrap_or_else(|e| panic!("Start with files refused: {e}"));
     let execution = started["target"].as_str().unwrap().to_owned();
     tokio::time::timeout(Duration::from_secs(25), async {
-        while !engine_prompts(&f).iter().any(carries_image) { tokio::time::sleep(Duration::from_millis(50)).await; }
-    }).await.expect("the engine never received the image block");
+        while !engine_prompts(&f).iter().any(carries_image) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the engine never received the image block");
     let first = engine_prompts(&f).into_iter().find(carries_image).unwrap();
     assert!(carries_text(&first, "read me first"), "{first}");
     store.read(|db| {
@@ -3081,22 +3730,71 @@ async fn attachments_journey() {
     }).unwrap();
     // A follow-up owner message with a file (also Request changes): refused when invalid, else
     // retained as the next revision and delivered to the engine.
-    let refused = service.prompt_execution(&id, &execution, "More", Some("bad-files"),
-        json!([{"name":"a/b.txt","mimeType":"text/plain","data":"YQ=="}])).await.unwrap_err().to_string();
-    assert_eq!(refused, "invalid_attachments");
+    let refused = service
+        .prompt_execution(
+            &id,
+            &execution,
+            "More",
+            Some("bad-files"),
+            json!([{"name":"b.txt","mimeType":"text/plain","data":"YQ=="}]),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(refused, "inline_attachment_refused");
+    let more = sent_file(&service, "more.txt", "text/plain", b"second file body").await;
     let before = engine_prompts(&f).len();
-    let receipt = service.prompt_execution(&id, &execution, "Also read this", Some("with-file"),
-        json!([wire_file("more.txt", "text/plain", b"second file body")])).await.unwrap();
+    let receipt = service
+        .prompt_execution(
+            &id,
+            &execution,
+            "Also read this",
+            Some("with-file"),
+            json!([more.clone()]),
+        )
+        .await
+        .unwrap();
     assert_eq!(receipt["native"], true);
-    assert_eq!(service.prompt_execution(&id, &execution, "Also read this", Some("with-file"),
-        json!([wire_file("more.txt", "text/plain", b"second file body")])).await.unwrap(), receipt);
+    assert_eq!(
+        service
+            .prompt_execution(
+                &id,
+                &execution,
+                "Also read this",
+                Some("with-file"),
+                json!([more.clone()])
+            )
+            .await
+            .unwrap(),
+        receipt
+    );
+    // The message waits for the coordinator's next turn; the work it arrived during finishes.
+    std::fs::write(f.0.join("project/scenario.txt"), "complete").unwrap();
+    // The coordinator turn that receives the message also carries its file.
     tokio::time::timeout(Duration::from_secs(25), async {
-        while !engine_prompts(&f)[before..].iter().any(|p| carries_text(p, "second file body")) { tokio::time::sleep(Duration::from_millis(50)).await; }
-    }).await.expect("the follow-up file never reached the engine");
-    assert_eq!(store.read(|db| Ok(db.query_row("SELECT count(*) FROM source_revisions", [], |r| r.get::<_, i64>(0))?)).unwrap(), 2);
+        while !engine_prompts(&f)[before..].iter().any(|p| {
+            carries_text(p, "second file body")
+                && p[0]["text"].as_str().is_some_and(|t| {
+                    t.contains("1. Also read this") && t.contains("Attached: more.txt")
+                })
+        }) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the follow-up file never reached the engine with its message");
+    assert_eq!(
+        store
+            .read(|db| Ok(
+                db.query_row("SELECT count(*) FROM source_revisions", [], |r| r
+                    .get::<_, i64>(0))?
+            ))
+            .unwrap(),
+        2
+    );
     // Worker guidance still carries no files, with its own reason.
     assert_eq!(service.control_execution(json!({"action":"worker_message","workerId":"w","text":"x","projectId":id,
-        "executionId":execution,"requestId":"worker-file","attachments":[wire_file("a.txt","text/plain",b"a")]})).await.unwrap_err().to_string(),
+        "executionId":execution,"requestId":"worker-file","attachments":[sent_file(&service, "a.txt", "text/plain", b"a").await]})).await.unwrap_err().to_string(),
         "native_attachments_unavailable");
     service.stop().await.unwrap();
     let _ = runner.await;
@@ -3107,50 +3805,169 @@ async fn answer_attachments_journey() {
     let f = Fixture::new();
     std::fs::write(f.0.join("project/scenario.txt"), "question").unwrap();
     std::fs::write(f.0.join("project/record-prompts"), "").unwrap();
-    let service = Service::bind_native(f.config(), Arc::new(Routes)).await.unwrap();
-    let registered = service.register(&f.0.join("project"), "Answer files").await.unwrap();
+    let service = Service::bind_native(f.config(), Arc::new(Routes))
+        .await
+        .unwrap();
+    let registered = service
+        .register(&f.0.join("project"), "Answer files")
+        .await
+        .unwrap();
     let id = registered["projectId"].as_str().unwrap().to_owned();
     service.activate(&id).await.unwrap();
     let runner = tokio::spawn(service.clone().serve());
     let store = f.store();
-    let created = service.workspace(command(&id, "tasks.create", json!(id), "create",
-        json!({"description":"Answer files","checkout":{"kind":"main"}}))).await.unwrap();
-    let started = service.workspace(command(&id, "tasks.start", created["target"].clone(), "start", json!({}))).await.unwrap();
+    let created = service
+        .workspace(command(
+            &id,
+            "tasks.create",
+            json!(id),
+            "create",
+            json!({"description":"Answer files","checkout":{"kind":"main"}}),
+        ))
+        .await
+        .unwrap();
+    let started = service
+        .workspace(command(
+            &id,
+            "tasks.start",
+            created["target"].clone(),
+            "start",
+            json!({}),
+        ))
+        .await
+        .unwrap();
     let execution = started["target"].as_str().unwrap().to_owned();
     tokio::time::timeout(Duration::from_secs(20), async {
-        while !store.read(|db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM pending_questions WHERE status='open')", [], |r| r.get::<_, bool>(0))?)).unwrap() {
+        while !store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pending_questions WHERE status='open')",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )?)
+            })
+            .unwrap()
+        {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    }).await.expect("no question was asked");
-    let page = service.workspace(json!({"protocol":{"major":1,"minor":8},"projectId":id,"requestId":"questions",
-        "operation":"decisions.list","target":execution,"cursor":null,"limit":100})).await.unwrap();
+    })
+    .await
+    .expect("no question was asked");
+    let page = service
+        .workspace(
+            json!({"protocol":{"major":1,"minor":8},"projectId":id,"requestId":"questions",
+        "operation":"decisions.list","target":execution,"cursor":null,"limit":100}),
+        )
+        .await
+        .unwrap();
     let d = &page["items"][0];
+    // The owner chooses an option, adds their own words and attaches a file: one answer.
+    let brief = d["options"][1].clone();
+    assert_eq!(brief["label"], "Brief", "{d}");
     let answer = |request: &str, files: Value| {
-        let mut c = command(&id, "decisions.answer", d["decisionId"].clone(), request,
+        let mut c = command(
+            &id,
+            "decisions.answer",
+            d["decisionId"].clone(),
+            request,
             json!({"executionId":execution,"acpSessionId":d["acpSessionId"],"batchId":null,"answers":[{
                 "decisionId":d["decisionId"],"questionId":d["questionId"],"expectedVersion":d["version"],
-                "optionId":null,"text":"see the screenshot","attachments":files}]}));
+                "optionId":brief["optionId"],"text":"Brief\n\nsee the screenshot","attachments":files}]}),
+        );
         c["expectedVersion"] = d["version"].clone();
         c["ownerEpoch"] = d["ownerEpoch"].clone();
         c
     };
-    let refused = service.workspace(answer("answer-bad", json!([wire_file("..", "image/png", PNG_BYTES)]))).await.unwrap_err().to_string();
-    assert_eq!(refused, "invalid_attachments");
-    assert_eq!(store.read(|db| Ok(db.query_row("SELECT count(*) FROM source_revisions", [], |r| r.get::<_, i64>(0))?)).unwrap(), 0);
-    let command = answer("answer", json!([wire_file("shot.png", "image/png", PNG_BYTES)]));
-    let receipt = service.workspace(command.clone()).await.unwrap_or_else(|e| panic!("answer with files refused: {e}"));
+    let refused = service
+        .workspace(answer(
+            "answer-bad",
+            json!([wire_file("shot.png", "image/png", PNG_BYTES)]),
+        ))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(refused, "inline_attachment_refused");
+    let shot = sent_file(&service, "shot.png", "image/png", PNG_BYTES).await;
+    assert_eq!(
+        store
+            .read(|db| Ok(
+                db.query_row("SELECT count(*) FROM source_revisions", [], |r| r
+                    .get::<_, i64>(0))?
+            ))
+            .unwrap(),
+        0
+    );
+    let command = answer("answer", json!([shot.clone()]));
+    let receipt = service
+        .workspace(command.clone())
+        .await
+        .unwrap_or_else(|e| panic!("answer with files refused: {e}"));
     assert_eq!(service.workspace(command).await.unwrap(), receipt);
-    assert_eq!(store.read(|db| Ok(db.query_row("SELECT count(*) FROM source_revisions", [], |r| r.get::<_, i64>(0))?)).unwrap(), 1);
+    assert_eq!(
+        store
+            .read(|db| Ok(
+                db.query_row("SELECT count(*) FROM source_revisions", [], |r| r
+                    .get::<_, i64>(0))?
+            ))
+            .unwrap(),
+        1
+    );
     tokio::time::timeout(Duration::from_secs(25), async {
-        while !engine_prompts(&f).iter().any(carries_image) { tokio::time::sleep(Duration::from_millis(50)).await; }
-    }).await.expect("the answered turn never received the image block");
-    store.read(|db| {
-        let payload: String = db.query_row("SELECT payload_json FROM runtime_events WHERE type='USER_ANSWER_ATTACHMENTS'", [], |r| r.get(0))?;
-        assert!(payload.contains("shot.png") && !payload.contains("iVBOR"), "{payload}");
-        let command_json: String = db.query_row("SELECT coalesce(group_concat(payload_json),'') FROM runtime_events", [], |r| r.get(0))?;
-        assert!(!command_json.contains("iVBOR"), "file bytes reached an event");
-        Ok(())
-    }).unwrap();
+        while !engine_prompts(&f).iter().any(carries_image) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the answered turn never received the image block");
+    // The answered turn's prompt carries the chosen option and the owner's words with the file.
+    let delivered = engine_prompts(&f).into_iter().find(carries_image).unwrap();
+    assert!(
+        delivered
+            .to_string()
+            .contains(r"Brief\n\nsee the screenshot"),
+        "{delivered}"
+    );
+    // The settled question reads its option, the owner's words and its own file, also on a later read.
+    let page = service
+        .workspace(
+            json!({"protocol":{"major":1,"minor":8},"projectId":id,"requestId":"questions-after",
+        "operation":"decisions.list","target":execution,"cursor":null,"limit":100}),
+        )
+        .await
+        .unwrap();
+    let settled = &page["items"][0];
+    assert_eq!(settled["status"], "answered", "{settled}");
+    assert_eq!(settled["answerText"], "Brief\n\nsee the screenshot");
+    assert_eq!(settled["answerAttachments"], json!([shot]), "{settled}");
+    store
+        .read(|db| {
+            let payload: String = db.query_row(
+                "SELECT payload_json FROM runtime_events WHERE type='USER_ANSWER_ATTACHMENTS'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert!(
+                payload.contains("shot.png") && !payload.contains("iVBOR"),
+                "{payload}"
+            );
+            let owners: Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(
+                owners["question_ids"],
+                json!([d["questionId"]]),
+                "{payload}"
+            );
+            let command_json: String = db.query_row(
+                "SELECT coalesce(group_concat(payload_json),'') FROM runtime_events",
+                [],
+                |r| r.get(0),
+            )?;
+            assert!(
+                !command_json.contains("iVBOR"),
+                "file bytes reached an event"
+            );
+            Ok(())
+        })
+        .unwrap();
     service.stop().await.unwrap();
     let _ = runner.await;
 }

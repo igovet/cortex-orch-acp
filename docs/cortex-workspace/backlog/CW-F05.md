@@ -1,6 +1,6 @@
 # CW-F05: WebKitGTK GPU/session startup mitigation layer: detect NVIDIA-proprietary-driver + X11/Wayland combinations and apply the documented environment workaround before webview creation, with an owner-facing override and a logged diagnostic
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Not confirmed in code: no WebKitGTK GPU or session startup mitigation layer is found; GPU behavior is not measured on real hardware · **Phase:** 3+ · **Size:** M
 
 ## Goal
 

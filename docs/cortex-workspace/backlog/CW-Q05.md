@@ -1,6 +1,6 @@
 # CW-Q05: Desktop migration/rollback rehearsal; no production Paseo mutation
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Not implemented; no desktop migration and rollback rehearsal is recorded · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Rehearse upgrade and rollback of the machine service data (project registration, allow-list, outbox cursor) and the desktop client cache. The Android client cache is covered by CW-Q04b, gated by Gate M. Run the rehearsal on copies only, so the owner's real project store and the production Paseo installation are never written.

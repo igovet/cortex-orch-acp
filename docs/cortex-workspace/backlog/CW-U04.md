@@ -1,6 +1,6 @@
 # CW-U04: Versioned result screen on the CodeMirror merge view
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Implemented: versioned result screen with evidence, request changes and acceptance ([screens](../SCREENS.md)); acceptance with an unmet check is partly implemented; no-paid checks only · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Build a read-only result screen for one specific result version. It shows the exact revision digest, the evidence list (passed, failed, unrun, unknown, missing), and the "what changed" view using @codemirror/merge in unified and split modes. Acceptance is a decision in [CW-U03](CW-U03.md), referenced from this screen, not a control inside it. The merge view is to be validated by CW-F03; this item does not assume that validation has already happened.

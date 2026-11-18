@@ -1,6 +1,6 @@
 # CW-U02: Desktop task detail: discussion, plan, workers and bounded history
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: task detail with the coordinator conversation, plan, history and a pinned workers bar above the composer ([screens](../SCREENS.md)); no-paid checks only · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Build the desktop task detail surface: a header (goal, stage, execution state, wait reason, age of the last confirmed state), a plan strip with stage pills, the discussion with compact worker rows, the tab host (Dialog, Workers, Changes, Code and Terminal) and bounded history. All data comes from typed public projections and paged history. The history list must hold the 10,000-event budget with a viewport-bounded DOM and incremental row updates.

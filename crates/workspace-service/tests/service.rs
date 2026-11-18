@@ -375,11 +375,17 @@ async fn unsafe_runtime_and_stale_endpoint_are_never_replaced() {
     // World-writable: refused, never repaired.
     std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o777)).unwrap();
     assert!(Native::bind(f.config()).await.is_err());
-    assert_eq!(std::fs::metadata(&runtime).unwrap().permissions().mode() & 0o777, 0o777);
+    assert_eq!(
+        std::fs::metadata(&runtime).unwrap().permissions().mode() & 0o777,
+        0o777
+    );
     // Owned and merely permissive (0755): made private (0700) before use.
     std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
     let repaired = Native::bind(f.config()).await.unwrap();
-    assert_eq!(std::fs::metadata(&runtime).unwrap().permissions().mode() & 0o777, 0o700);
+    assert_eq!(
+        std::fs::metadata(&runtime).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
     repaired.stop().await.unwrap();
     drop(repaired);
     let _ = std::fs::remove_file(runtime.join("service.sock"));

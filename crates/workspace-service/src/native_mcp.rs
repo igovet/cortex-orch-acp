@@ -366,7 +366,13 @@ impl Registry {
         core: Arc<dyn ExternalCore>,
         result: &mut Vec<Attachment>,
     ) -> Result<(), &'static str> {
-        let executable = resolve(&server.command).map_err(|_| "executable_unavailable")?;
+        let executable = resolve(&server.command)
+            .or_else(|e| match server.containment {
+                // As the owner's terminal finds it; a contained server keeps the system list.
+                Mode::Uncontained => owner_resolve(&server.command).ok_or(e),
+                Mode::Contained => Err(e),
+            })
+            .map_err(|_| "executable_unavailable")?;
         let runtime = parent.join(format!(
             "external-runtime-{}",
             crate::native_effects::identity().map_err(|_| "runtime_directory_unavailable")?
@@ -758,6 +764,10 @@ fn no_private_tree(p: &Path) -> Result<(), Error> {
 pub(crate) fn owner_path(executable: &Path, home: &Path) -> String {
     let mut dirs: Vec<PathBuf> = vec![];
     dirs.extend(executable.parent().map(Path::to_path_buf));
+    // The owner's tool search path, as their terminal has it (where the service read it).
+    if crate::tool_path::started() {
+        dirs.extend(crate::tool_path::directories().into_iter().map(|(p, _)| p));
+    }
     dirs.extend([home.join(".local/bin"), home.join("bin")]);
     dirs.extend(["/usr/local/bin", "/usr/bin", "/bin"].map(PathBuf::from));
     let mut seen = BTreeSet::new();
@@ -766,6 +776,13 @@ pub(crate) fn owner_path(executable: &Path, home: &Path) -> String {
         .filter(|d| !d.is_empty() && !d.contains(':') && seen.insert(d.clone()))
         .collect::<Vec<_>>()
         .join(":")
+}
+/// A bare command name on the owner's tool search path (uncontained servers only).
+fn owner_resolve(command: &str) -> Option<PathBuf> {
+    if command.is_empty() || command.contains('/') || !crate::tool_path::started() {
+        return None;
+    }
+    crate::tool_path::locate(command).map(|(p, _)| p)
 }
 fn resolve(command: &str) -> Result<PathBuf, Error> {
     let path = Path::new(command);

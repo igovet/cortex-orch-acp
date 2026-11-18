@@ -1,6 +1,6 @@
 # CW-D08: Rendered prototype review harness
 
-**Status:** Planned; not built · **Phase:** 1 · **Size:** M
+**Status:** Not built · **Phase:** 1 · **Size:** M
 
 ## Goal
 Rendered prototype review harness.

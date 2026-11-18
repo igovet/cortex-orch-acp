@@ -1,0 +1,6 @@
+{
+  "default": "../../../../packaging/icons/cortex-512.png",
+  "bg_color": "#ffffff",
+  "android_fg": "icon-foreground.png",
+  "android_fg_scale": 100
+}

@@ -157,7 +157,7 @@ fn owner_purge_error(error: cortex_core::CoreError) -> Refused {
 async fn purge_impl(
     root: &Path,
     project: &str,
-    state: &Path,
+    _state: &Path,
     product: &mut Value,
     task: &str,
     git: &mut Git,
@@ -189,9 +189,7 @@ async fn purge_impl(
         false
     };
     if unmerged(root, &record, git).await? && !discarded {
-        product["tasks"][task]["archiveQuestion"] = json!(true);
-        product["tasks"][task]["archive"] = Value::Null;
-        settings::write_json(&product_path(state, project)?, product)?;
+        // The task stays in the Archive with its work; nothing is changed or deleted.
         return Err(refuse(
             "unmerged_work",
             "This task has unmerged work. Decide whether it may be discarded first.",
@@ -291,13 +289,15 @@ pub async fn cleanup(state: &Path, projects: &Value, git: &mut Git) -> Result<Va
 }
 async fn cleanup_at(state: &Path, projects: &Value, git: &mut Git, at: u64) -> Result<Value> {
     let settings = settings::machine(state)?;
-    let _lock = Lock::new(state, "machine.lock")?;
     let (mut removed, mut skipped, mut asked, mut freed, mut failed) =
         (0u64, 0u64, 0u64, 0u64, 0u64);
     for project in projects.as_array().ok_or_else(invalid)? {
         let root = Path::new(string(project, "root")?);
         let id = string(project, "id")?;
         crate::project_guard::check(root)?;
+        // One project at a time: owner actions of the other projects never wait for
+        // this pass. Each purge stays one journaled deletion under this lock.
+        let _lock = Lock::new(state, "machine.lock")?;
         let mut product = context::product(root, state, id, git).await?;
         let ids = product["tasks"]
             .as_object()
@@ -306,6 +306,10 @@ async fn cleanup_at(state: &Path, projects: &Value, git: &mut Git, at: u64) -> R
             .cloned()
             .collect::<Vec<_>>();
         for task in ids {
+            // A task whose merge is running is left for a later pass.
+            if settings::idle(state, id, &task, &_lock).is_err() {
+                continue;
+            }
             let record = product["tasks"][&task].clone();
             let archive = record["archive"]["at"].as_u64();
             if archive.is_some_and(|a| {
@@ -333,20 +337,23 @@ async fn cleanup_at(state: &Path, projects: &Value, git: &mut Git, at: u64) -> R
                     at.saturating_sub(a) >= settings["autoArchiveDays"].as_u64().unwrap_or(7) * DAY
                 })
             {
-                if !unmerged(root, &record, git).await? {
-                    product["tasks"][&task]["archive"] = json!({"at":at,"previousStatus":"done"});
-                } else if record["archiveAskAfter"].as_u64().unwrap_or(0) <= at {
-                    product["tasks"][&task]["archiveQuestion"] = json!(true);
-                    asked += 1;
+                // Never asks and never discards: the task moves to the Archive with its work.
+                product["tasks"][&task]["archive"] = json!({"at":at,"previousStatus":"done"});
+                product["tasks"][&task]["archiveQuestion"] = json!(false);
+                if let Some(fields) = product["tasks"][&task].as_object_mut() {
+                    fields.remove("archiveAskAfter");
                 }
             }
         }
         settings::write_json(&product_path(state, id)?, &product)?;
     }
     let run = json!({"at":at,"removed":removed,"skipped":skipped,"asked":asked,"freedMb":freed as f64/(1024.0*1024.0),"reclamationFailed":failed});
+    let _lock = Lock::new(state, "machine.lock")?;
     let mut runs = settings::read_json(&state.join("machine-runs.json"), json!({}))?;
     runs["cleanup"] = run.clone();
     settings::write_json(&state.join("machine-runs.json"), &runs)?;
+    // Cleanup also removes attachment bodies nothing references any more.
+    let _ = super::attachment_files::sweep_locked(state, super::attachment_files::UNSENT_GRACE);
     Ok(run)
 }
 pub async fn delete_sprint(
@@ -398,6 +405,10 @@ pub async fn delete_sprint(
         if !members.contains(&task.to_owned()) {
             members.push(task.to_owned());
         }
+    }
+    // A member still being merged is never deleted under it; say so at once.
+    for task in &members {
+        settings::idle(state, project, task, &_lock)?;
     }
     if members.iter().any(|task| {
         !product["tasks"][task]["sprintId"].is_null() && product["tasks"][task]["sprintId"] != id
@@ -534,5 +545,7 @@ pub async fn delete_sprint(
     }
     product["deletedSprints"][id] = result.clone();
     settings::write_json(&product_path(state, project)?, &product)?;
+    // The deleted sprint's files go with it, once nothing else references them.
+    let _ = super::attachment_files::sweep_locked(state, super::attachment_files::UNSENT_GRACE);
     Ok(result)
 }

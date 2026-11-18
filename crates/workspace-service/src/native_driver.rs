@@ -19,6 +19,17 @@ impl NativeHost {
     /// Serialized host driver. Returns durable dispatch descriptions or a stopped
     /// state; never starts/replays an ambiguous process. No model-callable route.
     pub async fn advance(&self, task: String, owner: OwnerEpoch) -> CoreResult<Value> {
+        self.advance_step(task, owner, false).await
+    }
+    /// `advance`; with `recheck_after_verification` a passed verification returns
+    /// `{"recheck":true}` instead of reconciling at once, so the caller can take the
+    /// owner's queued messages at that boundary first.
+    pub async fn advance_step(
+        &self,
+        task: String,
+        owner: OwnerEpoch,
+        recheck_after_verification: bool,
+    ) -> CoreResult<Value> {
         let _driver = self.driver.lock().await;
         for _ in 0..8 {
             let t = task.clone();
@@ -33,11 +44,10 @@ impl NativeHost {
                 TaskState::PlanReady | TaskState::Executing | TaskState::Reviewing => {
                     // The baseline also retains the project's per-file manifest, which
                     // lets a clean first-review path list the files the work changed.
-                    let (e, baseline_manifest) = if state == TaskState::PlanReady {
-                        native_effects::observe_manifest(self.root.clone()).await?
-                    } else {
-                        (native_effects::observe(self.root.clone()).await?, None)
-                    };
+                    // The same pass also gives the per-file manifest: the execution
+                    // baseline keeps it, and a review packet lists the files changed since.
+                    let (e, baseline_manifest) =
+                        native_effects::observe_manifest(self.root.clone()).await?;
                     let t = task.clone();
                     let o = owner.clone();
                     let step=recv(self.executor.write(move|db|{
@@ -61,6 +71,9 @@ impl NativeHost {
                         let active:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM capacity_reservations WHERE task_id=? AND kind=\'worker\' AND state!=\'released\')",[&t],|r|r.get(0))?;
                         match state{
                             TaskState::PlanReady=>{
+                                // An owner message that arrived during the planning turn applies
+                                // before the plan starts: back to the coordinator with it.
+                                if lifecycle::steering::apply_pending_tx(db,&t)? {return Ok(json!({"continue":true}));}
                                 completion::execution_baseline_tx(db,&t,&e)?;
                                 if let (Some(digest),Some(manifest))=(e.project_digest.as_deref(),baseline_manifest.as_ref()){lifecycle::reconciliation::record_baseline_manifest_tx(db,&t,digest,manifest)?;}
                             },
@@ -103,7 +116,19 @@ impl NativeHost {
                                     (&t,&a),|r|r.get(0))?;
                                 if !bound{completion::start_review_tx(db,&t,&a,&e)?;}
                             }
-                            assignments.push(json!({"assignment_ref":a,"node":node,"role":role,"objective":objective,"scope":serde_json::from_str::<Value>(&scope)?,"stage":stage}));
+                            let mut item=json!({"assignment_ref":a,"node":node,"role":role,"objective":objective,"scope":serde_json::from_str::<Value>(&scope)?,"stage":stage});
+                            // A reviewer is told exactly what the work changed and how much
+                            // predecessor evidence there is to read.
+                            if stage=="review"{
+                                item["review_packet"]=lifecycle::reconciliation::review_packet_tx(db,&t,&node,baseline_manifest.as_ref(),e.ignored_digest.as_deref())?;
+                            }
+                            // The brief itself carries acceptance, the owner's constraints, the
+                            // predecessor report ids, the report skeleton and the question language.
+                            let language=cortex_core::assignment_brief::record_language_tx(db,&t)?;
+                            if let Value::Object(extra)=cortex_core::assignment_brief::extras(db,&t,&node,&role,&stage,language)?{
+                                for (k,v) in extra { item[k]=v; }
+                            }
+                            assignments.push(item);
                         }
                         Ok(json!({"state":current,"assignments":assignments}))
                     })?).await?;
@@ -114,6 +139,9 @@ impl NativeHost {
                 }
                 TaskState::Verifying => {
                     self.verify_plan(&task, &owner).await?;
+                    if recheck_after_verification {
+                        return Ok(json!({"recheck":true}));
+                    }
                     continue;
                 }
                 TaskState::AnswerReady | TaskState::Reconciling => {
@@ -167,6 +195,10 @@ impl NativeHost {
                             let workers=db.prepare("SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator' AND status='terminated'")?
                                 .query_map([&t],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
                             for a in workers{e.workers.insert(a,ProcessObservation::ConfirmedExited);}
+                            // Owner messages recorded while this revision ran apply here, after its
+                            // workers, review and verification: the coordinator replans with them
+                            // instead of the result completing past them.
+                            if lifecycle::steering::apply_pending_tx(db,&t)? {return Ok(false);}
                             let saved:Option<String>=db.query_row("SELECT synthesis FROM runtime_tasks WHERE task_id=?",[&t],|r|r.get(0))?;
                             let synthesis=if let Some(saved)=saved { saved } else {
                                 // Only the clean fast path may compose without a coordinator.
@@ -463,13 +495,19 @@ done
             parse(
                 r#"{"tasks":[{"key":"a","description":"A","dependsOn":["b"]},{"key":"b","description":"B","dependsOn":["a"]}]}"#
             ),
-            Err(PlanError { code: "invalid_dependencies", detail: "task 1 (a) is part of or blocked by a dependency cycle".into() })
+            Err(PlanError {
+                code: "invalid_dependencies",
+                detail: "task 1 (a) is part of or blocked by a dependency cycle".into()
+            })
         );
         assert_eq!(
             parse(
                 r#"{"tasks":[{"key":"a","description":"A","dependsOn":[]},{"key":"a","description":"B","dependsOn":[]}]}"#
             ),
-            Err(PlanError { code: "invalid_task", detail: "task 2 (a): duplicate key".into() })
+            Err(PlanError {
+                code: "invalid_task",
+                detail: "task 2 (a): duplicate key".into()
+            })
         );
         assert_eq!(
             parse(r#"{"question":"Which database?","options":["SQLite","Postgres"]}"#),
@@ -480,11 +518,13 @@ done
         );
         assert_eq!(
             parse(r#"{"question":"Q","options":[""]}"#),
-            Err(PlanError { code: "invalid_options", detail: "question options: option 1 must be text of 1 to 500 characters".into() })
+            Err(PlanError {
+                code: "invalid_options",
+                detail: "question options: option 1 must be text of 1 to 500 characters".into()
+            })
         );
         assert_eq!(parse(r#"{"tasks":[]}"#).unwrap_err().code, "tasks_required");
     }
-
 
     fn plan_of(text: &str) -> Vec<Value> {
         match super::sprints::parse(text) {
@@ -531,7 +571,11 @@ done
     fn plan_parser_names_the_failing_task_and_rule() {
         let case = |tasks: &str| detail(&format!(r#"{{"tasks":[{tasks}]}}"#));
         let ok = |k: &str| format!(r#"{{"key":"{k}","description":"D"}}"#);
-        let three = format!("{},{},{{\"key\":\"t3\",\"description\":\"  \"}}", ok("t1"), ok("t2"));
+        let three = format!(
+            "{},{},{{\"key\":\"t3\",\"description\":\"  \"}}",
+            ok("t1"),
+            ok("t2")
+        );
         assert_eq!(
             case(&three),
             ("invalid_task", "task 3 (t3): description is empty".into())
@@ -558,15 +602,23 @@ done
             "task 1 (t1): title must be text"
         );
         assert_eq!(
-            case(&format!("{},{{\"key\":\"t2\",\"description\":\"D\",\"dependsOn\":[\"t12\"]}}", ok("t1"))),
-            ("invalid_dependencies", "task 2 (t2) depends on unknown key t12".into())
+            case(&format!(
+                "{},{{\"key\":\"t2\",\"description\":\"D\",\"dependsOn\":[\"t12\"]}}",
+                ok("t1")
+            )),
+            (
+                "invalid_dependencies",
+                "task 2 (t2) depends on unknown key t12".into()
+            )
         );
         assert_eq!(
             case(r#"{"key":"t1","description":"D","dependsOn":["t1"]}"#).0,
             "invalid_dependencies"
         );
         assert_eq!(
-            detail(r#"{"question":"Q","options":["1","2","3","4","5","6","7","8","9","10","11","12","13"]}"#),
+            detail(
+                r#"{"question":"Q","options":["1","2","3","4","5","6","7","8","9","10","11","12","13"]}"#
+            ),
             ("invalid_options", "question options: more than 12".into())
         );
         assert_eq!(detail(r#"{"question":""}"#).0, "invalid_question");
@@ -619,7 +671,10 @@ done
         })
         .await
         .unwrap_err();
-        assert_eq!((engine.as_str(), *calls.lock().unwrap()), ("engine down", 1));
+        assert_eq!(
+            (engine.as_str(), *calls.lock().unwrap()),
+            ("engine down", 1)
+        );
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn native_sprint_plans_read_only_and_runs_its_queue_in_dependency_order() {
@@ -739,7 +794,7 @@ done
             Some(&false),
             "dependency started early"
         );
-        // Settle the first task as a verified native completion; the queue advances.
+        // Settle the first task as a completed answer; acceptance advances the queue.
         wait("the first task's coordinator turns to settle", || async {
             let runtime = service.state.lock().await.native.get(&id).unwrap().clone();
             runtime.host.executor.read(|db| Ok(db.query_row(
@@ -754,7 +809,8 @@ done
             let runtime_task: String = db.query_row(
                 "SELECT e.runtime_task_id FROM workspace_tasks w JOIN workspace_executions e ON e.execution_id=w.execution_id WHERE w.task_id=?",
                 [&t], |r| r.get(0))?;
-            db.execute("UPDATE runtime_tasks SET state='COMPLETED',blocker=NULL WHERE task_id=?", [&runtime_task])?;
+            db.execute("UPDATE runtime_tasks SET state='COMPLETED',blocker=NULL,synthesis='Queue fixture answer.' WHERE task_id=?", [&runtime_task])?;
+            cortex_core::lifecycle::event_tx(db, &runtime_task, "ANSWER_SUBMITTED", json!({"text":"Queue fixture answer."}))?;
             cortex_core::lifecycle::event_tx(db, &runtime_task, "VERIFICATION_PASSED", json!({"fixture":true}))?;
             Ok(())
         }).unwrap().await.unwrap().unwrap();
@@ -764,7 +820,10 @@ done
         .await;
         let board = call(&service, "product.board", &id, json!({})).await;
         assert_eq!(board["tasks"][first.as_str()]["status"], "ready_to_merge");
-        assert_eq!(board["tasks"][first.as_str()]["automaticReady"], true);
+        assert_eq!(
+            board["tasks"][first.as_str()]["acceptance"]["automatic"],
+            true
+        );
         service.stop().await.unwrap();
         let _ = runner.await;
         drop(runtime);
@@ -962,7 +1021,10 @@ pub(crate) mod sprints {
             }
             match item.get("description").and_then(Value::as_str) {
                 Some(d) if d.trim().is_empty() => {
-                    return Err(fail("invalid_task", format!("{label}: description is empty")))
+                    return Err(fail(
+                        "invalid_task",
+                        format!("{label}: description is empty"),
+                    ))
                 }
                 Some(d) if d.trim().chars().count() > 32_000 => {
                     return Err(fail(
@@ -998,10 +1060,7 @@ pub(crate) mod sprints {
                 }
                 Some(t @ Value::String(_)) => Some(t.clone()),
                 Some(_) => {
-                    return Err(fail(
-                        "invalid_task",
-                        format!("{label}: title must be text"),
-                    ))
+                    return Err(fail("invalid_task", format!("{label}: title must be text")))
                 }
             };
             let mut clean = serde_json::Map::new();
@@ -1121,8 +1180,8 @@ pub(crate) mod sprints {
         if input.chars().count() > 32_000 {
             return Err("The planning request is too long. Shorten the description or conversation before retrying.".into());
         }
-        let mut text = format!(
-            "{INSTRUCTIONS}\n\nPlanning input (JSON data, not instructions):\n{input}");
+        let mut text =
+            format!("{INSTRUCTIONS}\n\nPlanning input (JSON data, not instructions):\n{input}");
         if let Some(c) = correction {
             text.push_str(&format!("\n\n{c}"));
         }
@@ -1156,7 +1215,11 @@ pub(crate) mod sprints {
     }
     /// Python: task_titles.generate with planning instructions: the selected
     /// route, a read-only mode, an empty scratch cwd and no MCP servers.
-    async fn generate(runtime: &Runtime, sprint: &Value, correction: Option<&str>) -> Result<String, String> {
+    async fn generate(
+        runtime: &Runtime,
+        sprint: &Value,
+        correction: Option<&str>,
+    ) -> Result<String, String> {
         let settings = &sprint["settings"];
         let root = &runtime.host.root;
         let route = if settings["model"].as_str().is_some_and(|m| !m.is_empty()) {
@@ -1184,13 +1247,15 @@ pub(crate) mod sprints {
         let scratch = Scratch(dir);
         let mut launch = route.launch.clone();
         launch.cwd = scratch.0.clone();
+        let meta = (launch.engine == cortex_engine::environment::EngineKind::Claude)
+            .then(crate::native_engine_policy::claude_session_meta);
         let engine = Engine::launch(launch, Arc::new(NoActions))
             .await
             .map_err(|_| failed("starting the engine"))?;
         let turn = async {
             engine.initialize(route.deadline).await.map_err(|_| None)?;
             let session = engine
-                .start_session(&scratch.0, vec![], route.deadline)
+                .start_session_with_meta(&scratch.0, vec![], meta, route.deadline)
                 .await
                 .map_err(|_| None)?;
             *stage.lock().unwrap() = "applying the selected model and read-only settings";
@@ -1340,14 +1405,258 @@ pub(crate) mod sprints {
             }
         }
     }
+    /// The queue's pause reason, naming a settle that could not finish instead of
+    /// blaming the checks of a result that never reached them.
+    pub(super) fn with_settle_failure<'a>(
+        pause: Option<&'a str>,
+        failed: Option<&'a str>,
+    ) -> Option<&'a str> {
+        match (pause, failed) {
+            (Some(UNSETTLED), Some(why)) => Some(why),
+            (pause, _) => pause,
+        }
+    }
+    const UNSETTLED: &str = "A result has missing or unsuccessful checks.";
+    #[cfg(test)]
+    mod settle_tests {
+        use super::*;
+        #[test]
+        fn a_failed_settle_names_itself_and_other_pauses_keep_their_reason() {
+            let why = "Build could not be accepted automatically: The result could not be read. Open the task to accept it yourself.";
+            assert_eq!(with_settle_failure(Some(UNSETTLED), Some(why)), Some(why));
+            assert_eq!(with_settle_failure(Some(UNSETTLED), None), Some(UNSETTLED));
+            assert_eq!(
+                with_settle_failure(Some("This sprint is in manual mode."), Some(why)),
+                Some("This sprint is in manual mode.")
+            );
+            assert_eq!(with_settle_failure(None, Some(why)), None);
+        }
+    }
+    /// The outcome of one automatic settle for one task.
+    enum Settle {
+        Accepted,
+        Waiting,
+        Deferred,
+        Failed(String),
+    }
     fn other(code: String) -> io::Error {
         io::Error::other(code)
+    }
+    /// Least time between two passes of one project, however often it is woken: no wake-up storm
+    /// costs more than the fixed two-second loop this replaces did.
+    pub(crate) const PASS_FLOOR: Duration = PASS_EVERY;
+    /// A project with a sprint in motion (a queue running, planning, or results waiting for an
+    /// automatic settle) is looked at this often even without an event, for a change no event
+    /// reports (a runtime whose reader is not open yet, a settle that deferred). Others never are.
+    pub(crate) const SAFETY_TICK: Duration = Duration::from_secs(30);
+
+    /// Projects whose sprints should be looked at now, named by whatever changed them.
+    #[derive(Default)]
+    pub(crate) struct SprintWake {
+        woken: std::sync::Mutex<BTreeSet<String>>,
+        notify: tokio::sync::Notify,
+    }
+    impl SprintWake {
+        /// Something that can move this project's sprints on changed.
+        pub(crate) fn project(&self, project: &str) {
+            self.woken
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(project.to_owned());
+            self.notify.notify_one();
+        }
+        fn take(&self) -> BTreeSet<String> {
+            std::mem::take(&mut *self.woken.lock().unwrap_or_else(|e| e.into_inner()))
+        }
+    }
+
+    /// When each project's sprints are next passed. A project is passed once when it first
+    /// appears (service start or activation), on an owner or loop change of its sprint or task
+    /// records, on a runtime task event while it has a sprint in motion, and on the safety tick
+    /// while it has one. A project with no sprint in motion costs nothing between changes.
+    #[derive(Default, Debug)]
+    pub(crate) struct Schedule {
+        projects: std::collections::BTreeMap<String, Slot>,
+    }
+    #[derive(Default, Debug)]
+    struct Slot {
+        last: Option<tokio::time::Instant>,
+        live: bool,
+        pending: bool,
+    }
+    impl Schedule {
+        /// The projects that exist now: a new one is due at once, a gone one is forgotten.
+        pub(crate) fn known<'a>(&mut self, names: impl IntoIterator<Item = &'a str>) {
+            let names: BTreeSet<&str> = names.into_iter().collect();
+            self.projects.retain(|p, _| names.contains(p.as_str()));
+            for name in names {
+                self.projects.entry(name.to_owned()).or_insert(Slot {
+                    pending: true,
+                    ..Slot::default()
+                });
+            }
+        }
+        /// An owner or loop change of this project's sprint or task records.
+        pub(crate) fn wake(&mut self, project: &str) {
+            if let Some(slot) = self.projects.get_mut(project) {
+                slot.pending = true;
+            }
+        }
+        /// A runtime task event: it matters only to a project with a sprint in motion.
+        pub(crate) fn task_event(&mut self, project: &str) {
+            if let Some(slot) = self.projects.get_mut(project).filter(|s| s.live) {
+                slot.pending = true;
+            }
+        }
+        /// Events were lost: every project with a sprint in motion is looked at again.
+        pub(crate) fn lagged(&mut self) {
+            for slot in self.projects.values_mut().filter(|s| s.live) {
+                slot.pending = true;
+            }
+        }
+        /// The projects to pass now, each no sooner than `PASS_FLOOR` after its last pass.
+        pub(crate) fn due(&mut self, now: tokio::time::Instant) -> Vec<String> {
+            let mut due = vec![];
+            for (name, slot) in &mut self.projects {
+                if slot.live && slot.last.is_some_and(|at| now >= at + SAFETY_TICK) {
+                    slot.pending = true;
+                }
+                if slot.pending && slot.last.is_none_or(|at| now >= at + PASS_FLOOR) {
+                    slot.pending = false;
+                    due.push(name.clone());
+                }
+            }
+            due
+        }
+        /// A pass of `project` ended; `live` says whether it has a sprint in motion.
+        pub(crate) fn passed(&mut self, project: &str, live: bool, now: tokio::time::Instant) {
+            if let Some(slot) = self.projects.get_mut(project) {
+                slot.last = Some(now);
+                slot.live = live;
+            }
+        }
+        /// When the loop must look again without any wake: a deferred wake past its floor, or a
+        /// safety tick. `None` when no project has anything pending or in motion.
+        pub(crate) fn next(&self) -> Option<tokio::time::Instant> {
+            self.projects
+                .values()
+                .filter_map(|slot| match (slot.pending, slot.live, slot.last) {
+                    (true, _, None) => Some(tokio::time::Instant::now()),
+                    (true, _, Some(at)) => Some(at + PASS_FLOOR),
+                    (false, true, Some(at)) => Some(at + SAFETY_TICK),
+                    _ => None,
+                })
+                .min()
+        }
+    }
+    /// A service event that can move a sprint on: a runtime task change of that project.
+    fn task_event(event: &Value) -> Option<&str> {
+        let project = event["projectId"].as_str()?;
+        match event["type"].as_str()? {
+            "native_resync" => Some(project),
+            "native_delta" => event["batch"]["changes"]
+                .as_array()?
+                .iter()
+                .any(|c| c["kind"] == "task")
+                .then_some(project),
+            _ => None,
+        }
+    }
+    #[cfg(test)]
+    mod schedule_tests {
+        use super::*;
+        use serde_json::json;
+        #[test]
+        fn a_project_with_no_sprint_in_motion_costs_nothing_until_it_changes() {
+            let mut s = Schedule::default();
+            s.known(["p"]);
+            let now = tokio::time::Instant::now();
+            // Service start: one pass.
+            assert_eq!(s.due(now), vec!["p".to_owned()]);
+            s.passed("p", false, now);
+            assert_eq!(s.next(), None, "nothing in motion: no timer at all");
+            // Hours pass, runtime tasks change: nothing is read.
+            let later = now + Duration::from_secs(3600);
+            s.task_event("p");
+            s.lagged();
+            assert!(s.due(later).is_empty());
+            assert_eq!(s.next(), None);
+            // An owner change of a sprint (a run mode, Run): one pass.
+            s.wake("p");
+            assert_eq!(s.due(later), vec!["p".to_owned()]);
+        }
+        #[test]
+        fn a_sprint_in_motion_wakes_on_each_event_and_the_safety_tick() {
+            let mut s = Schedule::default();
+            s.known(["p", "q"]);
+            let now = tokio::time::Instant::now();
+            assert_eq!(s.due(now).len(), 2);
+            s.passed("p", true, now);
+            s.passed("q", false, now);
+            assert_eq!(s.next(), Some(now + SAFETY_TICK));
+            // A task state change, a settle outcome, a sprint patch: each wakes p, none sooner than the floor.
+            for wake in [
+                Schedule::task_event as fn(&mut Schedule, &str),
+                Schedule::wake,
+            ] {
+                let at = now + PASS_FLOOR * 10;
+                s.passed("p", true, at - PASS_FLOOR * 2);
+                wake(&mut s, "p");
+                assert_eq!(s.due(at), vec!["p".to_owned()]);
+                s.passed("p", true, at);
+                wake(&mut s, "p");
+                assert!(s.due(at + PASS_FLOOR / 2).is_empty(), "within the floor");
+                assert_eq!(s.next(), Some(at + PASS_FLOOR));
+                assert_eq!(s.due(at + PASS_FLOOR), vec!["p".to_owned()]);
+                s.passed("p", true, at + PASS_FLOOR);
+            }
+            // q has nothing in motion: its task events are ignored.
+            s.task_event("q");
+            assert!(!s.due(now + PASS_FLOOR * 100).contains(&"q".to_owned()));
+            // With no event, p is looked at on the safety tick only.
+            let last = now + PASS_FLOOR * 100;
+            s.passed("p", true, last);
+            assert!(s
+                .due(last + SAFETY_TICK - Duration::from_millis(1))
+                .is_empty());
+            assert_eq!(s.due(last + SAFETY_TICK), vec!["p".to_owned()]);
+            s.passed("p", true, last + SAFETY_TICK);
+            // Activation of a new project: passed at once; a removed one is forgotten.
+            s.known(["p", "r"]);
+            assert_eq!(s.due(last + SAFETY_TICK), vec!["r".to_owned()]);
+        }
+        #[test]
+        fn only_runtime_task_changes_count_as_task_events() {
+            let delta = |kind: &str| json!({"type":"native_delta","projectId":"p","batch":{"changes":[{"kind":kind}]}});
+            assert_eq!(task_event(&delta("task")), Some("p"));
+            assert_eq!(task_event(&delta("history")), None);
+            assert_eq!(
+                task_event(&json!({"type":"native_resync","projectId":"p"})),
+                Some("p")
+            );
+            // The loop's own writes tell windows to refresh; they are not task events.
+            assert_eq!(
+                task_event(&json!({"type":"invalidation","projectId":"p"})),
+                None
+            );
+        }
+        #[test]
+        fn a_wake_names_its_project_once() {
+            let wake = SprintWake::default();
+            wake.project("p");
+            wake.project("p");
+            wake.project("q");
+            assert_eq!(wake.take().into_iter().collect::<Vec<_>>(), ["p", "q"]);
+            assert!(wake.take().is_empty());
+        }
     }
     impl Service {
         pub(crate) async fn native_sprints(self: Arc<Self>) {
             let mut shutdown = self.shutdown.subscribe();
+            let mut events = self.events.subscribe();
             let mut jobs = Jobs::default();
             let mut seen = BTreeSet::new();
+            let mut schedule = Schedule::default();
             while !*shutdown.borrow_and_update() {
                 let native: Vec<(String, Arc<Runtime>)> = self
                     .state
@@ -1358,18 +1667,72 @@ pub(crate) mod sprints {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 jobs.0.retain(|_, j| !j.is_finished());
-                for (project, runtime) in native {
-                    let first = seen.insert(project.clone());
-                    // One project's unreadable state must not stop the others.
-                    let _ = self.sprint_pass(&project, &runtime, &mut jobs, first).await;
+                schedule.known(native.iter().map(|(k, _)| k.as_str()));
+                for project in self.sprint_wake.take() {
+                    schedule.wake(&project);
                 }
+                let due: BTreeSet<String> = schedule
+                    .due(tokio::time::Instant::now())
+                    .into_iter()
+                    .collect();
+                for (project, runtime) in native.iter().filter(|(k, _)| due.contains(k)) {
+                    let first = seen.insert(project.clone());
+                    // One project's unreadable state must not stop the others; it is looked at again on the safety tick.
+                    let live = self
+                        .sprint_pass(project, runtime, &mut jobs, first)
+                        .await
+                        .unwrap_or(true)
+                        || jobs.0.keys().any(|(p, _)| p == project);
+                    schedule.passed(project, live, tokio::time::Instant::now());
+                }
+                let next = schedule.next();
                 tokio::select! {
                     _ = shutdown.changed() => (),
-                    _ = tokio::time::sleep(PASS_EVERY) => (),
+                    _ = self.sprint_wake.notify.notified() => (),
+                    event = events.recv() => match event {
+                        Ok(event) => if let Some(project) = task_event(&event) { schedule.task_event(project); },
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => schedule.lagged(),
+                        // No sender is left only while the service stops.
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => tokio::time::sleep(SAFETY_TICK).await,
+                    },
+                    _ = tokio::time::sleep_until(next.unwrap_or_else(tokio::time::Instant::now)), if next.is_some() => (),
                 }
             }
         }
+        /// One automatic settle. Never an error for the pass: a settle that could not
+        /// finish is `Failed` with an owner-readable reason for that task only.
+        async fn settle(&self, project: &str, task: &str, record: &Value) -> Settle {
+            let title = record["title"]
+                .as_str()
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or("A result");
+            let failed = |why: &str| {
+                Settle::Failed(format!(
+                "{title} could not be accepted automatically: {why} Open the task to accept it yourself."))
+            };
+            match self
+                .product_call(
+                    "product.task",
+                    project,
+                    json!({"taskId":task,"action":"auto_ready"}),
+                )
+                .await
+            {
+                Ok(r) if r["accepted"] == true => Settle::Accepted,
+                Ok(r) if r["deferred"] == true => Settle::Deferred,
+                Ok(r) if r["failed"].is_string() => failed(
+                    r["reason"]
+                        .as_str()
+                        .unwrap_or("the result could not be read."),
+                ),
+                Ok(_) => Settle::Waiting,
+                Err(e) => failed(&format!("the check stopped ({e}).")),
+            }
+        }
         async fn product_call(&self, op: &str, project: &str, params: Value) -> io::Result<Value> {
+            // An automatic settle that accepted nothing changed nothing; it is retried on
+            // every pass, so it must not make open windows refetch their facts.
+            let settle = params["action"] == "auto_ready";
             let call = serde_json::from_value(json!({"op":op,"projectId":project,"params":params}))
                 .map_err(|_| crate::failure("invalid_request"))?;
             let reply = self.machine(call).await?;
@@ -1384,7 +1747,7 @@ pub(crate) mod sprints {
             // Owner state changed here in the background (a planner question, a plan, the
             // queue) has no runtime event of its own. Tell open windows at once, so it never
             // waits for their slow facts poll.
-            if op != "product.board" {
+            if op != "product.board" && !(settle && reply["result"]["accepted"] != true) {
                 let _ = self
                     .events
                     .send(json!({"projectId":project,"type":"invalidation"}));
@@ -1421,7 +1784,7 @@ pub(crate) mod sprints {
             runtime: &Arc<Runtime>,
             jobs: &mut Jobs,
             first: bool,
-        ) -> io::Result<()> {
+        ) -> io::Result<bool> {
             let product = self
                 .product_call("product.board", project, json!({}))
                 .await?;
@@ -1461,18 +1824,87 @@ pub(crate) mod sprints {
                     jobs.0.insert(
                         key,
                         tokio::spawn(async move {
+                            // Saved files are references; their bodies are read for this prompt only.
+                            let state = service.config.state_dir.clone();
+                            let sprint = tokio::task::spawn_blocking(move || {
+                                let mut sprint = sprint;
+                                crate::machine::attachment_files::inline_for_delivery(
+                                    &state,
+                                    &mut sprint,
+                                );
+                                sprint
+                            })
+                            .await
+                            .unwrap_or_default();
                             let outcome = plan_once(&runtime, &sprint).await;
                             let _ = service.finish_planning(&project, &id, outcome).await;
                         }),
                     );
                 }
             }
-            for sprint in product["sprints"].as_array().into_iter().flatten() {
-                if sprint["queueState"] == "running" && sprint["archivedAt"].is_null() {
-                    self.queue_pass(project, runtime, sprint, &product).await?;
+            // Settle waiting results of sprints currently in Automatic, even when the
+            // queue is paused (for example just after a switch to Automatic). Manual
+            // sprints cost nothing here: no task read, no settle call, no folder scan.
+            let automatic: Vec<&Value> = product["sprints"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|s| s["id"].is_string() && crate::machine::task_review::automatic_mode(s))
+                .map(|s| &s["id"])
+                .collect();
+            let waiting: Vec<&String> = product["tasks"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(_, record)| {
+                    automatic.contains(&&record["sprintId"])
+                        && record["acceptance"].is_null()
+                        && record["purged"] != true
+                        && record["status"] != "done"
+                })
+                .map(|(task, _)| task)
+                .collect();
+            let waiting_any = !waiting.is_empty();
+            if !waiting.is_empty() {
+                let finished = self.native_tasks(project).await?;
+                for task in waiting {
+                    if finished.get(task).is_some_and(|t| t["phase"] == "result") {
+                        let record = &product["tasks"][task.as_str()];
+                        if let Settle::Failed(reason) = self.settle(project, task, record).await {
+                            // A running queue pauses with this reason in its own pass;
+                            // a paused one shows it instead of its earlier reason.
+                            let sprint = product["sprints"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .find(|s| s["id"] == record["sprintId"]);
+                            if let Some(sprint) = sprint.filter(|s| {
+                                s["queueState"] == "paused" && s["pauseReason"] != reason.as_str()
+                            }) {
+                                if let Some(id) = sprint["id"].as_str() {
+                                    let _ = self
+                                        .sprint_patch(project, id, json!({"pauseReason":reason}))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            Ok(())
+            for sprint in product["sprints"].as_array().into_iter().flatten() {
+                if sprint["queueState"] == "running" && sprint["archivedAt"].is_null() {
+                    // One sprint's unreadable state never stops the others.
+                    let _ = self.queue_pass(project, runtime, sprint, &product).await;
+                }
+            }
+            // In motion: a queue running, planning under way, or a result waiting for an automatic settle.
+            // Anything else changes only through an owner or loop write, which wakes the loop itself.
+            let sprints = product["sprints"].as_array().into_iter().flatten();
+            let live = sprints.clone().any(|s| {
+                s["archivedAt"].is_null()
+                    && (s["queueState"] == "running" || s["planning"] == "planning")
+            }) || waiting_any;
+            Ok(live)
         }
         async fn finish_planning(
             &self,
@@ -1576,7 +2008,10 @@ pub(crate) mod sprints {
                     )
                 })
                 .collect();
-            // A native COMPLETED result already passed review and verification.
+            // Only a real acceptance settles a newly finished result, and only while the
+            // sprint is in Automatic (a Manual queue pauses below).
+            let sprint_automatic = crate::machine::task_review::automatic_mode(sprint);
+            let mut failed: Option<String> = None;
             for task in &members {
                 let done = matches!(
                     status.get(task).map(String::as_str),
@@ -1585,16 +2020,19 @@ pub(crate) mod sprints {
                 if done || records[task]["purged"] == true {
                     continue;
                 }
-                if tasks.get(task).is_some_and(|t| t["phase"] == "result")
-                    && verified(runtime, task).await
-                {
-                    self.product_call(
-                        "product.task",
-                        project,
-                        json!({"taskId":task,"action":"auto_ready"}),
-                    )
-                    .await?;
-                    status.insert(task.clone(), "ready_to_merge".into());
+                if sprint_automatic && tasks.get(task).is_some_and(|t| t["phase"] == "result") {
+                    match self.settle(project, task, &records[task]).await {
+                        Settle::Accepted => {
+                            status.insert(task.clone(), "ready_to_merge".into());
+                        }
+                        // Machine state is in use right now: settle on the next pass
+                        // instead of pausing the queue for an unsettled result.
+                        Settle::Deferred => return Ok(()),
+                        Settle::Failed(reason) => {
+                            failed.get_or_insert(reason);
+                        }
+                        Settle::Waiting => {}
+                    }
                 }
             }
             let phase = |task: &str| -> Option<String> {
@@ -1649,6 +2087,8 @@ pub(crate) mod sprints {
             } else {
                 None
             };
+            // A settle that could not finish says why, instead of blaming the checks.
+            let pause = with_settle_failure(pause, failed.as_deref());
             if let Some(reason) = pause {
                 return self
                     .sprint_patch(
@@ -1708,23 +2148,5 @@ pub(crate) mod sprints {
             }
             Ok(())
         }
-    }
-    /// The bound native runtime finished with verification passed and no owner override.
-    async fn verified(runtime: &Runtime, task: &str) -> bool {
-        let task = task.to_owned();
-        let Ok(reply) = runtime.host.executor.read(move |db| {
-            Ok(db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM workspace_tasks w JOIN workspace_executions e ON e.execution_id=w.execution_id
-                    JOIN runtime_tasks r ON r.task_id=e.runtime_task_id
-                    WHERE w.task_id=? AND r.state='COMPLETED'
-                    AND EXISTS(SELECT 1 FROM runtime_events v WHERE v.task_id=r.task_id AND v.type='VERIFICATION_PASSED')
-                    AND NOT EXISTS(SELECT 1 FROM runtime_events o WHERE o.task_id=r.task_id AND o.type='OWNER_TASK_RESOLVED'))",
-                [&task],
-                |r| r.get::<_, bool>(0),
-            )?)
-        }) else {
-            return false;
-        };
-        matches!(reply.await, Ok(Ok(true)))
     }
 }

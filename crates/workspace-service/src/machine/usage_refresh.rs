@@ -1,13 +1,14 @@
-//! Background plan-window refresh for Codex and Claude while settings are read.
+//! Plan-window refresh for Codex and Claude, on demand when settings are read.
 //!
-//! A settings read never waits for it. The first read starts one loop per state
-//! root; the loop makes a pass at most every [`PASS_EVERY`] and stops once no read
-//! has come for [`KEEP_ALIVE`]. Inside a pass each connection is read at most once
-//! per five minutes (`usage_refresh::refresh`), one after another, so connections
-//! are staggered rather than read at once. Passes are short and cheap (a registry
-//! and a probe record read), so a due read starts within [`PASS_EVERY`] of being due
-//! and each connection is read again five minutes and at most one pass after its
-//! last read. The app lines its settings reads up with that. Both reads are free and start no model
+//! A settings read never waits for it. Each read asks for one pass, which runs in
+//! the background unless a pass is already running or one started less than
+//! [`PASS_FLOOR`] ago; nothing runs between reads, so with no window reading the
+//! settings (nothing on screen shows the limits) no engine CLI is ever started.
+//! Inside a pass each connection is read at most once per five minutes
+//! (`usage_refresh::refresh`), one after another, so connections are staggered
+//! rather than read at once. The app's own settings reads are lined up with that
+//! five-minute snapshot, so each of them finds a due connection and the next one,
+//! moments later, shows its fresh limits. Both reads are free and start no model
 //! turn: Claude Code's local `/usage` and the Codex app server's
 //! `account/rateLimits/read`. Each runs the verified native CLI of the qualified
 //! adapter with the user's real `HOME` and the connection's own native directory
@@ -28,12 +29,9 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-/// Shortest time between two passes of one loop. A minute here let one connection
-/// go five minutes and a minute between reads; with the app's own five-minute
-/// reads not lined up to it, the limits shown reached twenty minutes old.
-const PASS_EVERY: Duration = Duration::from_secs(15);
-/// A loop stops when no settings read came for this long.
-const KEEP_ALIVE: Duration = Duration::from_secs(15 * 60);
+/// Shortest time between the starts of two passes for one state root, however
+/// often the settings are read.
+const PASS_FLOOR: Duration = Duration::from_secs(15);
 /// One read, including the CLI's exit.
 const RUN_BUDGET: Duration = Duration::from_secs(20);
 const OFF: &str = "CORTEX_WORKSPACE_USAGE_REFRESH";
@@ -47,13 +45,14 @@ const CLAUDE_ARGS: [&str; 7] = [
     "--no-session-persistence",
 ];
 
+#[derive(Default)]
 struct Slot {
     running: bool,
-    last_read: Instant,
+    started: Option<Instant>,
 }
-fn loops() -> std::sync::MutexGuard<'static, BTreeMap<PathBuf, Slot>> {
-    static LOOPS: OnceLock<Mutex<BTreeMap<PathBuf, Slot>>> = OnceLock::new();
-    LOOPS
+fn passes() -> std::sync::MutexGuard<'static, BTreeMap<PathBuf, Slot>> {
+    static PASSES: OnceLock<Mutex<BTreeMap<PathBuf, Slot>>> = OnceLock::new();
+    PASSES
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -64,31 +63,28 @@ fn now() -> Option<f64> {
         .ok()
         .map(|d| d.as_secs_f64())
 }
-/// Whether a loop whose last read was `since_read` ago makes another pass.
-fn keeps_running(since_read: Duration) -> bool {
-    since_read <= KEEP_ALIVE
+/// Whether a settings read starts a pass, given when the last one started.
+fn pass_due(running: bool, since_start: Option<Duration>) -> bool {
+    !running && since_start.is_none_or(|d| d >= PASS_FLOOR)
 }
 
-/// Note a settings read and start the loop when none runs. Returns at once.
+/// Note a settings read: start one background pass when one is due. Returns at once.
 pub(super) fn ensure(config: &crate::Config, env: &RouteEnvironment) {
     if std::env::var(OFF).is_ok_and(|v| matches!(v.trim(), "off" | "0" | "false" | "no")) {
         return;
     }
     let key = env.state.clone();
     {
-        let mut table = loops();
-        let slot = table.entry(key.clone()).or_insert(Slot {
-            running: false,
-            last_read: Instant::now(),
-        });
-        slot.last_read = Instant::now();
-        if slot.running {
+        let mut table = passes();
+        let slot = table.entry(key.clone()).or_default();
+        if !pass_due(slot.running, slot.started.map(|s| s.elapsed())) {
             return;
         }
         slot.running = true;
+        slot.started = Some(Instant::now());
     }
-    let stop = |key: &PathBuf| {
-        if let Some(slot) = loops().get_mut(key) {
+    let done = |key: &PathBuf| {
+        if let Some(slot) = passes().get_mut(key) {
             slot.running = false;
         }
     };
@@ -98,25 +94,13 @@ pub(super) fn ensure(config: &crate::Config, env: &RouteEnvironment) {
         .spawn({
             let key = key.clone();
             move || {
-                loop {
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        pass(&config, &env)
-                    }));
-                    std::thread::sleep(PASS_EVERY);
-                    let mut table = loops();
-                    let Some(slot) = table.get_mut(&key) else {
-                        break;
-                    };
-                    if !keeps_running(slot.last_read.elapsed()) {
-                        slot.running = false;
-                        return;
-                    }
-                }
-                stop(&key);
+                let _ =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| pass(&config, &env)));
+                done(&key);
             }
         });
     if spawned.is_err() {
-        stop(&key);
+        done(&key);
     }
 }
 
@@ -281,15 +265,21 @@ fn codex(binary: &Path, home: &Path, directory: &Path, cwd: &Path) -> Option<Val
 mod tests {
     use super::*;
     #[test]
-    fn the_loop_is_bounded_and_stops_without_reads() {
-        // A connection is read at most every five minutes; passes are 15 seconds apart.
-        assert_eq!(PASS_EVERY, Duration::from_secs(15));
+    fn a_pass_runs_only_on_a_read_and_never_more_often_than_the_floor() {
+        // A connection is read at most every five minutes; passes start at most every 15 seconds.
+        assert_eq!(PASS_FLOOR, Duration::from_secs(15));
         assert_eq!(usage_refresh::REFRESH_AFTER_SECONDS, 300.0);
-        assert!(keeps_running(Duration::from_secs(0)));
-        assert!(keeps_running(KEEP_ALIVE));
-        assert!(!keeps_running(KEEP_ALIVE + Duration::from_secs(1)));
+        // The first read starts one; a read while it runs, or within the floor of its start, does not.
+        assert!(pass_due(false, None));
+        assert!(!pass_due(true, None));
+        assert!(!pass_due(true, Some(PASS_FLOOR * 10)));
+        assert!(!pass_due(
+            false,
+            Some(PASS_FLOOR - Duration::from_millis(1))
+        ));
+        assert!(pass_due(false, Some(PASS_FLOOR)));
     }
-    /// Passes PASS_EVERY apart through the real `refresh` gate: each connection is read
+    /// Settings read continuously (a window showing the limits), so passes start PASS_FLOOR apart, through the real `refresh` gate: each connection is read
     /// again five minutes and at most one pass (plus the reads before it) after its
     /// last read, never sooner, so what the app shows can stay within about six minutes.
     #[test]
@@ -309,7 +299,7 @@ mod tests {
         }
         let state = state.canonicalize().unwrap();
         let ids = ["cn_000000000001", "cn_000000000002"];
-        // Each read takes up to 4 s; the next pass starts PASS_EVERY after one ends.
+        // Each read takes up to 4 s; the next pass starts PASS_FLOOR after one ends.
         let (read, start) = (4.0, 1_800_000_000.0);
         let mut reads: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
         let mut now = start;
@@ -330,10 +320,10 @@ mod tests {
                 reads.entry(id).or_default().push(at);
                 now += read;
             }
-            now += PASS_EVERY.as_secs_f64();
+            now += PASS_FLOOR.as_secs_f64();
         }
         let _ = std::fs::remove_dir_all(&state);
-        let worst = PASS_EVERY.as_secs_f64() + read * ids.len() as f64;
+        let worst = PASS_FLOOR.as_secs_f64() + read * ids.len() as f64;
         for id in ids {
             let times = &reads[id];
             assert!(times.len() >= 11, "{id}: {times:?}");

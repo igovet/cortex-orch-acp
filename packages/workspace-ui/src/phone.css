@@ -1,0 +1,119 @@
+/* The phone shell. Every rule is scoped to html[data-shell="phone"], which only a phone shell sets, so the mouse desktop is
+   untouched. Sizes follow the approved Android mockups: buttons 40 px, icon buttons, rows and menu items 44 px, inputs 44 px. */
+
+/* The page is as tall as what the on-screen keyboard leaves (--ws-vh from visualViewport), inside the system bars. */
+html[data-shell="phone"] { --titlebar-h: 52px; --ctl-h: 40px; --ctl-h-dlg: 40px; --toolbar-h: 52px; --toolbar-h-sm: 44px; --bar-h: 56px; --bar-h-dlg: 60px; --bar-h-card: 48px; --section-h: 40px; --strip-min: 44px; }
+html[data-shell="phone"], html[data-shell="phone"] body { height: var(--ws-vh, 100%); }
+html[data-shell="phone"] body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); box-sizing: border-box; overscroll-behavior: none; }
+html[data-shell="phone"] #root { height: 100%; }
+
+/* A finger scrolls the content itself, so no scrollbar is drawn and none takes room. The lists and pages were laid out with
+   that strip as part of their right margin, and an engine may or may not keep an unpainted strip, so each gets that margin
+   back as plain padding: the same space on both sides, whatever the engine does with scrollbars. */
+html[data-shell="phone"], html[data-shell="phone"] * { scrollbar-width: none; scrollbar-gutter: auto; }
+html[data-shell="phone"] ::-webkit-scrollbar { display: none; width: 0; height: 0; }
+html[data-shell="phone"] :is(.sb-scroll, .col-b, .wlist, .flist, .tree, .gscroll) { padding-right: 8px !important; }
+html[data-shell="phone"] :is(.home, .page, .create, .ready, .set-main, .launch) { padding-inline: 16px; margin-right: 0; }
+html[data-shell="phone"] :is(.feed, .d-scroll, .sp-scroll, .cf-scroll) { padding-right: 11px; }
+
+/* Title band: menu or Back, the title, one primary action. No tabs, window buttons or drag region. */
+html[data-shell="phone"] .ws-phonebar { gap: 4px; padding: 0 8px 0 4px; -webkit-app-region: no-drag; }
+html[data-shell="phone"] .ws-phonebar-t { flex: 1 1 auto; min-width: 0; padding-left: 4px; font-size: 16px; font-weight: 500; }
+html[data-shell="phone"] .ws-phonebar-a { display: flex; align-items: center; gap: 4px; flex: none; }
+html[data-shell="phone"] .workspace { grid-template-columns: minmax(0, 1fr); }
+html[data-shell="phone"] .workspace > .sidebar { display: none; }
+
+/* The sidebar as a drawer over the page, with a scrim that closes it. */
+html[data-shell="phone"] .ws-drawer-layer { position: fixed; inset: 0; z-index: 40; }
+html[data-shell="phone"] .ws-scrim { position: absolute; inset: 0; width: 100%; height: 100%; background: var(--scrim, rgba(0, 0, 0, .32)); }
+html[data-shell="phone"] .ws-drawer { position: absolute; inset: 0; display: flex; flex-direction: column; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); background: var(--bg-sidebar); }
+/* The menu's head is the title band's own box, so the button that opens the menu and the one that folds it stand on the same spot. */
+html[data-shell="phone"] .ws-drawer-h { display: flex; align-items: center; gap: 4px; flex: none; box-sizing: border-box; height: var(--titlebar-h); padding: 0 8px 0 4px; border-bottom: 1px solid var(--line); }
+/* Nothing in the menu is wider than the phone: its list scrolls up and down only. */
+html[data-shell="phone"] .ws-drawer .sb-scroll { overflow-x: hidden; }
+html[data-shell="phone"] .ws-drawer > .sidebar { flex: 1 1 auto; display: flex; width: 100%; border-right: 0; }
+html[data-shell="phone"] .ws-machine-m { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; height: 100%; padding: 0 8px 0 4px; text-align: left; color: var(--fg); }
+html[data-shell="phone"] .ws-machine-m-t { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; line-height: 18px; }
+
+/* Touch sizes. */
+html[data-shell="phone"] .btn { height: 40px; padding: 0 14px; font-size: 14px; }
+html[data-shell="phone"] .btn-sm { height: 32px; padding: 0 12px; font-size: 13px; }
+html[data-shell="phone"] .btn-lg { height: 44px; }
+html[data-shell="phone"] .ib { width: 44px; height: 44px; }
+html[data-shell="phone"] .ib .i { width: 20px; height: 20px; }
+html[data-shell="phone"] .nav, html[data-shell="phone"] .snav { height: 44px; font-size: 15px; gap: 12px; }
+html[data-shell="phone"] .proj { height: 44px; font-size: 15px; }
+html[data-shell="phone"] .proj-x { width: 44px; height: 44px; }
+html[data-shell="phone"] .task-row { height: 40px; font-size: 14px; }
+html[data-shell="phone"] .inp, html[data-shell="phone"] select { height: 44px; font-size: 15px; }
+html[data-shell="phone"] textarea { font-size: 15px; }
+html[data-shell="phone"] .mi { min-height: 44px; font-size: 15px; }
+html[data-shell="phone"] .seg > * { height: 36px; padding: 0 12px; font-size: 14px; }
+html[data-shell="phone"] .opt { min-height: 48px; }
+html[data-shell="phone"] .srow, html[data-shell="phone"] .need3, html[data-shell="phone"] .prow { min-height: 48px; }
+html[data-shell="phone"] .sb-foot { height: 52px; }
+html[data-shell="phone"] .sb-usage { min-height: 40px; }
+html[data-shell="phone"] .sb-h { height: 40px; }
+
+/* Menus and dialogs that would not fit become sheets along the bottom edge, full width. */
+/* A menu is a sheet across the bottom, edge to edge. The desktop nudge that keeps a menu inside the window (a translate) would
+   push such a sheet sideways off the screen, so it is switched off here. */
+html[data-shell="phone"] [popover]:popover-open { position: fixed; inset: auto 0 0 0 !important; translate: none !important; width: auto !important; max-width: none !important; max-height: 70vh; margin: 0; padding-bottom: calc(8px + env(safe-area-inset-bottom)); border-radius: 16px 16px 0 0; overflow-y: auto; }
+html[data-shell="phone"] dialog.dlg { width: 100vw; max-width: 100vw; max-height: calc(var(--ws-vh, 100vh) - 24px); margin: auto 0 0 0; border-radius: 16px 16px 0 0; padding-bottom: env(safe-area-inset-bottom); }
+
+/* The inspector opens over the page below the title band, full width. */
+html[data-shell="phone"] .inspector { top: calc(var(--titlebar-h) + env(safe-area-inset-top)); left: 0; right: 0; bottom: 0; width: auto; border-radius: 0; margin-right: 0; }
+
+/* The connection band under the title band. */
+html[data-shell="phone"] .ws-phone-conn { min-height: 44px; }
+
+/* The phone app's own root adds no box: the workspace inside it is laid out by the page grid (#root), as on the desktop. */
+.ph-app { display: contents; }
+/* The phone's own screens: first run, pairing, machines and the phone's settings. */
+.ph-screen { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column; height: var(--ws-vh, 100%); padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); box-sizing: border-box; background: var(--bg-canvas); color: var(--fg); }
+.ph-bar { display: flex; align-items: center; gap: 4px; flex: none; height: 52px; padding: 0 8px 0 4px; border-bottom: 1px solid var(--line); }
+.ph-bar-t { flex: 1 1 auto; min-width: 0; padding-left: 4px; font-size: 16px; font-weight: 500; }
+.ph-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column; gap: 14px; padding: 20px 16px; }
+.ph-body.center { justify-content: center; }
+.ph-body h1 { font-size: 22px; line-height: 28px; font-weight: 600; }
+.ph-foot { flex: none; display: flex; flex-direction: column; gap: 10px; padding: 12px 16px 16px; }
+.ph-foot .btn, .ph-wide { width: 100%; height: 48px; font-size: 15px; }
+.ph-steps { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.ph-steps li { display: flex; gap: 10px; align-items: flex-start; }
+.ph-steps .n { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 22px; height: 22px; border: 1px solid var(--line-strong); border-radius: 50%; font-size: 12px; color: var(--fg-2); }
+.ph-fpr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+.ph-fpr > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r-ctl); }
+.ph-fpr code { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ph-field { display: flex; flex-direction: column; gap: 6px; }
+.ph-field .inp { width: 100%; height: 44px; font-size: 15px; box-sizing: border-box; }
+.ph-group { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.ph-row { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 6px 12px; border-bottom: 1px solid var(--line); text-align: left; color: var(--fg); width: 100%; box-sizing: border-box; }
+.ph-row:last-child { border-bottom: 0; }
+.ph-row-t { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; line-height: 18px; }
+.ph-row-v { flex: none; }
+.ph-h { display: flex; align-items: center; justify-content: space-between; height: 32px; font-size: var(--t-cap); color: var(--fg-3); }
+.ph-sheet-layer { position: fixed; inset: 0; z-index: 45; }
+.ph-sheet-layer .ws-scrim { position: absolute; inset: 0; width: 100%; height: 100%; background: var(--scrim, rgba(0, 0, 0, .32)); }
+.ph-sheet { position: absolute; left: 0; right: 0; bottom: 0; display: flex; flex-direction: column; gap: 4px; max-height: 80%; overflow-y: auto; padding: 8px 0 calc(16px + env(safe-area-inset-bottom)); border-radius: 16px 16px 0 0; background: var(--bg-canvas); }
+.ph-sheet .ph-row { border-bottom: 0; padding: 6px 16px; }
+.ph-sheet .ph-row[aria-current="true"] { background: var(--bg-selected); }
+.ph-sheet .ph-foot { padding-bottom: 0; }
+.ph-note { display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border-radius: var(--r-ctl); background: var(--bg-input); font-size: 13px; line-height: 18px; color: var(--fg-2); }
+.ph-err { color: var(--danger); font-size: 13px; line-height: 18px; }
+.ph-logo { width: 48px; height: 48px; }
+.ph-edit { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.ph-edit .inp { flex: 1 1 auto; min-width: 0; height: 44px; font-size: 15px; }
+
+/* The composer bar is one row. Model, effort, settings, attach and voice scroll sideways under a fading edge that says there is
+   more; Queue and the plane never scroll and always stand at the right. */
+html[data-shell="phone"] .mc .c-bar { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; padding-right: 0; }
+/* The route is as wide as its choices, read whole: it is not sized by a container here, so no choice folds to its icon. */
+html[data-shell="phone"] .mc .c-bar > .c-route { order: -1; flex: 0 0 auto; flex-wrap: nowrap; container-type: normal; }
+html[data-shell="phone"] .mc .c-bar > .c-route > .sel { flex: none; max-width: none; }
+html[data-shell="phone"] .mc .c-bar > .mc-tools { flex: none; }
+html[data-shell="phone"] .mc .c-bar > .c-end { position: sticky; right: 0; z-index: 1; flex: none; flex-wrap: nowrap; margin-inline-start: auto; padding: 0 12px 0 4px; background: var(--mc-bg, var(--bg-raised)); }
+html[data-shell="phone"] .mc .c-bar > .c-end::before { content: ""; position: absolute; top: 0; bottom: 0; right: 100%; width: 28px; pointer-events: none; background: linear-gradient(to right, transparent, var(--mc-bg, var(--bg-raised))); }
+/* The Queue hint is read with a resting pointer; a phone has none. */
+html[data-shell="phone"] .mc-hint { display: none; }
+/* The menu section head holds a phone-size button: it is as tall as that button, never cutting it. */
+html[data-shell="phone"] .ws-drawer .sb-h { height: auto; min-height: 44px; padding-top: 0; padding-bottom: 0; }

@@ -120,6 +120,8 @@ SCREENS.push(["task-queued", task_at("r-now") + "&queued=r-now", QUEUED_ROW, FUL
 // A working task's steps that recorded output far wider than any column, in Workers and in Conversation; OUTPUT_FLOWS opens them.
 const OUTPUT_SCREENS = [["task-output-workers", review_at("out/workers/w-out"), "document.querySelector('.stream button.fold')"], ["task-output-conversation", review_at("out"), "document.querySelector('.timeline button.fold')"]];
 for (const [name, query, ready] of OUTPUT_SCREENS) SCREENS.push([name, query, ready, [[1280, 800]]]);
+// The runtime's stop question with long consequences, a Recommended mark and its targets: each answer is one row inside the card.
+SCREENS.push(["stopq-conversation", "world=conversation&stopq=1&route=" + quote("/m/<M>/t/c-ask"), "document.querySelector('.dc-opts-rows .opt .sub') && document.querySelector('.ws-dc-targets .btn')", [...NARROW, ...OWNER]]);
 // Connected service, unconfirmed task: one notice, its explanation and the real read-only refresh.
 const UNKNOWN_AT = review_at("unk") + "&dark=1";
 const UNKNOWN_READY = "document.querySelector('.l-task .l-strip .l-strip-a button') && document.querySelector('.composer textarea:disabled')";
@@ -748,7 +750,8 @@ return {label:(el.getAttribute('aria-label')||el.textContent).trim().slice(0,32)
       out.push(...found.controls.filter(c => c.top < 0 || c.bottom > found.view || c.left < 0).map(c => state(`control off the window at ${which}: ${c.name} ${c.top}..${c.bottom}`)));
       if (!found.controls.length) out.push(state(`no controls found at ${which}`));
       if (found.clear && found.clear.tail > found.clear.dock + 1) out.push(state(`dock covers the end of the feed at ${which}: ${json(found.clear)}`));
-      if (found.clear && found.clear.space !== `${found.clear.height + 16}px`) out.push(state(`feed not told the dock's height at ${which}: ${json(found.clear)}`));
+      // The dock is the feed's flow sibling below it: the feed's box, and so its scrollbar, ends at the dock's top edge.
+      if (found.clear && Math.abs(found.clear.feed - found.clear.dock) > 1) out.push(state(`feed box does not end at the dock's top at ${which}: ${json(found.clear)}`));
     }
     return out;
   };

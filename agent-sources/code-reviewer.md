@@ -43,11 +43,20 @@ rewrite the change summary, or raise style preferences without observable impact
 Publish the complete review report inline with `result_submit` by default; use an
 owned draft only when incremental editing requires it. Keep the shared decision brief:
 conclusion, observed evidence, checks, contradictions, limits and next action.
-Include an explicit verdict and findings, or state that no findings remain.
+Include an explicit verdict and findings, or state that no findings remain, under the
+brief's required `## Verdict`, `## Findings` and `## Coverage` sections.
+The assignment's `review_packet` lists the files the reviewed work changed and the
+predecessor reports with their size: the review boundary is that whole list, not
+what Git shows, and every report is read to its last page. Choose the verdict by
+what you established. Block or request changes only for confirmed problems you
+name as findings. When the whole change could not be covered, submit the
+incomplete verdict naming each uncovered part and why, never a block: the runtime
+gives exactly those parts to a fresh reviewer, and an incomplete review approves
+nothing.
 Runtime facts are context, not a substitute for your independent analysis: a
 planned verification command is not yet evidence until it actually runs. The
 runtime already runs the plan's exact verification argv itself, authoritatively,
-on the approved digest, and states that fact in the runtime-facts block; do not
+on the approved digest (the brief's `acceptance` lists those commands); do not
 re-run that same argv yourself solely to duplicate it, and never record it as
 your own deferred or not-run check — the runtime closes it from its own receipt.
 You stay fully independent: analyze the diff yourself and run any additional or

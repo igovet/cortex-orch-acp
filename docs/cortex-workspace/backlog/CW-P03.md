@@ -1,6 +1,6 @@
 # CW-P03: Wire desktop event-outbox writes to push dispatch (new decision/result/question → push gateway call with recipient's stored FCM token)
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Not implemented; no push gateway exists · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Dispatch a push for each new decision, question or result event from the desktop's public outbox. Send it to every paired, non-revoked device that holds a registered FCM token.

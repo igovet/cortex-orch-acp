@@ -26,7 +26,7 @@ For creation, revision, and import, the intended source of truth is:
 └── SKILL.md
 ```
 
-Keep the skill directory, frontmatter name, and referenced paths consistent. Add supporting references or scripts only when needed and keep them inside the skill directory. A real Codex project can discover skills below `.agents/skills`; current Codex documentation describes scanning from the working directory through the repository root. Claude Code discovers project skills below `.claude/skills`. With the default unified prompt, Cortex lists these skills and reads their exact session-listed paths through MCP `read_skill`; the engines' native catalogs are disabled. When the unified prompt is disabled, Claude's native skill discovery is enabled. The guarded link exposes the same project directory to either discovery path:
+Keep the skill directory, frontmatter name, and referenced paths consistent. Add supporting references or scripts only when needed and keep them inside the skill directory. A real Codex project can discover skills below `.agents/skills`; current Codex documentation describes scanning from the working directory through the repository root. Claude Code discovers project skills below `.claude/skills`. With the default unified prompt, Cortex lists these skills to every session that can read project files and reads them through MCP `read_skill` by name or by project path (see [project skills](../unified-system-prompt/index.md#project-skills)); the engines' native catalogs are disabled. When the unified prompt is disabled, Claude's native skill discovery is enabled. The guarded link exposes the same project directory to either discovery path:
 
 ```text
 .claude/skills/<name> -> ../../.agents/skills/<name>
@@ -72,7 +72,7 @@ tool or installed-client parity; see [native incoming ACP](../../project/native-
 
 ## Bundled core skills and project extras
 
-The Cortex package ships its own shared skills; a target project does not create them. These include the coordinator-only `requirements-intake` and `design-workflow` guidance and the worker-only `design-*` skills, which are readable only by their stage owners. Their provenance and the design workflow are described in [requirements intake](../requirements-intake/index.md) and [UI/UX design workflow](../design-workflow/index.md#bundled-design-skills). Project-specific procedures are added with `/skill-management` as described above. A session-listed project skill is read by its exact path through `read_skill`, and it can take precedence over a bundled design skill when applicable, as the design workflow instructs.
+The Cortex package ships its own shared skills; a target project does not create them. These include the coordinator-only `requirements-intake` and `design-workflow` guidance and the worker-only `design-*` skills, which are readable only by their stage owners. Their provenance and the design workflow are described in [requirements intake](../requirements-intake/index.md) and [UI/UX design workflow](../design-workflow/index.md#bundled-design-skills). Project-specific procedures are added with `/skill-management` as described above. A session-listed project skill is read by its name or path through `read_skill` (a Cortex id of the same name still selects the Cortex skill, so such a project skill is read by its path), and it can take precedence over a bundled design skill when applicable, as the design workflow instructs.
 
 ## Checks and evidence
 

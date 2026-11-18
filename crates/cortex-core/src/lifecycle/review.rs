@@ -122,8 +122,94 @@ fn strings(v: &Value) -> CoreResult<Vec<String>> {
         })
         .collect()
 }
+/// Fresh reviews of one revision after an incomplete review.
+pub const MAX_INCOMPLETE_REVIEW_RERUNS: i64 = 2;
+/// The parts of the change a review reports it did not cover, as given in its
+/// `not_covered` (a BLOCK that names no finding left everything unconfirmed).
+fn uncovered(result: &Value) -> Vec<Value> {
+    result["not_covered"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+}
+/// After an INCOMPLETE review (or a BLOCK that names no finding, which counts as
+/// one), schedule a fresh review of the same revision: same dependencies and
+/// routing, a brief listing exactly what was left uncovered, recorded as
+/// `REVIEW_RERUN` with its reason. Never an approval and never a blocking finding.
+/// Returns false once this revision had `MAX_INCOMPLETE_REVIEW_RERUNS` reruns.
+fn rerun_incomplete_review_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    revision: i64,
+    review: &str,
+    result: &Value,
+    reason: &str,
+) -> CoreResult<bool> {
+    let reruns: i64 = db.query_row(
+        "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='REVIEW_RERUN' AND json_extract(payload_json,'$.revision')=?",
+        (task, revision),
+        |r| r.get(0),
+    )?;
+    if reruns >= MAX_INCOMPLETE_REVIEW_RERUNS {
+        return Ok(false);
+    }
+    let deps: String = db.query_row(
+        "SELECT dependencies_json FROM runtime_nodes WHERE task_id=? AND revision=? AND node_id=?",
+        (task, revision, review),
+        |r| r.get(0),
+    )?;
+    let base = review.split("_rerun").next().unwrap_or(review);
+    let node = format!("{base}_rerun{}", reruns + 1);
+    let report = result["report_ref"].as_str().unwrap_or("");
+    let left = uncovered(result);
+    let mut objective = format!(
+        "Independently review the objective, implementation and retained reports. The previous independent review of this \
+         revision (report {report}) did not finish: "
+    );
+    if left.is_empty() {
+        objective.push_str("it returned BLOCK without naming a confirmed problem, so none of its conclusions are established.");
+    } else {
+        objective.push_str("it left these parts uncovered, which this review must cover:");
+        for item in &left {
+            objective.push_str(&format!(
+                "\n- {} (not covered because: {})",
+                item["item"].as_str().unwrap_or(""),
+                item["reason"].as_str().unwrap_or("")
+            ));
+        }
+    }
+    objective.push_str(
+        "\nCover the whole change listed in the review packet: every changed file, and every predecessor report to its last page.",
+    );
+    db.execute(
+        "INSERT INTO runtime_nodes(task_id,revision,node_id,role,objective,dependencies_json,scope_json,stage,status)
+         VALUES (?,?,?,'worker-code-reviewer',?,?,'[\"**\"]','review','pending')",
+        (task, revision, &node, &objective, &deps),
+    )?;
+    let plan: Option<String> = db.query_row(
+        "SELECT plan_json FROM runtime_tasks WHERE task_id=?",
+        [task],
+        |r| r.get(0),
+    )?;
+    let plan: Value = serde_json::from_str(plan.as_deref().unwrap_or("{}"))?;
+    let routing = super::plan::node_routing(&plan, review);
+    let routing = if routing.as_object().is_some_and(|o| !o.is_empty()) {
+        routing
+    } else {
+        json!({"work_kind":"review","complexity":"normal"})
+    };
+    super::plan::record_node_routing_tx(db, task, &node, &routing)?;
+    event_tx(
+        db,
+        task,
+        "REVIEW_RERUN",
+        json!({"revision":revision,"review":review,"rerun":node,"report_ref":report,"reason":reason,"not_covered":left}),
+    )?;
+    Ok(true)
+}
 /// Select the latest review's outcome. Approval enables final verification;
-/// request-changes schedules bounded scoped fixes, BLOCK asks about the stop.
+/// request-changes schedules bounded scoped fixes; BLOCK with findings asks about the
+/// stop; INCOMPLETE (or a BLOCK naming no finding) reruns the review, bounded.
 pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
     let (state, revision) = domain::task_tx(db, task)?;
     if state != TaskState::Reviewing {
@@ -145,8 +231,22 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
         serde_json::from_str(&result.ok_or(CoreError::Refused("review_incomplete"))?)?;
     match result["verdict"].as_str() {
         Some("APPROVE") => return domain::state_tx(db, task, TaskState::Verifying, None),
-        Some("BLOCK") => {
+        // A BLOCK with confirmed problems goes to the coordinator to address them.
+        Some("BLOCK") if result["findings"].as_array().is_some_and(|f| !f.is_empty()) => {
             domain::stop_tx(db, task, "review_blocked")?;
+            return Ok(());
+        }
+        // An unfinished review (or a BLOCK naming no problem) is reviewed again by a
+        // fresh reviewer; after the bounded reruns the owner is asked.
+        Some(verdict @ ("INCOMPLETE" | "BLOCK")) => {
+            let reason = if verdict == "BLOCK" {
+                "block_without_findings"
+            } else {
+                "review_incomplete"
+            };
+            if !rerun_incomplete_review_tx(db, task, revision, &review, &result, reason)? {
+                domain::stop_tx(db, task, "review_incomplete")?;
+            }
             return Ok(());
         }
         Some("REQUEST_CHANGES") => {}
@@ -191,11 +291,9 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
     let rows = rows
         .into_iter()
         .filter(|n| {
-            planned
-                .as_ref()
-                .map_or(!n.0.starts_with('_'), |p| {
-                    p.contains(&n.0) && n.0 != "_consultation"
-                })
+            planned.as_ref().map_or(!n.0.starts_with('_'), |p| {
+                p.contains(&n.0) && n.0 != "_consultation"
+            })
         })
         .collect::<Vec<_>>();
     if rows.is_empty() {

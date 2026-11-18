@@ -150,7 +150,8 @@ pub(super) async fn verify_cancelled(
     verify_in(root, argv, cancel, None).await
 }
 /// The verifier launch. Production passes no environment: the sandbox takes the
-/// service's own, exactly as before; tests pass an explicit owner environment.
+/// service's own with `PATH` set to the owner's tool search path
+/// (`crate::tool_path`); tests pass an explicit owner environment.
 async fn verify_in(
     root: PathBuf,
     argv: &[String],
@@ -247,7 +248,8 @@ pub(super) async fn plan_preflight(root: PathBuf, plan: &Value) -> CoreResult<()
     verification_preflight(root, &canonical["verification"]).await
 }
 pub(super) async fn verification_preflight(root: PathBuf, verification: &Value) -> CoreResult<()> {
-    verification_preflight_in(root, verification, std::env::vars_os().collect()).await
+    // The same environment the verifier's launch takes: the owner's tool search path.
+    verification_preflight_in(root, verification, crate::tool_path::environment()).await
 }
 async fn verification_preflight_in(
     root: PathBuf,
@@ -302,7 +304,7 @@ async fn verification_preflight_in(
     }
     Ok(())
 }
-async fn git_ref(root: &Path, args: &[&str]) -> CoreResult<Output> {
+pub(super) async fn git_ref(root: &Path, args: &[&str]) -> CoreResult<Output> {
     let mut argv = vec![
         "/usr/bin/git".into(),
         "-c".into(),
@@ -367,12 +369,22 @@ const NESTED_DEPTH: u8 = 4;
 pub(super) async fn observe(root: PathBuf) -> CoreResult<EvidenceSnapshot> {
     Ok(observe_with(root, false).await?.0)
 }
+/// `observe`'s project digest alone, for presentation reads that compare a result with
+/// the folder. Ignored files feed only the ignored digest and completeness flags, so
+/// this pass never lists or visits them (a dependency folder can hold most of a
+/// project's files); the digest is the one `observe` returns for the same folder.
+pub(super) async fn observe_digest(root: PathBuf) -> CoreResult<String> {
+    Ok(observe_checkout(root, 0, false, false).await?.digest)
+}
 /// Observation plus the per-file manifest of the same pass, for change attribution.
 /// The manifest is `None` when the observation is incomplete or stands in by metadata
 /// only anywhere: a changed-file list built from it could not be trusted.
 pub(super) async fn observe_manifest(
     root: PathBuf,
-) -> CoreResult<(EvidenceSnapshot, Option<std::collections::BTreeMap<String, String>>)> {
+) -> CoreResult<(
+    EvidenceSnapshot,
+    Option<std::collections::BTreeMap<String, String>>,
+)> {
     let (snapshot, manifest) = observe_with(root, true).await?;
     let usable = !(snapshot.incomplete || snapshot.metadata_only || snapshot.cap_reached);
     Ok((snapshot, usable.then_some(manifest)))
@@ -381,23 +393,154 @@ async fn observe_with(
     root: PathBuf,
     with_manifest: bool,
 ) -> CoreResult<(EvidenceSnapshot, std::collections::BTreeMap<String, String>)> {
-    let o = observe_checkout(root, 0, with_manifest).await?;
+    let o = observe_checkout(root, 0, with_manifest, true).await?;
     let manifest = o.manifest;
-    let o = Observed { manifest: Default::default(), ..o };
-    Ok((EvidenceSnapshot {
-        project_digest: Some(o.digest),
-        ignored_digest: o.ignored,
-        metadata_only: o.flags.metadata_only,
-        cap_reached: o.flags.cap_reached,
-        incomplete: o.flags.incomplete,
-        ..Default::default()
-    }, manifest))
+    let o = Observed {
+        manifest: Default::default(),
+        ..o
+    };
+    Ok((
+        EvidenceSnapshot {
+            project_digest: Some(o.digest),
+            ignored_digest: o.ignored,
+            metadata_only: o.flags.metadata_only,
+            cap_reached: o.flags.cap_reached,
+            incomplete: o.flags.incomplete,
+            ..Default::default()
+        },
+        manifest,
+    ))
 }
-type ObservedFuture = std::pin::Pin<Box<dyn std::future::Future<Output = CoreResult<Observed>> + Send>>;
-fn observe_root(root: PathBuf, depth: u8) -> ObservedFuture {
-    Box::pin(observe_checkout(root, depth, false))
+type ObservedFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = CoreResult<Observed>> + Send>>;
+fn observe_root(root: PathBuf, depth: u8, with_ignored: bool) -> ObservedFuture {
+    Box::pin(observe_checkout(root, depth, false, with_ignored))
 }
-async fn observe_checkout(root: PathBuf, depth: u8, with_manifest: bool) -> CoreResult<Observed> {
+/// What one observation pass hashes: Git's listing of a repository, or the plain walk
+/// of a folder that is in no repository (`plain_listing`).
+struct Listing {
+    /// NUL-separated deliverable paths; a nested checkout is listed as `dir/`.
+    paths: Vec<u8>,
+    index: Vec<u8>,
+    pruned: Option<BTreeSet<Vec<u8>>>,
+    ignored: Option<Vec<u8>>,
+    head: Vec<u8>,
+}
+async fn observe_checkout(
+    root: PathBuf,
+    depth: u8,
+    with_manifest: bool,
+    with_ignored: bool,
+) -> CoreResult<Observed> {
+    // A plain project folder (in no Git repository at all) is observed by walking it.
+    // Only Git's own "not a git repository" answer selects that walk: any other Git
+    // failure (a broken, unreadable or untrusted repository) stays a refusal, and a
+    // repository is always observed by Git, so its digest never depends on this.
+    let listing = match git_listing(&root, with_ignored).await {
+        Ok(listing) => listing,
+        Err(e) if e.code() == "project_revision_unavailable" && no_repository(&root).await => {
+            let r = root.clone();
+            tokio::task::spawn_blocking(move || plain_listing(&r, with_ignored))
+                .await
+                .map_err(|_| refused())??
+        }
+        Err(e) => return Err(e),
+    };
+    observe_listed(root, depth, with_manifest, with_ignored, listing).await
+}
+/// True only when Git itself answers that `root` is in no repository (its own
+/// "not a git repository" refusal, which also names a filesystem boundary) and `root`
+/// holds no `.git` entry. A Git that cannot run, times out or fails otherwise is not
+/// such an answer.
+async fn no_repository(root: &Path) -> bool {
+    if !matches!(std::fs::symlink_metadata(root.join(".git")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    {
+        return false;
+    }
+    let argv = [
+        "/usr/bin/git".to_owned(),
+        "-c".into(),
+        "core.fsmonitor=false".into(),
+        "rev-parse".into(),
+        "--is-inside-work-tree".into(),
+    ];
+    let (_cancel, receiver) = tokio::sync::watch::channel(false);
+    match capture(command(root, &argv), Duration::from_secs(10), receiver).await {
+        Ok(o) => {
+            o.complete
+                && o.code == Some(128)
+                && o.stdout.is_empty()
+                && String::from_utf8_lossy(&o.stderr).contains("not a git repository")
+        }
+        Err(_) => false,
+    }
+}
+/// The private stores and dev markers at the top of a project; never project content.
+const PRIVATE_TOP: [&str; 4] = [
+    ".cortex",
+    ".cortex-dev",
+    ".cortex-dev-owner.json",
+    ".cortex-workspace-dev.json",
+];
+/// The listing of a plain project folder, in no Git repository: every entry that is
+/// not a directory (regular files, symlinks by their target, special files) is a
+/// deliverable path, as Git lists an untracked one; a directory holding a `.git` entry
+/// is a nested checkout listed as `dir/` and observed by its own pass; nothing is
+/// ignored (no ignore rules apply without a repository), so the ignored listing is
+/// empty. The private stores at the top and `.cortex`/`.cortex-dev` directories at any
+/// depth are skipped, as the empty-directory walk skips them. An unreadable directory
+/// is a refusal, never a partial listing; more than `WALK_LIMIT` entries is refused.
+/// Order does not matter: the digest sorts the names.
+fn plain_listing(root: &Path, with_ignored: bool) -> CoreResult<Listing> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut paths = Vec::new();
+    let mut seen = 0usize;
+    let mut pending = vec![(root.to_owned(), Vec::<u8>::new())];
+    while let Some((dir, rel)) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).map_err(|_| unreadable())? {
+            let entry = entry.map_err(|_| unreadable())?;
+            seen += 1;
+            if seen > WALK_LIMIT {
+                return Err(CoreError::Refused("project_unobservable_too_many_paths"));
+            }
+            let name = entry.file_name();
+            let name = name.as_bytes();
+            if rel.is_empty() && PRIVATE_TOP.iter().any(|t| t.as_bytes() == name) {
+                continue;
+            }
+            let mut path = rel.clone();
+            if !path.is_empty() {
+                path.push(b'/');
+            }
+            path.extend_from_slice(name);
+            if entry.file_type().map_err(|_| unreadable())?.is_dir() {
+                if name == b".cortex" || name == b".cortex-dev" {
+                    continue;
+                }
+                if entry.path().join(".git").symlink_metadata().is_ok() {
+                    path.push(b'/');
+                    paths.extend_from_slice(&path);
+                    paths.push(0);
+                    continue;
+                }
+                pending.push((entry.path(), path));
+            } else {
+                paths.extend_from_slice(&path);
+                paths.push(0);
+            }
+        }
+    }
+    Ok(Listing {
+        paths,
+        index: Vec::new(),
+        pruned: None,
+        ignored: with_ignored.then(Vec::new),
+        head: b"plain-folder".to_vec(),
+    })
+}
+async fn git_listing(root: &Path, with_ignored: bool) -> CoreResult<Listing> {
+    let root = root.to_owned();
     const EXCLUDE: [&str; 4] = [
         ":(exclude).cortex",
         ":(exclude).cortex-dev",
@@ -422,21 +565,71 @@ async fn observe_checkout(root: PathBuf, depth: u8, with_manifest: bool) -> Core
     )
     .await?;
     let index = git(&root, &pathspec(&["ls-files", "--stage", "-z"])).await?;
+    // The outermost wholly ignored directories (Git stops at each): the empty-directory
+    // walk never descends into them, in every observation, so their digests agree.
+    // A failed listing makes the folder unobservable; it never switches to another
+    // walk rule, whose digest would differ for the same tree.
+    let pruned: Option<BTreeSet<Vec<u8>>> = Some(
+        git(
+            &root,
+            &pathspec(&[
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+                "-z",
+            ]),
+        )
+        .await?
+        .split(|c| *c == 0)
+        .filter_map(|p| p.strip_suffix(b"/"))
+        .filter(|p| !p.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect(),
+    );
     // Ignored files are covered by metadata only; an incomplete listing is "unobserved".
-    let ignored = git(
-        &root,
-        &pathspec(&[
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "-z",
-        ]),
-    )
-    .await
-    .ok();
+    // A digest-only observation never lists them: they feed only the ignored digest.
+    let ignored = if with_ignored {
+        git(
+            &root,
+            &pathspec(&[
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            ]),
+        )
+        .await
+        .ok()
+    } else {
+        None
+    };
     // Ref-only queries never invoke worktree clean/smudge filters or hooks.
     let head = git_head(&root).await?;
+    Ok(Listing {
+        paths,
+        index,
+        pruned,
+        ignored,
+        head,
+    })
+}
+async fn observe_listed(
+    root: PathBuf,
+    depth: u8,
+    with_manifest: bool,
+    with_ignored: bool,
+    listing: Listing,
+) -> CoreResult<Observed> {
+    let Listing {
+        paths,
+        index,
+        pruned,
+        ignored,
+        head,
+    } = listing;
     // Submodules and nested repositories: the commit their checkout is at plus the
     // digest of everything inside the checkout (tracked changes, untracked files,
     // empty directories, its own ignored files), observed the same way as the project.
@@ -478,7 +671,7 @@ async fn observe_checkout(root: PathBuf, depth: u8, with_manifest: bool) -> Core
             flags.incomplete = true;
             value.push_str(":unobserved-depth");
         } else {
-            match observe_root(checkout, depth + 1).await {
+            match observe_root(checkout, depth + 1, with_ignored).await {
                 Ok(nested) => {
                     flags.merge(nested.flags);
                     value.push(':');
@@ -498,7 +691,7 @@ async fn observe_checkout(root: PathBuf, depth: u8, with_manifest: bool) -> Core
     let root2 = root.clone();
     let digest = tokio::task::spawn_blocking(move || {
         let mut manifest = std::collections::BTreeMap::new();
-        let (d, f) = tree_collect(
+        let (d, f) = tree_collect_in(
             &root2,
             &paths,
             &index,
@@ -506,6 +699,7 @@ async fn observe_checkout(root: PathBuf, depth: u8, with_manifest: bool) -> Core
             &heads,
             (FILE_LIMIT, TOTAL_LIMIT, TIME_LIMIT),
             with_manifest.then_some(&mut manifest),
+            pruned.as_ref(),
         )?;
         let i = ignored.and_then(|l| ignored_tree(&root2, &l));
         Ok::<_, CoreError>((d, i, f, manifest))
@@ -522,7 +716,10 @@ async fn observe_checkout(root: PathBuf, depth: u8, with_manifest: bool) -> Core
     if !nested_ignored.is_empty() {
         use sha2::Digest;
         let mut h = sha2::Sha256::new();
-        feed(&mut h, ignored.as_deref().unwrap_or("unobserved").as_bytes());
+        feed(
+            &mut h,
+            ignored.as_deref().unwrap_or("unobserved").as_bytes(),
+        );
         for (path, nested) in &nested_ignored {
             feed(&mut h, path.as_bytes());
             feed(&mut h, nested.as_deref().unwrap_or("unobserved").as_bytes());
@@ -554,7 +751,16 @@ mod tests {
         let heads = [("sub".to_owned(), "abc:nested".to_owned())].into();
         let manifest = |paths: &[u8]| {
             let mut m = std::collections::BTreeMap::new();
-            tree_collect(&base, paths, b"", None, &heads, (u64::MAX, u64::MAX, Duration::from_secs(60)), Some(&mut m)).unwrap();
+            tree_collect(
+                &base,
+                paths,
+                b"",
+                None,
+                &heads,
+                (u64::MAX, u64::MAX, Duration::from_secs(60)),
+                Some(&mut m),
+            )
+            .unwrap();
             m
         };
         let before = manifest(b"a\0b\0");
@@ -715,6 +921,169 @@ mod tests {
         git_cmd(dir, &["commit", "-qm", "init"]);
     }
     #[tokio::test]
+    async fn empty_directories_inside_ignored_trees_are_not_walked() {
+        let f = Fixture::new();
+        let base = f.0.join("project");
+        init_repo(&base);
+        std::fs::write(base.join(".gitignore"), "target/\n").unwrap();
+        git_cmd(&base, &["add", ".gitignore"]);
+        git_cmd(&base, &["commit", "-qm", "ignore"]);
+        std::fs::create_dir_all(base.join("target/debug/deps")).unwrap();
+        let full = observe(base.clone()).await.unwrap();
+        let d0 = full.project_digest.clone().unwrap();
+        assert!(!full.incomplete);
+        assert_eq!(observe_digest(base.clone()).await.unwrap(), d0);
+        // Build output under an ignored tree is not project content.
+        std::fs::create_dir_all(base.join("target/debug/incremental/x")).unwrap();
+        assert_eq!(observe_digest(base.clone()).await.unwrap(), d0);
+        assert_eq!(
+            observe(base.clone()).await.unwrap().project_digest.unwrap(),
+            d0
+        );
+        // An empty directory elsewhere still is.
+        std::fs::create_dir_all(base.join("docs/empty")).unwrap();
+        let d1 = observe_digest(base.clone()).await.unwrap();
+        assert_ne!(d1, d0);
+        assert_eq!(
+            observe(base.clone()).await.unwrap().project_digest.unwrap(),
+            d1
+        );
+    }
+    /// A plain project folder (in no Git repository) is observed completely by a walk:
+    /// stable, blind to the private stores, moved by every write, delete, mode change and
+    /// empty directory, with a usable per-file manifest and an (empty) ignored digest.
+    #[tokio::test]
+    async fn a_plain_folder_without_git_is_observed_by_a_walk() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let base = f.0.join("plain");
+        std::fs::create_dir(&base).unwrap();
+        assert!(
+            no_repository(&base).await,
+            "the fixture must be in no repository"
+        );
+        // An empty folder is observable and complete.
+        let empty = observe(base.clone()).await.unwrap();
+        assert!(!empty.incomplete && !empty.metadata_only && !empty.cap_reached);
+        assert!(empty.ignored_digest.is_some());
+        let d_empty = empty.project_digest.unwrap();
+        assert_eq!(observe_digest(base.clone()).await.unwrap(), d_empty);
+        std::fs::create_dir_all(base.join("docs/notes")).unwrap();
+        std::fs::write(base.join("docs/notes/a.md"), "one").unwrap();
+        std::fs::write(base.join("top.txt"), "top").unwrap();
+        std::os::unix::fs::symlink("top.txt", base.join("link")).unwrap();
+        let (snapshot, manifest) = observe_manifest(base.clone()).await.unwrap();
+        assert!(!snapshot.incomplete && !snapshot.metadata_only && !snapshot.cap_reached);
+        let d0 = snapshot.project_digest.clone().unwrap();
+        assert_ne!(d0, d_empty);
+        let manifest = manifest.expect("a complete plain observation has a manifest");
+        assert_eq!(
+            manifest.keys().collect::<Vec<_>>(),
+            ["docs/notes/a.md", "link", "top.txt"]
+        );
+        // Deterministic, and the digest-only pass agrees with the full one.
+        assert_eq!(
+            observe(base.clone()).await.unwrap().project_digest.unwrap(),
+            d0
+        );
+        assert_eq!(observe_digest(base.clone()).await.unwrap(), d0);
+        // The private stores and dev markers are never project content.
+        std::fs::create_dir_all(base.join(".cortex/t")).unwrap();
+        std::fs::write(base.join(".cortex/t/pipeline.md"), "private").unwrap();
+        std::fs::create_dir_all(base.join(".cortex-dev")).unwrap();
+        std::fs::write(base.join(".cortex-dev/cortex.sqlite3"), "private").unwrap();
+        std::fs::write(base.join(".cortex-dev-owner.json"), "{}").unwrap();
+        std::fs::write(base.join(".cortex-workspace-dev.json"), "{}").unwrap();
+        std::fs::create_dir_all(base.join("docs/.cortex")).unwrap();
+        std::fs::write(base.join("docs/.cortex/x"), "nested store").unwrap();
+        assert_eq!(observe_digest(base.clone()).await.unwrap(), d0);
+        // A write, a new file, a mode change and a delete each move the digest; the
+        // manifest attributes the change to exactly the file.
+        std::fs::write(base.join("docs/notes/a.md"), "two").unwrap();
+        let (after, changed) = observe_manifest(base.clone()).await.unwrap();
+        let changed = changed.unwrap();
+        assert_ne!(after.project_digest.clone().unwrap(), d0);
+        assert_ne!(changed["docs/notes/a.md"], manifest["docs/notes/a.md"]);
+        assert_eq!(changed["top.txt"], manifest["top.txt"]);
+        std::fs::write(base.join("docs/notes/a.md"), "one").unwrap();
+        assert_eq!(observe_digest(base.clone()).await.unwrap(), d0);
+        std::fs::write(base.join("new.txt"), "new").unwrap();
+        let (_, added) = observe_manifest(base.clone()).await.unwrap();
+        assert!(added.unwrap().contains_key("new.txt"));
+        std::fs::remove_file(base.join("new.txt")).unwrap();
+        assert_eq!(observe_digest(base.clone()).await.unwrap(), d0);
+        std::fs::set_permissions(base.join("top.txt"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        assert_ne!(observe_digest(base.clone()).await.unwrap(), d0);
+        std::fs::remove_file(base.join("top.txt")).unwrap();
+        let (_, deleted) = observe_manifest(base.clone()).await.unwrap();
+        assert!(!deleted.unwrap().contains_key("top.txt"));
+        std::fs::write(base.join("top.txt"), "top").unwrap();
+        std::fs::set_permissions(base.join("top.txt"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let d1 = observe_digest(base.clone()).await.unwrap();
+        // An empty directory is a project change, as in a repository.
+        std::fs::create_dir(base.join("hollow")).unwrap();
+        assert_ne!(observe_digest(base.clone()).await.unwrap(), d1);
+        std::fs::remove_dir(base.join("hollow")).unwrap();
+        assert_eq!(observe_digest(base.clone()).await.unwrap(), d1);
+        // A nested repository inside the plain folder is observed by its own pass.
+        init_repo(&base.join("nested"));
+        let with_nested = observe(base.clone()).await.unwrap();
+        assert!(!with_nested.incomplete);
+        let d2 = with_nested.project_digest.unwrap();
+        assert_ne!(d2, d1);
+        std::fs::write(base.join("nested/lib"), "edited").unwrap();
+        assert_ne!(observe_digest(base.clone()).await.unwrap(), d2);
+        std::fs::write(base.join("nested/lib"), "lib").unwrap();
+        assert_eq!(observe_digest(base.clone()).await.unwrap(), d2);
+        // An unreadable directory is a refusal, never a partial listing.
+        if unsafe { libc::geteuid() } != 0 {
+            std::fs::create_dir(base.join("closed")).unwrap();
+            std::fs::set_permissions(base.join("closed"), std::fs::Permissions::from_mode(0o000))
+                .unwrap();
+            let error = observe(base.clone()).await.err().unwrap();
+            assert_eq!(error.code(), "project_unobservable_unreadable_content");
+            std::fs::set_permissions(base.join("closed"), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+    }
+    /// "No repository" is only Git's own answer: a broken repository (a `.git` entry Git
+    /// cannot use) stays a refusal and is never observed as a plain folder.
+    #[tokio::test]
+    async fn a_broken_repository_is_refused_not_walked() {
+        let f = Fixture::new();
+        let base = f.0.join("broken");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::write(base.join("file"), "x").unwrap();
+        std::fs::write(base.join(".git"), "gitdir: /nonexistent/cortex-fixture\n").unwrap();
+        assert!(!no_repository(&base).await);
+        assert_eq!(
+            observe(base.clone()).await.err().unwrap().code(),
+            "project_revision_unavailable"
+        );
+        assert_eq!(
+            observe_digest(base).await.err().unwrap().code(),
+            "project_revision_unavailable"
+        );
+    }
+    /// A repository is observed by Git exactly as before: its digest differs from the
+    /// same files in a plain folder, which never stand in for a repository's.
+    #[tokio::test]
+    async fn a_repository_and_the_same_plain_files_have_different_digests() {
+        let f = Fixture::new();
+        let repo = f.0.join("repo");
+        let plain = f.0.join("plain");
+        init_repo(&repo);
+        std::fs::create_dir(&plain).unwrap();
+        std::fs::write(plain.join("lib"), "lib").unwrap();
+        assert!(!no_repository(&repo).await);
+        assert_ne!(
+            observe_digest(repo).await.unwrap(),
+            observe_digest(plain).await.unwrap()
+        );
+    }
+    #[tokio::test]
     async fn nested_dirty_state_empty_directories_and_metadata_only_are_observed() {
         let f = Fixture::new();
         let base = f.0.join("outer");
@@ -723,7 +1092,13 @@ mod tests {
         init_repo(&base);
         git_cmd(
             &base,
-            &["submodule", "add", "-q", sub_source.to_str().unwrap(), "sub"],
+            &[
+                "submodule",
+                "add",
+                "-q",
+                sub_source.to_str().unwrap(),
+                "sub",
+            ],
         );
         git_cmd(&base, &["commit", "-qm", "sub"]);
         // An untracked nested repository.
@@ -764,7 +1139,10 @@ mod tests {
         git_cmd(&base, &["add", ".gitignore"]);
         git_cmd(&base, &["commit", "-qm", "ignore"]);
         let d_ign = snap().await;
-        let (pd, id0) = (d_ign.project_digest.clone().unwrap(), d_ign.ignored_digest.clone().unwrap());
+        let (pd, id0) = (
+            d_ign.project_digest.clone().unwrap(),
+            d_ign.ignored_digest.clone().unwrap(),
+        );
         std::fs::create_dir(base.join("target")).unwrap();
         std::fs::write(base.join("target/out"), "build").unwrap();
         std::fs::write(base.join("ignored.log"), "one").unwrap();
@@ -773,7 +1151,11 @@ mod tests {
         assert_eq!(with.project_digest.clone().unwrap(), pd);
         let id1 = with.ignored_digest.clone().unwrap();
         assert_ne!(id1, id0);
-        assert_eq!(snap().await.ignored_digest.unwrap(), id1, "unchanged ignored files are stable");
+        assert_eq!(
+            snap().await.ignored_digest.unwrap(),
+            id1,
+            "unchanged ignored files are stable"
+        );
         std::fs::write(base.join("target/out"), "changed!").unwrap();
         assert_ne!(snap().await.ignored_digest.unwrap(), id1);
         // An ignored file inside a nested checkout moves the ignored digest, not the project's.
@@ -795,23 +1177,63 @@ mod tests {
         std::fs::write(base.join("big"), vec![1u8; 17 * 1024 * 1024]).unwrap();
         let before = snap().await;
         assert!(!before.metadata_only && !before.cap_reached && !before.incomplete);
-        let mtime = std::fs::metadata(base.join("big")).unwrap().modified().unwrap();
+        let mtime = std::fs::metadata(base.join("big"))
+            .unwrap()
+            .modified()
+            .unwrap();
         let mut edited = vec![1u8; 17 * 1024 * 1024];
         edited[9 * 1024 * 1024] = 2;
         std::fs::write(base.join("big"), &edited).unwrap();
-        std::fs::File::options().write(true).open(base.join("big")).unwrap().set_modified(mtime).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(base.join("big"))
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
         assert_ne!(snap().await.project_digest, before.project_digest);
         // Past a safety bound a deliverable file is metadata-only and the observation incomplete.
-        let (_, flags) = tree_within(&base, b"big\0", b"", None, &Default::default(), (1024, u64::MAX, Duration::from_secs(60))).unwrap();
+        let (_, flags) = tree_within(
+            &base,
+            b"big\0",
+            b"",
+            None,
+            &Default::default(),
+            (1024, u64::MAX, Duration::from_secs(60)),
+        )
+        .unwrap();
         assert!(flags.metadata_only && flags.cap_reached && flags.incomplete);
-        let (_, flags) = tree_within(&base, b"big\0", b"", None, &Default::default(), (u64::MAX, 1024, Duration::from_secs(60))).unwrap();
+        let (_, flags) = tree_within(
+            &base,
+            b"big\0",
+            b"",
+            None,
+            &Default::default(),
+            (u64::MAX, 1024, Duration::from_secs(60)),
+        )
+        .unwrap();
         assert!(flags.incomplete && flags.cap_reached);
-        let (_, flags) = tree_within(&base, b"big\0", b"", None, &Default::default(), (u64::MAX, u64::MAX, Duration::ZERO)).unwrap();
+        let (_, flags) = tree_within(
+            &base,
+            b"big\0",
+            b"",
+            None,
+            &Default::default(),
+            (u64::MAX, u64::MAX, Duration::ZERO),
+        )
+        .unwrap();
         assert!(flags.incomplete);
         // A special file (fifo) cannot be content-hashed: incomplete.
         let fifo = std::ffi::CString::new(base.join("pipe").to_str().unwrap()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
-        let (_, flags) = tree_within(&base, b"pipe\0", b"", None, &Default::default(), (u64::MAX, u64::MAX, Duration::from_secs(60))).unwrap();
+        let (_, flags) = tree_within(
+            &base,
+            b"pipe\0",
+            b"",
+            None,
+            &Default::default(),
+            (u64::MAX, u64::MAX, Duration::from_secs(60)),
+        )
+        .unwrap();
         assert!(flags.incomplete && flags.metadata_only);
         std::fs::remove_file(base.join("pipe")).unwrap();
         std::fs::remove_file(base.join("big")).unwrap();
@@ -976,6 +1398,75 @@ mod tests {
                 .await
                 .unwrap_err();
         assert_eq!(dangling.code(), "verification_executable_unavailable");
+    }
+    /// Plan admission and the program probe (`check_preflight` calls the same
+    /// `verification_preflight`) refused a program the owner's terminal has, because
+    /// the service's session-manager PATH lacks the shell's directories. With the
+    /// path read from the owner's login shell, admission accepts it and the final
+    /// verifier runs exactly that program.
+    #[tokio::test]
+    async fn admission_and_the_verifier_use_the_path_read_from_the_owners_shell() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        if !sandbox_available(&f.0).await {
+            eprintln!("skipped: bubblewrap cannot create user namespaces on this host");
+            return;
+        }
+        let s = crate::tool_path::tests::Scratch::new("admission");
+        let bin = s.dir("home/.nvm/versions/node/v24.1.0/bin");
+        let program = bin.join("cortex-fixture-npm");
+        std::fs::write(&program, "#!/bin/sh\necho fixture-npm \"$1\"\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let shell = crate::tool_path::tests::login_shell(
+            &s,
+            &format!(
+                ". /dev/null\necho 'Now using node v24'\nexport PATH={}:$PATH\n",
+                bin.display()
+            ),
+        );
+        let home = s.0.join("home");
+        let systemd_path = "/usr/local/bin:/usr/bin:/bin";
+        let detected = crate::tool_path::detect(
+            &shell,
+            &home,
+            std::ffi::OsStr::new(systemd_path),
+            &[],
+            Duration::from_secs(5),
+        );
+        let project = s.dir("project");
+        std::fs::write(project.join("file"), "x").unwrap();
+        let before: BTreeMap<OsString, OsString> = [
+            ("HOME".into(), home.clone().into_os_string()),
+            ("PATH".into(), systemd_path.into()),
+        ]
+        .into();
+        let check = json!([["cortex-fixture-npm", "--version"]]);
+        let refused = verification_preflight_in(project.clone(), &check, before)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), "verification_executable_unavailable");
+        let after: BTreeMap<OsString, OsString> = [
+            ("HOME".into(), home.into_os_string()),
+            (
+                "PATH".into(),
+                std::env::join_paths(&detected.directories).unwrap(),
+            ),
+        ]
+        .into();
+        verification_preflight_in(project.clone(), &check, after.clone())
+            .await
+            .expect("the program on the owner's shell path is admitted");
+        let (_cancel, receiver) = tokio::sync::watch::channel(false);
+        let ran = verify_in(
+            project,
+            &["cortex-fixture-npm".into(), "--version".into()],
+            receiver,
+            Some(after),
+        )
+        .await
+        .unwrap();
+        assert_eq!(ran["observation"]["exit_code"], 0, "{ran}");
+        assert_eq!(ran["observation"]["stdout"], "fixture-npm --version\n");
     }
 }
 /// Safety bounds for hashing deliverable content. Real projects stay far below them;
@@ -1169,7 +1660,14 @@ fn tree(
     head: Option<&[u8]>,
     heads: &std::collections::BTreeMap<String, String>,
 ) -> CoreResult<(String, Flags)> {
-    tree_within(root, paths, index, head, heads, (FILE_LIMIT, TOTAL_LIMIT, TIME_LIMIT))
+    tree_within(
+        root,
+        paths,
+        index,
+        head,
+        heads,
+        (FILE_LIMIT, TOTAL_LIMIT, TIME_LIMIT),
+    )
 }
 #[cfg(test)]
 fn tree_within(
@@ -1182,7 +1680,21 @@ fn tree_within(
 ) -> CoreResult<(String, Flags)> {
     tree_collect(root, paths, index, head, heads, limits, None)
 }
+#[cfg(test)]
 fn tree_collect(
+    root: &Path,
+    paths: &[u8],
+    index: &[u8],
+    head: Option<&[u8]>,
+    heads: &std::collections::BTreeMap<String, String>,
+    limits: (u64, u64, Duration),
+    manifest: Option<&mut std::collections::BTreeMap<String, String>>,
+) -> CoreResult<(String, Flags)> {
+    tree_collect_in(root, paths, index, head, heads, limits, manifest, None)
+}
+/// `tree_collect` whose empty-directory walk skips the `pruned` ignored directories.
+#[allow(clippy::too_many_arguments)]
+fn tree_collect_in(
     root: &Path,
     paths: &[u8],
     index: &[u8],
@@ -1190,6 +1702,7 @@ fn tree_collect(
     heads: &std::collections::BTreeMap<String, String>,
     (file_limit, total_limit, time_limit): (u64, u64, Duration),
     mut manifest: Option<&mut std::collections::BTreeMap<String, String>>,
+    pruned: Option<&BTreeSet<Vec<u8>>>,
 ) -> CoreResult<(String, Flags)> {
     use sha2::Digest;
     let mut flags = Flags::default();
@@ -1203,100 +1716,264 @@ fn tree_collect(
     if names.len() > NAME_LIMIT {
         return Err(CoreError::Refused("project_unobservable_too_many_paths"));
     }
-    let dir = File::open(root)?;
-    let started = std::time::Instant::now();
-    let mut hashed = 0u64;
-    for name in names {
-        let name = checked_name(name)?;
-        let mut seen = lookup(&dir, name, true)?;
-        feed(&mut h, name.as_bytes());
-        h.update([seen.kind]);
-        // Per-file identity for change attribution (a content hash when streamed).
-        let mut entry = sha2::Sha256::new();
-        entry.update([seen.kind]);
-        entry.update(seen.mode.to_be_bytes());
-        match seen.kind {
-            REGULAR => {
-                let mut file = seen.file.take().unwrap();
-                let before = file.metadata()?;
-                h.update((seen.mode & 0o7777).to_be_bytes());
-                h.update(before.len().to_be_bytes());
-                if before.len() <= file_limit
-                    && hashed + before.len() <= total_limit
-                    && started.elapsed() <= time_limit
-                {
-                    let mut buffer = vec![0u8; 64 * 1024];
-                    let mut read = 0u64;
-                    loop {
-                        let n = file.read(&mut buffer).map_err(|_| unreadable())?;
-                        if n == 0 {
-                            break;
+    // Empty directories are a walk of their own (see below): it runs while the files are hashed.
+    std::thread::scope(|scope| {
+        let walk = scope.spawn(|| empty_directories(root, pruned));
+        let dir = File::open(root)?;
+        let started = std::time::Instant::now();
+        let mut hashed = 0u64;
+        for name in names {
+            let name = checked_name(name)?;
+            let mut seen = lookup(&dir, name, true)?;
+            feed(&mut h, name.as_bytes());
+            h.update([seen.kind]);
+            // Per-file identity for change attribution (a content hash when streamed).
+            let mut entry = sha2::Sha256::new();
+            entry.update([seen.kind]);
+            entry.update(seen.mode.to_be_bytes());
+            match seen.kind {
+                REGULAR => {
+                    let mut file = seen.file.take().unwrap();
+                    let before = file.metadata()?;
+                    h.update((seen.mode & 0o7777).to_be_bytes());
+                    h.update(before.len().to_be_bytes());
+                    if before.len() <= file_limit
+                        && hashed + before.len() <= total_limit
+                        && started.elapsed() <= time_limit
+                    {
+                        let mut buffer = vec![0u8; 64 * 1024];
+                        let mut read = 0u64;
+                        loop {
+                            let n = file.read(&mut buffer).map_err(|_| unreadable())?;
+                            if n == 0 {
+                                break;
+                            }
+                            read += n as u64;
+                            if read > before.len() {
+                                return Err(changed());
+                            }
+                            h.update(&buffer[..n]);
+                            entry.update(&buffer[..n]);
                         }
-                        read += n as u64;
-                        if read > before.len() {
+                        let after = file.metadata()?;
+                        if read != before.len() || before.modified()? != after.modified()? {
                             return Err(changed());
                         }
-                        h.update(&buffer[..n]);
-                        entry.update(&buffer[..n]);
+                        hashed += read;
+                        h.update(b"content");
+                    } else {
+                        // Over the limits: size, mtime and mode stand in for the content.
+                        // That is metadata only: restoring the mtime defeats it, so no waiver.
+                        flags.metadata_only = true;
+                        flags.cap_reached = true;
+                        flags.incomplete = true;
+                        h.update(b"large-file");
+                        h.update(seen.mtime.0.to_be_bytes());
+                        h.update(seen.mtime.1.to_be_bytes());
                     }
-                    let after = file.metadata()?;
-                    if read != before.len() || before.modified()? != after.modified()? {
-                        return Err(changed());
-                    }
-                    hashed += read;
-                    h.update(b"content");
-                } else {
-                    // Over the limits: size, mtime and mode stand in for the content.
-                    // That is metadata only: restoring the mtime defeats it, so no waiver.
-                    flags.metadata_only = true;
-                    flags.cap_reached = true;
-                    flags.incomplete = true;
-                    h.update(b"large-file");
-                    h.update(seen.mtime.0.to_be_bytes());
-                    h.update(seen.mtime.1.to_be_bytes());
                 }
+                LINK => {
+                    feed(&mut h, &seen.target);
+                    entry.update(&seen.target);
+                }
+                DIRECTORY => {
+                    let nested = heads
+                        .get(name.trim_end_matches('/'))
+                        .map(String::as_bytes)
+                        .unwrap_or(b"no-checkout");
+                    feed(&mut h, nested);
+                    entry.update(nested);
+                }
+                SPECIAL => {
+                    // A fifo, socket or device has no content to hash: deny the waiver.
+                    flags.metadata_only = true;
+                    flags.incomplete = true;
+                    h.update(seen.mode.to_be_bytes())
+                }
+                _ => {}
             }
-            LINK => {
-                feed(&mut h, &seen.target);
-                entry.update(&seen.target);
+            if let Some(m) = manifest.as_deref_mut() {
+                m.insert(name.to_owned(), hex(entry));
             }
-            DIRECTORY => {
-                let nested = heads
-                    .get(name.trim_end_matches('/'))
-                    .map(String::as_bytes)
-                    .unwrap_or(b"no-checkout");
-                feed(&mut h, nested);
-                entry.update(nested);
-            }
-            SPECIAL => {
-                // A fifo, socket or device has no content to hash: deny the waiver.
-                flags.metadata_only = true;
-                flags.incomplete = true;
-                h.update(seen.mode.to_be_bytes())
-            }
-            _ => {}
         }
-        if let Some(m) = manifest.as_deref_mut() {
-            m.insert(name.to_owned(), hex(entry));
+        // Git does not track empty directories; creating or removing one is a project change.
+        let (empty, complete) = walk.join().map_err(|_| unreadable())?;
+        flags.incomplete |= !complete;
+        if !complete {
+            // An incomplete walk (over `WALK_LIMIT` entries, or an unreadable directory)
+            // observed nothing reliable: this digest is unique to this observation, so it
+            // never compares as unchanged with another one.
+            static UNOBSERVED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            h.update(b"empty-directories-unobserved");
+            h.update(std::process::id().to_be_bytes());
+            h.update(
+                UNOBSERVED
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    .to_be_bytes(),
+            );
+            h.update(format!("{:?}", std::time::SystemTime::now()).as_bytes());
         }
-    }
-    // Git does not track empty directories; creating or removing one is a project change.
-    let (empty, complete) = empty_directories(root);
-    flags.incomplete |= !complete;
-    h.update(b"empty-directories");
-    for name in empty {
-        feed(&mut h, &name);
-        if let Some(m) = manifest.as_deref_mut() {
-            m.insert(format!("{}/", String::from_utf8_lossy(&name)), "empty".to_owned());
+        h.update(b"empty-directories");
+        for name in empty {
+            feed(&mut h, &name);
+            if let Some(m) = manifest.as_deref_mut() {
+                m.insert(
+                    format!("{}/", String::from_utf8_lossy(&name)),
+                    "empty".to_owned(),
+                );
+            }
         }
-    }
-    Ok((hex(h), flags))
+        Ok((hex(h), flags))
+    })
 }
 const WALK_LIMIT: usize = 300_000;
 /// Paths of directories with no entries, outside the private stores and nested
 /// repositories (those are observed by their own pass). `false` when the walk could
 /// not be completed.
-fn empty_directories(root: &Path) -> (BTreeSet<Vec<u8>>, bool) {
+///
+/// A large folder (a dependency folder alone can hold most of a project's entries) is
+/// walked by several threads. A complete walk has one answer whatever the order; an
+/// incomplete one (an unreadable directory) is the ordered walk's, which is then made
+/// and returned. A walk over `WALK_LIMIT` entries is incomplete with no directories
+/// named, whichever walk meets the bound: it is never walked a second time.
+///
+/// `pruned` directories (wholly Git-ignored ones, relative to `root`) are not entered:
+/// ignored content is not deliverable, and a dependency or build folder can hold most
+/// of a project's entries.
+fn empty_directories(root: &Path, pruned: Option<&BTreeSet<Vec<u8>>>) -> (BTreeSet<Vec<u8>>, bool) {
+    match empty_directories_parallel(root, WALKERS, pruned) {
+        Ok(found) => (found, true),
+        Err(true) => (BTreeSet::new(), false),
+        Err(false) => empty_directories_ordered(root, pruned),
+    }
+}
+/// Threads of one parallel empty-directory walk.
+const WALKERS: usize = 8;
+/// The entries `empty_directories_ordered` visits, read by `threads` threads at once.
+/// `Err(true)` when they exceed `WALK_LIMIT`, `Err(false)` when the walk is otherwise
+/// incomplete.
+fn empty_directories_parallel(
+    root: &Path,
+    threads: usize,
+    pruned: Option<&BTreeSet<Vec<u8>>>,
+) -> Result<BTreeSet<Vec<u8>>, bool> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Condvar, Mutex,
+    };
+    type Job = (std::path::PathBuf, Vec<u8>);
+    // Directories waiting to be read, and how many are being read right now.
+    let queue: Mutex<(Vec<Job>, usize)> = Mutex::new((vec![(root.to_owned(), Vec::new())], 0));
+    let ready = Condvar::new();
+    let seen = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let over = AtomicBool::new(false);
+    let found = Mutex::new(BTreeSet::new());
+    // Set under the queue lock, so a walker about to wait always sees it or is woken.
+    let fail = || {
+        let _queue = queue.lock();
+        failed.store(true, Ordering::SeqCst);
+        ready.notify_all();
+    };
+    // The next directory to read; None once none is left or the walk failed.
+    let next = || -> Option<Job> {
+        let mut q = queue.lock().ok()?;
+        loop {
+            if failed.load(Ordering::SeqCst) {
+                return None;
+            }
+            if let Some(job) = q.0.pop() {
+                q.1 += 1;
+                return Some(job);
+            }
+            if q.1 == 0 {
+                return None;
+            }
+            q = ready.wait(q).ok()?;
+        }
+    };
+    // One read directory's subdirectories join the queue.
+    let done = |children: Vec<Job>| match queue.lock() {
+        Ok(mut q) => {
+            q.0.extend(children);
+            q.1 -= 1;
+            ready.notify_all();
+        }
+        Err(_) => {
+            failed.store(true, Ordering::SeqCst);
+            ready.notify_all();
+        }
+    };
+    std::thread::scope(|scope| {
+        for _ in 0..threads.max(1) {
+            scope.spawn(|| {
+                let mut empty = Vec::new();
+                while let Some((dir, rel)) = next() {
+                    let mut children = Vec::new();
+                    let read = (|| -> Option<bool> {
+                        let mut any = false;
+                        for entry in std::fs::read_dir(&dir).ok()? {
+                            let entry = entry.ok()?;
+                            any = true;
+                            if seen.fetch_add(1, Ordering::SeqCst) >= WALK_LIMIT {
+                                over.store(true, Ordering::SeqCst);
+                                return None;
+                            }
+                            let name = entry.file_name();
+                            if !entry.file_type().ok()?.is_dir() {
+                                continue;
+                            }
+                            if [".git", ".cortex", ".cortex-dev"]
+                                .iter()
+                                .any(|n| name.as_bytes() == n.as_bytes())
+                            {
+                                continue;
+                            }
+                            let mut child = rel.clone();
+                            if !child.is_empty() {
+                                child.push(b'/');
+                            }
+                            child.extend_from_slice(name.as_bytes());
+                            if pruned.is_some_and(|p| p.contains(&child)) {
+                                continue;
+                            }
+                            let path = entry.path();
+                            // A nested checkout is observed by its own pass.
+                            if path.join(".git").symlink_metadata().is_ok() {
+                                continue;
+                            }
+                            children.push((path, child));
+                        }
+                        Some(any)
+                    })();
+                    let Some(any) = read else {
+                        fail();
+                        break;
+                    };
+                    if !any && !rel.is_empty() {
+                        empty.push(rel);
+                    }
+                    done(children);
+                }
+                match found.lock() {
+                    Ok(mut found) => found.extend(empty),
+                    Err(_) => fail(),
+                }
+            });
+        }
+    });
+    if failed.load(Ordering::SeqCst) {
+        return Err(over.load(Ordering::SeqCst));
+    }
+    found.into_inner().map_err(|_| false)
+}
+/// The single ordered walk: its result, complete or not, is the observation's
+/// (over `WALK_LIMIT`, incomplete with no directories named).
+fn empty_directories_ordered(
+    root: &Path,
+    pruned: Option<&BTreeSet<Vec<u8>>>,
+) -> (BTreeSet<Vec<u8>>, bool) {
     use std::os::unix::ffi::OsStrExt;
     let mut found = BTreeSet::new();
     let mut seen = 0usize;
@@ -1313,7 +1990,7 @@ fn empty_directories(root: &Path) -> (BTreeSet<Vec<u8>>, bool) {
             any = true;
             seen += 1;
             if seen > WALK_LIMIT {
-                return (found, false);
+                return (BTreeSet::new(), false);
             }
             let name = entry.file_name();
             let Ok(kind) = entry.file_type() else {
@@ -1328,16 +2005,19 @@ fn empty_directories(root: &Path) -> (BTreeSet<Vec<u8>>, bool) {
             {
                 continue;
             }
-            let path = entry.path();
-            // A nested checkout is observed by its own pass.
-            if path.join(".git").symlink_metadata().is_ok() {
-                continue;
-            }
             let mut child = rel.clone();
             if !child.is_empty() {
                 child.push(b'/');
             }
             child.extend_from_slice(name.as_bytes());
+            if pruned.is_some_and(|p| p.contains(&child)) {
+                continue;
+            }
+            let path = entry.path();
+            // A nested checkout is observed by its own pass.
+            if path.join(".git").symlink_metadata().is_ok() {
+                continue;
+            }
             pending.push((path, child));
         }
         if !any && !rel.is_empty() {

@@ -147,7 +147,8 @@ struct Cases {
 }
 
 fn load_golden() -> BTreeMap<String, (String, Option<i64>)> {
-    let value: serde_json::Value = serde_json::from_slice(&fs::read(GOLDEN).expect("tests/parity-golden.json")).unwrap();
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(GOLDEN).expect("tests/parity-golden.json")).unwrap();
     value
         .as_object()
         .unwrap()
@@ -155,7 +156,10 @@ fn load_golden() -> BTreeMap<String, (String, Option<i64>)> {
         .map(|(key, outcome)| {
             (
                 key.clone(),
-                (outcome["stdout"].as_str().unwrap().to_owned(), outcome["code"].as_i64()),
+                (
+                    outcome["stdout"].as_str().unwrap().to_owned(),
+                    outcome["code"].as_i64(),
+                ),
             )
         })
         .collect()
@@ -182,7 +186,8 @@ impl Cases {
         } else if let Some((stdout, code)) = self.golden.get(&key) {
             (denormalize(stdout).into_bytes(), code.map(|c| c as i32))
         } else {
-            self.failures.push(format!("{label}: no recorded Python outcome for {key}"));
+            self.failures
+                .push(format!("{label}: no recorded Python outcome for {key}"));
             return;
         };
         let actual = rust(command, args);
@@ -866,7 +871,11 @@ fn main() {
         count: 0,
         failures: Vec::new(),
         last: String::new(),
-        golden: if recording { BTreeMap::new() } else { load_golden() },
+        golden: if recording {
+            BTreeMap::new()
+        } else {
+            load_golden()
+        },
         recording: recording.then(BTreeMap::new),
         seen: BTreeMap::new(),
     };
@@ -1181,7 +1190,11 @@ fn main() {
             .map(|(key, (stdout, code))| (key, serde_json::json!({"stdout": stdout, "code": code})))
             .collect();
         let path = std::env::var("CORTEX_PARITY_RECORD").unwrap();
-        fs::write(&path, serde_json::to_string_pretty(&document).unwrap() + "\n").unwrap();
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&document).unwrap() + "\n",
+        )
+        .unwrap();
         println!("parity: recorded {} golden outcomes to {path}", cases.count);
         return;
     }
@@ -1190,5 +1203,8 @@ fn main() {
         cases.count,
         "the golden file holds cases this run did not exercise (or the reverse)"
     );
-    println!("parity: {} cases identical to the recorded Python outcomes", cases.count);
+    println!(
+        "parity: {} cases identical to the recorded Python outcomes",
+        cases.count
+    );
 }

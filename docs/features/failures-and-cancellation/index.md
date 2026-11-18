@@ -81,7 +81,24 @@ and the route is recorded unavailable for automatic routing (see
 
 ### MCP tool errors
 
-The MCP server distinguishes a typed portable failure from an unexpected storage
+The native gateway reports every failed Cortex tool call by its stable code;
+enforcement does not depend on how a failure is reported. After the channel is
+authenticated, a handler failure is an `isError` tool result whose structured
+content carries `code`, the offending `field` when known and a short corrective
+`hint`, for example `request_key_conflict`, `gateway_write_conflict`,
+`invalid_scope`, `replan_limit_requires_user_input`, `synthesis_gaps_undisclosed`
+(with the current gap names) or `pipeline_missing`. Authority failures stay
+JSON-RPC `-32001` refusals named `authority_refused: <code>` with
+`data: {code, retryable: false, hint}`: a channel that is no longer current, a
+tool not offered to the role or stage (`tool_not_offered`), a read-only role,
+an owner-protected path (`write_denied`) or a missing owner confirmation
+(`deletion_not_confirmed`). `result_submit` keeps its own split between
+correctable content refusals (tool errors) and named refusals. Arguments that do
+not match the advertised schema are `-32602 invalid_arguments` with a pointer to
+the live schema. Hints are fixed text; they never include another task's data, a
+path outside the project or a credential.
+
+The former Python MCP server distinguishes a typed portable failure from an unexpected storage
 exception. Its portable envelope retains a bounded identifier code, `category`,
 `retry_eligible` and `write_state`, with fixed, value-free guidance. It does not
 copy exception remediation/details or arbitrary fields, which can contain local

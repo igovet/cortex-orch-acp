@@ -855,7 +855,10 @@ async fn steer_busy(
                 .filter_map(|b| b["text"].as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
-            (open.first().copied(), if typed.trim().is_empty() { text } else { typed })
+            (
+                open.first().copied(),
+                if typed.trim().is_empty() { text } else { typed },
+            )
         }
     };
     let Some(chosen) = chosen else {
@@ -897,7 +900,10 @@ async fn steer_busy(
         .as_array()
         .is_some_and(|a| a.iter().any(|b| b["type"] != "text"))
     {
-        session.host.retain_answer_attachments(sid, blocks.clone()).await?;
+        session
+            .host
+            .retain_answer_attachments(sid, blocks.clone())
+            .await?;
     }
     session.host.answer(sid, question, &value).await?;
     permissions.retire_question(sid, question).await;
@@ -1412,9 +1418,12 @@ async fn follow(
                     if !questions.insert(batch.into()) {
                         continue;
                     }
-                    let members:Vec<_>=items.iter().filter(|m|m["batchId"]==batch).map(|m|
-                        json!({"questionId":m["questionId"],"question":m["prompt"],
-                            "options":m["options"].as_array().unwrap().iter().map(|o|o["label"].clone()).collect::<Vec<_>>()})).collect();
+                    // Python `elicit_batch` members carry the optional `topic` tab label.
+                    let members:Vec<_>=items.iter().filter(|m|m["batchId"]==batch).map(|m| {
+                        let mut v=json!({"questionId":m["questionId"],"question":m["prompt"],
+                            "options":m["options"].as_array().unwrap().iter().map(|o|o["label"].clone()).collect::<Vec<_>>()});
+                        if m["topic"].is_string() {v["topic"]=m["topic"].clone();}
+                        v}).collect();
                     // Python `elicit_batch` option ids, which the Paseo plugin's
                     // question form validates: `cortex-batch:<question>:<n>`.
                     let options: Vec<_> = items

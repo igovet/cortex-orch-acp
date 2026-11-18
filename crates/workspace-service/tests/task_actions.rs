@@ -243,11 +243,24 @@ async fn joining_a_sprint_records_the_plan_title() {
     }).unwrap();
     fs::create_dir_all(f.path().parent().unwrap()).unwrap();
     use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(f.path().parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
-    fs::write(f.path(), json!({"tasks":{"t2":{"title":"Owner title","titleState":"user"}},
-        "sprints":[{"id":"sp","taskIds":[],"targetBranch":null,"queueState":"idle"}]}).to_string()).unwrap();
+    fs::set_permissions(
+        f.path().parent().unwrap(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    fs::write(
+        f.path(),
+        json!({"tasks":{"t2":{"title":"Owner title","titleState":"user"}},
+        "sprints":[{"id":"sp","taskIds":[],"targetBranch":null,"queueState":"idle"}]})
+        .to_string(),
+    )
+    .unwrap();
     let join = |task: &str, title: Value| json!({"action":"sprint","taskId":task,"sprintId":"sp","dependencies":[],"title":title});
-    assert_eq!(f.call(join("t1", json!("  Добавить метод decrement  "))).await["ok"], true);
+    assert_eq!(
+        f.call(join("t1", json!("  Добавить метод decrement  ")))
+            .await["ok"],
+        true
+    );
     assert_eq!(f.call(join("t2", json!("Plan title"))).await["ok"], true);
     let saved: Value = serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
     assert_eq!(saved["tasks"]["t1"]["title"], "Добавить метод decrement");
@@ -257,10 +270,16 @@ async fn joining_a_sprint_records_the_plan_title() {
     assert_eq!(saved["sprints"][0]["taskIds"], json!(["t1", "t2"]));
     let read = f
         .service
-        .machine(serde_json::from_value(json!({"op":"product.read","projectId":f.id,"params":{}})).unwrap())
+        .machine(
+            serde_json::from_value(json!({"op":"product.read","projectId":f.id,"params":{}}))
+                .unwrap(),
+        )
         .await
         .unwrap();
-    assert_eq!(read["result"]["tasks"]["t1"]["title"], "Добавить метод decrement", "{read}");
+    assert_eq!(
+        read["result"]["tasks"]["t1"]["title"], "Добавить метод decrement",
+        "{read}"
+    );
     // A title that is not text is refused before any write.
     let before = fs::read(f.path()).unwrap();
     let refused = f.call(join("t1", json!(["x"]))).await;
@@ -653,7 +672,7 @@ fn authority(store: &cortex_core::Store) -> Vec<Vec<String>> {
 async fn owner_review_matches_without_an_engine() {
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/task-review-python.json")).unwrap();
-    assert_eq!(fixture["cases"].as_array().unwrap().len(), 110);
+    assert_eq!(fixture["cases"].as_array().unwrap().len(), 83);
     let cases = fixture["cases"].as_array().unwrap();
     let unique = cases
         .iter()
@@ -667,7 +686,7 @@ async fn review_unsupported_legacy_shapes_refuse_natively_before_effects() {
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/task-review-python.json")).unwrap();
     let case = &fixture["cases"][0];
-    for action in ["accept", "answer_archive"] {
+    for action in ["accept"] {
         for checkout in [
             json!({"kind":123,"path":"/unrelated","branch":"task"}),
             json!("legacy"),
@@ -719,27 +738,6 @@ async fn review_unsupported_legacy_shapes_refuse_natively_before_effects() {
             assert_eq!(error["code"], "unknown_checkout");
             assert_eq!(fs::read(f.path()).unwrap(), before);
             assert_eq!(authority(&store), authoritative);
-            // A too-large legacy integer is not rounded into new consent timing.
-            fs::write(f.path(), f.replace(&case["saved"]).to_string()).unwrap();
-            fs::write(
-                f.state.join("machine.json"),
-                json!({"autoArchiveDays":u64::MAX}).to_string(),
-            )
-            .unwrap();
-            let before = fs::read(f.path()).unwrap();
-            let error = f
-                .service
-                .machine(
-                    serde_json::from_value(json!({"op":"product.task","projectId":f.id,
-                "params":{"action":"answer_archive","taskId":"t1","discard":false}}))
-                    .unwrap(),
-                )
-                .await
-                .expect("native refusal, not a retained-provider failure");
-            // A too-large integer interval is refused, never rounded or replayed.
-            assert_eq!(error["ok"], false);
-            assert_eq!(error["code"], "archive_interval_unsupported");
-            assert_eq!(fs::read(f.path()).unwrap(), before);
             f.service.stop().await.unwrap();
         }
     }
@@ -754,7 +752,7 @@ async fn owner_review_store_exclusion_and_failed_save_do_not_delegate() {
     );
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/task-review-python.json")).unwrap();
-    for action in ["accept", "answer_archive"] {
+    for action in ["accept"] {
         for fault in ["store_lock", "overlay_save"] {
             let f = Fixture::new().await;
             let store = f.store();
@@ -818,8 +816,47 @@ async fn owner_review_store_exclusion_and_failed_save_do_not_delegate() {
         }
     }
 }
+/// The retained cases name files inline; the desktop now uploads them first and sends
+/// references. Each body is stored the way the upload stores it, so the cases keep
+/// their meaning (an invalid name is still refused, as an invalid reference).
+fn saved_references(state: &std::path::Path, mut params: Value) -> Value {
+    use base64::Engine as _;
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let Some(items) = params["payload"]["attachments"].as_array_mut() else {
+        return params;
+    };
+    let folder = state.join("attachments");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(&folder)
+        .unwrap();
+    for item in items {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(item["data"].as_str().unwrap())
+            .unwrap();
+        let sha = format!("{:x}", Sha256::digest(&bytes));
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(folder.join(&sha))
+            .unwrap();
+        std::io::Write::write_all(&mut file, &bytes).unwrap();
+        *item = json!({"name":item["name"],"mimeType":item["mimeType"],"size":bytes.len(),"sha256":sha});
+    }
+    params
+}
 async fn check_actions(fixture: &Value) {
     for case in fixture["cases"].as_array().unwrap() {
+        // auto_ready now requires native finish-time mode evidence and uses the
+        // acceptance validator; the historical unchecked lifecycle oracle no longer applies.
+        // Its replacement is covered by task_review::native_acceptance_tests and the queue test.
+        if case["params"]["action"] == "auto_ready" {
+            continue;
+        }
         let f = Fixture::new().await;
         setup_git(&f, fixture, case);
         let store = if case["store"] == true {
@@ -878,7 +915,9 @@ async fn check_actions(fixture: &Value) {
             fs::set_permissions(f.root.join("a.txt"), fs::Permissions::from_mode(0o000)).unwrap();
         }
         let before_time = now_ms();
-        let mut reply = f.call(f.replace(&case["params"])).await;
+        let mut reply = f
+            .call(saved_references(&f.state, f.replace(&case["params"])))
+            .await;
         let after_time = now_ms();
         if case["unobservable"] == true {
             fs::set_permissions(f.root.join("a.txt"), fs::Permissions::from_mode(0o644)).unwrap();
@@ -1048,4 +1087,68 @@ async fn check_actions(fixture: &Value) {
         }
         f.service.stop().await.unwrap();
     }
+}
+#[tokio::test]
+async fn archived_work_is_deleted_only_after_the_owner_confirms_it() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/task_lifecycle_python.json")).unwrap();
+    // A dirty merged task: archiving it keeps everything and asks nothing.
+    let case = fixture["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "archive-dirty")
+        .unwrap();
+    let f = Fixture::new().await;
+    setup_git(&f, &fixture, case);
+    let store = f.store();
+    store
+        .write(|db| {
+            for row in case["rows"].as_array().unwrap() {
+                let row = f.replace(row);
+                db.execute(
+                    row[0].as_str().unwrap(),
+                    rusqlite::params_from_iter(row[1].as_array().unwrap().iter().map(sql)),
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    fs::create_dir_all(f.path().parent().unwrap()).unwrap();
+    // A saved record that still carries the retired question fields.
+    let mut saved = f.replace(&case["saved"]);
+    saved["tasks"]["t1"]["archiveQuestion"] = json!(true);
+    saved["tasks"]["t1"]["archiveAskAfter"] = json!(99);
+    fs::write(f.path(), saved.to_string()).unwrap();
+    let call = |action: &str| {
+        let mut p = f.replace(&case["params"]);
+        p["action"] = json!(action);
+        p
+    };
+    // Confirming deletion needs an archived task; nothing changes before that.
+    let early = f.call(call("confirm_discard")).await;
+    assert_eq!(early["code"], "not_archived", "{early}");
+    let dirty = fs::read(f.root.join("a.txt")).ok();
+    let archived = f.call(call("archive")).await;
+    assert_eq!(archived["ok"], true, "{archived}");
+    let after: Value = serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
+    let t = &after["tasks"]["t1"];
+    assert!(t["archive"]["at"].is_u64());
+    assert_eq!(t["archiveQuestion"], false);
+    assert!(t.get("archiveAskAfter").is_none());
+    assert_eq!(t["work"], "merged", "the work record is untouched");
+    assert_eq!(fs::read(f.root.join("a.txt")).ok(), dirty);
+    // Restore brings it back as before.
+    let restored = f.call(call("restore")).await;
+    assert_eq!(restored["ok"], true, "{restored}");
+    let after: Value = serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
+    assert!(after["tasks"]["t1"]["archive"].is_null());
+    assert_eq!(f.call(call("archive")).await["ok"], true);
+    let confirmed = f.call(call("confirm_discard")).await;
+    assert_eq!(confirmed["ok"], true, "{confirmed}");
+    let after: Value = serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
+    assert_eq!(after["tasks"]["t1"]["work"], "discard_confirmed");
+    assert!(after["tasks"]["t1"]["archive"]["at"].is_u64());
+    assert_eq!(fs::read(f.root.join("a.txt")).ok(), dirty);
+    f.service.stop().await.unwrap();
 }

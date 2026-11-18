@@ -19,11 +19,22 @@ harness = false
 name = "codex_launcher"
 harness = false
 
+[[test]]
+# Short model texts through the ACP route; the executable doubles as the no-model fake engine.
+name = "short_text_engine"
+harness = false
+
+[[test]]
+# Every worker profile through the real runtime; the executable is its own recording no-model peer.
+name = "worker_roles"
+harness = false
+
 [dependencies]
 cortex-core = { path = "../cortex-core" }
 cortex-engine = { path = "../cortex-engine" }
 workspace-protocol = { path = "../workspace-protocol" }
-serde = { version = "=1.0.229", features = ["derive"] }
+workspace-remote = { path = "../workspace-remote" }
+serde ={ version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 rusqlite = { version = "=0.42.0", default-features = false, features = ["bundled"] }
 sha2 = "=0.10.9"

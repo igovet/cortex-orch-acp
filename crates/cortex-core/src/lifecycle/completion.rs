@@ -1,7 +1,9 @@
 //! Runtime-only certification. Python oracle: orchestration/state.py:246-298,
 //! 1861-1946,1993-2018,2104-2150,2244-2297. No model-provided pass flag
 //! can complete a task. Observations must come from the daemon's effect ports.
-use super::{domain, event_tx, plan, request_tx, waits, MAX_REVIEW_CYCLES, MAX_VERIFICATION_REPAIRS};
+use super::{
+    domain, event_tx, plan, request_tx, waits, MAX_REVIEW_CYCLES, MAX_VERIFICATION_REPAIRS,
+};
 use crate::{
     error::refuse,
     ownership::{self, OwnerEpoch},
@@ -399,7 +401,10 @@ fn review_independence_tx(
         ));
     };
     let model = own["model"].as_str().unwrap_or("");
-    let models: BTreeSet<&str> = reviewed.iter().filter_map(|r| r["model"].as_str()).collect();
+    let models: BTreeSet<&str> = reviewed
+        .iter()
+        .filter_map(|r| r["model"].as_str())
+        .collect();
     if model.is_empty() || models.is_empty() {
         return Ok(Independence::Unverified(
             json!({"status":"unverified","reason":"model_not_recorded"}),
@@ -419,8 +424,12 @@ fn review_independence_tx(
     }
     let warning = &own["decision"]["independence"];
     if warning["status"] == "warning" {
-        return Ok(Independence::Warning(json!({"status":"warning","model":model,
-            "same_engine_as_reviewed":same_engine,"warning":warning["warning"]})));
+        let mut facts = json!({"status":"warning","model":model,
+            "same_engine_as_reviewed":same_engine,"warning":warning["warning"]});
+        if warning["mode"].is_string() {
+            facts["mode"] = warning["mode"].clone();
+        }
+        return Ok(Independence::Warning(facts));
     }
     Ok(Independence::Refused)
 }
@@ -495,7 +504,10 @@ pub fn record_result_tx(
     // A reviewer that requests changes may cite a failing check as the finding;
     // that is a completed review that starts a fix cycle, not a failed reviewer.
     // Only an explicit assignment_outcome=failed marks the review itself failed.
-    let requests_changes = stage == "review" && result["verdict"] == "REQUEST_CHANGES";
+    // The same holds for BLOCK and INCOMPLETE: the verdict, not the cited check, routes it.
+    let requests_changes = stage == "review"
+        && ["REQUEST_CHANGES", "BLOCK", "INCOMPLETE"]
+            .contains(&result["verdict"].as_str().unwrap_or(""));
     let failed = result["assignment_outcome"] == "failed"
         || (!requests_changes
             && result["checks"].as_array().is_some_and(|c| {
@@ -504,10 +516,17 @@ pub fn record_result_tx(
             }));
     // Passed worker checks are not promoted into final verification evidence.
     if stage == "review" {
-        if !["APPROVE", "REQUEST_CHANGES", "BLOCK"]
+        if !["APPROVE", "REQUEST_CHANGES", "BLOCK", "INCOMPLETE"]
             .contains(&result["verdict"].as_str().unwrap_or(""))
         {
             return refuse("review_verdict_required");
+        }
+        // An incomplete review names what it did not cover; only that verdict does.
+        let uncovered = result["not_covered"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty());
+        if (result["verdict"] == "INCOMPLETE") != uncovered {
+            return refuse("review_not_covered_required");
         }
         let start: String = db
             .query_row(
@@ -856,7 +875,10 @@ pub fn complete_tx(
     let pending:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM pending_questions WHERE task_id=? AND status='open')
         OR EXISTS(SELECT 1 FROM task_events WHERE task_id=? AND event_type IN ('user_message','coordinator_clarification') AND consumed_by IS NULL AND superseded=0)",
         (task,task),|r|r.get(0))?;
+    // An owner message still waiting for the coordinator is never completed past.
     if pending
+        || !super::steering::pending(db, task)?.is_empty()
+        || !super::steering::undelivered(db, task)?.is_empty()
         || waits::projection_tx(db, task)?
             .iter()
             .any(|w| ["open", "ready", "resuming"].contains(&w["status"].as_str().unwrap_or("")))

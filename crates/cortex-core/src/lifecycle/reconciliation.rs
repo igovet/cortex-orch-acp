@@ -302,7 +302,9 @@ fn changed_files(
 ) -> CoreResult<Option<Vec<String>>> {
     // No trustworthy manifest of the project now (incomplete or metadata-only
     // observation): the changed-file list cannot be built.
-    let Some(current) = current else { return Ok(None) };
+    let Some(current) = current else {
+        return Ok(None);
+    };
     let baseline: Option<String> = db
         .query_row(
             "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='EXECUTION_BASELINE'
@@ -312,9 +314,14 @@ fn changed_files(
             |r| r.get(0),
         )
         .optional()?;
-    let Some(baseline) = baseline else { return Ok(None) };
+    let Some(baseline) = baseline else {
+        return Ok(None);
+    };
     let baseline: Value = serde_json::from_str(&baseline)?;
-    let Some(digest) = baseline["revision_digest"].as_str().filter(|_| baseline["kind"] == "observed") else {
+    let Some(digest) = baseline["revision_digest"]
+        .as_str()
+        .filter(|_| baseline["kind"] == "observed")
+    else {
         return Ok(None);
     };
     let stored: Option<(Option<String>, Option<String>)> = db
@@ -324,7 +331,9 @@ fn changed_files(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let Some((Some(stored_digest), Some(manifest))) = stored else { return Ok(None) };
+    let Some((Some(stored_digest), Some(manifest))) = stored else {
+        return Ok(None);
+    };
     if stored_digest != digest {
         return Ok(None);
     }
@@ -343,6 +352,157 @@ fn changed_files(
             .cloned()
             .collect(),
     ))
+}
+/// Changed files listed in a review brief; the rest are counted by folder.
+pub const REVIEW_PACKET_FILES: usize = 200;
+/// `read_report` characters per page.
+const REPORT_PAGE_CHARS: i64 = 4000;
+/// What a reviewer is handed besides its objective: the files the work under review
+/// changed, the predecessor reports with their size, and its read scope.
+///
+/// The change list joins two runtime records: the difference between the per-file
+/// manifest of the first execution baseline since the task was last reopened and
+/// `current` (complete, including changes made by commands, when both manifests are
+/// trustworthy), and the file writes and changes the task's sessions recorded since
+/// that baseline (`NATIVE_PROJECT_WRITTEN`, `NATIVE_PROJECT_CHANGED`), which also
+/// name the plan node that made them. Git is not used: project files may be
+/// untracked, or the project may have no repository. Without a usable manifest the
+/// list is the recorded writes only and says so (`complete: false`).
+pub fn review_packet_tx(
+    db: &Connection,
+    task: &str,
+    review_node: &str,
+    current: Option<&BTreeMap<String, String>>,
+    current_ignored: Option<&str>,
+) -> CoreResult<Value> {
+    let since: i64 = db.query_row(
+        "SELECT coalesce((SELECT id FROM runtime_events WHERE task_id=?1 AND type='EXECUTION_BASELINE'
+            AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='TASK_REOPENED'),0) ORDER BY id LIMIT 1),0)",
+        [task],
+        |r| r.get(0),
+    )?;
+    let mut files: BTreeMap<String, (String, BTreeSet<String>)> = BTreeMap::new();
+    let manifest = changed_files(db, task, current, current_ignored)?;
+    if let (Some(changed), Some(current)) = (&manifest, current) {
+        let stored: Option<String> = db
+            .query_row(
+                "SELECT manifest_json FROM attempt_revisions WHERE attempt_id=? AND phase=? ORDER BY rowid DESC LIMIT 1",
+                (baseline_attempt(task), BASELINE_PHASE),
+                |r| r.get(0),
+            )
+            .optional()?;
+        let before: BTreeMap<String, String> = stored
+            .map(|s| serde_json::from_str(&s))
+            .transpose()?
+            .unwrap_or_default();
+        for path in changed {
+            let kind = match (before.contains_key(path), current.contains_key(path)) {
+                (false, true) => "added",
+                (true, false) => "deleted",
+                _ => "modified",
+            };
+            files.insert(path.clone(), (kind.into(), BTreeSet::new()));
+        }
+    }
+    let rows = db
+        .prepare(
+            "SELECT e.type,json_extract(e.payload_json,'$.path'),json_extract(e.payload_json,'$.operation'),
+                (SELECT n.node_id FROM trusted_channels c JOIN runtime_nodes n ON n.task_id=c.task_id AND n.assignment_ref=c.assignment_id
+                 WHERE c.task_id=e.task_id AND c.channel_id=json_extract(e.payload_json,'$.channel_id'))
+             FROM runtime_events e WHERE e.task_id=? AND e.id>? AND e.type IN ('NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED') ORDER BY e.id",
+        )?
+        .query_map((task, since), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    for (kind, path, operation, node) in rows {
+        let Some(path) = path.filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        let entry = files.entry(path).or_insert_with(|| {
+            let kind = if kind == "NATIVE_PROJECT_WRITTEN" {
+                "written".to_owned()
+            } else {
+                operation.unwrap_or_else(|| "changed".into())
+            };
+            (kind, BTreeSet::new())
+        });
+        if let Some(node) = node {
+            entry.1.insert(node);
+        }
+    }
+    let total = files.len();
+    let listed: Vec<Value> = files
+        .iter()
+        .take(REVIEW_PACKET_FILES)
+        .map(|(path, (change, by))| json!({"path":path,"change":change,"by":by}))
+        .collect();
+    let mut folders: BTreeMap<String, usize> = BTreeMap::new();
+    for path in files.keys().skip(REVIEW_PACKET_FILES) {
+        let folder = path.rsplit_once('/').map_or(".", |(d, _)| d);
+        *folders.entry(folder.to_owned()).or_default() += 1;
+    }
+    let complete = manifest.is_some();
+    let mut changed = json!({"files":listed,"total":total,"complete":complete,
+        "source":if complete {"execution baseline manifest and recorded writes"} else {"recorded writes only"}});
+    if !complete {
+        changed["note"] = json!("The folder could not be compared with the execution baseline, so files changed by commands are not listed; inspect the predecessor reports and the folder for them.");
+    }
+    if total > listed.len() {
+        changed["more"] = json!({"count":total - listed.len(),
+            "by_folder":folders.iter().map(|(f, n)| json!({"folder":f,"files":n})).collect::<Vec<_>>(),
+            "how":"read these folders with project_read to see the rest"});
+    }
+    let reports = db
+        .prepare(
+            "SELECT n.node_id,n.role,json_extract(n.result_json,'$.report_ref'),
+                (SELECT size_bytes FROM editions d WHERE d.report_id=json_extract(n.result_json,'$.report_ref') ORDER BY d.sequence DESC LIMIT 1),
+                (SELECT substr(title,1,200) FROM editions d WHERE d.report_id=json_extract(n.result_json,'$.report_ref') ORDER BY d.sequence DESC LIMIT 1),
+                json_extract(n.result_json,'$.report_structure.status')
+             FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
+             WHERE n.task_id=? AND n.revision=t.revision AND n.stage!='review' AND n.status='completed'
+             AND json_type(n.result_json,'$.report_ref')='text' ORDER BY n.rowid",
+        )?
+        .query_map([task], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<i64>>(3)?,
+                r.get::<_, Option<String>>(4)?, r.get::<_, Option<String>>(5)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|(node, role, report, bytes, title, structure)| {
+            let bytes = bytes.unwrap_or(0);
+            let mut entry = json!({"report_id":report,"node":node,"role":role.trim_start_matches("worker-"),"title":title,"size_bytes":bytes,
+                "pages_at_most":((bytes + REPORT_PAGE_CHARS - 1) / REPORT_PAGE_CHARS).max(1),"page_characters":REPORT_PAGE_CHARS});
+            // A report accepted without its required sections is marked for the reviewer.
+            if let Some(structure) = structure {
+                entry["report_structure"] = json!(structure);
+            }
+            entry
+        })
+        .collect::<Vec<_>>();
+    let scope: Option<String> = db
+        .query_row(
+            "SELECT n.scope_json FROM runtime_nodes n JOIN runtime_tasks t USING(task_id) WHERE n.task_id=? AND n.revision=t.revision AND n.node_id=?",
+            (task, review_node),
+            |r| r.get(0),
+        )
+        .optional()?;
+    let scope: Vec<String> = scope
+        .map(|s| serde_json::from_str(&s))
+        .transpose()?
+        .unwrap_or_default();
+    let outside: Vec<&String> = files
+        .keys()
+        .filter(|p| {
+            !scope
+                .iter()
+                .any(|s| crate::scheduler::policy::overlaps(s, p))
+        })
+        .collect();
+    Ok(
+        json!({"changed_files":changed,"predecessor_reports":reports,"read_scope":scope,
+        "read_scope_covers_change":outside.is_empty(),"outside_read_scope":outside}),
+    )
 }
 /// Characters that are control or invisible formatting (Unicode Cc/Cf) but not
 /// ordinary whitespace.
@@ -418,9 +578,13 @@ pub fn compose_runtime_synthesis_tx(
     if summaries.is_empty() || total > SUMMARY_CHAR_LIMIT {
         return Ok(None);
     }
-    let Some(changed) = changed_files(db, task, current, current_ignored)? else { return Ok(None) };
+    let Some(changed) = changed_files(db, task, current, current_ignored)? else {
+        return Ok(None);
+    };
     if changed.iter().any(|f| {
-        f.contains('`') || f.chars().any(|c| hidden_character(c) || matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+        f.contains('`')
+            || f.chars()
+                .any(|c| hidden_character(c) || matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
     }) {
         return Ok(None);
     }
@@ -428,9 +592,17 @@ pub fn compose_runtime_synthesis_tx(
         (SELECT json_extract(payload_json,'$.settings.language') FROM runtime_events WHERE task_id=? AND type='NATIVE_TASK_SETTINGS' ORDER BY id DESC LIMIT 1),
         (SELECT language FROM task_language WHERE task_id=?))", (task,task), |r|r.get(0))?;
     let (done, summary_label, files_label) = if language.as_deref() == Some("ru") {
-        ("Работа выполнена.", "Сводки работы (как их передали исполнители):", "Изменённые файлы:")
+        (
+            "Работа выполнена.",
+            "Сводки работы (как их передали исполнители):",
+            "Изменённые файлы:",
+        )
     } else {
-        ("The work is done.", "Work summaries (as submitted by the workers):", "Changed files:")
+        (
+            "The work is done.",
+            "Work summaries (as submitted by the workers):",
+            "Changed files:",
+        )
     };
     let mut text = format!("{done}\n\n{summary_label}\n");
     for s in &summaries {

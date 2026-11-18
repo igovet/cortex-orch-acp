@@ -1,6 +1,6 @@
 # Design direction
 
-**Status: Gate D passed on 2026-11-05 for the clickable browser prototype. Production implementation is planned; no implementation or qualification is implied. The Conversation interaction model, selected by the owner on 2026-11-10, is built in the shared UI that the desktop app renders; what remains open is listed under [Conversation model](#conversation-model).**
+**Status: Gate D passed on 2026-11-05 for the clickable browser prototype. The desktop application implements the design on real data and is checked by no-paid automated checks, not on a real Ubuntu session. The Conversation interaction model, selected by the owner on 2026-11-10, is built in the shared UI that the desktop app renders; what remains open is listed under [Conversation model](#conversation-model).**
 
 Quiet, task-first tooling: neutral surfaces, restrained motion, readable state labels alongside color, no focus or press highlight for the pointer, and one quiet focus line for keyboard movement, which a dialog or panel also draws on the control it focuses as it opens, until the next pointer press. Keep at most two primary work areas visible. Never switch a user's active view automatically. Emphasize blocking decisions and concrete evidence rather than false progress percentages. Preserve observed, reported, estimated and unknown distinctions.
 
@@ -34,9 +34,9 @@ The owner keeps every accepted visual token, font, radius and quiet interaction 
 
 A task opens on its conversation, which has four parts:
 
-1. A stable title band: project and task identity, one plain state, one next-action link for actionable content that is off screen, and the task menu.
+1. A stable title band: project and task identity, one plain state, one next-action link for actionable content that is off screen, the Open and Git split buttons, and the task menu. A split button's words give way to its icon before the band runs out of room, and its Git counts go before that; neither moves when it turns on or off.
 2. One conversation column: the owner's brief, assistant messages, compact factual activity, settled answers, current decisions inline, and the current result only when it is eligible (see [result invariant](#result-invariant)). Entries keep their recorded order.
-3. The message composer at the foot of the column.
+3. The message composer at the foot of the column. Directly above it, once the task has workers, one team bar stands pinned outside the scrolling conversation: the worker at work now leads it with its role, state and current step, the other workers at work are counted beside it, and its All workers control opens the full list as a menu over the page, so opening or closing it moves neither the conversation nor the composer. A task with no workers shows no bar. The conversation never ends in a workers block of its own.
 4. Details (plan, team, usage, check output and diff), one activation away. At most the conversation plus one detail area is visible at a time.
 
 The permanent plan strip and the five-tab bar leave the default view. Work details, Changes, Code and Terminal stay as secondary entries with their routes and deep links. Progress is stated as actual sentences; no percentage is invented. Context occupancy measures resource use, not completion, so it moves out of the composer into Details.
@@ -74,9 +74,9 @@ Attach and Voice keep their positions in every mode. A control that cannot be us
 
 The send control is a paper-plane icon named for its real consequence: "Send message", "Send answer", "Send to <role>", "Send and reopen", "Save comment", "Save draft" or "Start planning". No generic "Send" may hide starting work or clearing an acceptance. The plane is the standard control in the row, not a round exception.
 
-Start, Resume and Stop are task actions in the title band or an inline lifecycle item. They never replace the plane, and the plane never turns into Stop.
+Start, Resume and Stop are the task composer's one action button while its field is empty, and entries of the task menu; with text or files the button is the plane. They are not in the title band, which shows no state chip. Enter never presses them.
 
-Where delivery is a choice (task messages), it sits beside the plane as Send now or Queue. A queued item is one line above the composer, with Edit, Send now, remove and reorder. Its files do not appear in the queue row; they return in Edit and in the sent conversation. Worker messages show their own delivery state and offer no interruption.
+Where delivery is a choice (task messages), it sits beside the plane as one Queue toggle: off, the message is sent now; on, it waits in the queue. With a pointer resting on it, or keyboard focus, a small label reads what it does. A queued item is one line above the composer, with Edit, Send now, remove and reorder. Its files do not appear in the queue row; they return in Edit and in the sent conversation. Worker messages show their own delivery state and offer no interruption.
 
 ## Editing text
 

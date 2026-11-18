@@ -12,6 +12,7 @@ pub(crate) mod input;
 mod inside;
 pub(crate) mod native;
 mod payload;
+mod probe;
 mod real_input;
 pub(crate) mod seed_large;
 mod session;
@@ -51,13 +52,21 @@ pub struct Cli {
 
 impl Cli {
     pub fn parse(raw: &[String]) -> Res<Cli> {
-        let mut cli = Cli { flags: Vec::new(), positional: Vec::new() };
+        let mut cli = Cli {
+            flags: Vec::new(),
+            positional: Vec::new(),
+        };
         let mut iter = raw.iter();
         while let Some(arg) = iter.next() {
             if let Some(name) = arg.strip_prefix("--") {
                 match name.split_once('=') {
                     Some((k, v)) => cli.flags.push((k.into(), v.into())),
-                    None => cli.flags.push((name.into(), iter.next().ok_or(format!("--{name} requires a value"))?.clone())),
+                    None => cli.flags.push((
+                        name.into(),
+                        iter.next()
+                            .ok_or(format!("--{name} requires a value"))?
+                            .clone(),
+                    )),
                 }
             } else {
                 cli.positional.push(arg.clone());
@@ -67,7 +76,11 @@ impl Cli {
     }
 
     pub fn flag(&self, name: &str) -> Option<&str> {
-        self.flags.iter().rev().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+        self.flags
+            .iter()
+            .rev()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
     }
 
     pub fn path(&self, name: &str) -> Option<PathBuf> {
@@ -75,31 +88,69 @@ impl Cli {
     }
 }
 
-pub const COMMANDS: &[&str] =
-    &["installed-gate", "installed-inside", "installed-session", "installed-seed-large", "installed-drag-source", "installed-clipboard-owner", "check-install", "check-install-container", "check-install-session", "check-real-input", "check-real-input-inner", "check-systemd", "check-systemd-inside", "check-systemd-rpc", "check-bundled-engines", "check-bundled-engines-session"];
+pub const COMMANDS: &[&str] = &[
+    "installed-gate",
+    "installed-inside",
+    "installed-session",
+    "installed-seed-large",
+    "installed-drag-source",
+    "installed-clipboard-owner",
+    "check-install",
+    "check-install-container",
+    "check-install-session",
+    "check-real-input",
+    "check-real-input-inner",
+    "check-systemd",
+    "check-systemd-inside",
+    "check-systemd-rpc",
+    "check-bundled-engines",
+    "check-bundled-engines-session",
+];
 
 pub fn run(command: &str, raw: &[String]) -> Res<i32> {
     let cli = Cli::parse(raw)?;
     let channel = || channel::Channel::new(cli.flag("channel").unwrap_or("dev"));
     let cycles = || -> Res<u32> {
-        let n: u32 = cli.flag("close-cycles").unwrap_or("1").parse().map_err(|_| "--close-cycles must be 1 to 10")?;
+        let n: u32 = cli
+            .flag("close-cycles")
+            .unwrap_or("1")
+            .parse()
+            .map_err(|_| "--close-cycles must be 1 to 10")?;
         if !(1..=10).contains(&n) {
             return Err("--close-cycles must be 1 to 10".into());
         }
         Ok(n)
     };
-    let pos = |i: usize| cli.positional.get(i).map(String::as_str).ok_or_else(|| "missing argument".to_string());
+    let pos = |i: usize| {
+        cli.positional
+            .get(i)
+            .map(String::as_str)
+            .ok_or_else(|| "missing argument".to_string())
+    };
     match command {
         "installed-gate" => return gate::run(&cli, &channel()?, cycles()?),
-        "installed-inside" => inside::run(&channel()?, pos(0)?, pos(1)?, cycles()?, cli.flag("python-allowed") == Some("yes"), cli.flag("only-phase").filter(|p| !p.is_empty()))?,
+        "installed-inside" => inside::run(
+            &channel()?,
+            pos(0)?,
+            pos(1)?,
+            cycles()?,
+            cli.flag("python-allowed") == Some("yes"),
+            cli.flag("only-phase").filter(|p| !p.is_empty()),
+        )?,
         "installed-session" => session::run(&channel()?, pos(0)?, pos(1)?, cycles()?)?,
         "installed-seed-large" => match pos(0)? {
             "api" => seed_large::api(&channel()?)?,
             "store" => seed_large::store(&channel()?)?,
             _ => return Err("expected api or store".into()),
         },
-        "installed-drag-source" => ffi::drag_source(std::path::Path::new(pos(0)?), std::path::Path::new(pos(1)?), pos(2)? == "x11")?,
-        "installed-clipboard-owner" => ffi::clipboard_owner(std::path::Path::new(pos(0)?), pos(1)?)?,
+        "installed-drag-source" => ffi::drag_source(
+            std::path::Path::new(pos(0)?),
+            std::path::Path::new(pos(1)?),
+            pos(2)? == "x11",
+        )?,
+        "installed-clipboard-owner" => {
+            ffi::clipboard_owner(std::path::Path::new(pos(0)?), pos(1)?)?
+        }
         "check-install" => check_install::host(&cli)?,
         "check-install-container" => check_install::container(pos(0)?)?,
         "check-install-session" => check_install::session(pos(0)?)?,

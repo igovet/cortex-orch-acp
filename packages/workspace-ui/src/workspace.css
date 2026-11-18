@@ -182,18 +182,26 @@ input.chk { display: inline-block; min-height: 0; }
 .qa-a { margin-top: 1px; color: var(--fg); }
 .qa-t { font-size: var(--t-cap); color: var(--fg-3); font-variant-numeric: tabular-nums; }
 
-/* Several open questions are tabs. A tab keeps its width with or without a check, and every panel sits in one cell, so nothing moves. */
-.dc-tabs { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; padding: 4px 12px 6px; }
-.dc-tabs .r { margin-left: auto; font-size: var(--t-cap); color: var(--fg-3); }
-.dc-tab { display: inline-flex; align-items: center; justify-content: center; gap: 3px; width: 42px; height: 24px; border: 1px solid var(--line-strong); border-radius: var(--r-ctl); background: var(--bg-canvas); font-size: var(--t-cap); color: var(--fg-2); font-variant-numeric: tabular-nums; }
-.dc-tab:hover { border-color: var(--line-ctl); }
-.dc-tab[aria-selected="true"] { border-color: var(--warn-line); background: var(--bg-raised); color: var(--fg); }
-.dc-tab .i { color: var(--ok); }
-.ws-off { visibility: hidden; }
-.dc-panels { display: grid; min-width: 0; }
-.dc-panel { grid-area: 1 / 1; min-width: 0; }
-.dc-panel[aria-hidden="true"] { visibility: hidden; }
+/* Questions asked together are one form: each question in turn, then one button that sends every answer. */
+.dc-panel { min-width: 0; }
+.dc-panel + .dc-panel, .dc > .qa + .dc-panel, .dc > .dc-panel + .qa { border-top: 1px solid var(--warn-line); }
+.dc-n { padding: 8px 12px 0; }
+.qa { padding: 8px 12px; border: 1px solid var(--warn-line); border-radius: var(--r-card); background: var(--warn-tint); }
+.dc > .qa { border: 0; border-radius: 0; background: none; }
+/* Once every answer is recorded the form reads exactly like the settled answers that replace it in the feed. */
+.dc.dc-done { display: flex; flex-direction: column; gap: 8px; border: 0; background: none; }
+.dc.dc-done > .dc-h, .dc.dc-done > .ws-dc-note { display: none; }
+.dc.dc-done > .qa { border: 1px solid var(--warn-line); border-radius: var(--r-card); background: var(--warn-tint); }
+.dc-send { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 8px 8px; }
 .dc-opts .opt .t { flex: 1 1 auto; min-width: 0; }
+/* Answers that explain what they do: one full-width row each, the label over its consequence, wrapping as text does and never
+   wider than the card. Block flow, not grid or flex: WebKit sizes a wrapping button from its label's narrowest form, one word a line. */
+.dc-opts.dc-opts-rows { display: block; }
+.dc-opts-rows .opt + .opt { margin-top: 4px; }
+.dc-opts-rows .opt { display: block; position: relative; box-sizing: border-box; width: 100%; max-width: 100%; min-height: 32px; padding: 6px 10px 6px 33px; white-space: normal; overflow-wrap: anywhere; }
+.dc-opts-rows .opt .n { position: absolute; left: 8px; top: 7px; }
+.dc-opts-rows .opt .t, .dc-opts-rows .opt .sub { display: block; margin-left: 0; white-space: normal; }
+.dc-opts-rows .opt .sub { margin-top: 2px; }
 .opt[aria-pressed="true"] { border-color: var(--warn-line); background: var(--bg-raised); }
 
 /* Decision cards */
@@ -204,13 +212,37 @@ input.chk { display: inline-block; min-height: 0; }
 
 .ws-pill { display: inline-flex; }
 .dock > .ws-pill, .dock-w > .ws-pill, .d-dock > .ws-pill { display: flex; }
-/* The follow pill and the folded "Send a separate message" stand in an opaque band of the timeline's own surface, a row the
-   timeline reserves below its content (the dock's height is its bottom clearance). Floating over the feed they covered a
-   question's options and a result's footer; now content scrolls behind the band as it does behind the composer, and is never
-   under a control. The band is a little wider than the content column so no card edge shows past it. */
+/* The follow pill and the folded "Send a separate message" stand in an opaque band of the timeline's own surface: content
+   scrolls behind the band as it does behind the composer, and is never under a floating control. The band is a little wider
+   than the content column so no card edge shows past it. The pill's band lies over the feed's bottom edge just above the dock,
+   out of flow: it shows only while the reader is away from the end, and taking room in the dock it would resize the feed and
+   move the end each time it came or went. It stops short of the feed's right edge so the feed's scrollbar stays whole. */
 .pill-band, .mc-fold { margin: 0 -12px; background: var(--bg-canvas); }
 .pill-band { display: flex; justify-content: center; padding: 4px 0 8px; }
+.dock > .pill-band, .dock-w > .pill-band { position: absolute; bottom: 100%; left: calc(11px + var(--ws-edge)); right: calc(11px + var(--ws-edge)); margin: 0; }
 .pill-band > .new-pill { margin: 0; }
+/* The team bar: one opaque strip pinned in the dock directly above the composer, never part of the scrolling feed. The worker at
+   work leads it; the whole list opens as a top-layer menu, so opening it moves neither the feed nor the composer. */
+.ws-team { container: team / inline-size; display: flex; align-items: center; gap: 8px; min-width: 0; height: 36px; margin-bottom: 6px; padding: 0 4px 0 6px;
+  border: 1px solid var(--line-strong); border-radius: var(--r-card); background: var(--bg-raised); box-shadow: var(--shadow-float); font-size: var(--t-sec); }
+.ws-team-lead { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; height: 28px; padding: 0 6px; border-radius: var(--r-ctl); text-align: left; }
+.ws-team-lead:hover { background: var(--bg-hover); }
+.ws-team-role { flex: none; font-weight: 500; white-space: nowrap; }
+.ws-team-lead > .st { flex: none; white-space: nowrap; }
+.ws-team-now { flex: 1 1 auto; min-width: 0; color: var(--fg-2); font-size: var(--t-cap); }
+.ws-team-more { flex: none; color: var(--fg-2); font-size: var(--t-cap); white-space: nowrap; }
+.ws-team-all { display: inline-flex; align-items: center; gap: 6px; flex: none; max-width: 45%; white-space: nowrap; }
+.ws-team-all > .tnum { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The menu opens upward, so its chevron points up. */
+.ws-team-all > .i-chevron-down { transform: rotate(180deg); }
+@container team (max-width: 520px) { .ws-team-now, .ws-team-more { display: none; } .ws-team-all > .tnum { display: none; } }
+.ws-team-pop { width: min(620px, calc(100vw - 32px)); padding: 0; overflow: hidden auto; max-height: min(60vh, 520px); }
+.ws-team-pop .wt-h { position: sticky; top: 0; z-index: 1; background: var(--bg-raised); }
+.ws-team-list .wrow:first-child { border-top: 0; }
+.ws-team-foot { display: flex; justify-content: flex-end; padding: 8px 12px; border-top: 1px solid var(--line); font-size: var(--t-sec); }
+.ws-team-pop .wrow { grid-template-columns: 18px minmax(0, 1fr) max-content max-content max-content; }
+.ws-team-pop .wrow > .route, .ws-team-pop .wrow > .st { white-space: nowrap; }
+@media (max-width: 1200px) { .ws-team-pop .wrow { grid-template-columns: 18px minmax(0, 1fr) max-content max-content; } .ws-team-pop .wrow > .route { display: none; } }
 /* The follow pill floats over the feed. In the dark theme a light primary pill would be the one bright block on the screen, so it
    takes the raised control surface like every other control there; the light theme keeps the approved primary pill. */
 :root:not([data-theme="light"]) .new-pill { background: var(--bg-input); color: var(--fg); box-shadow: var(--shadow-float), 0 0 0 1px var(--line-ctl); }
@@ -474,6 +506,12 @@ textarea[data-grow] { max-height: 40vh; }
 .gf .ib, .gf .ib:hover { background-clip: content-box; }
 .ws-hint:hover { background: var(--bg-hover); color: var(--fg); }
 [popover].ws-hint-pop { width: 340px; max-height: 320px; overflow-y: auto; padding: 8px 10px; font-size: var(--t-cap); line-height: 17px; color: var(--fg-2); }
+/* `@` and `/` suggestions: in the top layer against their field, so the composer below never moves. */
+[popover].ws-suggest { max-width: min(520px, calc(100vw - 16px)); max-height: 320px; overflow-y: auto; }
+.ws-suggest-o { cursor: default; min-width: 0; }
+.ws-suggest-o[aria-selected="true"] { background: var(--bg-hover); }
+.ws-suggest-o .grow { min-width: 0; }
+.ws-suggest-note { padding: 6px 8px; }
 .ws-hint-pop p + p { margin-top: 8px; }
 .ws-adv { display: grid; gap: 10px; }
 .ws-adv-h { display: inline-flex; align-items: center; gap: 5px; width: fit-content; height: 26px; font-size: var(--t-sec); color: var(--fg-2); }
@@ -716,10 +754,33 @@ input.chk { margin-top: 1px; }
 .ws-result-copy pre { white-space: pre-wrap; }
 .ws-result-copy blockquote { display: grid; gap: 8px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--r-ctl); }
 .ws-result-copy a { color: var(--primary); text-decoration: underline; text-underline-offset: 2px; }
+/* An image reference is a labelled chip: the window never loads a picture from a message. */
+.ws-result-copy .ws-img-ref { display: inline-block; max-width: 100%; padding: 0 6px; border: 1px solid var(--line-strong); border-radius: var(--r-ctl); background: var(--bg-raised); font-size: var(--t-cap); color: var(--fg-2); text-decoration: none; overflow-wrap: anywhere; vertical-align: baseline; }
+.ws-result-copy a.ws-img-ref { color: var(--primary); }
 .ws-result-table { min-width: 0; overflow-x: auto; }
-.ws-result-table table { width: 100%; border-collapse: collapse; text-align: left; }
-.ws-result-table :is(th, td) { padding: 6px 8px; border: 1px solid var(--line); vertical-align: top; }
+/* A table keeps its columns readable and scrolls sideways inside its own box instead of squeezing cells: words break only
+   between words, a column is as wide as its content, from its longest word up to a reading width, and a table wider than the message scrolls. */
+.ws-result-table table { width: max-content; min-width: 100%; border-collapse: collapse; text-align: left; }
+.ws-result-table :is(th, td) { padding: 6px 8px; border: 1px solid var(--line); vertical-align: top; min-width: 4ch; max-width: 60ch; overflow-wrap: break-word; word-break: normal; }
 .ws-result-table th { font-weight: 600; background: var(--bg-input); }
+/* A message's copy control keeps its own caption row under received text, or sits on the message's meta line, so the
+   message text never moves. It shows on hover or keyboard focus (rule below). The 24px button keeps the caption line's height with negative block margins. */
+/* The note opens on the side away from the edge the button keeps, so "Copied" never moves the button. */
+.ws-copy-src { display: inline-flex; flex-direction: row-reverse; align-items: center; gap: 2px; flex: none; max-width: 100%; }
+.ws-msg-tools:not(.end) .ws-copy-src { flex-direction: row; }
+.ws-msg-tools:not(.end) .ws-copy-btn { margin-left: -6px; }
+:is(.ws-msg-tools.end, .brief .meta, .rcard-h, .mine-meta, .me .ms) .ws-copy-btn { margin-right: -6px; }
+.ws-copy-btn { display: inline-flex; align-items: center; gap: 4px; height: 24px; margin: -4px 0; padding: 0 6px; border-radius: var(--r-ctl); font-size: var(--t-cap); line-height: 16px; font-weight: 400; color: var(--fg-3); white-space: nowrap; }
+.ws-copy-btn:hover { background: var(--bg-hover); color: var(--fg); }
+/* Copy shows only while its message is pointed at, focused, or just copied; its caption line stays reserved, so nothing overlaps or moves. */
+.ws-copy-btn { opacity: 0; }
+:is(:is(.ai, .mine, .me):hover + .ws-msg-tools, .ws-msg-tools:hover, .brief:hover, .rcard:hover, .me:hover, .mine:hover, .qa:hover, .ws-copy-src:focus-within, .ws-copy-src:has(.ws-copy-note > *)) .ws-copy-btn { opacity: 1; }
+.ws-copy-note { font-size: var(--t-cap); line-height: 16px; font-weight: 400; white-space: nowrap; }
+.ws-msg-tools { display: flex; justify-content: flex-start; min-width: 0; margin-top: -9px; color: var(--fg-3); }
+.ws-msg-tools.end { align-self: flex-end; justify-content: flex-end; }
+.brief .meta { flex-wrap: wrap; row-gap: 4px; }
+:is(.brief .meta, .rcard-h) > .ws-copy-src { margin-left: auto; }
+.rcard-h > .r + .ws-copy-src { margin-left: 0; }
 /* The worker's result ends its feed: a card, not a disclosure. */
 .ws-worker-result { margin-top: 8px; }
 .ws-worker-result .rcard-h .r .btn { font-size: var(--t-sec); }
@@ -733,7 +794,7 @@ body[data-tab="conversation"] .task-body { grid-template-columns: minmax(0, 1fr)
   .task-body.live > .task-panel { display: none; }
   .ws-worker-picker { display: flex; align-items: center; gap: 8px; padding: 8px 12px; }
   .ws-worker-picker select { width: auto; min-width: 0; flex: 1; }
-  .stream-in { padding: 12px 12px 160px; }
+  .stream-in { padding: 12px 12px 16px; }
 
   .dock-w { padding: 0 12px 12px; }
 
@@ -789,7 +850,7 @@ button.step-t { text-align: left; font: inherit; }
 .ws-step-acts { display: flex; justify-content: flex-end; }
 /* Reverse flex changes the scroll origin as streamed content grows in WebKitGTK. */
 .timeline, .stream { display: block; overflow-anchor: none; }
-.stream-in { max-width: 808px; padding: 16px 24px max(148px, var(--dock-clear, 0px)); gap: 14px; }
+.stream-in { max-width: 808px; padding: 16px 24px; gap: 14px; }
 .ev-note .tx { font-size: var(--t-content); line-height: 22px; }
 .ws-cf-err { padding: 8px 14px; }
 
@@ -800,6 +861,10 @@ button.step-t { text-align: left; font: inherit; }
 
 /* Long names shorten in place: a row never wraps, and its controls keep their width beside it. */
 .tn, .res-file, .gf { min-width: 0; }
+/* Code's tree: what Git ignores is shown dimmed; a folder's note (entries not shown, a read in progress or refused) is text, not a control. */
+.tn.ws-ignored { color: var(--fg-3); }
+.tn.ws-tree-note { color: var(--fg-3); font-size: var(--t-cap); cursor: default; }
+.tn.ws-tree-note:hover { background: none; }
 .ws-res-n { flex: none; }
 /* The side panes' and the editor's toolbars: small type, the panes' own tighter edge. */
 :is(.ecrumb, .side-opts, .chg-tools, .git-sum).l-toolbar { font-size: var(--t-cap); color: var(--fg-2); }
@@ -911,6 +976,9 @@ button.step-t { text-align: left; font: inherit; }
    chip, which the task's own strip repeats. The crumbs are the band's own items, each with its own floor, so the title
    shortens in place and nothing runs into its neighbour. */
 .tb-main { container: tb / inline-size; }
+/* Back and Forward always keep their places; with nowhere to go they stay visible but dimmed and inert. */
+.tb-main > .ib.tb-nav-off { opacity: .35; cursor: default; }
+.tb-main > .ib.tb-nav-off:hover { background: none; }
 .tb-main > .crumbs { display: contents; }
 .tb-main > .crumbs > .sep { margin-inline: -2px; }
 .tb-main > .crumbs > .ws-title-in { flex: 0 1 280px; width: auto; min-width: 64px; }
@@ -941,6 +1009,33 @@ button.step-t { text-align: left; font: inherit; }
   .tb-actions > .tb-state, .tb-fixed > .ws-hide, .tb-main > .tb-facts { display: none; }
   .tb-actions { gap: 4px; }
   .crumbs > .cur { min-width: 48px; }
+}
+/* The band's two split buttons, Open and Git: a fixed main half and a chevron for the menu that lists everything else. Their
+   words give way to icons as the band narrows, then the ahead, behind and uncommitted counts beside Git; the controls themselves
+   keep their place and size whether they are on or off. */
+.split.hs { flex: none; }
+.i-vscode{--m:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M23.15 2.587L18.21.21a1.494 1.494 0 0 0-1.705.29l-9.46 8.63-4.12-3.128a.999.999 0 0 0-1.276.057L.327 7.261A1 1 0 0 0 .326 8.74L3.899 12 .326 15.26a1 1 0 0 0 .001 1.479L1.65 17.94a.999.999 0 0 0 1.276.057l4.12-3.128 9.46 8.63a1.492 1.492 0 0 0 1.704.29l4.942-2.377A1.5 1.5 0 0 0 24 20.06V3.939a1.5 1.5 0 0 0-.85-1.352zm-5.146 14.861L10.826 12l7.178-5.448v10.896z'/%3E%3C/svg%3E")}
+.hs-open .i-vscode { color: #2f9fe8; }
+/* The two halves read as one control: the menu button is the split's second button even though its popover follows it in
+   the markup, so the joined corners and the shared edge are set by class, not by first/last child. */
+.split.hs > .hs-a { gap: 6px; padding: 0 8px; border-radius: var(--r-ctl) 0 0 var(--r-ctl); }
+.split.hs > .hs-m { margin-left: -1px; padding: 0 5px; border-radius: 0 var(--r-ctl) var(--r-ctl) 0; }
+.split.hs > .hs-m.btn-primary { margin-left: 0; border-left: 1px solid color-mix(in srgb, var(--primary-fg) 22%, transparent); }
+.split.hs > :is(.hs-a, .hs-m):is(:hover, :focus-visible) { position: relative; z-index: 1; }
+.tb-actions > .hg-sync { margin-inline: 2px -2px; }
+.hg-sync { display: inline-flex; align-items: center; gap: 6px; flex: none; color: var(--fg-2); font-size: var(--t-sec); white-space: nowrap; }
+.hg-dirty { display: inline-flex; align-items: center; gap: 4px; }
+.hg-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--warn, currentColor); }
+.hg-fail { display: grid; gap: 4px; font-size: var(--t-sec); }
+.split.hs .hs-n { display: none; }
+@container tb (max-width: 899px) { .split.hs > .btn-line .hs-t { display: none; } }
+/* On a narrow band Open folds away (the task and project menus keep Open in VS Code, and Code is a tab), the state chip goes
+   (the task's strip repeats it), and Git is one menu button unless its action is the task's own next step. */
+@container tb (max-width: 799px) {
+  .tb-actions > :is(.hg-sync, .hs-open, .tb-state) { display: none; }
+  .split.hs > .hg-a.btn-line { display: none; }
+  .split.hs > .hg-a.btn-line + .hs-m { gap: 4px; margin-left: 0; padding: 0 6px; border-left: 1px solid var(--line-ctl); border-radius: var(--r-ctl); }
+  .split.hs > .hg-a.btn-line + .hs-m > .hs-n { display: inline-block; }
 }
 .ws-pane { position: absolute; inset: 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .ws-pane[data-parked] { visibility: hidden; pointer-events: none; }
@@ -992,6 +1087,12 @@ button.step-t { text-align: left; font: inherit; }
 .savebar .l-reason { text-align: start; font-size: var(--t-sec); color: var(--fg); }
 
 /* The paper plane: the one send glyph, drawn like every other icon. */
+/* Queue beside the plane: lit while messages are queued. What it does is read from a small label while a pointer rests on it
+   or the keyboard reaches it; a touch screen has neither and shows the queue itself. */
+.mc-delivery { position: relative; display: inline-flex; flex: none; }
+.mc .c-bar .mc-delivery > .ib[aria-pressed="true"] { background: var(--bg-selected); color: var(--fg); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.mc-delivery > .mc-hint { position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 5; padding: 4px 8px; border-radius: var(--r-ctl); background: var(--bg-raised); box-shadow: var(--shadow-menu); color: var(--fg); font-size: var(--t-cap); font-weight: 400; line-height: 16px; white-space: nowrap; opacity: 0; pointer-events: none; }
+.mc-delivery > .ib:hover + .mc-hint, .mc-delivery > .ib:focus-visible + .mc-hint { opacity: 1; }
 .i-send{--m:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z'/%3E%3Cpath d='m21.854 2.147-10.94 10.939'/%3E%3C/svg%3E")}
 
 /* The shared message composer. Every control in its tools row has one box: 32 px at every width and with every pointer (a
@@ -1095,3 +1196,28 @@ button.step-t { text-align: left; font: inherit; }
 .answered.sp-plan-line { align-items: center; }
 .answered.sp-plan-line .i { margin-top: 0; }
 .sp-plan-line > .btn { flex: none; }
+/* File preview in Code: formatted text, tables, pictures and players, and a calm placeholder for the rest. */
+.fv-switch button[aria-pressed="true"] { background: var(--bg-raised, var(--bg)); color: var(--fg); }
+.fv-body { display: flex; flex-direction: column; min-width: 0; }
+.fv-doc { padding: 12px 20px; max-width: 920px; min-width: 0; overflow-wrap: anywhere; line-height: 1.55; }
+.fv-doc :is(pre, code) { font-family: var(--mono, monospace); }
+.fv-doc pre { overflow-x: auto; padding: 8px 10px; border-radius: 6px; background: var(--bg-input); }
+.fv-doc img { max-width: 100%; }
+.fv-html .fv-link { color: var(--accent, inherit); text-decoration: underline; }
+.fv-html table { border-collapse: collapse; }
+.fv-html { overflow-x: auto; }
+.fv-html :is(th, td) { padding: 4px 8px; border: 1px solid var(--line); min-width: 4ch; max-width: 60ch; overflow-wrap: break-word; word-break: normal; }
+.fv-table { min-width: 0; overflow: auto; padding: 8px 12px; }
+.fv-table table { border-collapse: collapse; text-align: left; font-size: var(--t-sec); }
+.fv-table :is(th, td) { padding: 4px 8px; border: 1px solid var(--line); vertical-align: top; white-space: pre-wrap; }
+.fv-table th { position: sticky; top: 0; font-weight: 600; background: var(--bg-input); }
+.fv-media { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; min-height: 0; padding: 16px; }
+.fv-media :is(img, video) { max-width: 100%; max-height: 100%; object-fit: contain; }
+.fv-media[data-kind="image"] img, .fv-media[data-kind="svg"] img { background: repeating-conic-gradient(var(--bg-input) 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
+.fv-media audio { width: min(480px, 100%); }
+.fv-acts { display: inline-flex; gap: 8px; margin-top: 8px; }
+/* A message on its way reads as the owner's, slightly quieter; one that did not arrive is outlined, and its line says why. */
+.mine[data-sent="sending"] { opacity: .85; }
+.mine.ws-sent-bad { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 40%, transparent); background: var(--danger-tint); }
+.ws-sent-meta .act { display: inline-flex; gap: 8px; }
+.qrow[data-sent] .qrow-end .cap { white-space: nowrap; }

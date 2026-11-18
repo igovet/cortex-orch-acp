@@ -300,7 +300,7 @@ pub fn request(
             event_tx(db, task, "USER_QUESTION_REQUESTED", saved.clone())?;
             domain::state_tx(db, task, TaskState::WaitingUser, None)?;
             let mut receipt = json!({"state":"WAITING_USER","question_id":saved["question_id"],
-                "next":"The question is shown to the user together with the message you wrote before this call. End this turn now without writing any further text: do not restate, rewrite or summarize anything. The runtime continues the task after the user answers."});
+                "next":"The question and its options are shown to the user exactly as you wrote them. End this turn now without writing any further text: do not explain, restate, rewrite or summarize the question, its findings or its options. The runtime continues the task after the user answers."});
             if !saved["batch_id"].is_null() {
                 receipt["batch_id"] = saved["batch_id"].clone();
                 receipt["question_ids"] = saved["question_ids"].clone();

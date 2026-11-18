@@ -8,7 +8,7 @@ use std::path::Path;
 pub fn supported(action: &str) -> bool {
     matches!(
         action,
-        "auto_ready" | "merged" | "close" | "archive" | "resolution_started"
+        "merged" | "close" | "archive" | "resolution_started"
     )
 }
 pub(super) fn unsettled() -> Refused {
@@ -164,10 +164,6 @@ pub async fn apply(
 ) -> Result<()> {
     let at = now_ms();
     match p["action"].as_str().unwrap_or("") {
-        "auto_ready" => {
-            record["status"] = json!("ready_to_merge");
-            record["automaticReady"] = json!(true);
-        }
         "merged" => {
             record["status"] = json!("done");
             record["work"] = json!("merged");
@@ -218,11 +214,12 @@ pub async fn apply(
                     "Only a finished task can go to the Archive.",
                 ));
             }
-            if unmerged(root, record, git).await? {
-                record["archiveQuestion"] = json!(true);
-            } else {
-                record["archive"] = json!({"at":at,"previousStatus":"done"});
-                record["archiveQuestion"] = json!(false);
+            // Archiving never asks and never discards: the work, checkout and result
+            // stay as they are. Only the explicit delete of an archived task confirms.
+            record["archive"] = json!({"at":at,"previousStatus":"done"});
+            record["archiveQuestion"] = json!(false);
+            if let Some(fields) = record.as_object_mut() {
+                fields.remove("archiveAskAfter");
             }
         }
         "resolution_started" => {
@@ -250,27 +247,4 @@ pub async fn apply(
         }
     }
     Ok(())
-}
-async fn unmerged(root: &Path, record: &Value, git: &mut Git) -> Result<bool> {
-    if record["integration"]["worktreeCleanup"] == "removed"
-        && record["checkout"]["path"]
-            .as_str()
-            .is_some_and(|s| !s.is_empty() && !Path::new(s).exists())
-    {
-        return Ok(false);
-    }
-    let path = retention::task_path(root, record, git).await?;
-    if git.is_repo(&path).await? {
-        let head = &record["integration"]["sourceHead"];
-        if truth(head) && json!(git.out(&path, &["rev-parse", "HEAD"]).await?.trim()) != *head {
-            return Ok(true);
-        }
-        if !git.clean(&path).await? {
-            return Ok(true);
-        }
-    }
-    Ok(!matches!(
-        record["work"].as_str(),
-        Some("merged" | "discard_confirmed")
-    ))
 }

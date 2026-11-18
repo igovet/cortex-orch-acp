@@ -50,6 +50,8 @@ prompt): the same model list as 0.97.0 (`default`, `opus[1m]`,
 `claude-opus-4-6`, `claude-sonnet-4-6`), the same `effort` values (`default`,
 `low` to `max`), the same `fast` and `ultracode` on/off options and the same five
 modes. Model choices are the account's; the adapter version does not add models.
+
+The adapter's `default` entry is an alias that names no concrete model. Cortex never offers, lists, routes to or sends it: a refreshed catalogue drops it, the bundled preset has no entry for it, and a saved routing file or profile that still names it loads and is reported as no longer offered. Every route is a concrete model. A session that was configured on it before this change shows the engine's own name recorded with the session (for example "Default (Opus 5.5)"), or "Default (engine alias)" when none was recorded.
 This is not a paid model turn, tool-enforcement or rendered client evidence.
 
 ## Previous support: 0.97.0 (2026-10-27)
@@ -332,9 +334,9 @@ confirm-or-fail: if the switched session no longer offers `mode`, the worker
 is refused. 
 
 Fresh ACP sessions initialize Development for brokered writing-worker host
-commands. This leaves the Claude engine jail, disallowed native tools and worker
-mode floor unchanged; it is not bypassPermissions. Explicit Auto retains its
-separate offered-mode behavior. See [access modes and Docker limits](../permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
+commands. No access mode changes the Claude session mode (`default`) or its
+disallowed native tools; Auto only lets the runtime approve a writing worker's
+remaining native requests without a card. See [access modes and Docker limits](../permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
 
 ## Evidence status
 
@@ -365,30 +367,47 @@ no-paid startup-close regression; the transient live failure's discarded
 token bytes were not retained, so that individual case cannot be proved
 byte-for-byte after the fact.
 
-Every Cortex-created session at this pinned version, coordinator or worker,
-sends `strictMcpConfig: true`, empty `plugins`,
-`managedSettings.disableAllHooks`, `managedSettings.autoMemoryEnabled: false` (native
-auto-memory read and write is off), and disallows native subagents plus `Bash`,
-`Read`, `Edit`, `Write`, `Grep`, `Glob`, `Skill`, `NotebookEdit`, `EnterWorktree`,
-`ExitWorktree`, `PushNotification`, `EnterPlanMode`, `ExitPlanMode` and `TaskStop`
-through the Claude-specific SDK `disallowedTools` option. These six lifecycle tools
-belong to the runtime, not the model. `WebFetch` and `WebSearch` are not disallowed.
-MCP tools are not disallowed.
-The installed 0.78.0 and 0.81.2 option-forwarding paths are statically checked,
-and fake-wire tests check the emitted payload. The isolated CLI diagnosis
-observed a 0.81.2 session *before* this restriction with full MCP schemas and
-native Bash/Read/Edit still available. A new owner-requested live canary is
-needed to establish effective 0.81.2 enforcement. A session with role instructions
-sends the [unified system prompt](../unified-system-prompt/index.md) and the role text as
-one plain-string `systemPrompt`, replacing the `claude_code` preset, with
-`skills: []` and a `settings` layer that empties commit/PR attribution and turns
-off git instructions; a session without role instructions keeps the preset but
-still has native skills disabled. `settingSources` is not sent, so the adapter default (`user`,
-`project`, `local`) applies and Claude Code loads `CLAUDE.md`/`AGENTS.md`. The process runs in Cortex's engine jail, which bounds
-native tools to the assignment scope (see
-[containment](../permissions-and-containment/index.md)). A 2026-09-22 no-paid check started
-the installed adapter inside the jail and created a session; no model turn has
-yet been observed there.
+Every Claude session Cortex starts (coordinator, every worker profile, reviewers,
+sprint planning and short model texts) sends `session/new`
+`_meta.claudeCode.options`, which claude-agent-acp 0.107.0 merges into its SDK
+options (`userProvidedOptions`; its own `disallowedTools` are appended to ours):
+`allowDangerouslySkipPermissions: false`, so `bypassPermissions` is unavailable;
+`strictMcpConfig: true`, so only the MCP servers passed in `session/new` (the
+`cortex` relay and the owner-registered external servers the runtime attaches)
+start; empty `plugins` and `skills`; `disableAllHooks` and
+`autoMemoryEnabled: false` in both `settings` and `managedSettings`; deny rules
+`Read(./.cortex/**)`, `Read(./.cortex-dev/**)` and the two dev state files in
+`settings.permissions.deny`, credential and key file `ask` rules in
+`settings.permissions.ask`; and `disallowedTools` with native `Bash`,
+`BashOutput`, `KillShell`, `KillBash`, `PowerShell`, `Edit`, `MultiEdit`, `Write`,
+`NotebookEdit`, `Skill`, the subagent and scheduling tools (`Agent`, `Task`,
+`Workflow`, `TeamCreate`, `TeamDelete`, `SendMessage`, `ScheduleWakeup`,
+`Monitor`, `CronCreate`, `CronDelete`, `CronList`, `RemoteTrigger`) and the
+lifecycle/outward tools (`EnterWorktree`, `ExitWorktree`, `PushNotification`,
+`EnterPlanMode`, `ExitPlanMode`, `TaskStop`, `Artifact`, `SendFeedback`). Native
+`Read`, `Grep`, `Glob`, `WebFetch` and `WebSearch` stay, and MCP tools are not
+disallowed. The list is in `crates/workspace-service/src/native_engine_policy.rs`;
+fake-wire tests (`native_sessions`, `worker_roles`) check the emitted payload. `settingSources` is
+not sent, so the adapter default (`user`, `project`, `local`) applies and Claude
+Code loads `CLAUDE.md`/`AGENTS.md`; allow rules in those settings still apply.
+Role instructions reach the session in its prompt; no `systemPrompt` is sent.
+
+Every session runs in `default` mode, in every access mode and role. Claude
+Code runs native reads and searches inside the project without asking, except
+that `settings.permissions.ask` rules make it ask before reading a credential or
+key file name there (`.env*`, SSH key names, `*.pem`, `*.key`, token and secret
+names), and asks for everything else. The runtime answers each request by the
+access mode's decision table (see
+[native engines](../permissions-and-containment/index.md#native-engines)): Cortex
+private state is refused in every mode; Auto allows everything else and records
+the rule; Development allows reads outside the project and asks the owner for
+credential reads; Guarded asks the owner before reads outside the project,
+credential reads and web fetches. Read-only channels get only reads. Claude has no
+native write tool in a Cortex session, so the write rows apply to it only if it
+ever sends such a request. The Claude process is not sandboxed. Whether a real
+turn lists no native `Bash`, `Edit` or `Write`, keeps the attached MCP servers
+reachable, asks before a read outside the project and honours the `ask` and deny
+rules has not been observed in a live run.
 
 `TaskCreate` and related plan tools are separate. This is a static and
 fake-wire-supported prevention mechanism, not a completed real-client

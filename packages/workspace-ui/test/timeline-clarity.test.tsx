@@ -51,12 +51,11 @@ it("opens worker rows directly in the full stream and hides result bookkeeping",
   state.sessions=[session];
   const port = await mount(`/m/${LOCAL_MACHINE_ID}/t/t`,state);
   expect(document.querySelector(".ws-working")).not.toBeNull();
-  // The team update is one folded line in the conversation; the rows are one activation away.
-  const team=[...document.querySelectorAll<HTMLButtonElement>(".timeline button.fold")].find(b=>b.textContent?.startsWith("Workers:"))!;
-  expect(team.getAttribute("aria-expanded")).toBe("false");
-  expect(document.querySelector(".wrow")).toBeNull();
-  team.click(); await settle();
-  (document.querySelector(".wrow") as HTMLButtonElement).click(); await settle();
+  // The team stands in the bar pinned above the composer; its rows are in the menu it opens, never in the feed.
+  const team=document.querySelector<HTMLButtonElement>(".dock .ws-team-all")!;
+  expect(team.textContent).toMatch(/^Workers:/);
+  expect(document.querySelector(".timeline .wrow")).toBeNull();
+  (document.getElementById(team.getAttribute("popovertarget")!)!.querySelector(".wrow") as HTMLButtonElement).click(); await settle();
   expect(document.querySelector(".livepane .stream")).not.toBeNull();
   expect(document.querySelector(".detail")).toBeNull();
   expect(document.body.textContent).not.toMatch(/Full view|Submit result|mcp__cortex__/);
@@ -126,6 +125,7 @@ it("keeps history rows and the reader's position through a live tail update", as
   const port=await mount(`/m/${LOCAL_MACHINE_ID}/t/t/workers/w`,structuredClone(state));
   const rows=[...document.querySelectorAll(".ev-note")];
   const scroller=document.querySelector<HTMLElement>(".stream")!;
+  scroller.dispatchEvent(new WheelEvent("wheel",{deltaY:-100}));
   scroller.scrollTop=-100;
   scroller.dispatchEvent(new Event("scroll"));
   state.workers[0].activity.at(-1)!.text="Live tail changed";
@@ -258,8 +258,7 @@ it("shows the recorded model and effort wherever an agent is named, and omits th
   expect(document.querySelector('.wcard[href$="/workers/cortex"] .l3')?.textContent ?? "").toMatch(/gpt-6-luna|luna/i);
   dispose?.(); document.body.innerHTML="";
   await mount(`/m/${LOCAL_MACHINE_ID}/t/t`,state);
-  [...document.querySelectorAll<HTMLButtonElement>(".timeline button.fold")].find(b=>b.textContent?.startsWith("Workers:"))!.click(); await settle();
-  expect(document.querySelector(".wrow .route")?.textContent).toMatch(/opus.5\.5/i);
+  expect([...document.querySelectorAll(".ws-team-pop .wrow .route")].map(e=>e.textContent).join(" ")).toMatch(/opus.5\.5/i);
 });
 
 it("shows the coordinator's recorded feed instead of an empty note",async()=>{

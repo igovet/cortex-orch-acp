@@ -24,13 +24,20 @@ pub(super) struct Evidence {
     /// Visible notes that do not make the evidence unavailable (same-model review,
     /// self-reported checks the runtime's own passing verification supersedes).
     pub review_warnings: Vec<String>,
+    /// The open checks behind `unexplained`, named (`open_note`), in order. Native tasks
+    /// only: a retained task keeps the wording its recorded projection had.
+    pub blocking: Vec<String>,
 }
 /// At most this many superseded self-reported checks are named one by one.
 const NOTED_CLAIMS: usize = 10;
 /// One self-reported check that does not block acceptance because the runtime's own
 /// verification of this exact version passed, in plain words. Bounded.
 fn superseded_note(stage: &str, check: &Value, outcome: &str) -> String {
-    let who = if stage == "review" { "Reviewer" } else { "Worker" };
+    let who = if stage == "review" {
+        "Reviewer"
+    } else {
+        "Worker"
+    };
     let name: String = check["name"]
         .as_str()
         .map(str::trim)
@@ -40,23 +47,72 @@ fn superseded_note(stage: &str, check: &Value, outcome: &str) -> String {
         .take(160)
         .collect();
     let why = match check["evidence_gap"].as_str() {
-        Some("revision_mismatch") => "it ran before the final edits, so that run does not count".to_owned(),
-        Some("trivial_command") => "its command only shows something and does not test the claim".to_owned(),
+        Some("revision_mismatch") => {
+            "it ran before the final edits, so that run does not count".to_owned()
+        }
+        Some("trivial_command") => {
+            "its command only shows something and does not test the claim".to_owned()
+        }
         Some(_) => "the runtime could not confirm the command run it cited".to_owned(),
-        None if outcome == "not_run" => match check["blocker"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(blocker) => format!("not run: {}", blocker.chars().take(200).collect::<String>().trim_end_matches('.')),
+        None if outcome == "not_run" => match check["blocker"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(blocker) => format!(
+                "not run: {}",
+                blocker
+                    .chars()
+                    .take(200)
+                    .collect::<String>()
+                    .trim_end_matches('.')
+            ),
             None => "not run".to_owned(),
         },
         None => "not confirmed by a recorded command run".to_owned(),
     };
     format!("{who} check \u{201c}{name}\u{201d}: {why}.")
 }
+fn outcome_words(outcome: &str) -> &'static str {
+    match outcome {
+        "failed" => "failed",
+        "not_run" => "was not run",
+        "unverified" => "is not confirmed by a recorded run",
+        _ => "has no usable outcome",
+    }
+}
+/// One open check that keeps Accept off, in plain words and bounded, so the reason
+/// names what blocks instead of a generic instruction (`Evidence::blocking`).
+fn open_note(stage: &str, check: &Value, outcome: &str) -> String {
+    let who = if stage == "review" {
+        "Reviewer"
+    } else {
+        "Worker"
+    };
+    let name: String = check["name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("unnamed check")
+        .chars()
+        .take(160)
+        .collect();
+    format!(
+        "{who} check \u{201c}{name}\u{201d} {}.",
+        outcome_words(outcome)
+    )
+}
 /// Whether every file this task recorded writing (Cortex project writes and their
 /// reconciliations, before its verification event `before`) still holds exactly the
 /// content it wrote, and nothing of the task could have changed the folder unrecorded
 /// in a way this cannot see (a command still without its end). Fail-closed: no
 /// recorded write, an unreadable/unsafe/oversized file or any malformed record is false.
-fn own_writes_unchanged(db: &Connection, task: &str, root: &std::path::Path, before: i64) -> CoreResult<bool> {
+fn own_writes_unchanged(
+    db: &Connection,
+    task: &str,
+    root: &std::path::Path,
+    before: i64,
+) -> CoreResult<bool> {
     let mut q = db.prepare(
         "SELECT payload_json FROM runtime_events WHERE task_id=? AND type IN ('NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_RECONCILED') AND id<? ORDER BY id LIMIT 1001",
     )?;
@@ -68,14 +124,20 @@ fn own_writes_unchanged(db: &Connection, task: &str, root: &std::path::Path, bef
     }
     let mut written = std::collections::BTreeMap::new();
     for raw in rows {
-        let Ok(value) = serde_json::from_str::<Value>(&raw) else { return Ok(false) };
-        let Some(path) = value["path"].as_str() else { return Ok(false) };
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            return Ok(false);
+        };
+        let Some(path) = value["path"].as_str() else {
+            return Ok(false);
+        };
         // The latest record of a path says what the file holds; it must name a content digest.
         written.insert(path.to_owned(), value["sha256"].clone());
     }
     let Some(written) = written
         .into_iter()
-        .map(|(path, sha)| valid_digest(&sha).then(|| (path, sha.as_str().unwrap_or_default().to_owned())))
+        .map(|(path, sha)| {
+            valid_digest(&sha).then(|| (path, sha.as_str().unwrap_or_default().to_owned()))
+        })
         .collect::<Option<Vec<_>>>()
     else {
         return Ok(false);
@@ -131,7 +193,11 @@ fn commands(value: &Value) -> CoreResult<&[Value]> {
 /// persisted. The attempt's runs come from its trusted channels; output evidence is
 /// bound to that attempt's own non-truncated large outputs. Any gap (no provisioning,
 /// no channel, an assessor refusal, unbound output) leaves the claim a failed check.
-pub(super) fn withdrawn(
+const RESOLUTIONS: [&str; 3] = ["retracted_by", "closed_by", "superseded_by"];
+fn assessor_resolved(check: &Value) -> bool {
+    cortex_core::lifecycle::worker_checks::resolved(check)
+}
+pub(crate) fn withdrawn(
     db: &Connection,
     task: &str,
     assignment: Option<&str>,
@@ -141,7 +207,7 @@ pub(super) fn withdrawn(
     let none = vec![false; checks.len()];
     if !checks
         .iter()
-        .any(|c| c["outcome"] == "failed" && c["retracted_by"].is_string())
+        .any(|c| c["outcome"] == "failed" && RESOLUTIONS.iter().any(|k| c[*k].is_string()))
     {
         return none;
     }
@@ -172,14 +238,7 @@ pub(super) fn withdrawn(
         let mut artifacts = std::collections::BTreeMap::new();
         for run in &runs {
             if let Some(id) = run.receipt["large_output_id"].as_str() {
-                let source: Option<String> = db
-                    .query_row(
-                        "SELECT l.source_ref FROM large_outputs l JOIN delegation_provisioning p ON p.task_id=l.task_id AND p.idempotency_key=l.owner_scope WHERE l.task_id=? AND l.id=? AND p.attempt_id=? AND l.truncated=0",
-                        (task, id, &attempt),
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                if let Some(source) = source {
+                if let Some(source) = attempt_output(db, task, id, &attempt)? {
                     artifacts.insert(id.to_owned(), source);
                 }
             }
@@ -192,12 +251,64 @@ pub(super) fn withdrawn(
         .iter()
         .zip(&now)
         .map(|(claimed, fresh)| {
+            // Retracted, closed by a later passing run of the same check, or superseded by a
+            // corrected command: each counts only when the fresh assessment derives the very
+            // same reference the claim persisted, and no other.
             claimed["outcome"] == "failed"
-                && fresh["current_outcome"] == "retracted"
-                && claimed["retracted_by"].is_string()
-                && claimed["retracted_by"] == fresh["retracted_by"]
+                && assessor_resolved(fresh)
+                && RESOLUTIONS.iter().any(|k| claimed[*k].is_string())
+                && RESOLUTIONS.iter().all(|k| claimed[*k] == fresh[*k])
         })
         .collect()
+}
+/// The recorded content hash of one complete large output of `attempt`, as the result's
+/// completion bound it. A retained (legacy) output is scoped to the attempt's assignment
+/// and is taken as recorded. A native one is scoped to the channel that ran the command,
+/// one of that attempt's trusted channels; like completion, its stored file must still
+/// hash to the recorded digest and size. Anything else (another attempt's output, a
+/// truncated or missing file, an unsafe name) is None: the run's output stays unverified.
+fn attempt_output(
+    db: &Connection,
+    task: &str,
+    id: &str,
+    attempt: &str,
+) -> CoreResult<Option<String>> {
+    let row: Option<(Option<String>, String, i64, bool)> = db
+        .query_row(
+            "SELECT l.source_ref,l.filename,l.byte_count,
+                EXISTS(SELECT 1 FROM delegation_provisioning p WHERE p.task_id=l.task_id AND p.idempotency_key=l.owner_scope AND p.attempt_id=?3)
+             FROM large_outputs l WHERE l.task_id=?1 AND l.id=?2 AND l.truncated=0 AND (
+                EXISTS(SELECT 1 FROM delegation_provisioning p WHERE p.task_id=l.task_id AND p.idempotency_key=l.owner_scope AND p.attempt_id=?3)
+                OR EXISTS(SELECT 1 FROM trusted_channels c WHERE c.task_id=l.task_id AND c.channel_id=l.owner_scope AND c.attempt_id=?3))",
+            (task, id, attempt),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((Some(source), file, size, assignment_scoped)) = row else {
+        return Ok(None);
+    };
+    if assignment_scoped {
+        return Ok(Some(source));
+    }
+    let Some(directory) = db.path().and_then(|p| std::path::Path::new(p).parent()) else {
+        return Ok(None);
+    };
+    if file.is_empty()
+        || file.contains('/')
+        || file.contains("..")
+        || task.contains('/')
+        || task.contains("..")
+    {
+        return Ok(None);
+    }
+    let path = directory.join(task).join(".native-output").join(&file);
+    let Ok(mut opened) = cortex_core::store::locks::open_private(&path, false, true) else {
+        return Ok(None);
+    };
+    Ok(match crate::native_commands::fingerprint(&mut opened) {
+        Ok((hash, count)) if hash == source && count as i64 == size => Some(source),
+        _ => None,
+    })
 }
 /// Paid-probe words in the command a cited gateway receipt recorded. The
 /// receipt's own strength is not assessed here, so any such mention is treated as
@@ -297,6 +408,7 @@ pub(super) fn evaluate(
                 drifted: false,
                 scoped: false,
                 review_warnings: vec![],
+                blocking: vec![],
             })
         }
         other => other,
@@ -316,9 +428,7 @@ fn evaluate_exact(
         [task],
         |r| r.get(0),
     )?;
-    let __e=std::time::Instant::now();
     let attempts = super::task_facts_attempts::Attempts::read(db, store, task, revision)?;
-    eprintln!("perf-sec ev_attempts_ms={}", __e.elapsed().as_millis()); let __e=std::time::Instant::now();
     let plan: Option<String> = db.query_row(
         "SELECT plan_json FROM runtime_tasks WHERE task_id=?",
         [task],
@@ -344,8 +454,8 @@ fn evaluate_exact(
     let mut drifted = false;
     let mut scoped = false;
     let mut review_warnings = Vec::new();
+    let mut blocking = Vec::new();
     let final_closures = super::task_facts_rerun::final_closures(db, store, task, revision)?;
-    eprintln!("perf-sec ev_closures_ms={}", __e.elapsed().as_millis()); let __e=std::time::Instant::now();
     if let Some((id, kind, raw)) = &verification {
         let value: Value = serde_json::from_str(raw)?;
         let current = value["revision"] == revision;
@@ -386,7 +496,7 @@ fn evaluate_exact(
                 manual,
             );
             acknowledge |= !manual && open;
-            unexplained |= !manual
+            let unaccounted = !manual
                 && open
                 && !policy
                 && (outcome != "not_run"
@@ -394,6 +504,14 @@ fn evaluate_exact(
                         .get(Some("runtime-verification"), i)
                         .filter(|a| a.id > *id)
                         .is_none());
+            if unaccounted && native_task {
+                blocking.push(format!(
+                    "Runtime check {} {}.",
+                    i + 1,
+                    outcome_words(outcome)
+                ));
+            }
+            unexplained |= unaccounted;
             count += 1;
         }
         verified = current && kind == "VERIFICATION_PASSED" && bound && all_passed;
@@ -418,11 +536,22 @@ fn evaluate_exact(
                     r.get(0)
                 })?,
             };
-            // A native task adopted after Python verification keeps a legacy digest.
+            // A native task adopted after Python verification keeps a legacy digest. A
+            // verification the native runtime recorded (any of a task it created, or one
+            // after the adoption) is in the native domain only: a legacy capture of the
+            // folder could never match it, so it is not taken (it walks the whole folder).
+            let legacy_domain: bool = !native_task
+                || db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='NATIVE_TASK_ADOPTED' AND id>?)",
+                    (task, *id),
+                    |r| r.get(0),
+                )?;
             let actual = if native_task && native.is_some_and(|d| value["revision_digest"] == d) {
                 native.map(str::to_owned)
+            } else if native_task && !legacy_domain {
+                None
             } else if native_task {
-                {let __t=std::time::Instant::now(); let r=super::legacy_source::capture(std::path::Path::new(&root)).unwrap_or(None); eprintln!("perf-sec legacy_capture_ms={} task={task}", __t.elapsed().as_millis()); r}
+                super::legacy_source::capture(std::path::Path::new(&root)).unwrap_or(None)
             } else {
                 super::legacy_source::capture(std::path::Path::new(&root))?
             };
@@ -432,7 +561,7 @@ fn evaluate_exact(
                 && own_writes
                 && native.is_some()
                 && verified
-                && {let __t=std::time::Instant::now(); let r=own_writes_unchanged(db, task, std::path::Path::new(&root), *id)?; eprintln!("perf-sec own_writes_ms={}", __t.elapsed().as_millis()); r}
+                && own_writes_unchanged(db, task, std::path::Path::new(&root), *id)?
             {
                 // A project-folder sprint task shares the folder with the tasks after
                 // it: their writes leave this result as verified while every file it
@@ -454,7 +583,6 @@ fn evaluate_exact(
             .iter()
             .any(|argv| argv.as_array().is_some_and(|a| !a.is_empty()));
     }
-    eprintln!("perf-sec ev_verification_ms={}", __e.elapsed().as_millis()); let __e=std::time::Instant::now();
     let mut q = db.prepare("SELECT stage,assignment_ref,result_json FROM runtime_nodes WHERE task_id=? AND revision=? ORDER BY rowid LIMIT 1001")?;
     let nodes = q
         .query_map((task, revision), |r| {
@@ -631,14 +759,17 @@ fn evaluate_exact(
             let open = !matches!(outcome, "passed" | "not_applicable") && !manual;
             count_open(&mut open_counts, outcome, manual);
             acknowledge |= open;
-            unexplained |= open
+            let unaccounted = open
                 && !(target && policy(check))
                 && !receipt_policy
                 && (outcome != "not_run" || attempts.get(assignment.as_deref(), index).is_none());
+            if unaccounted && native_task {
+                blocking.push(open_note(&stage, check, outcome));
+            }
+            unexplained |= unaccounted;
             count += 1;
         }
     }
-    eprintln!("perf-sec ev_nodes_ms={}", __e.elapsed().as_millis());
     if work && !has_review {
         let waived: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='REVIEW_NOT_REQUIRED' AND json_extract(payload_json,'$.revision')=?)",
             (task,revision),|r|r.get(0))?;
@@ -659,7 +790,10 @@ fn evaluate_exact(
         let more = superseded.len().saturating_sub(NOTED_CLAIMS);
         review_warnings.extend(superseded.into_iter().take(NOTED_CLAIMS));
         if more > 0 {
-            review_warnings.push(format!("And {more} more self-reported check{}.", if more == 1 { "" } else { "s" }));
+            review_warnings.push(format!(
+                "And {more} more self-reported check{}.",
+                if more == 1 { "" } else { "s" }
+            ));
         }
     }
     Ok(Evidence {
@@ -674,5 +808,6 @@ fn evaluate_exact(
         drifted,
         scoped,
         review_warnings,
+        blocking,
     })
 }

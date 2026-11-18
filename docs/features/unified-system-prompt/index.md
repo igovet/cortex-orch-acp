@@ -237,8 +237,8 @@ the role instructions that follow the prompt. The authority section ranks projec
 rules files below runtime scope, permissions and lifecycle, and the same
 precedence covers anything the host engine adds, whatever its framing (see
 [What each engine still adds](#what-each-engine-still-adds)). The skills
-section points to the project and user skills list only when that list is
-rendered. Refusal routing is role-aware:
+section points to the [project skills](#project-skills) list only when that
+list is rendered. Refusal routing is role-aware:
 workers use `access_request` first for additional project paths and the question
 tool for decisions reserved to the user; scope/replan requests are for changes
 to the plan itself. Coordinators plan refused work for a worker, ask the user
@@ -246,7 +246,8 @@ when only the user can decide, or report a blocker. These prompt directions do
 not change tool authority or make a refused operation available.
 
 Both engines' native skill catalogs are switched off, so Cortex lists the
-skills either engine would have found by itself, for every engine. Where each
+project skills either engine would have found by itself, for every engine (see
+[Project skills](#project-skills); user-level directories are not listed). Where each
 engine looks was observed on 2026-09-28 with a probe skill in every candidate
 directory and each installed engine pointed at a local stub endpoint:
 
@@ -260,60 +261,53 @@ directory and each installed engine pointed at a local stub endpoint:
 | `$CODEX_HOME/skills` (default `~/.codex/skills`) | not read | read |
 | `<project>/skills`, nested project directories | not read | not read |
 
-The prompt catalog reads only bounded top-level `name` and `description`
-frontmatter scalars; it is not a general YAML parser. The reader accepts plain,
-single-quoted and JSON-compatible double-quoted scalars, including single- and
-double-quoted scalars continued across indented physical lines, indented plain
-continuations, and literal (`|`) or folded (`>`) block scalars with optional
-`+`/`-` chomping and explicit indentation indicators. Continued quoted
-scalars follow the reader's bounded folding rules; this is not general YAML
-parsing. Frontmatter reads are limited to 16 KiB, the closing delimiter must be
-an exact `---` line, and the rendered description is capped at 1024 characters.
-Unsupported node types and malformed or incomplete frontmatter produce an
-empty field rather than being interpreted as general YAML. No YAML package is
-required.
+### Project skills
 
-Cortex lists bounded `<dir>/<name>/SKILL.md` files from the configured
-project and user skill roots (project roots: `.agents/skills`, `.claude/skills`,
-`.codex/skills`; user roots: `.agents/skills`, `.claude/skills` and
-`$CODEX_HOME/skills`, default `~/.codex/skills`). Entries are
-filtered to regular, single-link files inside an allowed root; hidden names,
-duplicates and paths beyond the path-length limit are excluded. File size is
-capped at 65,536 bytes, frontmatter inspection at 16 KiB and rendered
-`description` at 1,024 characters. Project paths are relative and user paths are
-absolute. The matching description and path appear in the prompt; Cortex does
-not paste the full skill body there.
+The project skill directories are `.agents/skills`, `.claude/skills` and
+`.codex/skills` below the project root, looked up in that order. A project skill
+is a regular, single-link `<dir>/<name>/SKILL.md` of at most 65,536 bytes of
+UTF-8 text. Hidden names are skipped, and Cortex never follows a symbolic link
+(including the `.claude/skills/<name>` link that `project_skill_link` creates; the
+real `.agents/skills/<name>` directory is found by name). User-level skill
+directories in the owner's home are neither listed nor read.
 
-The read route is Cortex MCP `read_skill`, not an engine-native general file
-read: a session may request only an exact listed skill path bound to that
-session's sent prompt and attempt, or a supported shared skill/reference ID.
-Project paths are relative and user paths absolute as listed. The runtime reads
-the original canonical `SKILL.md` as a bounded UTF-8 regular file without
-following symlinks, and fails closed if the listed target changes. It grants no
-general file access, globs, sibling files or arbitrary paths; sessions without a
-matching catalog snapshot cannot use the path form. Native catalogs are disabled
-for the unified prompt, so Cortex's listing and this explicit read route form
-the supported skill-discovery flow.
+At session start, every channel that is served `project_read` (the coordinator
+and every specialist; not the senior consultant) receives a `## Project skills`
+section after the role instructions listing up to 64 project skills by name,
+path and description, marked as project content that grants no tool access,
+scope or permission. The first directory wins for a duplicated name. A project
+skill whose name equals a Cortex shared/reference id is listed by path only.
+The description is the top-level `description` frontmatter value (plain, quoted
+or `|`/`>` block form with indented continuation lines, whitespace collapsed),
+read from the first 16 KiB and capped at 300 characters; anything else yields
+no description. This is not a YAML parser. The section is omitted when the
+project has no project skills.
 
-Channel issuance happens before the engine session exists. After session open,
-`EngineSessionManagerAdapter._open_generation` snapshots the catalog from
-observed sent metadata and binds the launch's exact channel/task/attempt to its
-generation. Codex grants use `cortexBaseInstructions`, Claude uses
-`systemPrompt`, and OpenCode uses the observed process launch prompt.
-Reconstructed metadata is not sufficient to grant skill paths. Prompt listing
-and snapshot enumeration use the same adapter environment, including `HOME`
-and `CODEX_HOME`; a changed catalog/environment that no longer matches the
-sent section yields no grant.
+Cortex MCP `read_skill` reads a Cortex shared/reference id for the channel's
+role, or a project skill by its name, its directory (`.agents/skills/<name>`)
+or its file (`.agents/skills/<name>/SKILL.md`), relative to the project or as
+an absolute path inside it. The accepted forms are stated in the tool's
+advertised schema. Cortex ids win: a Cortex id always returns the Cortex body and
+keeps its role restriction, so a project file cannot replace or unlock a Cortex
+protocol skill; a same-named project file is read only by its path. Path forms
+are checked with the same rules as `project_read` (no empty, `.` or `..` parts,
+no backslashes, no `.git`, `.cortex`, `.cortex-dev` or workspace owner files)
+and are read by descriptor traversal without following links. A project skill
+reply carries `source: "project"`, its path, SHA-256, size and a note that the
+text is project content, not runtime instruction. Reading a project skill grants
+nothing beyond reading that file, which the same channel can already do with
+`project_read`; channels without `project_read` cannot read project skills.
 
-Reads select the current persisted channel binding, since an MCP server may
-cache its channel context during `tools/list` before session open completes.
-Only the newest generation of that bound session is eligible. Compaction
-advances the channel's generation without re-enumerating the catalog or granting
-late-added paths. Termination removes that session's snapshots even if process
-exit is unconfirmed. A channel cannot be rebound to a different engine session;
-worker route fallback and coordinator recovery issue fresh channels and receive
-their own catalogs. Cross-task/attempt grants, revoked or expired channels and
-superseded persisted generations fail closed.
+A skill that cannot be read is an ordinary tool error (`isError`), not an
+authority refusal. It carries a `code` (`skill_unknown`, `skill_not_for_role`,
+`project_skill_path_refused`, `project_skill_outside_project`,
+`project_skill_location_unrecognised`, `project_skill_missing`,
+`project_skill_symlink_refused`, `project_skill_not_regular`,
+`project_skill_too_large`, `project_skill_not_text`,
+`project_skills_unavailable` or `invalid_arguments`), the requested value, and a
+message that lists the accepted forms and this role's Cortex ids and, for
+channels with project file access, points to `project_read` for other project
+files. Channel authentication failures remain authority refusals.
 
 When `codebase-memory-mcp` is attached, the prompt tells the session to call
 `list_projects` once and take the project whose root path matches the working
@@ -337,8 +331,22 @@ sessions; `project_read`, `project_git` and `command_run` are not offered, and
 project-source calls through those gateway routes are refused with
 `gateway_read_denied`. The consultant has no `ask_question`, `access_request`,
 `replan_request`, `scope_request` or `escalation_request` route. Its role text
-states English-only communication, and its turn wrapper omits the
-question-language exception that other worker turns carry.
+states English-only communication; its turns and brief name
+`user_question_language` like every worker's, which has no effect without a
+question tool.
+
+Every worker prompt is the instruction bundle, the recovery capsule and the
+assignment brief, in that order (`SessionDriver::prompt`). The brief lists the
+objective, scope, acceptance (the plan's verification commands), the owner's
+constraints, every predecessor report id with its role, title, size and page count,
+the runtime-selected report skeleton and `user_question_language`; see
+[roles and delegation](../roles-and-delegation/index.md). Each prompt is recorded
+as a `NATIVE_ATTEMPT_DELIVERY` event with the sha256 and size of the bundle, the
+capsule and the brief and the served tool catalogue's sha256; the attempt's first
+delivery also fills `delegation_provisioning.instruction_delivery` and mirrors the
+worker's `NATIVE_ROUTE_SELECTED` decision (engine, model, connection, parameters
+including effort, decision basis) into `attempt_route_audit`. Only digests are
+stored, never the text.
 Claude's consultant profile disallows native file/search/edit tools. Codex native reads remain available and may run without a permission
 request inside the read-only engine jail, so this is not a complete native-source
 access boundary.

@@ -3709,8 +3709,10 @@
       "after": {
         "tasks": {
           "t1": {
-            "archive": null,
-            "archiveQuestion": true,
+            "archive": {
+              "at": 123,
+              "previousStatus": "done"
+            },
             "doneAt": 100,
             "integration": {
               "sourceHead": "db08d8700ae1850e83f37ddfe5c29cc1ade34bb8"
@@ -3751,9 +3753,7 @@
           "t2": [
             "keep"
           ]
-        },
-        "ghAvailable": "$GH_AVAILABLE",
-        "hasGit": true
+        }
       },
       "observed": null,
       "deletionCounts": null,
@@ -3856,8 +3856,10 @@
       "after": {
         "tasks": {
           "t1": {
-            "archive": null,
-            "archiveQuestion": true,
+            "archive": {
+              "at": 123,
+              "previousStatus": "done"
+            },
             "doneAt": 100,
             "integration": {
               "sourceHead": "old"
@@ -3898,9 +3900,7 @@
           "t2": [
             "keep"
           ]
-        },
-        "ghAvailable": "$GH_AVAILABLE",
-        "hasGit": true
+        }
       },
       "observed": null,
       "deletionCounts": null,
@@ -11737,8 +11737,10 @@
       "after": {
         "tasks": {
           "t1": {
-            "archive": null,
-            "archiveQuestion": true,
+            "archive": {
+              "at": 123,
+              "previousStatus": "done"
+            },
             "doneAt": 100,
             "integration": {
               "sourceHead": 123
@@ -11779,9 +11781,7 @@
           "t2": [
             "keep"
           ]
-        },
-        "ghAvailable": "$GH_AVAILABLE",
-        "hasGit": true
+        }
       },
       "observed": null,
       "deletionCounts": null,
@@ -12026,8 +12026,10 @@
       "after": {
         "tasks": {
           "t1": {
-            "archive": null,
-            "archiveQuestion": true,
+            "archive": {
+              "at": 123,
+              "previousStatus": "done"
+            },
             "doneAt": 100,
             "integration": {
               "sourceHead": {
@@ -12070,9 +12072,7 @@
           "t2": [
             "keep"
           ]
-        },
-        "ghAvailable": "$GH_AVAILABLE",
-        "hasGit": true
+        }
       },
       "observed": null,
       "deletionCounts": null,
@@ -12552,8 +12552,10 @@
       "after": {
         "tasks": {
           "t1": {
-            "archive": null,
-            "archiveQuestion": true,
+            "archive": {
+              "at": 123,
+              "previousStatus": "done"
+            },
             "discardRevision": "stale",
             "doneAt": 100,
             "integration": {
@@ -12595,9 +12597,7 @@
           "t2": [
             "keep"
           ]
-        },
-        "ghAvailable": "$GH_AVAILABLE",
-        "hasGit": true
+        }
       },
       "observed": null,
       "deletionCounts": null,
@@ -15986,8 +15986,10 @@
       "after": {
         "tasks": {
           "t1": {
-            "archive": null,
-            "archiveQuestion": true,
+            "archive": {
+              "at": 123,
+              "previousStatus": "done"
+            },
             "doneAt": 100,
             "status": "done",
             "work": "unmerged"
@@ -16025,9 +16027,7 @@
           "t2": [
             "keep"
           ]
-        },
-        "ghAvailable": "$GH_AVAILABLE",
-        "hasGit": false
+        }
       },
       "observed": null,
       "deletionCounts": null,

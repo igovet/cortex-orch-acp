@@ -25,7 +25,8 @@ const command = (sequence: number, status = "in_progress"): Activity => ({ seque
 function readingAt(box: HTMLElement, position: number) {
   let top = position;
   Object.defineProperties(box, { clientHeight: { configurable: true, get: () => 400 }, scrollHeight: { configurable: true, get: () => 2000 }, scrollTop: { configurable: true, get: () => top, set: (v: number) => { top = v; } } });
-  box.dispatchEvent(new Event("scroll"));
+  // The reader scrolled up there with the wheel: a scroll with no input is the engine's, and following pins the end again.
+  box.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 })); box.dispatchEvent(new Event("scroll"));
   return () => top;
 }
 const working = (title: string) => { const s = withTask(emptyWorkspace(), title); s.tasks[0].status = "working"; s.tasks[0].process = "live"; return s; };

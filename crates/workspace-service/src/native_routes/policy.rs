@@ -59,6 +59,110 @@ pub(super) fn role_kind(role: &str) -> &'static str {
         _ => "implementation_backend",
     }
 }
+/// Review route selection over the usable candidates (already filtered for owner
+/// permission, automatic use, blocking and exhausted quota). `node["avoid_routes"]`
+/// names each reviewed node's author route with its recorded changed-file count;
+/// `node["previous_reviewers"]` the routes of earlier reviews of this revision.
+///
+/// 1. When any model the owner marked `preferred_for: review` is usable, only those
+///    are kept. A model not preferred for review reviews only when none is usable
+///    (`no_review_preferred_model`), never because of independence.
+/// 2. Among them, independence in this order: (a) a model different from every
+///    author model (`different_from_all_authors`); (b) a model different from the
+///    dominant author's model, preferring another engine than that author's
+///    (`different_from_dominant_author`); the dominant author is the reviewed node with
+///    the most recorded changed files, ties going to the first in plan order; (c) the
+///    authors' own review-preferred models, in a fresh session
+///    (`same_model_fresh_session`). Without review-preferred models, the former filter
+///    (another model, then another engine) applies to all candidates.
+/// 3. A rerun prefers, within the chosen set, a model no earlier review of this
+///    revision used. Ranking among the rest (quota, usage) is unchanged.
+///
+/// Returns the audit record, including the review's effort target: `high`, or
+/// `xhigh` for high-complexity work, raised one step per rerun.
+fn review_candidates<'a>(
+    usable: &mut Vec<(&'a Candidate, Option<f64>)>,
+    node: &Value,
+    preferred: impl Fn(&Candidate) -> bool,
+) -> Value {
+    let authors: Vec<&Value> = node["avoid_routes"]
+        .as_array()
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+    let models: BTreeSet<&str> = authors.iter().filter_map(|a| a["model"].as_str()).collect();
+    let engines: BTreeSet<&str> = authors
+        .iter()
+        .filter_map(|a| a["engine"].as_str())
+        .collect();
+    // The first author with the most changed files (`max_by_key` keeps the last of equals).
+    let dominant = authors
+        .iter()
+        .enumerate()
+        .max_by_key(|(i, a)| (a["changes"].as_i64().unwrap_or(0), usize::MAX - i))
+        .map(|(_, a)| *a);
+    let previous: BTreeSet<&str> = node["previous_reviewers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r["model"].as_str())
+        .collect();
+    let review: Vec<_> = usable
+        .iter()
+        .filter(|(c, _)| preferred(c))
+        .cloned()
+        .collect();
+    let rule = if review.is_empty() {
+        if !models.is_empty() && usable.iter().any(|(c, _)| !models.contains(c.model())) {
+            usable.retain(|(c, _)| !models.contains(c.model()));
+            if usable.iter().any(|(c, _)| !engines.contains(c.engine())) {
+                usable.retain(|(c, _)| !engines.contains(c.engine()));
+            }
+        }
+        "no_review_preferred_model"
+    } else {
+        *usable = review;
+        if usable.iter().any(|(c, _)| !models.contains(c.model())) {
+            usable.retain(|(c, _)| !models.contains(c.model()));
+            if models.is_empty() {
+                "no_authors"
+            } else {
+                "different_from_all_authors"
+            }
+        } else if let Some(d) = dominant.filter(|d| {
+            usable
+                .iter()
+                .any(|(c, _)| Some(c.model()) != d["model"].as_str())
+        }) {
+            usable.retain(|(c, _)| Some(c.model()) != d["model"].as_str());
+            if usable
+                .iter()
+                .any(|(c, _)| Some(c.engine()) != d["engine"].as_str())
+            {
+                usable.retain(|(c, _)| Some(c.engine()) != d["engine"].as_str());
+            }
+            "different_from_dominant_author"
+        } else {
+            "same_model_fresh_session"
+        }
+    };
+    let avoided_previous = !previous.is_empty()
+        && usable.iter().any(|(c, _)| !previous.contains(c.model()))
+        && usable.iter().any(|(c, _)| previous.contains(c.model()));
+    if avoided_previous {
+        usable.retain(|(c, _)| !previous.contains(c.model()));
+    }
+    let rerun = node["review_rerun"].as_u64().unwrap_or(0) as usize;
+    let base = if node["complexity"] == "high" { 3 } else { 2 };
+    json!({
+        "rule": rule,
+        "authors": authors.iter().map(|a| json!({"node":a["node"],"engine":a["engine"],"model":a["model"],"changes":a["changes"]})).collect::<Vec<_>>(),
+        "dominant_author": dominant.map(|d| json!({"node":d["node"],"engine":d["engine"],"model":d["model"]})),
+        "kept": usable.iter().map(|(c, _)| format!("{}/{}", c.engine(), c.model())).collect::<Vec<_>>(),
+        "rerun": rerun,
+        "avoided_previous_reviewer": avoided_previous,
+        "effort_target": EFFORTS[(base + rerun).min(EFFORTS.len() - 1)],
+    })
+}
 fn base_tier(role: &str) -> usize {
     match role.trim_start_matches("worker-") {
         "architect" | "database-architect" | "security-auditor" | "senior-consultant" => 1,
@@ -214,10 +318,10 @@ impl RouteResolver {
     fn policy(&self, c: &Candidate) -> &Value {
         &self.config(c)["policy"][c.model()]
     }
-    fn placed(&self, c: &Candidate) -> Vec<&str> {
+    pub(super) fn placed(&self, c: &Candidate) -> Vec<&str> {
         tiers(&self.config(c)["tiers"][c.model()])
     }
-    fn automatic(&self, c: &Candidate) -> Option<&'static str> {
+    pub(super) fn automatic(&self, c: &Candidate) -> Option<&'static str> {
         if !contains(&self.config(c)["auto"], c.model()) {
             Some("not_selected")
         } else if self.placed(c).is_empty() {
@@ -309,7 +413,7 @@ impl RouteResolver {
             .map(|s| s.to_string())
             .collect())
     }
-    fn usage(&self, c: &Candidate) -> CoreResult<Option<f64>> {
+    pub(super) fn usage(&self, c: &Candidate) -> CoreResult<Option<f64>> {
         let cached = if c.engine() == "codex-acp" {
             c.connection["credential_ref"]["path"]
                 .as_str()
@@ -584,6 +688,17 @@ impl RouteResolver {
                 _ => "high",
             }
         };
+        // A review asks for at least its own effort target (`review_effort`), within
+        // what the model permits (its floor up to its maximum).
+        let position = |e: &str| EFFORTS.iter().position(|v| *v == e).unwrap_or(0);
+        let target = match decision["review_route"]["effort_target"].as_str() {
+            Some(review)
+                if effort.is_none() && kind == "review" && position(review) > position(target) =>
+            {
+                EFFORTS[position(review)]
+            }
+            _ => target,
+        };
         let selected_effort = effort.map(str::to_owned).or_else(|| {
             permitted
                 .iter()
@@ -832,10 +947,32 @@ impl RouteResolver {
                 usable.push((c, usage));
             }
         }
-        // Review independence: leave only routes on another model when one exists, then
-        // prefer another engine among them. With none, ranking proceeds unchanged and
-        // the runtime records the independence warning.
-        if let Some(avoid) = node["avoid_routes"].as_array().filter(|a| !a.is_empty()) {
+        // Review routing. A model the owner prefers for review always reviews when one is
+        // usable; independence then chooses among those models only, never by falling
+        // back to a model the owner did not mark for review. See `review_candidates`.
+        let mut review_hint_dropped = None;
+        if kind == "review" {
+            let matches_hint = |c: &Candidate| hint == label(c) || hint == c.engine();
+            let hinted_before: Vec<bool> = usable
+                .iter()
+                .filter(|(c, _)| matches_hint(c))
+                .map(|(c, _)| purpose(c))
+                .collect();
+            let rule = review_candidates(&mut usable, node, |c| {
+                purpose(c) && order.iter().any(|t| serves(c, t))
+            });
+            decision["review_route"] = rule;
+            // A hinted model that review routing set aside says why.
+            if !hinted_before.is_empty() && !usable.iter().any(|(c, _)| matches_hint(c)) {
+                review_hint_dropped = Some(if hinted_before.iter().any(|p| *p) {
+                    "ignored:review_independence"
+                } else {
+                    "ignored:owner_preferred"
+                });
+            }
+        } else if let Some(avoid) = node["avoid_routes"].as_array().filter(|a| !a.is_empty()) {
+            // Other independence-constrained work: leave only routes on another model when
+            // one exists, then prefer another engine among them.
             let models: BTreeSet<&str> = avoid.iter().filter_map(|a| a["model"].as_str()).collect();
             let engines: BTreeSet<&str> =
                 avoid.iter().filter_map(|a| a["engine"].as_str()).collect();
@@ -1025,6 +1162,8 @@ impl RouteResolver {
                 && !hinted.iter().any(|(c, _)| purpose(c))
             {
                 "ignored:owner_preferred"
+            } else if let Some(reason) = review_hint_dropped.filter(|_| hinted.is_empty()) {
+                reason
             } else if hint_active {
                 "honoured"
             } else if !hinted.is_empty() {

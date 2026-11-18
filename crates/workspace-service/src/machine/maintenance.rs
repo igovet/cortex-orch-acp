@@ -799,7 +799,10 @@ pub async fn worker(state: &Path, id: &str) -> Result<()> {
                     || !newer(string(&data,"version")?,string(&data,"current")?).await? {
                     return Err(refuse("stale_release","The installed version or archive changed. Check again."));
                 }
-                let _admission=Lock::new(state,"maintenance.lock")?;
+                // The privilege prompt and package manager can take minutes: anything waiting
+                // for admission is told at once instead of stalling.
+                let _admission=Lock::long(state,"maintenance.lock","maintenance_in_progress",
+                    "A Cortex Workspace update is being installed. Try again when it finishes.")?;
                 ensure_quiet(&data["projects"])?;
                 save(&path,json!({"phase":"installing","message":"Approve the system privilege prompt. Installing…"}))?;
                 let mut cmd=Command::new("/usr/bin/pkexec");cmd.args(["/usr/bin/apt-get","install","--no-remove","-y"]);
@@ -1058,6 +1061,21 @@ mod tests {
 
 pub async fn action(state: &Path, p: &Value, projects: &Value) -> Result<Value> {
     match p["action"].as_str().unwrap_or("") {
+        // The owner's tool search path: shown, re-read from the shell (outside every
+        // lock, bounded by its own timeout) and extended with owner-added folders.
+        "tool_path.read" => Ok(crate::tool_path::snapshot()),
+        "tool_path.reread" => {
+            if !crate::tool_path::started() {
+                return Err(refuse(
+                    "tool_path_unavailable",
+                    "The tool search path is read by the installed service only.",
+                ));
+            }
+            tokio::task::spawn_blocking(crate::tool_path::reread)
+                .await
+                .map_err(|_| refuse("tool_path_unavailable", "The shell could not be read."))
+        }
+        "tool_path.set_extra" => settings::set_tool_path_extra(state, p, projects),
         "voice.status" => {
             let spec: Value =
                 serde_json::from_str(include_str!("../../../../packaging/voice/model.json"))

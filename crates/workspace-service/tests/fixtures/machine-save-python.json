@@ -12479,14 +12479,7 @@
                 "enabled": {}
               },
               "builtin": {
-                "model_efforts": {
-                  "codex-acp": {
-                    "default": [
-                      "low",
-                      "high"
-                    ]
-                  }
-                },
+                "model_efforts": {},
                 "supported_engines": [
                   "codex-acp",
                   "claude-agent-acp",

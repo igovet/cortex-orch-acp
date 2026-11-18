@@ -434,6 +434,7 @@ CREATE TABLE IF NOT EXISTS host_updates (
  UNIQUE(session_id, seq)
 );
 CREATE INDEX IF NOT EXISTS host_updates_by_session ON host_updates(session_id, seq);
+CREATE INDEX IF NOT EXISTS host_updates_by_call ON host_updates(session_id, json_extract(update_json,'$.toolCallId'), seq) WHERE json_valid(update_json);
 CREATE TABLE IF NOT EXISTS pending_questions (
  id TEXT PRIMARY KEY,
  task_id TEXT NOT NULL REFERENCES tasks(id),

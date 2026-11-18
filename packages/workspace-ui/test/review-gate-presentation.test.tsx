@@ -31,6 +31,14 @@ const withResult = (status: WorkspaceState["tasks"][number]["status"]) => {
   return s;
 };
 
+it.each([true, false])("acceptance presentation identifies automatic=%s without offering Accept again", async automatic => {
+  const s = withResult("ready_to_merge");
+  s.tasks[0].acceptance = { version: 1, digest: "digest", automatic, at: 1 };
+  await mount(s, taskPath);
+  expect(text()).toContain(automatic ? "accepted automatically" : "accepted by you");
+  expect(text()).not.toContain(automatic ? "accepted by you" : "accepted automatically");
+  expect(buttons("Accept v1")).toHaveLength(0);
+});
 it("a blocked Accept's reason ends in exactly one full stop, whether or not the runtime's reason has its own", async () => {
   expect(sentence("Resolve the conflict first")).toBe("Resolve the conflict first.");
   expect(sentence("Only recorded technical blockers may be acknowledged.")).toBe("Only recorded technical blockers may be acknowledged.");

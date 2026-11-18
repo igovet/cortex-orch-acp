@@ -45,7 +45,8 @@ export function EditTask(props: { taskId: string; onClose: () => void }) {
     <div class="dlg-b">
       <label class="fld"><span class="lab">Title</span><input class="inp" aria-label="Task title" maxLength={200} value={title()} disabled={!!off()} onInput={e => setTitle(e.currentTarget.value)} /></label>
       <Show when={failed()}><div role="alert">Saved attachments could not be read. Nothing was replaced. <button class="btn btn-sm" onClick={load}>Retry</button></div></Show>
-      <MessageComposer label="Task description" placeholder="Describe the task." text={text()} onText={setText} files={files} mic={mic} off={off()}
+      <MessageComposer label="Task description" placeholder="Describe the task. Tag @files or use /skills." text={text()} onText={setText} files={files} mic={mic} off={off()}
+        suggest={current() ? { projectId: current()!.task.projectId, taskId: props.taskId, skills: true } : undefined}
         effect="Saves this task only. It does not start work or change its dependencies."
         route={<RouteBar id="edit-task" disabled={off()} settings={settings()} onChange={patch => setSettings({...settings(),...patch})} />}
         sendKey="mod-enter" send={{label:"Save changes",needs:"edit_task",why:why(),go:() => { void save(); }}} />

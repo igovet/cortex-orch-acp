@@ -6,8 +6,9 @@ description: Critique, audit and refine an already-rendered product interface. C
 # Impeccable (Cortex adaptation)
 
 Use this skill for a surface that already renders. It turns a visible
-interface into a sharper one through review and then targeted refinement. For a
-new visual direction, use `design-frontend-design` or `design-ui-ux-pro-max`.
+interface into a sharper one through review and then targeted refinement. A new
+visual direction is outside this skill: use your role's direction skill when your
+skill list includes one, otherwise report that need.
 
 Adapted for Cortex from the Apache-2.0 `impeccable` skill (see `LICENSE`,
 `NOTICE.md` and `CORTEX-SOURCE.md`). Its launcher, live browser mode,

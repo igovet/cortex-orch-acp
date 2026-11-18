@@ -1,6 +1,6 @@
 # Version-bound result acceptance
 
-**Status: planned; no implementation or qualification is implied.**
+**Status: decided and implemented for the local desktop; checked by no-paid automated checks only.**
 
 Decision: Bind human acceptance to artifact/workspace identity and revision. It is separate from runtime completion and Git push.
 

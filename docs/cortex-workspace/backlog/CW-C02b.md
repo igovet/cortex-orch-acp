@@ -1,6 +1,6 @@
 # CW-C02b: Atomic snapshot cursor, bounded replay, gap detection and resync
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: bounded snapshot reads and forward-cursor history reads exist for the local client; replay across devices, gap detection and resync for remote clients are not confirmed in code · **Phase:** 3+ · **Size:** L
 
 Split from [CW-C02](CW-C02.md) to keep each part within the two-day limit.
 

@@ -1,6 +1,6 @@
 # CW-G07: Owner-confirmed merge and PR
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: Ready to merge with owner-confirmed local squash merge or pull request creation, and a conflict display with manual resolution ([local task execution](../local-task-execution.md)); handing a conflict to Cortex is not confirmed in code; no-paid checks only · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Owner-confirmed merge and PR.

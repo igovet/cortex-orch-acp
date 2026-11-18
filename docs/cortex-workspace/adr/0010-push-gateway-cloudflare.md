@@ -1,6 +1,6 @@
 # Push gateway on Cloudflare Workers; Cloudflare Tunnel rejected as transport
 
-**Status: superseded by [ADR 0011](0011-self-hosted-relay-and-push-gateway.md); kept as history. No implementation or qualification is implied.**
+**Status: superseded by [ADR 0011](0011-self-hosted-relay-and-push-gateway.md); kept as history. Not implemented.**
 
 This record is not current guidance. Its push gateway placement on Cloudflare Workers was replaced by the owner's binding decision to run both server-side components on the owner's own server through Docker Compose.
 

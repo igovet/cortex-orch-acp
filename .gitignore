@@ -45,3 +45,6 @@ prototypes/cortex-workspace/node_modules/
 # Local qualification scratch helpers and evidence.
 /tmp/
 /.cortex/
+
+# Self-hosted relay deployment secrets/environment
+/deploy/relay/.env

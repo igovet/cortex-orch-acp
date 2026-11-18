@@ -1060,10 +1060,22 @@ fn descriptive_check_command_never_blocks_a_verified_pass_at_completion() {
     use cortex_core::lifecycle::worker_checks;
     let script = "import sys; sys.exit(0 if open('README.md').read() else 1)";
     for (argv, command, completes) in [
-        (json!(["python3", "-I", "-c", script]), json!(["python3", "-I", "-c", "..."]), true),
-        (json!(["python3", "-I", "-c", script]), json!(["python3", "-I", "-c", script]), true),
+        (
+            json!(["python3", "-I", "-c", script]),
+            json!(["python3", "-I", "-c", "..."]),
+            true,
+        ),
+        (
+            json!(["python3", "-I", "-c", script]),
+            json!(["python3", "-I", "-c", script]),
+            true,
+        ),
         (json!(["python3", "-I", "-c", script]), Value::Null, true),
-        (json!(["cat", "README.md"]), json!(["python3", "-I", "-c", script]), false),
+        (
+            json!(["cat", "README.md"]),
+            json!(["python3", "-I", "-c", script]),
+            false,
+        ),
     ] {
         let (_p, s, o) = setup();
         let mut e = evidence('a');
@@ -1092,19 +1104,29 @@ fn descriptive_check_command_never_blocks_a_verified_pass_at_completion() {
         e.artifacts.insert("r".into(), "f".repeat(64));
         s.write(|db| {
             publish(db, "a", "r")?;
-            record_result_tx(db, "t", "a", &json!({"report_ref":"r","summary":"done","checks":normalized}), &e)?;
+            record_result_tx(
+                db,
+                "t",
+                "a",
+                &json!({"report_ref":"r","summary":"done","checks":normalized}),
+                &e,
+            )?;
             add_review_tx(db, "t", &e)?;
             Ok(())
         })
         .unwrap();
         verified(&s, &o, &e);
-        e.workers.insert("xa".into(), ProcessObservation::ConfirmedExited);
+        e.workers
+            .insert("xa".into(), ProcessObservation::ConfirmedExited);
         let result = s.write(|db| complete_tx(db, "t", &e));
         if completes {
             assert!(result.is_ok(), "{command}: {result:?}");
             assert_eq!(state(&s), "COMPLETED");
         } else {
-            assert_eq!(result.unwrap_err().code(), "completion_unresolved_worker_check");
+            assert_eq!(
+                result.unwrap_err().code(),
+                "completion_unresolved_worker_check"
+            );
         }
     }
 }
@@ -1137,7 +1159,10 @@ fn progress_budget_survives_restart_and_resets_on_owner_action() {
     for event in ["NATIVE_DRIVER_STOPPED", "USER_STEERING", "TURN_INTERRUPTED"] {
         s.write(|db| event_tx(db, "t", event, json!({}))).unwrap();
         s.write(|db| spend_tx(db, "t", 1)).unwrap();
-        assert_eq!(s.write(|db| spend_tx(db, "t", 1)).unwrap_err().code(), "native_progress_limit");
+        assert_eq!(
+            s.write(|db| spend_tx(db, "t", 1)).unwrap_err().code(),
+            "native_progress_limit"
+        );
     }
 }
 

@@ -152,7 +152,9 @@ pub fn product_path(state: &Path, project: &str) -> Result<PathBuf> {
 }
 pub fn product(state: &Path, project: &str) -> Result<Value> {
     let mut value = json!({"tasks":{},"sprints":[],"drafts":{},"messages":[],"comments":{}});
-    let saved = settings::read_json(&product_path(state, project)?, json!({}))?;
+    let mut saved = settings::read_json(&product_path(state, project)?, json!({}))?;
+    // Inline bodies saved by an earlier version move to private files once.
+    super::attachment_files::migrate(state, project, &mut saved)?;
     if let Some(map) = saved.as_object() {
         for (k, v) in map {
             value[k] = v.clone();
@@ -179,6 +181,8 @@ pub fn supported(op: &str) -> bool {
             | "repo.file"
             | "repo.file.save"
             | "repo.locate"
+            | "repo.list"
+            | "repo.skills"
             | "git"
             | "git_init"
             | "logs.folder"
@@ -188,6 +192,7 @@ pub fn supported(op: &str) -> bool {
             | "product.message"
             | "product.comment"
             | "product.sprint"
+            | "product.attachment"
     )
 }
 pub async fn run(
@@ -227,6 +232,7 @@ pub async fn run(
         "machine.update" => settings::update(state, params, projects).await,
         "overview" => settings::overview(state, projects),
         "diagnostics.run" => settings::diagnostics(state, projects),
+        "product.attachment" => super::attachment_files::action(state, params),
         "product.message" | "product.comment" => {
             private_product::conversation(state, project, params, op == "product.comment")
         }
@@ -251,12 +257,16 @@ pub async fn run(
             let mut git = git::Git::for_service(config);
             match op {
                 "product.read" if params["attachments"] == true => {
-                    context::attachments(root, project, string(params, "taskId")?)
+                    context::attachments(root, state, project, string(params, "taskId")?)
                 }
                 "project.config.read" => super::project_config::read(root, config),
                 "project.config.save" => super::project_config_save::save(root, config, params),
                 "product.integrate" => {
                     super::integration::run(root, project, state, params, &mut git).await
+                }
+                // Short model texts never take machine.lock or wait for a model.
+                "product.task" if super::short_text::handles(params) => {
+                    super::short_text::run(root, project, state, params, config).await
                 }
                 "product.task" => {
                     super::task_actions::run(root, project, state, params, &mut git).await
@@ -309,6 +319,22 @@ pub async fn run(
                         .unwrap_or_else(|| format!("{project}:main"));
                     let path = git.resolve(root, project, &wanted).await?;
                     files::locate(&path, params)
+                }
+                "repo.skills" => {
+                    let wanted = params["checkoutId"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("{project}:main"));
+                    let path = git.resolve(root, project, &wanted).await?;
+                    super::project_skills::list(&path)
+                }
+                "repo.list" => {
+                    let wanted = params["checkoutId"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("{project}:main"));
+                    let path = git.resolve(root, project, &wanted).await?;
+                    git::listing::list(&path, params, &mut git).await
                 }
                 _ => Err(refuse(
                     "unsupported_operation",

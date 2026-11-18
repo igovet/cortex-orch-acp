@@ -386,6 +386,165 @@ async fn native_cold_start_without_helper_assets_keeps_all_projects() {
     f.stop().await;
 }
 
+impl Fixture {
+    /// Registers and activates project `one` and waits until its runtime is ready.
+    async fn ready_project(&self) -> String {
+        let id = self.register("one").await;
+        let listed = self.rpc("projects.list", json!({})).await;
+        if listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["projectId"] == id)
+            .unwrap()["activation"]
+            .is_null()
+        {
+            self.rpc("projects.activate", json!({"projectId":id})).await;
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = self.rpc("projects.status", json!({"projectId":id})).await;
+                assert_ne!(status["state"], "failed", "{status}");
+                if status["ready"] == true {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        id
+    }
+    /// Every page of one task's conversation through `native.query`, as the desktop reads it.
+    async fn whole_history(&self, project: &str, task: &str) -> Vec<Value> {
+        let (mut rows, mut cursor) = (Vec::new(), Value::Null);
+        for _ in 0..50 {
+            let page = self
+                .rpc(
+                    "native.query",
+                    json!({"protocol":{"major":2,"mapping":2},"requestId":"history","projectId":project,
+                        "operation":"history.page","payload":{"target":task,"cursor":cursor,"limit":100}}),
+                )
+                .await;
+            assert_eq!(page["data"]["type"], "history", "{page}");
+            rows.extend(
+                page["data"]["value"]["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .cloned(),
+            );
+            cursor = page["data"]["value"]["nextCursor"].clone();
+            if cursor.is_null() {
+                return rows;
+            }
+        }
+        panic!("conversation did not end within 50 pages");
+    }
+}
+
+/// A run that was working when its service stopped keeps its whole retained conversation readable
+/// after the service starts again, whatever state its recovery leaves the run in: every page,
+/// in order, from the store, with no engine session for it running.
+#[tokio::test]
+async fn conversation_of_a_run_working_when_the_service_stopped_stays_readable_after_restart() {
+    let mut f = Fixture::new();
+    f.start().await;
+    let id = f.ready_project().await;
+    let created = f
+        .rpc(
+            "workspace",
+            json!({
+                "protocol":{"major":1,"minor":8},"projectId":id,"actorId":"owner",
+                "requestId":"restart-draft","operation":"tasks.create","target":id,
+                "expectedVersion":"0","ownerEpoch":null,
+                "payload":{"description":"Run interrupted by a restart","checkout":{"kind":"main"}}
+            }),
+        )
+        .await;
+    let task = created["target"].as_str().unwrap().to_owned();
+    f.stop().await;
+    // While the service is down, the store holds a run that was executing, with a long conversation:
+    // a reply in streamed chunks, tool calls in several updates each, and an owner message.
+    let root = f.root.join("projects/one");
+    let channel = if workspace_protocol::channel::current().is_dev() {
+        cortex_core::StoreChannel::Dev
+    } else {
+        cortex_core::StoreChannel::Release
+    };
+    let store = cortex_core::Store::open(
+        cortex_core::ProjectKey::new(&root, channel).unwrap(),
+        cortex_core::OpenMode::RuntimeValidate,
+    )
+    .unwrap();
+    cortex_core::lifecycle::TaskMachine::new(&store)
+        .create("restart-runtime", "Interrupted run", "fixture")
+        .unwrap();
+    let mut expected = 0;
+    store.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='EXECUTING' WHERE task_id='restart-runtime'", [])?;
+        db.execute("INSERT INTO acp_host_sessions VALUES ('restart-session',?,'restart-runtime','{}','{}','[]','now',NULL)", [root.to_str().unwrap()])?;
+        db.execute("INSERT INTO workspace_executions VALUES ('restart-execution',?,'restart-runtime','restart-session',1,1,'now')", [&task])?;
+        db.execute("UPDATE workspace_tasks SET execution_id='restart-execution' WHERE task_id=?", [&task])?;
+        let mut seq = 0;
+        db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,created_at) VALUES ('restart-session',?,'user_message','Run interrupted by a restart','2026-11-17T14:00:00Z')", [seq])?;
+        expected += 1;
+        for call in 0..60 {
+            for status in ["pending", "in_progress", "completed"] {
+                seq += 1;
+                let update = json!({"sessionUpdate":if status == "pending" {"tool_call"} else {"tool_call_update"},
+                    "toolCallId":format!("call-{call}"),"title":format!("Read file {call}"),"status":status,"kind":"read"});
+                db.execute("INSERT INTO host_updates VALUES ('restart-session',?,?,'2026-11-17T14:00:01Z')", rusqlite::params![seq, update.to_string()])?;
+                expected += 1;
+            }
+            seq += 1;
+            db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,message_id,created_at) VALUES ('restart-session',?,'agent_message',?,'m1','2026-11-17T14:00:02Z')",
+                rusqlite::params![seq, format!("chunk {call} ")])?;
+            expected += 1;
+        }
+        Ok(())
+    }).unwrap();
+    drop(store);
+    f.start().await;
+    let id = f.ready_project().await;
+    let board = f
+        .rpc(
+            "native.board",
+            json!({"protocol":{"major":2,"mapping":2},"requestId":"board","projectId":id,
+                "operation":"tasks.board","payload":{"id":id}}),
+        )
+        .await;
+    let listed = board["data"]["value"]["items"].as_array().unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .find(|t| t["taskId"] == task.as_str())
+            .unwrap()["executionId"],
+        "restart-execution",
+        "{board}"
+    );
+    let rows = f.whole_history(&id, &task).await;
+    assert_eq!(rows.len(), expected, "every retained row is read");
+    assert_eq!(rows[0]["kind"], "user");
+    assert!(rows.iter().all(|r| r["availability"] == "available"));
+    let sequences: Vec<u64> = rows
+        .iter()
+        .map(|r| r["sequence"].as_str().unwrap().parse().unwrap())
+        .collect();
+    assert!(
+        sequences.windows(2).all(|w| w[0] < w[1]),
+        "in order, none repeated"
+    );
+    assert!(rows.last().unwrap()["text"]
+        .as_str()
+        .unwrap()
+        .contains("chunk 59"));
+    // Read again after the runtime has had time to recover the run: the same conversation.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(f.whole_history(&id, &task).await.len(), expected);
+    f.stop().await;
+}
+
 #[tokio::test]
 async fn native_requests_including_float_profile_verbs_need_no_helper() {
     let mut f = Fixture::new();

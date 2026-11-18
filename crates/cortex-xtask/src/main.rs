@@ -69,13 +69,22 @@ struct Args {
 
 impl Args {
     fn parse(raw: &[String]) -> Res<Args> {
-        let mut args = Args { positional: Vec::new(), root: None, flags: Vec::new() };
+        let mut args = Args {
+            positional: Vec::new(),
+            root: None,
+            flags: Vec::new(),
+        };
         let mut iter = raw.iter();
         while let Some(arg) = iter.next() {
             if let Some(name) = arg.strip_prefix("--") {
                 let (name, value) = match name.split_once('=') {
                     Some((n, v)) => (n.to_string(), v.to_string()),
-                    None => (name.to_string(), iter.next().ok_or(format!("--{name} requires a value"))?.clone()),
+                    None => (
+                        name.to_string(),
+                        iter.next()
+                            .ok_or(format!("--{name} requires a value"))?
+                            .clone(),
+                    ),
                 };
                 if name == "root" {
                     args.root = Some(PathBuf::from(value));
@@ -90,7 +99,10 @@ impl Args {
     }
 
     fn flag(&self, name: &str) -> Option<&str> {
-        self.flags.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+        self.flags
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
     }
 
     fn path(&self, name: &str) -> Option<PathBuf> {
@@ -127,7 +139,10 @@ fn run(raw: &[String]) -> Res<i32> {
             println!("{USAGE}");
             return Ok(0);
         }
-        driver::build_deb(&args_root_for_build(raw)?, &driver::Options::parse(&strip_root(&raw[1..]))?)?;
+        driver::build_deb(
+            &args_root_for_build(raw)?,
+            &driver::Options::parse(&strip_root(&raw[1..]))?,
+        )?;
         return Ok(0);
     }
     if raw.first().map(String::as_str) == Some("test-fast") {
@@ -135,17 +150,27 @@ fn run(raw: &[String]) -> Res<i32> {
         let root = package::absolute_root(&args_root_for_build(raw)?)?;
         return testrun::run(&root, &testrun::Options::parse(&strip_root(&raw[1..]))?);
     }
-    if let Some(command) = raw.first().filter(|c| installed::COMMANDS.contains(&c.as_str())) {
+    if let Some(command) = raw
+        .first()
+        .filter(|c| installed::COMMANDS.contains(&c.as_str()))
+    {
         return installed::run(command, &raw[1..]);
     }
-    if let Some(command) = raw.first().filter(|c| rendered::COMMANDS.contains(&c.as_str())) {
+    if let Some(command) = raw
+        .first()
+        .filter(|c| rendered::COMMANDS.contains(&c.as_str()))
+    {
         return rendered::run(command, &raw[1..]);
     }
     let args = Args::parse(raw)?;
     let command = args.positional.first().map(String::as_str).ok_or(USAGE)?;
     match command {
-        "generate-contract" => contract::run(&args.root()?, args.action(&["check", "write"])? == "write")?,
-        "generate-instructions" => instructions::run(&args.root()?, args.action(&["check", "write"])? == "write")?,
+        "generate-contract" => {
+            contract::run(&args.root()?, args.action(&["check", "write"])? == "write")?
+        }
+        "generate-instructions" => {
+            instructions::run(&args.root()?, args.action(&["check", "write"])? == "write")?
+        }
         "profiles" => profiles::run(&args.root()?, args.action(&["check", "write"])? == "write")?,
         "check-generated" => {
             let root = args.root()?;
@@ -162,22 +187,41 @@ fn run(raw: &[String]) -> Res<i32> {
             package::run_payload_list(&args.root()?)?
         }
         "package-channel" => package_channel(&args)?,
-        "bundle-engines" => {
-            engines::build_engines(&args.root()?, &args.path("output").ok_or("--output is required")?)?
-        }
-        "bundle-voice" => engines::build_voice(&args.root()?, &args.path("output").ok_or("--output is required")?)?,
+        "bundle-engines" => engines::build_engines(
+            &args.root()?,
+            &args.path("output").ok_or("--output is required")?,
+        )?,
+        "bundle-voice" => engines::build_voice(
+            &args.root()?,
+            &args.path("output").ok_or("--output is required")?,
+        )?,
         "debian-version" => {
-            let (Some(identity), Some(stamp)) = (args.positional.get(1), args.positional.get(2)) else {
+            let (Some(identity), Some(stamp)) = (args.positional.get(1), args.positional.get(2))
+            else {
                 return Err("usage: debian-version <identity-version> <build-stamp>".into());
             };
             println!("{}", debian::debian_version(identity, stamp)?);
         }
         "build-stamp" => {
-            let stamp = args.positional.get(1).ok_or("usage: build-stamp <build-stamp>")?;
+            let stamp = args
+                .positional
+                .get(1)
+                .ok_or("usage: build-stamp <build-stamp>")?;
             println!("{}", debian::build_stamp(stamp)?);
         }
-        "snapshot" => driver::snapshot(&package::absolute_root(&args.root()?)?, &PathBuf::from(args.positional.get(1).ok_or("usage: snapshot <destination>")?))?,
-        "new-build-dir" => driver::new_build_dir(std::path::Path::new(args.positional.get(1).ok_or("usage: new-build-dir <parent>")?))?,
+        "snapshot" => driver::snapshot(
+            &package::absolute_root(&args.root()?)?,
+            &PathBuf::from(
+                args.positional
+                    .get(1)
+                    .ok_or("usage: snapshot <destination>")?,
+            ),
+        )?,
+        "new-build-dir" => driver::new_build_dir(std::path::Path::new(
+            args.positional
+                .get(1)
+                .ok_or("usage: new-build-dir <parent>")?,
+        ))?,
         "shlibdeps" => {
             return tools::shlibdeps(&args.path("target").unwrap_or_else(tools::default_target));
         }
@@ -208,28 +252,48 @@ fn args_root_for_build(raw: &[String]) -> Res<PathBuf> {
     let mut iter = raw.iter();
     while let Some(a) = iter.next() {
         if a == "--root" {
-            return iter.next().map(PathBuf::from).ok_or_else(|| "--root requires a value".to_string());
+            return iter
+                .next()
+                .map(PathBuf::from)
+                .ok_or_else(|| "--root requires a value".to_string());
         }
         if let Some(v) = a.strip_prefix("--root=") {
             return Ok(PathBuf::from(v));
         }
     }
-    Args { positional: vec![], root: None, flags: vec![] }.root().and_then(|r| package::absolute_root(&r))
+    Args {
+        positional: vec![],
+        root: None,
+        flags: vec![],
+    }
+    .root()
+    .and_then(|r| package::absolute_root(&r))
 }
 
 fn package_channel(args: &Args) -> Res<()> {
     let action = args.action(&["overlay", "package"])?;
-    let channel = args.positional.get(2).map(String::as_str).filter(|c| matches!(*c, "dev" | "release")).ok_or("channel must be dev or release")?;
+    let channel = args
+        .positional
+        .get(2)
+        .map(String::as_str)
+        .filter(|c| matches!(*c, "dev" | "release"))
+        .ok_or("channel must be dev or release")?;
     let root = args.root()?;
     if action == "overlay" {
         println!("{}", debian::overlay(&root, channel)?);
         return Ok(());
     }
-    let stamp = args.flag("build-stamp").ok_or("package requires --build-stamp")?;
+    let stamp = args
+        .flag("build-stamp")
+        .ok_or("package requires --build-stamp")?;
     let depends = match args.path("depends-file") {
         Some(file) => {
             let text = fsutil::read_text(&file)?;
-            Some(fsutil::py_strip(&text).trim_start_matches("shlibs:Depends=").to_string())
+            Some(
+                fsutil::py_strip(&text)
+                    .trim_start_matches("shlibs:Depends=")
+                    .to_string(),
+            )
         }
         None => None,
     };

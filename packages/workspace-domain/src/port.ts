@@ -15,7 +15,7 @@ export type ProjectSlice = { project: Project; tasks: Task[]; sessions: TaskSess
 /** A confirmed snapshot. `version` is a decimal string, and a store installs only a newer one. */
 export type ProjectionUpdate = { kind: "projection"; version: string } & ({ scope: "workspace"; state: WorkspaceState } | { scope: "project"; slice: ProjectSlice });
 /** What the owner decided about a task. The runtime knows nothing of these, so they come from the machine and sit over its facts. */
-export type TaskOverlay = Partial<Pick<Task, "title" | "titleState" | "acceptance" | "reviewActions" | "integrationFacts" | "closedAs" | "doneAt" | "archive" | "archiveQuestion" | "archiveAskAfter" | "targetBranch" | "sprintId" | "dependencies" | "integration" | "notVerifiedByCortex" | "purgeBlocker" | "work" | "checkout" | "settings" | "result" | "conflict" | "merge" | "resolvedBy">> & {
+export type TaskOverlay = Partial<Pick<Task, "title" | "titleState" | "acceptance" | "reviewActions" | "integrationFacts" | "closedAs" | "doneAt" | "archive" | "targetBranch" | "sprintId" | "dependencies" | "integration" | "notVerifiedByCortex" | "purgeBlocker" | "work" | "checkout" | "settings" | "result" | "conflict" | "merge" | "resolvedBy" | "writeDenials">> & {
   status?: "ready_to_merge" | "done"; automaticReady?: boolean; planning?: boolean; purged?: boolean;
 };
 /**
@@ -28,7 +28,10 @@ export type ProjectFacts = { hasGit?: boolean; projectId: string; openBranch: st
   /** Answers kept for a batch of questions, which the machine takes only as a whole. By decision. */
   heldAnswers?: Record<string, string>;
   /** Why Cortex is not working for this project now, when it is not. */
-  issue?: string | null };
+  issue?: string | null;
+  /** When the port numbers its reads: this read's place in the order the reads began. Facts that began earlier never
+   *  replace facts that began later. Absent, facts arriving during a coherent read cause another read instead. */
+  readOrder?: number };
 /** The machine's own background fetch of the engines' model lists: still running, and the connections whose fetch ended without a list. */
 export type CatalogueState = { running: boolean; failed: { connectionId: string; reason: string }[] };
 /**
@@ -48,6 +51,12 @@ export type CommandEnvelope = {
   payload: WorkspaceCommand;
 };
 /** That a command was recorded. It is not the new state: the screen changes only when a projection confirms it. */
+/**
+ * What a screen on view shows of a project: its facts, a Git screen (Git, Worktrees, Code, Changes, the merge dialog: Git is
+ * also reread on the visible refresh), or a Git status line such as the title band's Git button (Git is read with the facts,
+ * on events, on return to the window and after the owner's own action, never on a timer).
+ */
+export type GitInterest = "facts" | "git" | "status";
 export type CommandReceipt = { requestId: string; ok: boolean; outcome: string; message: string; entityId?: string; entityVersion?: string; deletedTaskIds?: string[]; keptPaths?: string[] };
 
 /** One folder the machine found. `git` says a `.git` is there. */
@@ -59,7 +68,7 @@ export type DirectorySearch = { query: string; home: string; entries: DirectoryE
  * `fresh` bypasses repository cache age; `full` rereads all projects even after event invalidations were consumed.
  * `machine.overview` is read on demand, when a screen that shows its fields opens; startup never asks for it.
  */
-export type QueryParameters = { "capabilities.get": Record<string, never>; "project.snapshot": { projectId?: string; full?: boolean }; "project.facts": { projectId?: string; fresh?: boolean }; "machine.facts": Record<string, never>; "machine.overview": Record<string, never> };
+export type QueryParameters = { "capabilities.get": Record<string, never>; "project.snapshot": { projectId?: string; full?: boolean }; "project.facts": { projectId?: string; fresh?: boolean; git?: boolean }; "machine.facts": Record<string, never>; "machine.overview": Record<string, never> };
 export type QueryResults = { "capabilities.get": PortCapabilities; "project.snapshot": ProjectionUpdate[]; "project.facts": ProjectFacts[]; "machine.facts": MachineFacts[]; "machine.overview": MachineFacts[] };
 export type QueryOperation = keyof QueryResults;
 
@@ -73,8 +82,12 @@ export interface WorkspacePort {
   /** One file of a checkout, read when it is opened. A port with no files has none. */
   discoverMcp?(server: McpServer): Promise<ConnectResult>;
   takeDroppedFiles?(): Promise<import("./types").Attachment[]>;
-  /** Saved creation bytes for one task, fetched on demand rather than duplicated in every board snapshot. */
-  readTaskAttachments?(taskId: string): Promise<import("./types").Attachment[]>;
+  /** A saved task's files, fetched on demand rather than duplicated in every board snapshot. */
+  readTaskAttachments?(taskId: string): Promise<import("./types").AttachmentInput[]>;
+  /** Uploads files the owner just attached, once; every later command carries the references it answers. */
+  uploadAttachments?(files: import("./types").Attachment[]): Promise<import("./types").AttachmentRef[]>;
+  /** One saved file's bytes, read only to show or save it. */
+  readAttachment?(file: import("./types").AttachmentRef): Promise<import("./types").Attachment>;
   readClipboardImage?(): Promise<import("./types").Attachment[]>;
   /** Saves one attachment where the owner picks, through the system's save dialog. A path of null means the owner cancelled. */
   saveAttachment?(file: import("./types").Attachment): Promise<{ path: string | null }>;
@@ -85,13 +98,70 @@ export interface WorkspacePort {
   cancelDirectorySearch?(machineId: string, session: string): Promise<void>;
   readWorkerActivity?(taskId: string, workerId: string, cursor?: string): Promise<Pick<Worker, "activity" | "activityCursor" | "messages">>;
   readReport?(taskId: string, reportId: string, cursor?: string): Promise<import("@cortex/workspace-contract").ReportPage>;
+  /** Reads one task's retained conversation again now, after a read that did not complete. The result arrives as an update. */
+  retryHistory?(taskId: string): void;
+  /** Reads the next older part of a task's conversation, when only its latest part is held (`historyEarlier`). The rows
+   *  arrive as an update and are put before the ones held; a failed read says so on `historyEarlier`. */
+  loadEarlierHistory?(taskId: string): void;
+  /**
+   * A screen on view shows one project's facts (`facts`: workers, reviews, queued messages) or its Git data (`git`: the
+   * repository snapshot, task diffs, branches). The port reads only what some screen holds interest in; the returned
+   * function releases it. `taskId` names the task the screen shows: while a project has interest, its facts carry worker
+   * rows only for such tasks. A port that reads nothing in the background has no such registry.
+   */
+  interest?(projectId: string, kind: GitInterest, taskId?: string): () => void;
+  /** A screen on view shows the machine overview (storage, retention, version); it is reread only while one does. */
+  watchOverview?(): () => void;
+  /**
+   * Settles once every board or facts read that `query` stopped waiting for has delivered its late result as an update
+   * (or failed). A port whose queries always carry their whole result has none.
+   */
+  presented?(): Promise<void>;
+  /**
+   * The local machine's remote access (`remote.*`), when its service advertises it (`FEATURES.remoteAccess`). Each call
+   * answers the whole new status. `watch` tells when the service says the status changed.
+   */
+  remoteAccess?: {
+    call<O extends import("./remote").RemoteOperation>(operation: O, message: import("./remote").RemoteRequests[O]): Promise<import("./remote").RemoteStatus>;
+    watch(listener: () => void): () => void;
+  };
   readFile?(checkoutId: string, file: string): Promise<FileRead>;
+  /** A commit message or pull request text the machine wrote from the task's real changes. Null when none could be had; the caller keeps its own text. */
+  draftIntegrationText?(request: IntegrationTextRequest): Promise<IntegrationText | null>;
+  /** One picture, video or sound of a checkout as bytes, for viewing only. Its type comes from its name. */
+  readMedia?(checkoutId: string, file: string): Promise<FileRead>;
+  /**
+   * The project's own skills (`.agents/skills`, `.claude/skills`, `.codex/skills`): names, project-relative paths and short
+   * descriptions, never a body. Read when a composer's `/` list first opens for that project.
+   */
+  listProjectSkills?(projectId: string): Promise<ProjectSkills>;
+  /**
+   * One level of each named checkout folder for the Code tree (`""` is the checkout itself), and with `overview` what the
+   * repository snapshot's tree leaves out (ignored files, top-most ignored and untracked folders), never walked into.
+   * Read only when Code asks: on open, on its refresh and when the owner expands a folder.
+   */
+  listFolders?(checkoutId: string, request: FolderListRequest): Promise<FolderListing>;
   /** Writes the owner's text only over the revision they last saw. A port with no writes has no editor. */
   saveFile?(checkoutId: string, file: string, text: string, revision: string | null): Promise<FileSaveResult>;
 }
 
 /** One read of a checkout file. `revision` is the hash of its bytes; `readOnly` and `writer` say why saving it is not possible now. */
-export type FileRead = { text: string | null; reason?: string; revision?: string | null; size?: number; readOnly?: string | null; writer?: string | null };
+/** `pathOnly`: a bundled skill has the same name, so only the path names this file. `omitted` counts skills past the bound. */
+export type ProjectSkill = { name: string; path: string; description: string | null; pathOnly: boolean };
+export type ProjectSkills = { skills: ProjectSkill[]; omitted: number };
+export type FileRead = { text: string | null; reason?: string; revision?: string | null; size?: number; readOnly?: string | null; writer?: string | null; media?: FileMedia };
+export type FolderListRequest = { dirs: string[]; overview?: boolean };
+/** `ignored` is Git's verdict (in a folder without Git: one of the folders its tree does not walk); null when Git could not say. */
+export type FolderEntry = { name: string; dir: boolean; link?: boolean; ignored: boolean | null };
+/** At most a bounded number of entries; `more` counts the rest, a lower bound when `exact` is false. */
+export type FolderRead = { dir: string; entries: FolderEntry[]; more: number; exact: boolean } | { dir: string; code: string; message: string };
+export type FolderOverview = { truncated: boolean; entries: { path: string; dir: boolean; ignored: boolean }[] };
+export type FolderListing = { overview: FolderOverview | null; folders: FolderRead[] };
+export type IntegrationTextRequest = { taskId: string; method: "commit" | "squash" | "pr"; targetBranch: string; paths?: string[]; summary?: string };
+/** `model` names the model that wrote it; `fallback` text is built from the changed files alone. */
+export type IntegrationText = { source: "model" | "fallback"; message?: string; title?: string; body?: string; model?: string };
+/** Base64 bytes and the MIME type the machine chose from the file name. */
+export type FileMedia = { mime: string; data: string };
 /** `unknown` means the reply was lost, which says nothing about the write. */
 export type FileSaveResult = { outcome: "saved"; revision: string; size: number } | { outcome: "conflict"; revision: string | null } | { outcome: "writer_active"; writer: string } | { outcome: "refused"; message: string } | { outcome: "unknown" };
 
@@ -154,10 +224,20 @@ const FACT_ENTRY = "facts:";
 function withFactEntries(session: TaskSession, facts: ProjectFacts): TaskSession {
   const workers = facts.workers.filter(w => w.taskId === session.taskId).map(w => w.id);
   // A message the runtime already recorded is that record, so it reads once, in its place.
-  const recorded = new Set(session.timeline.flatMap(e => e.kind === "said" ? [e.text] : []));
-  const said = (facts.messages ?? []).filter(m => m.taskId === session.taskId && m.workerId === null && m.delivery !== "queued" && !recorded.has(m.text));
+  const recorded = new Set(session.timeline.flatMap(e => e.kind === "said" ? [e.text.trim()] : []));
+  // With only the latest part of the conversation read, a message sent before that part has its record among the rows not
+  // read yet: it is not added at the end as if it had just been said.
+  const since = session.historyEarlier?.since ?? null;
+  const said = (facts.messages ?? []).filter(m => m.taskId === session.taskId && m.workerId === null && m.delivery !== "queued" && !recorded.has(m.text.trim())
+    && !(session.historyEarlier && since !== null && m.at !== null && m.at < since));
   const entries: TimelineEntry[] = [
     ...(workers.length ? [{ id: `${FACT_ENTRY}workers`, kind: "workers" as const, title: "Workers", workerIds: workers }] : []),
+    ...(facts.overlays[session.taskId]?.acceptance?.automatic ? [{
+      id: `${FACT_ENTRY}automatic-acceptance`,
+      kind: "line" as const, icon: "check-circle",
+      text: `Automatically accepted v${facts.overlays[session.taskId]!.acceptance!.version}`,
+      at: facts.overlays[session.taskId]!.acceptance!.at ?? null, rule: false,
+    }] : []),
     ...said.map(m => ({ id: `${FACT_ENTRY}message:${m.id}`, kind: "message" as const, messageId: m.id })),
   ];
   const kept = session.timeline.filter(e => !e.id.startsWith(FACT_ENTRY)), held = facts.heldAnswers ?? {};

@@ -30,6 +30,17 @@ const setupCopy: Record<string, string> = {
   setup_failed: "Engine setup failed. Check native login and sandbox availability, then restart the app.",
   downloaded: "Adapter installed; connection setup pending.",
 };
+// A click on one of this window's notifications: the shell sends back only the target it validated and kept for that notification.
+const notificationClicks = (listener: (target: unknown) => void) => {
+  const stop = listen("workspace-navigate", event => listener(event.payload));
+  return () => { void stop.then(unlisten => unlisten(), () => {}); };
+};
+// The machine service raises the notifications when it can: the window tells it what the focused window shows and which
+// kinds the owner wants, and collects the place of a click that started this window.
+const notificationService = {
+  report: (report: unknown) => native.transport.request("notifications.report", report) as Promise<{ raising?: boolean }>,
+  take: () => native.transport.request("notifications.take", {}) as Promise<{ target?: unknown }>,
+};
 // The logo the page painted before any script ran. The startup screen takes over this very element, so it is never redrawn.
 const boot = document.getElementById("boot");
 const logo = boot?.querySelector("img") ?? undefined;
@@ -52,7 +63,7 @@ function Desktop() {
     void poll();
     onCleanup(() => { active = false; clearTimeout(timer); });
   });
-  return <Workspace logo={logo} notify={label => invoke<void>("workspace_notify", { label })} voice={createVoicePort(native.transport)} terminal={createTerminalPort(native.transport)} port={createRealPort({ transport: native.transport, registry: true, actorId: "local-peer", boardStorage: {getItem:key => localStorage.getItem(key),setItem:(key,value) => localStorage.setItem(key,value)} })} chrome={chrome}
+  return <Workspace logo={logo} notify={({ label, target }) => invoke<void>("workspace_notify", { label, target })} notificationClicks={notificationClicks} notificationService={notificationService} voice={createVoicePort(native.transport)} terminal={createTerminalPort(native.transport)} port={createRealPort({ transport: native.transport, registry: true, actorId: "local-peer", boardStorage: {getItem:key => localStorage.getItem(key),setItem:(key,value) => localStorage.setItem(key,value)} })} chrome={chrome}
     notice={<><Show when={chrome.closeError()}>{reason => <div class="strip bad" role="alert">{reason()}</div>}</Show><Show when={setup().length}><div class="strip info" role="status"><For each={notices()}>{([engines, copy]) =>
       <span>{engines}: {copy} </span>
     }</For></div></Show></>} />;

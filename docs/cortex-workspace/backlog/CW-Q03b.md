@@ -1,6 +1,6 @@
 # CW-Q03b: Physical-Android accessibility and long-history checks
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Not implemented; mobile, gated by Gate M · **Phase:** 3+ · **Size:** L
 
 Split from [CW-Q03](CW-Q03.md) for the physical Android device.
 

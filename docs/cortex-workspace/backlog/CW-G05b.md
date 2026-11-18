@@ -1,6 +1,6 @@
 # CW-G05b: Android Git screens
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Not implemented; no Android client exists; mobile is deferred behind Gate M · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Build the React Native Git screens for Android: status, read-only diff, stage and unstage, commit confirmation, branch switch and push confirmation. They use the same service commands and typed outcomes as the desktop panel in CW-G05a. Mobile confirmations show the full remote and branch names. No Android path turns an acceptance into a commit or a push.

@@ -9,8 +9,8 @@ use crate::{
 use std::{
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc,
         mpsc::{sync_channel, RecvTimeoutError, SyncSender},
+        Arc,
     },
     time::{Duration, Instant},
 };
@@ -80,7 +80,11 @@ impl Lane {
                         super::locks::private_directory(&key.directory(), true)?;
                         // A shared writer waits for another process's idle release;
                         // an exclusive one refuses at once.
-                        Some(if shared { fences_waiting(&key)? } else { fences(&key)? })
+                        Some(if shared {
+                            fences_waiting(&key)?
+                        } else {
+                            fences(&key)?
+                        })
                     } else {
                         None
                     };

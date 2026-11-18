@@ -53,7 +53,32 @@ pub async fn run(
         })
         .ok_or_else(|| refuse("invalid_task", "Unknown task."))?;
     // `params or {}`: falsy params read as an empty request (invalid_task above).
-    let _lock = Lock::new(state, "machine.lock")?;
+    // Merge finish/abort and file choices change the index: one Git-changing action
+    // per repository at a time, taken before the machine lock (the same order as
+    // every other holder of both).
+    let _repo = if matches!(
+        p["action"].as_str(),
+        Some("finish_merge" | "abort_merge" | "resolve_block")
+    ) {
+        Some(Lock::long(
+            state,
+            &super::git::repo_lock(root),
+            "integration_in_progress",
+            super::integration::REPO_BUSY,
+        )?)
+    } else {
+        None
+    };
+    // An automatic settle never waits for the machine lock: the background pass
+    // simply tries again next time (`deferred`), so no owner ever sees it as busy.
+    let _lock = if p["action"] == "auto_ready" {
+        match Lock::try_new(state, "machine.lock")? {
+            Some(lock) => lock,
+            None => return Ok(json!({"accepted":false,"deferred":true})),
+        }
+    } else {
+        Lock::new(state, "machine.lock")?
+    };
     if matches!(
         p["action"].as_str(),
         Some("resolve_block" | "finish_merge" | "abort_merge")
@@ -69,10 +94,18 @@ pub async fn run(
             return super::task_resolution::replay(reply);
         }
     }
+    // A merge or pull request of this task runs its Git effects outside the lock; any
+    // other action on the task is refused at once, naming it, rather than waiting.
+    if let Err(e) = settings::idle(state, project, task, &_lock) {
+        if p["action"] == "auto_ready" {
+            return Ok(json!({"accepted":false,"deferred":true}));
+        }
+        return Err(e);
+    }
     // Check before any effect. Unmaterialized legacy names still need the retained projection.
     super::task_facts::materialized(root, project).or_else(|error| {
         if error.code == "project_storage_mismatch"
-            && matches!(p["action"].as_str(), Some("accept" | "answer_archive"))
+            && matches!(p["action"].as_str(), Some("accept" | "confirm_discard"))
         {
             // The retained boundary translates this storage refusal; do not reopen it.
             return Err(refuse("machine_tool_failed", "StoreError"));
@@ -120,11 +153,27 @@ pub async fn run(
             workspace_protocol::validate("Identity", &json!(task)).map_err(|_| contract())?;
             workspace_protocol::validate("Decimal", &p["expectedVersion"])
                 .map_err(|_| contract())?;
-            let payload = &p["payload"];
-            let title = payload["title"]
+            let mut resolved = p["payload"].clone();
+            let title = p["payload"]["title"]
                 .as_str()
                 .filter(|s| !s.trim().is_empty() && s.trim().chars().count() <= 200)
                 .ok_or_else(|| edit_error("title_required"))?;
+            // The edit names its files by reference; Core keeps its own copy of each body.
+            if let Some(items) = resolved
+                .get("attachments")
+                .filter(|a| a.is_array())
+                .cloned()
+            {
+                resolved["attachments"] =
+                    super::attachment_files::resolve(state, &items).map_err(|e| {
+                        edit_error(if e.code == "invalid_attachments" {
+                            "invalid_attachment"
+                        } else {
+                            e.code
+                        })
+                    })?;
+            }
+            let payload = &resolved;
             let mut choices = payload.clone();
             choices
                 .as_object_mut()
@@ -351,20 +400,15 @@ pub async fn run(
             .await;
         }
         "finish_merge" | "abort_merge" => {
-            return super::task_merge::run(
-                root,
-                project,
-                task,
-                state,
-                &mut product,
-                p,
-                git,
-                &_lock,
-            )
-            .await;
+            return super::task_merge::run(root, project, task, state, &mut product, p, git, _lock)
+                .await;
         }
-        "answer_archive" => {
-            super::task_review::answer_archive(root, state, &mut record, p, git).await?;
+        "confirm_discard" => {
+            super::task_review::confirm_discard(root, &mut record, git).await?;
+        }
+        "auto_ready" => {
+            return super::task_review::automatic(root, project, task, state, &mut product, git)
+                .await;
         }
         "accept" => {
             return super::task_review::accept(root, project, task, state, &mut product, p, git)

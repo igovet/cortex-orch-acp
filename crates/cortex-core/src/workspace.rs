@@ -343,6 +343,8 @@ pub fn start_native_input(
             db.execute("INSERT INTO host_transcript(session_id,seq,kind,text,attachments_json,created_at) VALUES (?,?,'user_message',?,?,?)",
                 (session,seq,&goal,attachments.to_string(),crate::now()))?;
         }
+        // The owner's language is recorded at task start (task_language) for its readers.
+        crate::assignment_brief::record_language_tx(db,&task)?;
         db.execute("INSERT INTO workspace_starts(execution_id,task_id,project_id,actor_id,request_id,source_origin,source_event_id,state,created_at)
             VALUES (?,?,?,?,?,?,?,'claimed',?)",
             (&execution,draft,project,actor,request,"native-desktop",format!("native:{execution}"),crate::now()))?;
@@ -465,13 +467,11 @@ pub fn read_report_page(
     if kind != "report" {
         return refuse("not_found");
     }
-    let page = crate::store::documents::Publisher::new(store).read_report(
-        &task,
-        report,
-        cursor,
-        limit,
-    )?;
-    Ok(json!({"reportId":report,"title":title,"sha256":page.sha256,"markdown":page.markdown,
+    let page =
+        crate::store::documents::Publisher::new(store).read_report(&task, report, cursor, limit)?;
+    Ok(
+        json!({"reportId":report,"title":title,"sha256":page.sha256,"markdown":page.markdown,
         "totalCharacters":page.total_characters,"partial":page.next_cursor.is_some(),
-        "nextCursor":page.next_cursor}))
+        "nextCursor":page.next_cursor}),
+    )
 }

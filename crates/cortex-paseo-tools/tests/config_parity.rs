@@ -21,7 +21,10 @@ use std::{
     process::{Command, Stdio},
 };
 
-const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/config-parity-golden.json");
+const GOLDEN: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/config-parity-golden.json"
+);
 const TOOL: &str = env!("CARGO_BIN_EXE_cortex-paseo-tools");
 struct Fixture {
     base: PathBuf,

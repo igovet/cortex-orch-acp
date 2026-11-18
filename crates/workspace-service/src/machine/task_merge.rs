@@ -10,6 +10,32 @@ use super::{
 use serde_json::{json, Value};
 use std::path::Path;
 
+const IN_PROGRESS: &str = "This task's merge is being finished or aborted. Wait for it to finish.";
+/// The merge fields of this task's record, plus the Git facts the read added (kept as
+/// the retained overlay did), into the saved product as it is now. Never gives up
+/// waiting for the machine lock: the Git effect already happened.
+fn save(state: &Path, project: &str, task: &str, product: &Value) -> Result<()> {
+    settings::save_task(
+        state,
+        project,
+        task,
+        &product["tasks"][task],
+        &["conflict", "merge", "acceptance", "resolvedBy", "status"],
+    )?;
+    let _lock = Lock::wait(state, "machine.lock")?;
+    let mut saved = super::native::product(state, project)?;
+    let mut changed = false;
+    for key in ["hasGit", "ghAvailable"] {
+        if let Some(value) = product.get(key).filter(|v| saved.get(key) != Some(*v)) {
+            saved[key] = value.clone();
+            changed = true;
+        }
+    }
+    if changed {
+        settings::write_json(&product_path(state, project)?, &saved)?;
+    }
+    Ok(())
+}
 fn unknown() -> Refused {
     refuse("integration_unknown", "The merge may have changed Git or task state. Inspect Git before requesting a new action; nothing was retried.")
 }
@@ -21,7 +47,7 @@ pub async fn run(
     product: &mut Value,
     p: &Value,
     git: &mut Git,
-    lock: &Lock,
+    lock: Lock,
 ) -> Result<Value> {
     let record = &product["tasks"][task];
     if record["conflict"] == "resolving" {
@@ -46,11 +72,15 @@ pub async fn run(
     if !abort && !record["merge"].is_object() {
         return Err(refuse("machine_tool_failed", "AttributeError"));
     }
+    // The Git merge commit (and its hooks) or abort runs after the machine lock is
+    // released; this task's other owner actions are refused until it settles.
+    let claim = settings::claim(state, project, task, IN_PROGRESS, &lock)?;
     let intent =
-        match ledger::Intent::begin_locked(state, "product.task", project, Some(root), p, lock)? {
+        match ledger::Intent::begin_locked(state, "product.task", project, Some(root), p, &lock)? {
             ledger::Begin::Replay(reply) => return super::task_resolution::replay(reply),
             ledger::Begin::Run(intent) => intent,
         };
+    drop(lock);
     let mut effects = false;
     let outcome: Result<Value> = async {
         if abort {
@@ -68,7 +98,7 @@ pub async fn run(
             record["conflict"] = json!("none");
             record["merge"] = Value::Null;
             record["acceptance"] = Value::Null;
-            settings::write_json(&product_path(state, project)?, product)?;
+            save(state, project, task, product)?;
             return Ok(json!({"done":true,"reclamation":product["tasks"][task]["reclamation"]}));
         }
         if !git
@@ -113,11 +143,12 @@ pub async fn run(
         record.as_object_mut().unwrap().remove("status");
         record["merge"]["finished"] = json!(true);
         record["merge"]["finishedAt"] = json!(now_ms());
-        settings::write_json(&product_path(state, project)?, product)?;
+        save(state, project, task, product)?;
         Ok(json!({"done":true,"reclamation":product["tasks"][task]["reclamation"]}))
     }
     .await;
     let reply = envelope(outcome.map_err(|e| if effects { unknown() } else { e }));
-    intent.finish_locked(&reply, lock).map_err(|_| unknown())?;
+    intent.finish(state, &reply).map_err(|_| unknown())?;
+    drop(claim);
     super::task_resolution::replay(reply)
 }

@@ -38,10 +38,16 @@ fn opening_an_existing_store_keeps_the_locks_of_live_connections() {
     let live = p.open();
     tasks(&live);
     let database = p.key().database();
-    assert!(held_locks(&database) > 0, "an idle WAL connection holds its shared lock");
+    assert!(
+        held_locks(&database) > 0,
+        "an idle WAL connection holds its shared lock"
+    );
     for mode in [OpenMode::Initialize, OpenMode::RuntimeValidate] {
         drop(Store::open(p.key(), mode).unwrap());
-        assert!(held_locks(&database) > 0, "{mode:?} open released live locks");
+        assert!(
+            held_locks(&database) > 0,
+            "{mode:?} open released live locks"
+        );
     }
     assert_eq!(tasks(&live), 0);
 }

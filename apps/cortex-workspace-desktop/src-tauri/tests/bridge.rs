@@ -735,3 +735,28 @@ async fn mismatched_rpc_identity_and_oversized_frame_fail_closed() {
         responder.await.unwrap();
     }
 }
+
+/// The owner's remote-access settings travel through the desktop bridge to the service and
+/// back as the full status, including when this service runs no remote host.
+#[tokio::test]
+async fn remote_settings_reach_the_service_through_the_bridge() {
+    let f = Fixture::new();
+    let service = bind(f.config()).await.unwrap();
+    let serving = tokio::spawn(service.clone().serve());
+    let bridge = Bridge::new(service.socket_path().into());
+    let status = bridge
+        .request(call("remote.status", json!({})))
+        .await
+        .unwrap();
+    assert_eq!(status["available"], false, "{status}");
+    assert_eq!(status["devices"], json!([]));
+    assert_eq!(
+        bridge
+            .request(call("remote.enable", json!({"enabled":true})))
+            .await
+            .unwrap_err(),
+        "refused:Remote access is not available on this machine."
+    );
+    service.stop().await.unwrap();
+    serving.await.unwrap().unwrap();
+}

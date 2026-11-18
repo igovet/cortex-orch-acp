@@ -581,15 +581,9 @@ fn efforts_at(state: &Path, registry: &Value, home: Option<&Path>) -> Result<Val
                     }
                     let engine = r["engine"].as_str().unwrap();
                     let name = r["model"].as_str().unwrap();
-                    if name.eq_ignore_ascii_case("default") {
-                        let desc = entry["model_description"].as_str().unwrap_or("");
-                        if !crate::config_read_model::matches(
-                            r"^[a-z][a-z0-9.]*(?:-[a-z0-9.]+)+(?:\[[a-z0-9]+\])?$",
-                            desc,
-                        ) || entries.iter().any(|e| e["route"]["model"] == desc)
-                        {
-                            continue;
-                        }
+                    // A pure alias entry names no concrete model and is never offered.
+                    if crate::native_routes::is_alias_model(name) {
+                        continue;
                     }
                     let mut levels = r["supported_parameters"]
                         .as_array()

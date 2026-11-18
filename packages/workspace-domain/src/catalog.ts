@@ -83,8 +83,9 @@ export const newMcpServer = (): McpServer => ({
 });
 /** Access modes and message languages are the runtime's words. Which of them a session offers is in its options. */
 export const ACCESS_MODES = [
-  { id: "development", label: "Development", sub: "Writes in the project without asking" },
-  { id: "guarded", label: "Guarded", sub: "Asks before anything outside the scope" },
-  { id: "auto", label: "Auto", sub: "Routine permission cards are answered for you" },
+  // What each mode asks is about engine file tools; a command can read anything the owner's account can in every mode.
+  { id: "development", label: "Development", sub: "Asks before deletions, engine writes outside the project and key files. Writing workers' commands read and write anywhere without asking" },
+  { id: "guarded", label: "Guarded", sub: "Engine tools ask before reading or writing outside the project. Commands can read, not write, anywhere without asking" },
+  { id: "auto", label: "Auto", sub: "Nothing asks you; each step is recorded. Writing workers' commands read and write anywhere" },
 ] as const satisfies readonly SessionChoice[];
 export const LANGUAGES = [{ id: "auto", label: "Auto" }, { id: "en", label: "English" }, { id: "ru", label: "Russian" }] as const satisfies readonly SessionChoice[];

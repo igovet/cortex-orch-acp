@@ -82,17 +82,20 @@ A local-release build remains non-official even after passing it.
 
 ## Manual Workspace releases
 
-Once `.github/workflows/workspace-desktop-release.yml` is present on the default
-branch `main`, GitHub Actions shows its **Run workflow** button. Pushes never
-publish automatically.
+Once `.github/workflows/workspace-desktop-release.yml` (named **Workspace release**)
+is present on the default branch `main`, GitHub Actions shows its **Run workflow**
+button. Pushes never publish automatically. The workflow has three jobs: `build` (the
+`.deb`), `android` (the APK) and `publish`, which needs both and creates one release.
 
-1. Open Actions → Workspace desktop release → Run workflow.
+1. Open Actions → Workspace release → Run workflow.
 2. Choose branch `main` for production or `dev` for development, then start.
    Other branches and tags are refused; there is no independent channel input.
-3. Download the package and its SHA-256 sidecar from the resulting release.
-   Main publishes `cortex-workspace_<version>_<arch>.deb` under `v<debian-version>`,
-   explicitly Latest. Dev publishes `cortex-workspace-dev_<version>_<arch>.deb`
-   under `dev-v<debian-version>`, marked prerelease and never Latest.
+3. Download the package, the APK and their SHA-256 sidecars from the resulting release.
+   Main publishes `cortex-workspace_<version>_<arch>.deb` and the release-channel APK
+   under `v<debian-version>`, explicitly Latest. Dev publishes
+   `cortex-workspace-dev_<version>_<arch>.deb` and the dev APK under
+   `dev-v<debian-version>`, marked prerelease and never Latest. Both artifacts and their
+   `.sha256` files are attached to the one release.
 4. Install dev manually with `sudo apt install ./cortex-workspace-dev_<version>_<arch>.deb`
    after replacing the placeholders with the downloaded filename. Dev has no
    in-app updates. Its separate package, launcher, service and state can coexist
@@ -103,7 +106,11 @@ updater reads only `/releases/latest`; dev prereleases do not replace it.
 Existing tags are not overwritten; lookup failures other than HTTP 404 stop
 publication. Runs of the same branch are serialized without cancellation.
 Publication grants contents-write only to the publish job through GitHub's token.
-The workflow has not yet been exercised on GitHub.
+The `android` job runs `scripts/build-android-apk.sh` (`--release` on `main`, the dev channel on `dev`) on an Ubuntu runner with JDK 17 and the Android NDK of the runner image. It needs repository secrets `ANDROID_KEYSTORE_BASE64` (the keystore, base64) and `ANDROID_KEYSTORE_PASSWORD`, and optionally `ANDROID_KEY_ALIAS` (default `cortex-workspace`); without the first two it fails closed before building, so no release is published. Create the keystore once with `scripts/build-android-apk.sh --init-signing`, which prints these names; an app update installs over an existing one only when signed with the same key. The keystore is removed from the runner after the build, and the job checks the APK against its SHA-256 file. The workflow has not yet been exercised on GitHub, and the Android job has never run.
+
+### Local builds of both installables
+
+`scripts/build-local.sh [desktop|apk|all] [--release] [--debug-apk]` builds the desktop package (`build-dev-deb.sh`, or `build-prod-deb.sh` with `--release`) and/or the APK (`build-android-apk.sh`), desktop first, and prints each path. `--debug-apk` signs with Android's debug key so no keystore is needed. `scripts/build-android-apk.sh [--release] [--debug] [--all-abis] [--init-signing]` writes `.workspace-build/android/<package>_<version>_<arch>.apk` and its `.sha256`; its prerequisites and signing variables are in [platforms](../cortex-workspace/platforms.md#android-build-prerequisites). A debug APK was built on the development machine; installing any APK on a device has not been verified.
 
 ## Installed desktop handoff gate
 

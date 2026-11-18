@@ -129,6 +129,31 @@ fn parent(checkout: &Path, name: &str) -> Result<(File, String)> {
     }
     Ok((folder, name))
 }
+/// One folder of the checkout (`""` is the checkout itself), held open by descriptor and
+/// reached without following any link, with the same private-name refusal as reads and saves.
+pub(super) fn open_folder(checkout: &Path, dir: &str) -> Result<File> {
+    let mut folder = File::open(checkout)?;
+    if dir.is_empty() {
+        return Ok(folder);
+    }
+    relative(dir)?;
+    if dir.split('/').any(|p| RESERVED.contains(&p)) {
+        return Err(refuse("invalid_path", "Private helper path."));
+    }
+    for part in dir.split('/') {
+        folder = open_at(&folder, part, libc::O_RDONLY | libc::O_DIRECTORY, 0).map_err(|e| {
+            if e.code == "file_missing" {
+                refuse(
+                    "folder_missing",
+                    "This folder is no longer in the checkout.",
+                )
+            } else {
+                e
+            }
+        })?;
+    }
+    Ok(folder)
+}
 fn held(folder: &File, name: &str) -> Result<Option<(Vec<u8>, u32)>> {
     let file = match open_at(folder, name, libc::O_RDONLY | libc::O_NONBLOCK, 0) {
         Ok(f) => f,
@@ -197,9 +222,62 @@ pub fn locate(checkout: &Path, p: &Value) -> Result<Value> {
     }
     Ok(json!({"root":checkout,"path":path}))
 }
+/// The largest picture, video or sound shown inline. Its base64 reply stays well inside one frame.
+pub const MAX_MEDIA: usize = 4 * 1024 * 1024;
+/// The only file types whose bytes are sent for inline viewing, chosen by name and never by content.
+pub fn media_type(name: &str) -> Option<&'static str> {
+    let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "ogv" => "video/ogg",
+        "mov" => "video/quicktime",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "flac" => "audio/flac",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        _ => return None,
+    })
+}
+/// `media: true` reads one picture, video or sound as base64 for inline viewing. It is never edited or saved.
+fn read_media(path: &Path, name: &str) -> Result<Value> {
+    let mime = media_type(name)
+        .ok_or_else(|| refuse("not_media", "This file type cannot be shown here."))?;
+    let mut reply = json!({"file":name,"text":null,"revision":null});
+    if fs::metadata(path)?.len() > MAX_MEDIA as u64 {
+        reply["reason"] = json!("This file is too large to show here.");
+        return Ok(reply);
+    }
+    let mut data = Vec::new();
+    File::open(path)?
+        .take(MAX_MEDIA as u64 + 1)
+        .read_to_end(&mut data)?;
+    if data.len() > MAX_MEDIA {
+        reply["reason"] = json!("This file is too large to show here.");
+        return Ok(reply);
+    }
+    use base64::Engine;
+    reply["revision"] = json!(revision(&data));
+    reply["size"] = json!(data.len());
+    reply["media"] =
+        json!({"mime":mime,"data":base64::engine::general_purpose::STANDARD.encode(&data)});
+    Ok(reply)
+}
 pub fn read(checkout: &Path, p: &Value) -> Result<Value> {
     let name = string(p, "file")?;
     let path = inside(checkout, name)?;
+    if p["media"] == json!(true) && path.is_file() {
+        return read_media(&path, name);
+    }
     let mut reply = json!({"file":name,"text":null,"revision":null});
     let reason = if !path.is_file() {
         Some("This file is not in the checkout.")
@@ -365,6 +443,63 @@ mod tests {
             revision(&vec![b'a'; 1000000]),
             "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
         );
+    }
+    #[test]
+    fn media_reads_are_typed_bounded_and_confined() {
+        use base64::Engine;
+        let root = std::env::temp_dir().join(format!(
+            "cw-media-test-{}",
+            super::super::settings::unique()
+        ));
+        let outside =
+            std::env::temp_dir().join(format!("cw-media-out-{}", super::super::settings::unique()));
+        fs::create_dir_all(root.join("img")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let png = [0x89, b'P', b'N', b'G', 0, 0, 0, 13];
+        fs::write(root.join("img/a.PNG"), png).unwrap();
+        let reply = read(&root, &json!({"file":"img/a.PNG","media":true})).unwrap();
+        assert_eq!(reply["media"]["mime"], "image/png");
+        assert_eq!(reply["text"], Value::Null);
+        assert_eq!(reply["size"], 8);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(reply["media"]["data"].as_str().unwrap())
+                .unwrap(),
+            png
+        );
+        // The ordinary read is unchanged: no bytes, only why there is no text.
+        let plain = read(&root, &json!({"file":"img/a.PNG"})).unwrap();
+        assert!(plain.get("media").is_none());
+        assert_eq!(plain["reason"], "This is a binary file.");
+        // Only listed media types; a text or unknown file is refused, never sent as bytes.
+        fs::write(root.join("notes.txt"), b"hi").unwrap();
+        fs::write(root.join("doc.pdf"), b"%PDF").unwrap();
+        for f in ["notes.txt", "doc.pdf"] {
+            assert_eq!(
+                read(&root, &json!({"file":f,"media":true}))
+                    .unwrap_err()
+                    .code,
+                "not_media"
+            );
+        }
+        // Bounded: one byte over the limit has no bytes; the limit itself fits one frame.
+        let big = fs::File::create(root.join("v.mp4")).unwrap();
+        big.set_len(MAX_MEDIA as u64 + 1).unwrap();
+        let reply = read(&root, &json!({"file":"v.mp4","media":true})).unwrap();
+        assert!(reply.get("media").is_none());
+        assert_eq!(reply["reason"], "This file is too large to show here.");
+        big.set_len(MAX_MEDIA as u64).unwrap();
+        let reply = read(&root, &json!({"file":"v.mp4","media":true})).unwrap();
+        assert_eq!(reply["media"]["mime"], "video/mp4");
+        assert!(serde_json::to_vec(&reply).unwrap().len() < super::super::native::FRAME_BUDGET);
+        // Confined to the checkout by the same guards as text reads.
+        fs::write(outside.join("x.png"), png).unwrap();
+        std::os::unix::fs::symlink(outside.join("x.png"), root.join("link.png")).unwrap();
+        for f in ["link.png", "../x.png", "/etc/x.png", ".git/x.png"] {
+            assert!(read(&root, &json!({"file":f,"media":true})).is_err(), "{f}");
+        }
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
     }
     #[test]
     fn interrupted_and_late_save_leave_current_bytes() {

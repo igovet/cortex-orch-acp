@@ -8,7 +8,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub const BASE: &str = "ubuntu:26.04@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c";
+pub const BASE: &str =
+    "ubuntu:26.04@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c";
 
 pub fn s(x: impl Into<String>) -> Value {
     Value::str(x)
@@ -33,12 +34,23 @@ pub fn opt_s(x: Option<String>) -> Value {
     x.map(Value::Str).unwrap_or(Value::Null)
 }
 
-const LINE: Format = Format { sort_keys: false, ensure_ascii: true, indent: None, compact: false };
-const CANON: Format = Format { sort_keys: true, ensure_ascii: true, indent: None, compact: true };
+const LINE: Format = Format {
+    sort_keys: false,
+    ensure_ascii: true,
+    indent: None,
+    compact: false,
+};
+const CANON: Format = Format {
+    sort_keys: true,
+    ensure_ascii: true,
+    indent: None,
+    compact: true,
+};
 
 /// Python `json.dumps(value)` (`", "` and `": "` separators, ASCII).
 pub fn line(value: &Value) -> String {
-    dumps(value, &LINE).unwrap_or_else(|e| format!("{{\"step\": \"evidence_error\", \"error\": {:?}}}", e))
+    dumps(value, &LINE)
+        .unwrap_or_else(|e| format!("{{\"step\": \"evidence_error\", \"error\": {:?}}}", e))
 }
 
 /// `json.dumps(value, sort_keys=True, separators=(",", ":"))`
@@ -76,7 +88,9 @@ pub struct Captured {
 pub fn capture(command: &mut Command, timeout: Duration) -> Res<Captured> {
     let label = format!("{:?}", command.get_program());
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|e| format!("cannot start {label}: {e}"))?;
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("cannot start {label}: {e}"))?;
     let mut out = child.stdout.take().unwrap();
     let mut err = child.stderr.take().unwrap();
     // A daemonizing grandchild may keep the pipes open after the child exits, so the readers
@@ -122,7 +136,10 @@ pub fn run(argv: &[&str], timeout: Duration) -> Res<Captured> {
     if done.code != 0 {
         return Err(format!(
             "{} failed (exit {}): {}",
-            Path::new(argv[0]).file_name().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default(),
+            Path::new(argv[0])
+                .file_name()
+                .map(|x| x.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             done.code,
             tail(&done.stderr)
         ));
@@ -137,7 +154,9 @@ pub fn run_ok(argv: &[&str]) -> Res<Captured> {
 pub fn tail(text: &str) -> String {
     let t = text.trim();
     let start = t.len().saturating_sub(400);
-    let start = (start..=t.len()).find(|i| t.is_char_boundary(*i)).unwrap_or(0);
+    let start = (start..=t.len())
+        .find(|i| t.is_char_boundary(*i))
+        .unwrap_or(0);
     t[start..].to_string()
 }
 
@@ -184,7 +203,10 @@ pub fn sleep_ms(ms: u64) {
 }
 
 pub fn mono_ns() -> i64 {
-    let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) };
     t.tv_sec as i64 * 1_000_000_000 + t.tv_nsec as i64
 }

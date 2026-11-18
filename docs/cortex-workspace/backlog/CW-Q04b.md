@@ -1,6 +1,6 @@
 # CW-Q04b: Android APK upgrade checks
 
-**Status:** planned · **Phase:** 3+ · **Size:** M
+**Status:** Not implemented; mobile, gated by Gate M · **Phase:** 3+ · **Size:** M
 
 Split from [CW-Q04](CW-Q04.md) for the Android platform.
 

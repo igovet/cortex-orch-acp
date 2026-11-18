@@ -1,6 +1,6 @@
 # CW-U09: Machine switcher and aggregate views
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies · **Phase:** 3+ · **Size:** M
+**Status:** Not implemented; only the local machine exists and the Add remote machine control is disabled · **Phase:** 3+ · **Size:** M
 
 ## Goal
 Machine switcher and aggregate views.

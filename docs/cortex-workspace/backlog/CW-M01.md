@@ -1,6 +1,6 @@
 # CW-M01: Two mobile navigation concepts using tokens selected at Gate D
 
-**Status:** planned · **Phase:** 2 · **Size:** L
+**Status:** Superseded by the owner's decision of 2026-11-17: one approved static mockup set (prototypes/cortex-workspace/mobile/) and one navigation concept, not two · **Phase:** 2 · **Size:** L
 
 ## Goal
 Two mobile navigation concepts using tokens selected at Gate D.

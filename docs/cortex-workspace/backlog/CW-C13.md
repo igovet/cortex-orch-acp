@@ -1,6 +1,6 @@
 # CW-C13: Interrupt-now worker message per engine
 
-**Status:** Planned; design gate passed 2026-11-05; implementation waits for its dependencies; engine capability unverified · **Phase:** 3+ · **Size:** M
+**Status:** Not confirmed in code: no per-engine interrupt-now message to a worker is found; Stop and steer are separate controls · **Phase:** 3+ · **Size:** M
 
 ## Goal
 

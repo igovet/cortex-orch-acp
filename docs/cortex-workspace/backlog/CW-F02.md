@@ -1,6 +1,6 @@
 # CW-F02: Android stack go/no-go record (roll-up of CW-F02a and CW-F02b)
 
-**Status:** planned · **Phase:** 3+ · **Size:** S
+**Status:** Superseded by the owner's decision of 2026-11-17: the Android client is the same Tauri/Solid interface; no go/no-go record was written and no device spike ran · **Phase:** 3+ · **Size:** S
 
 ## Goal
 

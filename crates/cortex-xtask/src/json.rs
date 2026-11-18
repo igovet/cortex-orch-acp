@@ -120,7 +120,12 @@ pub struct Format {
     pub compact: bool,
 }
 
-pub const CANONICAL: Format = Format { sort_keys: true, ensure_ascii: false, indent: None, compact: true };
+pub const CANONICAL: Format = Format {
+    sort_keys: true,
+    ensure_ascii: false,
+    indent: None,
+    compact: true,
+};
 
 pub fn dumps(value: &Value, format: &Format) -> Res<String> {
     let mut out = String::new();
@@ -135,14 +140,30 @@ pub fn canonical(value: &Value) -> Res<String> {
 
 /// `json.dumps(value, ensure_ascii=False, indent=2) + "\n"`
 pub fn pretty(value: &Value) -> Res<String> {
-    let mut s = dumps(value, &Format { sort_keys: false, ensure_ascii: false, indent: Some(2), compact: false })?;
+    let mut s = dumps(
+        value,
+        &Format {
+            sort_keys: false,
+            ensure_ascii: false,
+            indent: Some(2),
+            compact: false,
+        },
+    )?;
     s.push('\n');
     Ok(s)
 }
 
 /// `json.dumps(value, indent=2) + "\n"` (ASCII-escaping, insertion order).
 pub fn pretty_ascii(value: &Value) -> Res<String> {
-    let mut s = dumps(value, &Format { sort_keys: false, ensure_ascii: true, indent: Some(2), compact: false })?;
+    let mut s = dumps(
+        value,
+        &Format {
+            sort_keys: false,
+            ensure_ascii: true,
+            indent: Some(2),
+            compact: false,
+        },
+    )?;
     s.push('\n');
     Ok(s)
 }
@@ -212,7 +233,11 @@ fn write_value(out: &mut String, value: &Value, f: &Format, depth: usize) -> Res
             for (i, (key, item)) in ordered.into_iter().enumerate() {
                 separator(out, f, depth + 1, i == 0);
                 out.push_str(&quote(key, f.ensure_ascii));
-                out.push_str(if f.indent.is_none() && f.compact { ":" } else { ": " });
+                out.push_str(if f.indent.is_none() && f.compact {
+                    ":"
+                } else {
+                    ": "
+                });
                 write_value(out, item, f, depth + 1)?;
             }
             close(out, f, depth, '}');
@@ -247,7 +272,10 @@ fn close(out: &mut String, f: &Format, depth: usize, ch: char) {
 }
 
 pub fn parse(text: &str) -> Res<Value> {
-    let mut p = Parser { s: text.as_bytes(), i: 0 };
+    let mut p = Parser {
+        s: text.as_bytes(),
+        i: 0,
+    };
     p.ws();
     let v = p.value(0)?;
     p.ws();
@@ -339,18 +367,26 @@ impl Parser<'_> {
                 let start = self.i;
                 self.i += 1;
                 while self.i < self.s.len()
-                    && matches!(self.s[self.i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
+                    && matches!(
+                        self.s[self.i],
+                        b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-'
+                    )
                 {
                     self.i += 1;
                 }
-                Ok(Value::Num(String::from_utf8_lossy(&self.s[start..self.i]).into_owned()))
+                Ok(Value::Num(
+                    String::from_utf8_lossy(&self.s[start..self.i]).into_owned(),
+                ))
             }
             Some(_) => Err("invalid JSON value".into()),
         }
     }
 
     fn hex4(&mut self) -> Res<u32> {
-        let slice = self.s.get(self.i..self.i + 4).ok_or("short unicode escape")?;
+        let slice = self
+            .s
+            .get(self.i..self.i + 4)
+            .ok_or("short unicode escape")?;
         let text = std::str::from_utf8(slice).map_err(|_| "bad unicode escape")?;
         self.i += 4;
         u32::from_str_radix(text, 16).map_err(|_| "bad unicode escape".to_string())
@@ -412,7 +448,10 @@ mod tests {
     #[test]
     fn preserves_order_and_formats_like_python() {
         let v = parse(r#"{"b":[1,2],"a":{"x":"é\n","y":[]},"c":{}}"#).unwrap();
-        assert_eq!(canonical(&v).unwrap(), "{\"a\":{\"x\":\"é\\n\",\"y\":[]},\"b\":[1,2],\"c\":{}}");
+        assert_eq!(
+            canonical(&v).unwrap(),
+            "{\"a\":{\"x\":\"é\\n\",\"y\":[]},\"b\":[1,2],\"c\":{}}"
+        );
         assert_eq!(
             pretty(&v).unwrap(),
             "{\n  \"b\": [\n    1,\n    2\n  ],\n  \"a\": {\n    \"x\": \"é\\n\",\n    \"y\": []\n  },\n  \"c\": {}\n}\n"

@@ -17,10 +17,8 @@ pub use generated::*;
 fn schema() -> &'static Value {
     static SCHEMA: OnceLock<Value> = OnceLock::new();
     SCHEMA.get_or_init(|| {
-        serde_json::from_str(include_str!(
-            "../schema/workspace.json"
-        ))
-        .expect("checked canonical schema")
+        serde_json::from_str(include_str!("../schema/workspace.json"))
+            .expect("checked canonical schema")
     })
 }
 fn definition(name: &str) -> Result<&'static Value, String> {

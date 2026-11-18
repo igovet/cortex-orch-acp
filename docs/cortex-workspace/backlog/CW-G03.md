@@ -1,6 +1,6 @@
 # CW-G03: Branch switch, fetch and pull through the Git CLI
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Implemented: branch switch, fetch and fast-forward-only pull through the `git` CLI ([IDE and Git](../ide-and-git.md)); no-paid checks only · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Create and switch branches, fetch and pull through the Git CLI, spawned with tokio::process. Unsafe operations are refused when the worktree is dirty. Merge conflicts stay visible as typed state. The service never stashes, resets or cleans on the owner's behalf.

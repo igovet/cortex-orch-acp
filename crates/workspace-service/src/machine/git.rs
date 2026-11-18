@@ -16,9 +16,12 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Command,
 };
+pub(super) mod listing;
+mod snapshot_reuse;
 const MAX_DIFF: usize = 400000;
 const MAX_TREE: usize = 20000;
 const MAX_UNTRACKED: usize = 2000;
+#[derive(Clone)]
 pub struct Git {
     configs: BTreeMap<PathBuf, Vec<String>>,
     runtime_config: Option<crate::Config>,
@@ -33,6 +36,127 @@ fn too_large() -> Refused {
     refuse(
         "git_output_too_large",
         "Git output exceeds the bounded inspection limit.",
+    )
+}
+/// Why Git refused a command, from its own (C locale) error text, as a code and what to do next. Only the
+/// classification leaves this function: stderr can name remote URLs, hook output or credentials.
+pub(super) fn failure(verb: &str, stderr: &str) -> Refused {
+    // Only the network commands are classified. Every other command keeps `git_failed`, which
+    // callers such as the squash integration rely on to restore the index after a refused merge
+    // or commit, and whose output (a hook's, say) can contain any of the words below.
+    if !matches!(verb, "push" | "pull" | "fetch") {
+        return refuse(
+            "git_failed",
+            "Git refused this operation. Inspect the checkout in Git; no automatic retry was made.",
+        );
+    }
+    let e = stderr.to_ascii_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| e.contains(n));
+    let nothing = match verb {
+        "push" => " Nothing was pushed.",
+        "pull" => " Nothing was pulled.",
+        "fetch" => " Nothing was fetched.",
+        _ => " Nothing changed.",
+    };
+    let next = |why: &str, todo: &str| format!("{why}{nothing} {todo}");
+    if has(&[
+        "protected branch",
+        "gh006",
+        "not allowed to push code to protected",
+        "not allowed to force push code to a protected",
+    ]) {
+        return refuse(
+            "push_protected_branch",
+            format!("The remote protects this branch and refused the push.{nothing} Push to another branch and open a pull request, or ask the repository owner to allow it."),
+        );
+    }
+    if has(&[
+        "hook declined",
+        "pre-receive hook",
+        "pre-push hook",
+        "hook rejected",
+    ]) {
+        return refuse(
+            "git_hook_rejected",
+            format!("A Git hook rejected this operation.{nothing} Read the hook's message by running the same command in the terminal (Ctrl+J), fix what it reports, then try again."),
+        );
+    }
+    if verb == "push"
+        && has(&[
+            "(fetch first)",
+            "(non-fast-forward)",
+            "non-fast-forward",
+            "tip of your current branch is behind",
+        ])
+    {
+        return refuse(
+            "push_not_fast_forward",
+            next("The remote branch has commits this checkout does not have, so the push would not be a fast-forward.", "Fetch, then merge or rebase the remote branch in the terminal (Ctrl+J), and push again. Cortex never force-pushes."),
+        );
+    }
+    if has(&[
+        "not possible to fast-forward",
+        "diverging branches",
+        "have diverged",
+        "need to specify how to reconcile",
+    ]) {
+        return refuse(
+            "pull_not_fast_forward",
+            next(
+                "The local and remote histories diverged, so Git cannot fast-forward this branch.",
+                "Merge or rebase the remote branch in the terminal (Ctrl+J), then push.",
+            ),
+        );
+    }
+    if has(&[
+        "no tracking information",
+        "has no upstream branch",
+        "no upstream configured",
+        "no such ref was fetched",
+    ]) {
+        return refuse(
+            "upstream_required",
+            next("This branch has no upstream.", "Set one in the terminal (git push -u <remote> <branch> or git branch --set-upstream-to), then try again."),
+        );
+    }
+    if has(&[
+        "authentication failed",
+        "permission denied (publickey",
+        "could not read username",
+        "could not read password",
+        "terminal prompts disabled",
+        "invalid username or password",
+        "the requested url returned error: 403",
+        "the requested url returned error: 401",
+        "permission to ",
+    ]) {
+        return refuse(
+            "git_auth_failed",
+            next("The remote did not accept this machine's credentials.", "Check your Git login or SSH key for this remote in the terminal (Ctrl+J), then try again."),
+        );
+    }
+    if has(&[
+        "could not resolve host",
+        "connection refused",
+        "connection timed out",
+        "network is unreachable",
+        "unable to access",
+        "could not read from remote repository",
+        "does not appear to be a git repository",
+        "repository not found",
+        "failed to connect",
+    ]) {
+        return refuse(
+            "remote_unreachable",
+            next(
+                "The remote could not be reached or does not exist.",
+                "Check the network and the remote's address in Git settings, then try again.",
+            ),
+        );
+    }
+    refuse(
+        "git_failed",
+        "Git refused this operation. Inspect the checkout in Git; no automatic retry was made.",
     )
 }
 fn args(values: &[&str]) -> Vec<String> {
@@ -96,7 +220,10 @@ impl Git {
             // A missing working directory fails the spawn with the same NotFound as a missing
             // `git`; only the latter means Git is not installed.
             if e.kind() == std::io::ErrorKind::NotFound && !path.is_dir() {
-                refuse("checkout_missing", "This checkout folder no longer exists. Prune it in Git (git worktree prune).")
+                refuse(
+                    "checkout_missing",
+                    "This checkout folder no longer exists. Prune it in Git (git worktree prune).",
+                )
             } else if e.kind() == std::io::ErrorKind::NotFound {
                 refuse("git_unavailable", "Git is not installed on this machine.")
             } else {
@@ -132,6 +259,8 @@ impl Git {
         });
         let run = async {
             let read = tokio::try_join!(bounded(stdout, limit), bounded(stderr, 65536));
+            #[cfg(test)]
+            snapshot_reuse::record(path, argv, read.as_ref().map_or(limit + 1, |r| r.0.len()));
             let (out, err) = match read {
                 Ok(read) => read,
                 Err(problem) => {
@@ -155,7 +284,7 @@ impl Git {
                 error: String::from_utf8_lossy(&err).into_owned(),
             }))
         };
-        let __t=std::time::Instant::now(); let __r=tokio::time::timeout(Duration::from_secs(25),run).await; eprintln!("perf-git ms={} argv={:?}", __t.elapsed().as_millis(), argv.iter().take(6).collect::<Vec<_>>()); __r.map_err(|_|refuse("git_timeout","Git did not answer in time; a write may have completed. Inspect before retrying."))?
+        tokio::time::timeout(Duration::from_secs(25),run).await.map_err(|_|refuse("git_timeout","Git did not answer in time; a write may have completed. Inspect before retrying."))?
     }
     async fn raw(&self, path: &Path, argv: &[String], input: Option<Vec<u8>>) -> Result<Output> {
         self.raw_bounded(path, argv, input, workspace_protocol::FRAME_BYTES)
@@ -181,10 +310,37 @@ impl Git {
         input: Option<Vec<u8>>,
         limit: usize,
     ) -> Result<Option<Output>> {
+        let changes = snapshot_reuse::mutating(&argv);
+        let verb = argv.first().cloned().unwrap_or_default();
+        let full = self.prepared(path, argv).await?;
+        let found = self.raw_bounded(path, &full, input, limit).await;
+        if changes {
+            // Whatever the outcome, a Git-changing command ends every reused snapshot.
+            snapshot_reuse::invalidate();
+        }
+        let Some(out) = found? else {
+            return Ok(None);
+        };
+        if check && !out.ok {
+            // Never return stderr: remote URLs, hook output or credentials can occur there.
+            return Err(failure(&verb, &out.error));
+        }
+        Ok(Some(out))
+    }
+    /// The complete argv of one command: inspection commands carry the per-repository
+    /// overrides that disable hooks, file monitors and every configured filter driver.
+    async fn prepared(&mut self, path: &Path, argv: Vec<String>) -> Result<Vec<String>> {
         let verb = argv.first().map(String::as_str).unwrap_or("");
         let read = matches!(
             verb,
-            "status" | "diff" | "log" | "show" | "ls-files" | "check-attr" | "rev-list"
+            "status"
+                | "diff"
+                | "log"
+                | "show"
+                | "ls-files"
+                | "check-attr"
+                | "check-ignore"
+                | "rev-list"
         );
         let mut full = Vec::new();
         if read {
@@ -240,14 +396,7 @@ impl Git {
             full.extend(args(&["--no-ext-diff", "--no-textconv"]));
         }
         full.extend(argv.into_iter().skip(1));
-        let Some(out) = self.raw_bounded(path, &full, input, limit).await? else {
-            return Ok(None);
-        };
-        if check && !out.ok {
-            // Never return stderr: remote URLs, hook output or credentials can occur there.
-            return Err(refuse("git_failed","Git refused this operation. Inspect the checkout in Git; no automatic retry was made."));
-        }
-        Ok(Some(out))
+        Ok(full)
     }
     pub(super) async fn out(&mut self, path: &Path, a: &[&str]) -> Result<String> {
         Ok(self.run(path, args(a), true, None).await?.text)
@@ -354,6 +503,75 @@ impl Git {
             .map(|p| (p[0].to_owned(), p[2].to_owned()))
             .collect())
     }
+    /// Which of `paths` (relative to `path`) Git ignores, from one `check-ignore` read.
+    /// A tracked file is never reported ignored.
+    pub(super) async fn ignored(
+        &mut self,
+        path: &Path,
+        paths: &[String],
+    ) -> Result<BTreeSet<String>> {
+        if paths.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let input = format!("{}\0", paths.join("\0")).into_bytes();
+        let out = self
+            .run(
+                path,
+                args(&["check-ignore", "-z", "--stdin"]),
+                false,
+                Some(input),
+            )
+            .await?;
+        // Exit 1 with nothing on stderr only means that none is ignored.
+        if !out.ok && !out.error.is_empty() {
+            return Err(refuse(
+                "git_failed",
+                "Git could not say which files it ignores.",
+            ));
+        }
+        Ok(out
+            .text
+            .split('\0')
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+    /// What the snapshot's tree leaves out, without descending into it: every ignored file and
+    /// top-most ignored folder, and every untracked folder (also empty ones), as `(path, folder,
+    /// ignored)`. `None` when Git's answer is larger than `limit` bytes.
+    pub(super) async fn outside_tree(
+        &mut self,
+        path: &Path,
+        limit: usize,
+    ) -> Result<Option<Vec<(String, bool, bool)>>> {
+        let mut found = Vec::new();
+        for ignored in [true, false] {
+            let mut a = args(&[
+                "ls-files",
+                "-z",
+                "--others",
+                "--exclude-standard",
+                "--directory",
+            ]);
+            if ignored {
+                a.push("--ignored".into());
+            }
+            let Some(out) = self.run_bounded(path, a, true, None, limit).await? else {
+                return Ok(None);
+            };
+            for name in out.text.split('\0').filter(|s| !s.is_empty()) {
+                let (name, folder) = match name.strip_suffix('/') {
+                    Some(n) => (n, true),
+                    None => (name, false),
+                };
+                // Untracked files are in the tree already; only their folders are added.
+                if (ignored || folder) && !name.split('/').any(|p| RESERVED.contains(&p)) {
+                    found.push((name.to_owned(), folder, ignored));
+                }
+            }
+        }
+        Ok(Some(found))
+    }
     async fn listed(&mut self, path: &Path, directories: bool) -> Result<Vec<String>> {
         let mut a = args(&["ls-files", "-z", "--others", "--exclude-standard"]);
         if directories {
@@ -425,7 +643,10 @@ impl Git {
         Ok((loose, collapsed))
     }
     /// Tracked changes as `(stage, letter, path)`, without diffs and without untracked files.
-    async fn tracked_changes(&mut self, path: &Path) -> Result<Vec<(&'static str, &'static str, String)>> {
+    async fn tracked_changes(
+        &mut self,
+        path: &Path,
+    ) -> Result<Vec<(&'static str, &'static str, String)>> {
         let raw = self
             .out(
                 path,
@@ -659,34 +880,26 @@ impl Git {
                     "100",
                     "--date=relative",
                     "--format=%x1e%H%x00%h%x00%s%x00%an%x00%ar%x00%D",
-                    "--shortstat",
                 ],
             )
             .await?;
+        // Commits are immutable: their `--shortstat` is computed once per repository and
+        // commit, never again for each snapshot (it diffs every listed commit).
+        let hashes = text
+            .split('\x1e')
+            .filter_map(|b| b.split('\0').next())
+            .filter(|h| !h.trim().is_empty())
+            .map(|h| h.trim().to_owned())
+            .collect::<Vec<_>>();
+        let stats = self.commit_stats(root, &hashes).await?;
         let mut rows = Vec::new();
         for block in text.split('\x1e').filter(|b| !b.trim().is_empty()) {
-            let (head, tail) = block.split_once('\n').unwrap_or((block, ""));
+            let (head, _) = block.split_once('\n').unwrap_or((block, ""));
             let f = head.split('\0').collect::<Vec<_>>();
             if f.len() != 6 {
                 continue;
             }
-            let mut files = 0;
-            let mut add = 0;
-            let mut del = 0;
-            for field in tail.trim().split(',') {
-                let n = field
-                    .split_whitespace()
-                    .next()
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                if field.contains("file") {
-                    files = n;
-                } else if field.contains("insertion") {
-                    add = n;
-                } else if field.contains("deletion") {
-                    del = n;
-                }
-            }
+            let (files, add, del) = stats.get(f[0]).copied().unwrap_or_default();
             let tags = f[5]
                 .split(", ")
                 .filter_map(|r| r.strip_prefix("tag: "))
@@ -704,6 +917,109 @@ impl Git {
         }
         Ok(rows)
     }
+    /// `(files, insertions, deletions)` of each commit as `git log --shortstat` reports
+    /// it, from the bounded per-repository cache; only commits not seen before are
+    /// diffed, split over a few parallel `git log --no-walk` reads.
+    async fn commit_stats(
+        &mut self,
+        root: &Path,
+        hashes: &[String],
+    ) -> Result<BTreeMap<String, (u64, u64, u64)>> {
+        let (mut found, missing) = snapshot_reuse::known_stats(root, hashes);
+        if missing.is_empty() {
+            return Ok(found);
+        }
+        let lanes = missing.len().min(8);
+        let mut jobs = Vec::new();
+        for lane in 0..lanes {
+            let mut a = args(&[
+                "log",
+                "--no-walk=unsorted",
+                "--format=%x1e%H",
+                "--shortstat",
+            ]);
+            // Round robin: the newest (often largest) commits land in different reads.
+            a.extend(missing.iter().skip(lane).step_by(lanes).cloned());
+            a.push("--".into());
+            let full = self.prepared(root, a).await?;
+            let git = self.clone();
+            let path = root.to_path_buf();
+            jobs.push(tokio::spawn(async move {
+                git.raw_bounded(&path, &full, None, workspace_protocol::FRAME_BYTES)
+                    .await
+            }));
+        }
+        let mut computed = BTreeMap::new();
+        for job in jobs {
+            let out = job
+                .await
+                .map_err(|_| refuse("git_failed", "Commit statistics could not be read."))??
+                .ok_or_else(too_large)?;
+            if !out.ok {
+                return Err(refuse("git_failed","Git refused this operation. Inspect the checkout in Git; no automatic retry was made."));
+            }
+            for block in out.text.split('\x1e').filter(|b| !b.trim().is_empty()) {
+                let (hash, tail) = block.split_once('\n').unwrap_or((block, ""));
+                computed.insert(hash.trim().to_owned(), shortstat(tail));
+            }
+        }
+        // A requested commit absent from the reply is shown without counts and not kept.
+        snapshot_reuse::keep_stats(root, &computed);
+        for hash in missing {
+            found.insert(
+                hash.clone(),
+                computed.get(&hash).copied().unwrap_or_default(),
+            );
+        }
+        Ok(found)
+    }
+    /// True only when the `diff --unified=3 <revisions> -- .` of a task (filtered paths
+    /// excluded) is certainly larger than `MAX_DIFF`, decided by a cheaper bounded read.
+    /// Rename detection pairs only added and deleted paths, so the patch of each path
+    /// modified on both sides appears unchanged in the full diff: those patches alone,
+    /// read with `--no-renames` (no rename detection over a large history) and stopped at
+    /// the same bound, already exceeding it settles the answer. False, so the full read
+    /// decides, whenever they fit or cannot be read.
+    async fn diff_certainly_over(&mut self, path: &Path, revisions: &[String]) -> Result<bool> {
+        let mut a = args(&[
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--diff-filter=M",
+        ]);
+        a.extend(revisions.iter().cloned());
+        a.extend(args(&["--", "."]));
+        let Some(names) = self
+            .run_bounded(path, a, false, None, workspace_protocol::FRAME_BYTES)
+            .await?
+            .filter(|o| o.ok)
+        else {
+            return Ok(false);
+        };
+        let names = names
+            .text
+            .split('\0')
+            .filter(|n| !n.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if names.is_empty() {
+            return Ok(false);
+        }
+        let filters = self.filters(path, &names).await?;
+        let mut a = args(&["diff", "--unified=3", "--no-renames", "--diff-filter=M"]);
+        a.extend(revisions.iter().cloned());
+        a.extend(args(&["--", "."]));
+        a.extend(filters.keys().map(|n| format!(":(literal,exclude){n}")));
+        Ok(self
+            .run_bounded(path, a, false, None, MAX_DIFF)
+            .await?
+            .is_none())
+    }
+    /// The repository snapshot. A repeated read whose inputs did not change (the task
+    /// context, every ref, the worktree list, the fetch marker, the origin URL and the
+    /// `folder_signal` of each checkout) within `task_facts::RECENT` is served from the
+    /// bounded reuse slot; any Git-changing command through the service ends reuse.
     pub async fn snapshot(
         &mut self,
         root: &Path,
@@ -715,6 +1031,130 @@ impl Git {
             Some(value) => value.clone(),
             None => product(state, project)?,
         };
+        let slot = snapshot_reuse::slot(root, project);
+        let mut held = slot.lock().await;
+        // The key is taken before the reads: a change during them moves the next key.
+        let key = self.snapshot_key(root, project, &product).await?;
+        if let (Some(key), Some(seen)) = (&key, held.as_ref()) {
+            if seen.key == *key && seen.at.elapsed() < super::task_facts::RECENT {
+                return Ok(seen.value.clone());
+            }
+        }
+        *held = None;
+        let at = std::time::Instant::now();
+        let value = self.snapshot_fresh(root, project, &product).await?;
+        if let Some(key) = key {
+            *held = Some(snapshot_reuse::Seen {
+                key,
+                at,
+                value: value.clone(),
+            });
+        }
+        Ok(value)
+    }
+    /// The cheap reuse key of a snapshot, or None when it must be read fresh (no Git,
+    /// or a checkout whose `folder_signal` is unavailable, e.g. a file changed just now).
+    async fn snapshot_key(
+        &mut self,
+        root: &Path,
+        project: &str,
+        product: &Value,
+    ) -> Result<Option<String>> {
+        use sha2::Digest;
+        let generation = snapshot_reuse::generation();
+        if !self.is_repo(root).await? {
+            return Ok(None);
+        }
+        let mut h = sha2::Sha256::new();
+        // Only what `snapshot_fresh` reads of the task context: a new message, comment
+        // or task timestamp does not end reuse.
+        let tasks = product["tasks"]
+            .as_object()
+            .into_iter()
+            .flat_map(|m| m.iter())
+            .map(|(task, r)| {
+                let gone = r["checkout"]["path"]
+                    .as_str()
+                    .is_some_and(|p| !Path::new(p).exists());
+                (
+                    task.clone(),
+                    json!([
+                        r["checkout"],
+                        r["baseRevision"],
+                        r["integration"]["worktreeCleanup"],
+                        r["integration"]["sourceHead"],
+                        gone
+                    ]),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        for part in [
+            format!("{generation}\0{project}\0{}", root.display()),
+            serde_json::to_string(&json!([tasks, product["drafts"]])).unwrap_or_default(),
+        ] {
+            h.update(part.as_bytes());
+            h.update(b"\0\x1e");
+        }
+        let refs = self
+            .out(
+                root,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)%00%(objectname)%00%(symref)%00%(upstream)",
+                ],
+            )
+            .await?;
+        let trees = self.out(root, &["worktree", "list", "--porcelain"]).await?;
+        let remote = self
+            .run(root, args(&["remote", "get-url", "origin"]), false, None)
+            .await?
+            .text;
+        let marker = self
+            .run(
+                root,
+                args(&["rev-parse", "--git-path", "FETCH_HEAD"]),
+                false,
+                None,
+            )
+            .await?
+            .text;
+        let fetched = fs::metadata(root.join(marker.trim()))
+            .ok()
+            .and_then(|m| m.modified().ok());
+        for part in [refs, trees.clone(), remote, format!("{fetched:?}")] {
+            h.update(part.as_bytes());
+            h.update(b"\0\x1e");
+        }
+        // Every checkout is signalled at once: each costs a few listings and stats.
+        let signals = trees
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .map(|path| {
+                let path = PathBuf::from(path);
+                tokio::task::spawn_blocking(move || {
+                    if path.is_dir() {
+                        super::task_facts::folder_signal(&path)
+                    } else {
+                        Some("absent".to_owned())
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for signal in signals {
+            let Some(signal) = signal.await.ok().flatten() else {
+                return Ok(None);
+            };
+            h.update(signal.as_bytes());
+            h.update(b"\0");
+        }
+        Ok(Some(format!("{:x}", h.finalize())))
+    }
+    async fn snapshot_fresh(
+        &mut self,
+        root: &Path,
+        project: &str,
+        product: &Value,
+    ) -> Result<Value> {
         let main = format!("{project}:main");
         let mut snapshot = json!({"projectId":project,"hasGit":false,"remote":"","tree":[],"treeTruncated":false,"sources":{},
             "commits":[],"branches":[],"checkouts":[],"taskDiffs":{},"fetchedAt":null,"openBranch":"","defaultBranch":""});
@@ -747,6 +1187,13 @@ impl Git {
             return Ok(snapshot);
         }
         snapshot["hasGit"] = json!(true);
+        // The commit list (statistics of commits not seen before are its slow part) is
+        // read alongside the checkouts; it only reads, and only from `root`.
+        let commits = {
+            let mut git = self.clone();
+            let root = root.to_path_buf();
+            tokio::spawn(async move { git.commits(&root).await })
+        };
         let main_branch = self
             .out(root, &["branch", "--show-current"])
             .await?
@@ -787,6 +1234,10 @@ impl Git {
         snapshot["branches"] = json!(branches);
         let trees = self.trees(root).await?;
         let mut checkouts = Vec::new();
+        // One snapshot inspects each checkout once and each task baseline once: tasks
+        // of one folder, often several on the same base revision, share the reads.
+        let mut statuses: BTreeMap<PathBuf, Vec<Value>> = BTreeMap::new();
+        let mut task_diffs: BTreeMap<(PathBuf, Vec<String>, bool), Value> = BTreeMap::new();
         for (i, t) in trees.iter().enumerate() {
             let path = Path::new(t["path"].as_str().unwrap_or(""));
             let branch = t["branch"].as_str().unwrap_or("");
@@ -798,7 +1249,9 @@ impl Git {
             });
             let (up, mut ahead, mut behind) = upstream.get(branch).cloned().unwrap_or_default();
             let files = if path.is_dir() {
-                self.status(path).await?
+                let found = self.status(path).await?;
+                statuses.insert(path.to_path_buf(), found.clone());
+                found
             } else {
                 Vec::new()
             };
@@ -884,6 +1337,17 @@ impl Git {
                         .to_owned(),
                 );
             }
+            let key = (path.to_path_buf(), revisions.clone(), removed);
+            if let Some(seen) = task_diffs.get(&key) {
+                snapshot["taskDiffs"][task] = seen.clone();
+                continue;
+            }
+            if self.diff_certainly_over(path, &revisions).await? {
+                let value = json!({"files":[],"reason":"The task diff exceeds the display limit; review it in Git."});
+                snapshot["taskDiffs"][task] = value.clone();
+                task_diffs.insert(key, value);
+                continue;
+            }
             let mut a = vec!["diff".into(), "--unified=3".into()];
             a.extend(revisions.clone());
             let mut names_args = args(&["diff", "--name-only", "-z"]);
@@ -901,8 +1365,14 @@ impl Git {
                 .await?;
             a.extend(args(&["--", "."]));
             a.extend(filters.keys().map(|n| format!(":(literal,exclude){n}")));
-            let Some(diff) = self.run_bounded(path, a, true, None, MAX_DIFF).await?.map(|o| o.text) else {
-                snapshot["taskDiffs"][task] = json!({"files":[],"reason":"The task diff exceeds the display limit; review it in Git."});
+            let Some(diff) = self
+                .run_bounded(path, a, true, None, MAX_DIFF)
+                .await?
+                .map(|o| o.text)
+            else {
+                let value = json!({"files":[],"reason":"The task diff exceeds the display limit; review it in Git."});
+                snapshot["taskDiffs"][task] = value.clone();
+                task_diffs.insert(key, value);
                 continue;
             };
             let mut files = parse_diff(&diff, false)
@@ -913,13 +1383,23 @@ impl Git {
                     data
                 })
                 .collect::<Vec<_>>();
-            for mut file in self.status(path).await? {
+            let status = match statuses.get(path) {
+                Some(seen) => seen.clone(),
+                None => {
+                    let found = self.status(path).await?;
+                    statuses.insert(path.to_path_buf(), found.clone());
+                    found
+                }
+            };
+            for mut file in status {
                 if !removed && file["stage"] == "untracked" {
                     file.as_object_mut().unwrap().remove("stage");
                     files.push(file);
                 }
             }
-            snapshot["taskDiffs"][task] = json!({"files":files});
+            let value = json!({"files":files});
+            snapshot["taskDiffs"][task] = value.clone();
+            task_diffs.insert(key, value);
         }
         let (untracked, collapsed) = self.untracked(root).await?;
         let tracked = self.out(root, &["ls-files", "-z", "--cached"]).await?;
@@ -935,7 +1415,9 @@ impl Git {
             .collect();
         snapshot["treeTruncated"] = json!(tree.len() > MAX_TREE);
         snapshot["tree"] = json!(tree.into_iter().take(MAX_TREE).collect::<Vec<_>>());
-        snapshot["commits"] = json!(self.commits(root).await?);
+        snapshot["commits"] = json!(commits
+            .await
+            .map_err(|_| refuse("git_failed", "The commit list could not be read."))??);
         let marker = self
             .run(
                 root,
@@ -1049,12 +1531,20 @@ impl Git {
         p: &Value,
     ) -> Result<Value> {
         let action = string(p, "action")?;
+        // The owner's own action, Git or not (a draft, an untracked file removed), is
+        // never followed by a reused snapshot from before it.
+        let _invalidate = snapshot_reuse::OnDrop;
         // Slow external Git effects must not hold the product/configuration writer lock.
-        let git_lock = format!(
-            "git-{}.lock",
-            &revision(root.as_os_str().as_encoded_bytes())[..16]
-        );
-        let _lock = Lock::new(state, &git_lock)?;
+        let git_lock = repo_lock(root);
+        // Network and hook-running actions name themselves: a second Git action on this
+        // project is then refused at once with that reason instead of waiting.
+        let _lock = match action {
+            "fetch" | "pull" | "push" => Lock::long(state, &git_lock, "git_in_progress",
+                "A fetch, pull or push of this project is still running. Try again when it finishes.")?,
+            "commit" | "revert_commit" | "git_init" => Lock::long(state, &git_lock, "git_in_progress",
+                "A commit in this project is still running. Try again when it finishes.")?,
+            _ => Lock::new(state, &git_lock)?,
+        };
         if action == "git_init" {
             if self.is_repo(root).await? || fs::symlink_metadata(root.join(".git")).is_ok() {
                 return Err(refuse(
@@ -1305,6 +1795,147 @@ mod tests {
             .status
             .success());
     }
+    /// A failing Git command's stderr, as the service runs Git (C locale, no prompts).
+    fn refused_stderr(root: &Path, a: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(a)
+            .current_dir(root)
+            .env("LC_ALL", "C")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{a:?} succeeded");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    }
+    /// Push and pull refusals name their cause and the next step from real Git output, never the output itself.
+    #[test]
+    fn git_refusals_are_classified_from_real_git_output() {
+        let base = std::env::temp_dir().join(format!("cw-git-refusals-{}", settings::unique()));
+        let origin = base.join("origin.git");
+        let (a, b) = (base.join("a"), base.join("b"));
+        fs::create_dir_all(&base).unwrap();
+        git(
+            &base,
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                origin.to_str().unwrap(),
+            ],
+        );
+        for clone in [&a, &b] {
+            git(
+                &base,
+                &[
+                    "clone",
+                    "-q",
+                    origin.to_str().unwrap(),
+                    clone.to_str().unwrap(),
+                ],
+            );
+            git(clone, &["checkout", "-q", "-B", "main"]);
+        }
+        fs::write(a.join("a.txt"), "a\n").unwrap();
+        git(&a, &["add", "."]);
+        git(&a, &["commit", "-q", "-m", "a"]);
+        git(&a, &["push", "-q", "-u", "origin", "main"]);
+        git(&b, &["pull", "-q", "origin", "main"]);
+        git(&b, &["branch", "-q", "--set-upstream-to=origin/main"]);
+        // Both sides move on: the histories diverge.
+        fs::write(a.join("a.txt"), "a2\n").unwrap();
+        git(&a, &["commit", "-q", "-am", "a2"]);
+        git(&a, &["push", "-q"]);
+        fs::write(b.join("b.txt"), "b\n").unwrap();
+        git(&b, &["add", "."]);
+        git(&b, &["commit", "-q", "-m", "b"]);
+        let push = failure(
+            "push",
+            &refused_stderr(&b, &["push", "--", "origin", "main"]),
+        );
+        assert_eq!(push.code, "push_not_fast_forward", "{}", push.message);
+        assert!(
+            push.message.contains("Nothing was pushed") && push.message.contains("terminal"),
+            "{}",
+            push.message
+        );
+        git(&b, &["fetch", "-q"]);
+        let pull = failure("pull", &refused_stderr(&b, &["pull", "--ff-only"]));
+        assert_eq!(pull.code, "pull_not_fast_forward", "{}", pull.message);
+        assert!(pull.message.contains("diverged"), "{}", pull.message);
+        git(&b, &["checkout", "-q", "-b", "loose"]);
+        let upstream = failure("pull", &refused_stderr(&b, &["pull", "--ff-only"]));
+        assert_eq!(upstream.code, "upstream_required", "{}", upstream.message);
+        // A server-side hook refusal, and one that reports a protected branch as GitHub does.
+        let hook = origin.join("hooks/pre-receive");
+        for (script, code) in [
+            ("#!/bin/sh\necho 'policy says no' >&2\nexit 1\n", "git_hook_rejected"),
+            ("#!/bin/sh\necho 'GH006: Protected branch update failed for refs/heads/main.' >&2\nexit 1\n", "push_protected_branch"),
+        ] {
+            fs::write(&hook, script).unwrap();
+            fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            fs::write(a.join("a.txt"), format!("{code}\n")).unwrap();
+            git(&a, &["commit", "-q", "-am", code]);
+            let refused = failure("push", &refused_stderr(&a, &["push", "--", "origin", "main"]));
+            assert_eq!(refused.code, code, "{}", refused.message);
+            assert!(!refused.message.contains("policy says no") && !refused.message.contains("GH006"));
+        }
+        let gone = failure(
+            "push",
+            &refused_stderr(
+                &a,
+                &[
+                    "push",
+                    "--",
+                    base.join("missing.git").to_str().unwrap(),
+                    "main",
+                ],
+            ),
+        );
+        assert_eq!(gone.code, "remote_unreachable", "{}", gone.message);
+        // Authentication needs a real server; these are Git's own messages for it.
+        for text in [
+            "remote: Invalid username or password.\nfatal: Authentication failed for 'https://example.invalid/o/r.git/'\n",
+            "git@example.invalid: Permission denied (publickey).\nfatal: Could not read from remote repository.\n",
+            "fatal: could not read Username for 'https://example.invalid': terminal prompts disabled\n",
+        ] {
+            let auth = failure("fetch", text);
+            assert_eq!(auth.code, "git_auth_failed", "{text}");
+            assert!(!auth.message.contains("example.invalid"));
+        }
+        assert_eq!(
+            failure("commit", "error: something else\n").code,
+            "git_failed"
+        );
+        // Outside push, pull and fetch nothing is classified, whatever the output says.
+        for verb in ["commit", "merge", "revert", "status"] {
+            assert_eq!(
+                failure(
+                    verb,
+                    "remote: pre-receive hook declined\nfatal: Authentication failed\n"
+                )
+                .code,
+                "git_failed"
+            );
+        }
+        fs::remove_dir_all(base).unwrap();
+    }
+    /// The snapshot without the relative commit times (`when`, e.g. "3 seconds ago"):
+    /// two separate reads of an unchanged checkout differ only there as the clock moves.
+    fn timeless(snapshot: &Value) -> Value {
+        match snapshot {
+            Value::Object(map) => Value::Object(
+                map.iter()
+                    .filter(|(k, _)| k.as_str() != "when")
+                    .map(|(k, v)| (k.clone(), timeless(v)))
+                    .collect(),
+            ),
+            Value::Array(items) => Value::Array(items.iter().map(timeless).collect()),
+            other => other.clone(),
+        }
+    }
     /// A worktree whose folder the owner deleted (`git worktree list` marks it prunable) must
     /// not fail the whole snapshot, and must never be reported as "Git is not installed".
     #[tokio::test]
@@ -1317,7 +1948,17 @@ mod tests {
         fs::write(root.join("a.txt"), "a\n").unwrap();
         git(&root, &["add", "."]);
         git(&root, &["commit", "-q", "-m", "init"]);
-        git(&root, &["worktree", "add", "-q", "-b", "side", gone.to_str().unwrap()]);
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "side",
+                gone.to_str().unwrap(),
+            ],
+        );
         fs::remove_dir_all(&gone).unwrap();
         let state = base.join("state");
         fs::create_dir_all(&state).unwrap();
@@ -1326,9 +1967,355 @@ mod tests {
             .snapshot(&root, "p", &state, Some(&json!({"tasks":{}})))
             .await
             .unwrap();
-        assert_eq!(snapshot["checkouts"].as_array().unwrap().len(), 2, "{snapshot}");
+        assert_eq!(
+            snapshot["checkouts"].as_array().unwrap().len(),
+            2,
+            "{snapshot}"
+        );
         let refused = g.out(&gone, &["status"]).await.unwrap_err();
         assert_eq!(refused.code, "checkout_missing");
+        fs::remove_dir_all(base).unwrap();
+    }
+    /// Tasks of one folder on one base revision share a single diff and status read,
+    /// and each still shows the whole task diff, untracked files included.
+    #[tokio::test]
+    async fn tasks_on_one_base_share_the_snapshot_reads() {
+        let base = std::env::temp_dir().join(format!("cw-shared-base-{}", settings::unique()));
+        let root = base.join("repo");
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        fs::write(root.join("a.txt"), "a\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let head = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&root)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        fs::write(root.join("a.txt"), "a\nb\n").unwrap();
+        fs::write(root.join("new.txt"), "n\n").unwrap();
+        let state = base.join("state");
+        fs::create_dir_all(&state).unwrap();
+        let task = |kind: &str| json!({"baseRevision":head,"checkout":{"kind":kind}});
+        let product = json!({"tasks":{"t1":task("main"),"t2":task("main"),"t3":{"checkout":{"kind":"main"}}}});
+        let snapshot = Git::new()
+            .snapshot(&root, "p", &state, Some(&product))
+            .await
+            .unwrap();
+        let diffs = &snapshot["taskDiffs"];
+        assert_eq!(diffs["t1"], diffs["t2"], "{snapshot}");
+        assert!(diffs.get("t3").is_none(), "{snapshot}");
+        let paths: BTreeSet<_> = diffs["t1"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            paths,
+            BTreeSet::from(["a.txt".to_owned(), "new.txt".to_owned()])
+        );
+        assert_eq!(
+            snapshot["checkouts"][0]["files"].as_array().unwrap().len(),
+            2,
+            "{snapshot}"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+    fn head(root: &Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+    fn fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("cw-{tag}-{}", settings::unique()));
+        let root = base.join("repo");
+        let state = base.join("state");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        (base, root, state)
+    }
+    fn task_on(base: &str) -> Value {
+        json!({"tasks":{"t1":{"baseRevision":base,"checkout":{"kind":"main"}}}})
+    }
+    const OVER: &str = "The task diff exceeds the display limit; review it in Git.";
+    /// A task diff whose modified paths alone exceed the display limit is decided from
+    /// that cheaper read, stopped at the bound: the full diff (with rename detection) is
+    /// never run, and nothing is read past the bound.
+    #[tokio::test]
+    async fn an_over_limit_task_diff_is_decided_without_reading_it() {
+        let (base, root, state) = fixture("over-limit");
+        let lines = 120_000;
+        let body = |tag: &str| {
+            (0..lines)
+                .map(|i| format!("{tag}{i}\n"))
+                .collect::<String>()
+        };
+        fs::write(root.join("big.txt"), body("o")).unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let start = head(&root);
+        fs::write(root.join("big.txt"), body("n")).unwrap();
+        git(&root, &["commit", "-q", "-am", "rewrite"]);
+        let snapshot = Git::new()
+            .snapshot(&root, "p", &state, Some(&task_on(&start)))
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot["taskDiffs"]["t1"],
+            json!({"files":[],"reason":OVER}),
+            "{snapshot}"
+        );
+        let reads = snapshot_reuse::reads(&root);
+        let task_reads = |renames: bool| {
+            reads
+                .iter()
+                .filter(|(a, _)| a.contains(&"--unified=3".to_owned()) && a.contains(&start))
+                .filter(|(a, _)| a.contains(&"--no-renames".to_owned()) != renames)
+                .map(|r| r.1)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(task_reads(true), Vec::<usize>::new(), "{reads:?}");
+        assert_eq!(task_reads(false), vec![MAX_DIFF + 1], "{reads:?}");
+        assert!(
+            reads.iter().all(|(_, bytes)| *bytes <= MAX_DIFF + 1),
+            "{reads:?}"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+    /// A diff the cheaper read cannot rule out (here an added file) is read only up to
+    /// the display limit: the read stops (the child is killed) at the bound, same reason.
+    #[tokio::test]
+    async fn a_task_diff_read_stops_at_the_display_limit() {
+        let (base, root, state) = fixture("stop-at-limit");
+        fs::write(root.join("a.txt"), "a\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let start = head(&root);
+        fs::write(root.join("big.txt"), "x\n".repeat(300_000)).unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "big"]);
+        let snapshot = Git::new()
+            .snapshot(&root, "p", &state, Some(&task_on(&start)))
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot["taskDiffs"]["t1"],
+            json!({"files":[],"reason":OVER}),
+            "{snapshot}"
+        );
+        let reads = snapshot_reuse::reads(&root);
+        let full = reads
+            .iter()
+            .filter(|(a, _)| a.contains(&"--unified=3".to_owned()) && a.contains(&start))
+            .filter(|(a, _)| !a.contains(&"--no-renames".to_owned()))
+            .collect::<Vec<_>>();
+        assert_eq!(full.len(), 1, "{reads:?}");
+        assert_eq!(full[0].1, MAX_DIFF + 1, "{reads:?}");
+        fs::remove_dir_all(base).unwrap();
+    }
+    /// Commit counts equal `git log --shortstat` (root, rename and merge commits
+    /// included) and are computed once per commit: a repeated list reruns no statistics,
+    /// and a new commit computes only its own.
+    #[tokio::test]
+    async fn commit_statistics_are_computed_once_per_commit() {
+        let (base, root, _state) = fixture("commit-stats");
+        fs::write(root.join("a.txt"), "a\nb\nc\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "root"]);
+        git(&root, &["mv", "a.txt", "b.txt"]);
+        git(&root, &["commit", "-q", "-m", "rename"]);
+        git(&root, &["checkout", "-q", "-b", "side"]);
+        fs::write(root.join("s.txt"), "s\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "side"]);
+        git(&root, &["checkout", "-q", "main"]);
+        fs::write(root.join("m.txt"), "m\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "main"]);
+        git(&root, &["merge", "-q", "--no-ff", "-m", "merge", "side"]);
+        git(&root, &["commit", "-q", "--allow-empty", "-m", "empty"]);
+        let old = std::process::Command::new("git")
+            .args([
+                "log",
+                "--no-ext-diff",
+                "--no-textconv",
+                "-n",
+                "100",
+                "--format=%x1e%H",
+                "--shortstat",
+            ])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        let expected = String::from_utf8(old.stdout)
+            .unwrap()
+            .split('\x1e')
+            .filter(|b| !b.trim().is_empty())
+            .map(|b| {
+                let (hash, tail) = b.split_once('\n').unwrap_or((b, ""));
+                let (files, add, del) = shortstat(tail);
+                (hash[..7].to_owned(), json!([files, add, del]))
+            })
+            .collect::<Vec<_>>();
+        let counted = |rows: &[Value]| {
+            rows.iter()
+                .map(|r| {
+                    (
+                        r["sha"].as_str().unwrap()[..7].to_owned(),
+                        json!([r["files"], r["add"], r["del"]]),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let stat_reads = || {
+            snapshot_reuse::reads(&root)
+                .into_iter()
+                .filter(|(a, _)| a.contains(&"--shortstat".to_owned()))
+                .map(|(a, _)| a)
+                .collect::<Vec<_>>()
+        };
+        let mut g = Git::new();
+        let first = g.commits(&root).await.unwrap();
+        assert_eq!(counted(&first), expected);
+        assert!(
+            expected.iter().any(|(_, c)| c == &json!([0, 0, 0])),
+            "{expected:?}"
+        );
+        let before = stat_reads().len();
+        assert!(before >= 1);
+        // `when` is the commit's age in words, so it may tick between the two reads.
+        let timeless = |mut rows: Vec<Value>| {
+            for r in &mut rows {
+                r.as_object_mut().unwrap().remove("when");
+            }
+            rows
+        };
+        assert_eq!(timeless(g.commits(&root).await.unwrap()), timeless(first.clone()));
+        assert_eq!(
+            stat_reads().len(),
+            before,
+            "known commits were diffed again"
+        );
+        git(&root, &["commit", "-q", "--allow-empty", "-m", "next"]);
+        let next = head(&root);
+        let again = g.commits(&root).await.unwrap();
+        assert_eq!(again.len(), first.len() + 1);
+        let reads = stat_reads();
+        assert_eq!(reads.len(), before + 1, "{reads:?}");
+        let hashes = reads[before]
+            .iter()
+            .filter(|a| a.len() == 40)
+            .collect::<Vec<_>>();
+        assert_eq!(hashes, vec![&next], "{reads:?}");
+        fs::remove_dir_all(base).unwrap();
+    }
+    /// An unchanged checkout is served from the reuse slot without rereading Git status,
+    /// diffs, the tree or the log; the owner's own action through the service ends reuse at once.
+    #[tokio::test]
+    async fn an_unchanged_snapshot_is_reused_until_an_owner_action() {
+        let (base, root, state) = fixture("reuse");
+        fs::write(root.join("a.txt"), "a\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let start = head(&root);
+        fs::write(root.join("a.txt"), "a\nb\n").unwrap();
+        fs::write(root.join("new.txt"), "n\n").unwrap();
+        // `folder_signal` refuses to vouch for anything changed in the last two seconds.
+        tokio::time::sleep(Duration::from_millis(3100)).await;
+        let context = task_on(&start);
+        let status_reads = || {
+            snapshot_reuse::reads(&root)
+                .iter()
+                .filter(|(a, _)| a.contains(&"status".to_owned()))
+                .count()
+        };
+        let mut g = Git::new();
+        let first = g
+            .snapshot(&root, "p", &state, Some(&context))
+            .await
+            .unwrap();
+        let fresh = status_reads();
+        assert!(fresh > 0);
+        let second = g
+            .snapshot(&root, "p", &state, Some(&context))
+            .await
+            .unwrap();
+        assert_eq!(second, first);
+        assert_eq!(
+            status_reads(),
+            fresh,
+            "an unchanged snapshot was read again"
+        );
+        // A changed task context is not served from reuse.
+        let other = json!({"tasks":{}});
+        let changed = g.snapshot(&root, "p", &state, Some(&other)).await.unwrap();
+        assert_ne!(timeless(&changed), timeless(&first));
+        assert!(status_reads() > fresh);
+        // A fresh read, so its relative commit times may have moved on since `first`.
+        let reread = g
+            .snapshot(&root, "p", &state, Some(&context))
+            .await
+            .unwrap();
+        assert_eq!(timeless(&reread), timeless(&first));
+        let reused = status_reads();
+        // Served from reuse: byte-identical to the read it reuses, times included.
+        assert_eq!(
+            g.snapshot(&root, "p", &state, Some(&context))
+                .await
+                .unwrap(),
+            reread
+        );
+        assert_eq!(status_reads(), reused);
+        // An owner action that changes nothing the key sees still ends reuse...
+        g.action(&root, "p", &state, &json!({"action":"draft","message":"m"}))
+            .await
+            .unwrap();
+        g.snapshot(&root, "p", &state, Some(&context))
+            .await
+            .unwrap();
+        assert!(
+            status_reads() > reused,
+            "a snapshot from before an owner action was reused"
+        );
+        // ...and staging shows at once.
+        g.action(
+            &root,
+            "p",
+            &state,
+            &json!({"action":"stage","path":"a.txt","staged":true}),
+        )
+        .await
+        .unwrap();
+        let staged = g
+            .snapshot(&root, "p", &state, Some(&context))
+            .await
+            .unwrap();
+        let stages = staged["checkouts"][0]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                (
+                    f["path"].as_str().unwrap().to_owned(),
+                    f["stage"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            stages.contains(&("a.txt".to_owned(), "staged".to_owned())),
+            "{staged}"
+        );
         fs::remove_dir_all(base).unwrap();
     }
     /// A working tree whose diff is larger than a frame must neither stall until the Git
@@ -1340,7 +2327,11 @@ mod tests {
         fs::create_dir(&root).unwrap();
         git(&root, &["init", "-q"]);
         let lines = workspace_protocol::FRAME_BYTES / 40 + 1000;
-        let body = |tag: &str| (0..lines).map(|i| format!("{tag} line {i:08} padding padding\n")).collect::<String>();
+        let body = |tag: &str| {
+            (0..lines)
+                .map(|i| format!("{tag} line {i:08} padding padding\n"))
+                .collect::<String>()
+        };
         fs::write(root.join("big.txt"), body("old")).unwrap();
         fs::write(root.join("small.txt"), "a\n").unwrap();
         git(&root, &["add", "."]);
@@ -1357,7 +2348,11 @@ mod tests {
         assert_eq!(files[0]["hunks"], json!([]));
         let refused = g.out(&root, &["diff", "--unified=3"]).await.unwrap_err();
         assert_eq!(refused.code, "git_output_too_large");
-        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
         git(&root, &["checkout", "--", "big.txt"]);
         assert!(g.clean(&root).await.unwrap());
         fs::write(root.join("new.txt"), "n\n").unwrap();
@@ -1450,7 +2445,13 @@ fn checkout(
     json!({"id":id,"projectId":project,"kind":kind,"branch":branch,"path":path,"taskId":task,"label":null,"base":base,"upstream":up,
         "ahead":ahead,"behind":behind,"behindOf":{},"files":files,"draft":draft,"sources":{},"updateConflict":null})
 }
+/// Folders the tree of a folder without Git does not walk into. Code lists them on demand, marked ignored.
+pub(super) const UNWALKED: [&str; 3] = ["node_modules", ".venv", "__pycache__"];
 fn folder_tree(root: &Path) -> Result<Vec<String>> {
+    folder_tree_with(root, &mut Vec::new())
+}
+/// The tree of a folder without Git; `skipped` receives each folder not walked into.
+pub(super) fn folder_tree_with(root: &Path, skipped: &mut Vec<String>) -> Result<Vec<String>> {
     let mut pending = vec![root.to_path_buf()];
     let mut tree = Vec::new();
     while let Some(path) = pending.pop() {
@@ -1463,9 +2464,17 @@ fn folder_tree(root: &Path) -> Result<Vec<String>> {
                 continue;
             }
             let meta = e.file_type()?;
-            if meta.is_dir() && !["node_modules", ".venv", "__pycache__"].contains(&name.as_ref()) {
+            if meta.is_dir() && !UNWALKED.contains(&name.as_ref()) {
                 pending.push(e.path());
-            } else if !meta.is_dir() {
+            } else if meta.is_dir() {
+                skipped.push(
+                    e.path()
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            } else {
                 tree.push(
                     e.path()
                         .strip_prefix(root)
@@ -1557,4 +2566,34 @@ pub fn parse_diff(text: &str, staged: bool) -> BTreeMap<String, Value> {
         }
     }
     files
+}
+/// `(files, insertions, deletions)` from one `--shortstat` line; zeros when absent.
+fn shortstat(tail: &str) -> (u64, u64, u64) {
+    let mut files = 0;
+    let mut add = 0;
+    let mut del = 0;
+    for field in tail.trim().split(',') {
+        let n = field
+            .split_whitespace()
+            .next()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        if field.contains("file") {
+            files = n;
+        } else if field.contains("insertion") {
+            add = n;
+        } else if field.contains("deletion") {
+            del = n;
+        }
+    }
+    (files, add, del)
+}
+/// The per-repository lock every Git-changing owner action of a project takes:
+/// Git actions here, integration and merge finish/abort. Changes of one index and
+/// checkout set never interleave.
+pub(crate) fn repo_lock(root: &Path) -> String {
+    format!(
+        "git-{}.lock",
+        &revision(root.as_os_str().as_encoded_bytes())[..16]
+    )
 }

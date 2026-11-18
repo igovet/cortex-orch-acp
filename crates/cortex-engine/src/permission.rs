@@ -40,19 +40,33 @@ pub const NATIVE_QUESTION_TOOLS: [&str; 3] = [
 const DELETION_TITLE: &str = "Removal blocked pending confirmation: ";
 
 /// Authenticated channel facts. `runtime_answers_native` is true for engines
-/// whose requests are ordinary per-tool approvals (claude-agent-acp in its
-/// `default` floor). Other engines ask only to leave their own sandbox, so
-/// their native requests keep the client route outside Auto.
+/// whose requests the runtime answers itself: claude-agent-acp in `default` and
+/// codex-acp in `read-only`/`workspace-write`, which asks only to leave its
+/// sandbox. Other engines (OpenCode) keep the client route outside Auto.
 pub struct Facts<'a> {
     pub access: &'a str,
     pub read_only: bool,
     pub consultant: bool,
     pub runtime_answers_native: bool,
     pub root: &'a Path,
+    /// The engine's `HOME`, for `~` paths; `None` leaves them unclassified.
+    pub home: Option<&'a Path>,
     /// Names of the external MCP servers Cortex attached to this session.
     pub mcp_servers: &'a [String],
-    /// Runtime/control-plane targets no native edit may reach outside Auto.
-    pub protected: &'a dyn Fn(&Path) -> bool,
+    /// The class of a resolved absolute path (see [`PathClass`]).
+    pub class: &'a dyn Fn(&Path) -> PathClass,
+}
+/// What a native request's path reaches, strongest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PathClass {
+    /// An ordinary path (inside or outside the project).
+    Ordinary,
+    /// Git control files of the project, engine and Cortex configuration.
+    Control,
+    /// Credential and key material.
+    Credential,
+    /// Cortex private state: refused in every mode.
+    Private,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -132,31 +146,69 @@ pub fn classify(request: &Value, facts: &Facts<'_>) -> Verdict {
     if channel_mcp(name, facts.mcp_servers) {
         return verdict(Action::Allow, "channel_mcp");
     }
-    // No engine jail bounds native tools here, so read-only channels keep the
-    // read/search-only fence in every mode.
-    if facts.read_only && !matches!(kind, Some("read" | "search")) {
-        return verdict(
-            if facts.runtime_answers_native {
-                Action::Refuse
-            } else {
-                Action::Cancel
-            },
-            "read_only",
-        );
+    let refuse = if facts.runtime_answers_native {
+        Action::Refuse
+    } else {
+        Action::Cancel
+    };
+    let ask = Action::Ask {
+        deletion: false,
+        fallback: if facts.runtime_answers_native {
+            Fallback::Refuse
+        } else {
+            Fallback::Cancel
+        },
+    };
+    let read = matches!(kind, Some("read" | "search"));
+    let targets = targets(request, facts);
+    // Cortex private state is refused to every native request in every mode.
+    if targets.paths.iter().any(|(_, c)| *c == PathClass::Private) {
+        return verdict(refuse, "cortex_private");
     }
-    if facts.access == "auto" {
-        return verdict(Action::Allow, "auto");
+    // Read-only channels never write, delete or execute natively, in any mode.
+    if facts.read_only && !read {
+        return verdict(refuse, "read_only");
+    }
+    let auto = facts.access == "auto";
+    let deletion = is_deletion(request);
+    let credential = targets
+        .paths
+        .iter()
+        .any(|(_, c)| *c == PathClass::Credential);
+    let control = !read && targets.paths.iter().any(|(_, c)| *c == PathClass::Control);
+    let outside = targets.unclassified || targets.paths.iter().any(|(inside, _)| !inside);
+    // Auto allows everything else; the rule names what was allowed.
+    if auto {
+        let rule = if credential {
+            "auto_credential"
+        } else if control {
+            "auto_control"
+        } else if deletion {
+            "auto_deletion"
+        } else if outside && read {
+            "auto_outside_read"
+        } else if outside && !targets.paths.is_empty() {
+            "auto_outside_write"
+        } else {
+            "auto"
+        };
+        return verdict(Action::Allow, rule);
+    }
+    // Credential and key material, Git controls and engine/Cortex configuration
+    // (written) and a path that cannot be resolved ask the owner.
+    if credential {
+        return verdict(ask, "credential");
+    }
+    if control {
+        return verdict(ask, "control_target");
+    }
+    if targets.unclassified {
+        return verdict(ask, "unclassified_path");
     }
     if !facts.runtime_answers_native {
-        return verdict(
-            Action::Ask {
-                deletion: false,
-                fallback: Fallback::Cancel,
-            },
-            "client",
-        );
+        return verdict(ask, "client");
     }
-    if is_deletion(request) {
+    if deletion {
         return verdict(
             Action::Ask {
                 deletion: true,
@@ -165,58 +217,227 @@ pub fn classify(request: &Value, facts: &Facts<'_>) -> Verdict {
             "deletion",
         );
     }
-    let effect = match kind {
-        Some("read" | "search" | "fetch" | "think" | "switch_mode") => Effect::None,
-        Some("edit") => edit_effect(request, facts),
-        _ => Effect::Uncontained,
-    };
-    match (facts.access, effect) {
-        (_, Effect::None) => verdict(Action::Allow, "native_read"),
-        (_, Effect::Protected) => verdict(Action::Refuse, "protected_target"),
-        ("development", _) => verdict(Action::Allow, "native_development"),
-        (_, Effect::Project) => verdict(Action::Allow, "native_project"),
-        _ => verdict(
-            Action::Ask {
-                deletion: false,
-                fallback: Fallback::Refuse,
-            },
-            "native_uncontained",
-        ),
-    }
-}
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Effect {
-    None,
-    Project,
-    Protected,
-    Uncontained,
-}
-fn edit_effect(request: &Value, facts: &Facts<'_>) -> Effect {
-    let Some(locations) = request["toolCall"]["locations"].as_array() else {
-        return Effect::Uncontained;
-    };
-    if locations.is_empty() {
-        return Effect::Uncontained;
-    }
-    let Some(root) = resolved(facts.root) else {
-        return Effect::Uncontained;
-    };
-    let mut effect = Effect::Project;
-    for location in locations {
-        let Some(path) = location["path"].as_str().and_then(resolved_str) else {
-            return Effect::Uncontained;
+    let development = facts.access == "development";
+    if read {
+        return match (outside, development) {
+            (false, _) => verdict(Action::Allow, "native_read"),
+            (true, true) => verdict(Action::Allow, "outside_read"),
+            (true, false) => verdict(ask, "outside_read"),
         };
-        if (facts.protected)(&path) {
-            return Effect::Protected;
-        }
-        if !path.starts_with(&root) {
-            effect = Effect::Uncontained;
+    }
+    if matches!(kind, Some("think" | "switch_mode")) {
+        return verdict(Action::Allow, "native_read");
+    }
+    if kind == Some("fetch") {
+        return if development {
+            verdict(Action::Allow, "native_fetch")
+        } else {
+            verdict(ask, "native_fetch")
+        };
+    }
+    // A write names its targets (an edit's locations, a sandbox escalation's
+    // paths); outside the project it asks in Guarded and Development.
+    if !targets.paths.is_empty() {
+        return match (outside, development) {
+            (true, _) => verdict(ask, "outside_write"),
+            (false, true) => verdict(Action::Allow, "native_development"),
+            (false, false) => verdict(Action::Allow, "native_project"),
+        };
+    }
+    // An edit without a declared target cannot be shown to stay in the project.
+    if kind == Some("edit") {
+        return verdict(ask, "outside_write");
+    }
+    if development {
+        verdict(Action::Allow, "native_development")
+    } else {
+        verdict(ask, "native_uncontained")
+    }
+}
+/// The resolved targets of a native request: each with whether it lies in the
+/// project and its class. `unclassified` marks a named path that cannot be
+/// resolved (a `~` path without a known home, a non-string path field).
+struct Targets {
+    paths: Vec<(bool, PathClass)>,
+    unclassified: bool,
+}
+/// Paths a native request names: ACP `locations`, the tool's
+/// `path`/`file_path`/`notebook_path`, and the literal leading directories of a
+/// Glob `pattern` or Grep `glob`. A relative path is taken from the project
+/// folder; `~` from the engine's home. A request naming no path names none.
+fn targets(request: &Value, facts: &Facts<'_>) -> Targets {
+    let mut out = Targets {
+        paths: Vec::new(),
+        unclassified: false,
+    };
+    let Some(root) = resolved(facts.root) else {
+        out.unclassified = true;
+        return out;
+    };
+    let call = &request["toolCall"];
+    let raw = &call["rawInput"];
+    let mut names: Vec<String> = Vec::new();
+    if let Some(locations) = call["locations"].as_array() {
+        for location in locations {
+            match location["path"].as_str() {
+                Some(p) => names.push(p.to_owned()),
+                None => out.unclassified = true,
+            }
         }
     }
-    effect
+    for key in ["path", "file_path", "notebook_path"] {
+        match &raw[key] {
+            Value::Null => {}
+            Value::String(p) => names.push(p.clone()),
+            _ => out.unclassified = true,
+        }
+    }
+    let pattern = match tool_name(request) {
+        Some("Glob") => raw["pattern"].as_str(),
+        Some("Grep") => raw["glob"].as_str(),
+        _ => None,
+    };
+    if let Some(pattern) = pattern {
+        if pattern.starts_with('/')
+            || pattern.starts_with('~')
+            || pattern.split('/').any(|p| p == "..")
+        {
+            let literal: Vec<&str> = pattern
+                .split('/')
+                .take_while(|part| !part.contains(['*', '?', '[', '{']))
+                .collect();
+            let prefix = literal.join("/");
+            names.push(if prefix.is_empty() {
+                "/".to_owned()
+            } else {
+                prefix
+            });
+        }
+    }
+    for name in names {
+        let path = if let Some(rest) = name.strip_prefix('~') {
+            match (
+                facts.home,
+                rest.strip_prefix('/').or((rest.is_empty()).then_some("")),
+            ) {
+                (Some(home), Some(rest)) => home.join(rest),
+                _ => {
+                    out.unclassified = true;
+                    continue;
+                }
+            }
+        } else if name.is_empty() {
+            out.unclassified = true;
+            continue;
+        } else if Path::new(&name).is_absolute() {
+            PathBuf::from(&name)
+        } else {
+            facts.root.join(&name)
+        };
+        match resolved(&path) {
+            Some(real) => out
+                .paths
+                .push((real.starts_with(&root), (facts.class)(&real))),
+            None => out.unclassified = true,
+        }
+    }
+    out
 }
-fn resolved_str(path: &str) -> Option<PathBuf> {
-    resolved(Path::new(path))
+/// Why an asked request is outside the normal bounds, for the owner card.
+pub fn ask_reason(rule: &str) -> &'static str {
+    match rule {
+        "credential" => "it reaches credential or key material",
+        "control_target" => "it changes Git control files or engine/Cortex configuration",
+        "unclassified_path" => "its path cannot be resolved",
+        "outside_read" => "it reads outside the project",
+        "outside_write" => "it writes outside the project",
+        "native_fetch" => "it fetches from the network",
+        "deletion" => "it deletes or moves files",
+        _ => "it is not provably contained in the project",
+    }
+}
+/// The stable reason code of an asked rule.
+pub fn reason_code(rule: &str) -> &'static str {
+    match rule {
+        "credential" => "credential",
+        "control_target" => "control",
+        "unclassified_path" => "unresolvable_path",
+        "outside_read" | "outside_write" => "outside_project",
+        "native_fetch" => "network",
+        "deletion" => "deletion",
+        _ => "uncontained",
+    }
+}
+/// The operation kind of a native request: read, write, delete, run or fetch.
+pub fn operation(request: &Value) -> &'static str {
+    let call = &request["toolCall"];
+    match call["kind"].as_str() {
+        Some("read" | "search") => "read",
+        Some("delete" | "move") => "delete",
+        _ if is_deletion(request) => "delete",
+        Some("edit") => "write",
+        Some("fetch") => "fetch",
+        Some("execute") => "run",
+        _ if call["locations"].as_array().is_some_and(|l| !l.is_empty()) => "write",
+        _ => "run",
+    }
+}
+/// The exact paths (or URL) a native request names, as the engine declared them.
+pub fn paths(request: &Value) -> Vec<String> {
+    let call = &request["toolCall"];
+    let mut paths: Vec<String> = call["locations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| l["path"].as_str().map(str::to_owned))
+        .collect();
+    for key in ["path", "file_path", "notebook_path", "url", "cwd"] {
+        if let Some(p) = call["rawInput"][key].as_str() {
+            if !paths.iter().any(|q| q == p) {
+                paths.push(p.to_owned());
+            }
+        }
+    }
+    paths
+}
+/// The owner card for an asked native request: the role, the operation kind,
+/// the exact paths and why it is outside the normal bounds lead the title, and
+/// only one-shot Allow once / Deny options are offered. A deletion keeps its
+/// `Removal blocked pending confirmation: ...` title.
+pub fn owner_card(request: &Value, role: &str, rule: &str) -> Value {
+    let mut card = if rule == "deletion" {
+        deletion_card(request)
+    } else {
+        let mut card = request.clone();
+        let call = &request["toolCall"];
+        let paths = paths(request);
+        let subject = if paths.is_empty() {
+            let command = command_text(call);
+            let title = call["title"].as_str().unwrap_or("");
+            if command.trim().is_empty() {
+                title.to_owned()
+            } else {
+                command.trim().to_owned()
+            }
+        } else {
+            paths.join(", ")
+        };
+        let subject: String = subject.chars().take(300).collect();
+        card["toolCall"]["title"] = json!(format!(
+            "Owner decision: {role} wants to {} {subject} because {}",
+            operation(request),
+            ask_reason(rule)
+        ));
+        card
+    };
+    if let Some(options) = request["options"].as_array() {
+        card["options"] = json!(options
+            .iter()
+            .filter(|o| matches!(o["kind"].as_str(), Some("allow_once" | "reject_once")))
+            .cloned()
+            .collect::<Vec<_>>());
+    }
+    card
 }
 /// Lexically normalized absolute path whose deepest existing ancestor is
 /// canonicalized, so a symlinked parent cannot hide its real target.
@@ -367,8 +588,9 @@ mod tests {
             consultant: false,
             runtime_answers_native: true,
             root,
+            home: None,
             mcp_servers: &[],
-            protected: &|_| false,
+            class: &|_| PathClass::Ordinary,
         }
     }
     fn command(cmd: &str) -> Value {
@@ -397,7 +619,7 @@ mod tests {
         ));
     }
     #[test]
-    fn names_kinds_and_modes() {
+    fn names_kinds_and_mcp() {
         let root = std::env::temp_dir();
         let mcp = json!({"toolCall":{"kind":"other","_meta":{"claudeCode":{"toolName":"mcp__cortex__plan_submit"}}}});
         assert_eq!(
@@ -408,7 +630,7 @@ mod tests {
             json!({"toolCall":{"_meta":{"claudeCode":{"toolName":"mcp__code_index__search"}}}});
         let servers = vec!["code.index".to_owned()];
         let mut f = facts("guarded", true, &root);
-        assert_eq!(classify(&external, &f).action, Action::Refuse);
+        assert_eq!(classify(&external, &f).rule, "read_only");
         f.mcp_servers = &servers;
         assert_eq!(classify(&external, &f).rule, "channel_mcp");
         f.consultant = true;
@@ -418,13 +640,13 @@ mod tests {
             classify(&bash, &facts("development", false, &root)).action,
             Action::Allow
         );
-        assert!(matches!(
+        assert_eq!(
             classify(&bash, &facts("guarded", false, &root)).action,
             Action::Ask {
                 deletion: false,
                 fallback: Fallback::Refuse
             }
-        ));
+        );
         let mut legacy = facts("development", false, &root);
         legacy.runtime_answers_native = false;
         assert_eq!(
@@ -436,50 +658,272 @@ mod tests {
         );
         legacy.read_only = true;
         assert_eq!(classify(&bash, &legacy).action, Action::Cancel);
-        let edit = |p: PathBuf| json!({"toolCall":{"kind":"edit","locations":[{"path":p}]}});
-        assert_eq!(
-            classify(&edit(root.join("a/b")), &facts("guarded", false, &root)).rule,
-            "native_project"
-        );
-        assert_eq!(
-            classify(
-                &edit(root.join("a/../../x")),
-                &facts("guarded", false, &root)
-            )
-            .rule,
-            "native_uncontained"
-        );
-        assert_eq!(
-            classify(
-                &json!({"toolCall":{"kind":"edit"}}),
-                &facts("guarded", false, &root)
-            )
-            .rule,
-            "native_uncontained"
-        );
     }
-    /// A reviewer channel is read-only in every access mode: native edit, execute and
-    /// delete tools are refused (Claude, which the runtime answers) or cancelled
-    /// (other engines) before any access-mode shortcut, while reads still pass.
+    /// Read-only channels never write, delete or execute natively, in any mode,
+    /// while reads follow the access-mode table.
     #[test]
     fn read_only_channels_never_get_native_edit_tools() {
         let root = std::env::temp_dir();
         let edit = json!({"toolCall":{"kind":"edit","locations":[{"path":root.join("a")}]}});
-        let read = json!({"toolCall":{"kind":"read"}});
         for access in ["auto", "development", "guarded"] {
             for answers in [true, false] {
                 let mut f = facts(access, true, &root);
                 f.runtime_answers_native = answers;
                 let v = classify(&edit, &f);
                 assert_eq!(v.rule, "read_only");
-                assert_eq!(v.action, if answers { Action::Refuse } else { Action::Cancel });
-                for kind in ["execute", "delete", "move"] {
-                    let tool = json!({"toolCall":{"kind":kind}});
-                    assert_eq!(classify(&tool, &f).rule, "read_only");
+                assert_eq!(
+                    v.action,
+                    if answers {
+                        Action::Refuse
+                    } else {
+                        Action::Cancel
+                    }
+                );
+                for kind in ["execute", "delete", "move", "fetch"] {
+                    assert_eq!(
+                        classify(&json!({"toolCall":{"kind":kind}}), &f).rule,
+                        "read_only"
+                    );
                 }
-                assert_ne!(classify(&read, &f).rule, "read_only");
+                assert_ne!(
+                    classify(&json!({"toolCall":{"kind":"read"}}), &f).rule,
+                    "read_only"
+                );
             }
         }
+    }
+    /// Every cell of the access-mode decision table.
+    #[test]
+    fn decision_table() {
+        let base = std::env::temp_dir().join(format!("permission-table-{}", std::process::id()));
+        let root = base.join("project");
+        let home = base.join("home");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        let class = |p: &Path| {
+            if p.starts_with(root.join(".cortex")) || p.starts_with(root.join(".cortex-dev")) {
+                PathClass::Private
+            } else if p.starts_with(home.join(".ssh")) || p.to_string_lossy().ends_with(".pem") {
+                PathClass::Credential
+            } else if p.starts_with(root.join(".git")) || p.starts_with(home.join(".claude")) {
+                PathClass::Control
+            } else {
+                PathClass::Ordinary
+            }
+        };
+        let read = |p: &Path| {
+            json!({"toolCall":{"kind":"read","locations":[{"path":p}],
+            "_meta":{"claudeCode":{"toolName":"Read"}},"rawInput":{"file_path":p}}})
+        };
+        let edit = |p: &Path| json!({"toolCall":{"kind":"edit","locations":[{"path":p}]}});
+        let ask = Action::Ask {
+            deletion: false,
+            fallback: Fallback::Refuse,
+        };
+        let allow = Action::Allow;
+        let refuse = Action::Refuse;
+        // (request, [guarded, development, auto] as (action, rule)).
+        let cases: Vec<(Value, [(Action, &str); 3])> = vec![
+            (
+                read(&root.join("src/a.rs")),
+                [
+                    (allow, "native_read"),
+                    (allow, "native_read"),
+                    (allow, "auto"),
+                ],
+            ),
+            (
+                read(&base.join("other/b.rs")),
+                [
+                    (ask, "outside_read"),
+                    (allow, "outside_read"),
+                    (allow, "auto_outside_read"),
+                ],
+            ),
+            (
+                json!({"toolCall":{"kind":"search","_meta":{"claudeCode":{"toolName":"Glob"}},"rawInput":{"pattern":"/etc/**"}}}),
+                [
+                    (ask, "outside_read"),
+                    (allow, "outside_read"),
+                    (allow, "auto_outside_read"),
+                ],
+            ),
+            (
+                read(Path::new("~/notes.txt")),
+                [
+                    (ask, "outside_read"),
+                    (allow, "outside_read"),
+                    (allow, "auto_outside_read"),
+                ],
+            ),
+            (
+                edit(&root.join("src/a.rs")),
+                [
+                    (allow, "native_project"),
+                    (allow, "native_development"),
+                    (allow, "auto"),
+                ],
+            ),
+            (
+                edit(&base.join("other/b.rs")),
+                [
+                    (ask, "outside_write"),
+                    (ask, "outside_write"),
+                    (allow, "auto_outside_write"),
+                ],
+            ),
+            (
+                json!({"toolCall":{"kind":"edit"}}),
+                [
+                    (ask, "outside_write"),
+                    (ask, "outside_write"),
+                    (allow, "auto"),
+                ],
+            ),
+            (
+                read(&home.join(".ssh/id_ed25519")),
+                [
+                    (ask, "credential"),
+                    (ask, "credential"),
+                    (allow, "auto_credential"),
+                ],
+            ),
+            (
+                read(&root.join("src/server.pem")),
+                [
+                    (ask, "credential"),
+                    (ask, "credential"),
+                    (allow, "auto_credential"),
+                ],
+            ),
+            (
+                edit(&home.join(".ssh/config")),
+                [
+                    (ask, "credential"),
+                    (ask, "credential"),
+                    (allow, "auto_credential"),
+                ],
+            ),
+            (
+                edit(&root.join(".git/config")),
+                [
+                    (ask, "control_target"),
+                    (ask, "control_target"),
+                    (allow, "auto_control"),
+                ],
+            ),
+            (
+                edit(&home.join(".claude/settings.json")),
+                [
+                    (ask, "control_target"),
+                    (ask, "control_target"),
+                    (allow, "auto_control"),
+                ],
+            ),
+            (
+                read(&root.join(".git/HEAD")),
+                [
+                    (allow, "native_read"),
+                    (allow, "native_read"),
+                    (allow, "auto"),
+                ],
+            ),
+            (
+                read(&root.join(".cortex/cortex.sqlite3")),
+                [
+                    (refuse, "cortex_private"),
+                    (refuse, "cortex_private"),
+                    (refuse, "cortex_private"),
+                ],
+            ),
+            (
+                edit(&root.join(".cortex-dev/x")),
+                [
+                    (refuse, "cortex_private"),
+                    (refuse, "cortex_private"),
+                    (refuse, "cortex_private"),
+                ],
+            ),
+            (
+                command("rm -rf build"),
+                [
+                    (
+                        Action::Ask {
+                            deletion: true,
+                            fallback: Fallback::Refuse,
+                        },
+                        "deletion",
+                    ),
+                    (
+                        Action::Ask {
+                            deletion: true,
+                            fallback: Fallback::Refuse,
+                        },
+                        "deletion",
+                    ),
+                    (allow, "auto_deletion"),
+                ],
+            ),
+            (
+                json!({"toolCall":{"kind":"fetch","rawInput":{"url":"https://example.invalid"}}}),
+                [
+                    (ask, "native_fetch"),
+                    (allow, "native_fetch"),
+                    (allow, "auto"),
+                ],
+            ),
+            (
+                json!({"toolCall":{"kind":"other","locations":[{"path":base.join("other")}]}}),
+                [
+                    (ask, "outside_write"),
+                    (ask, "outside_write"),
+                    (allow, "auto_outside_write"),
+                ],
+            ),
+        ];
+        for (request, expected) in cases {
+            for (access, (action, rule)) in
+                ["guarded", "development", "auto"].into_iter().zip(expected)
+            {
+                let mut f = facts(access, false, &root);
+                f.home = Some(&home);
+                f.class = &class;
+                let v = classify(&request, &f);
+                assert_eq!((v.action, v.rule), (action, rule), "{access} {request}");
+            }
+        }
+        // Without a known home a `~` path is unclassified and asks outside Auto.
+        let v = classify(&read(Path::new("~/x")), &facts("development", false, &root));
+        assert_eq!(
+            (v.action, v.rule),
+            (
+                Action::Ask {
+                    deletion: false,
+                    fallback: Fallback::Refuse
+                },
+                "unclassified_path"
+            )
+        );
+        // A read-only channel's reads follow the same table; its private reads are refused.
+        let mut f = facts("auto", true, &root);
+        f.home = Some(&home);
+        f.class = &class;
+        assert_eq!(
+            classify(&read(&home.join(".ssh/id_ed25519")), &f).rule,
+            "auto_credential"
+        );
+        assert_eq!(
+            classify(&read(&root.join(".cortex/x")), &f).rule,
+            "cortex_private"
+        );
+        // The owner card names role, operation, path and reason with one-shot options.
+        let request = json!({"toolCall":{"kind":"read","locations":[{"path":"/etc/hosts"}]},
+            "options":[{"optionId":"a","kind":"allow_once"},{"optionId":"aa","kind":"allow_always"},{"optionId":"r","kind":"reject_once"}]});
+        let card = owner_card(&request, "worker-explorer", "outside_read");
+        assert_eq!(card["toolCall"]["title"],
+            "Owner decision: worker-explorer wants to read /etc/hosts because it reads outside the project");
+        assert_eq!(card["options"].as_array().unwrap().len(), 2);
+        std::fs::remove_dir_all(&base).unwrap();
     }
     #[test]
     fn options_are_only_offered_ones() {

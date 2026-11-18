@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capture, coordinatorResolution, emptyWorkspace, machineDefaults, profileChanges, sessionsOf } from "../src";
+import { capture, configIssues, coordinatorResolution, emptyWorkspace, machineDefaults, profileChanges, sessionsOf } from "../src";
 
 describe("task default routes", () => {
   it("keeps the exact configured connection route instead of picking the first model", () => {
@@ -47,5 +47,16 @@ describe("profile changes in words", () => {
     const machine = changed(), c = machine.config;
     c.surfaces.user_defaults.routeDefault = {routeId:"xr_6b08617e228a",connectionId:"cn_ab12cd34ef56",model:"opus",parameters:{}};
     expect(coordinatorResolution(machine)).toEqual({ok:true,route:"Claude · Opus 5.5, exact route"});
+  });
+});
+
+describe("a saved config that still names the retired default alias", () => {
+  it("is reported as no longer offered, never mapped to another model", () => {
+    const machine = emptyWorkspace().machines[0], routing = machine.config.surfaces.routing;
+    machine.config.catalogue["claude-agent-acp"].models = [{id:"opus",label:"Opus 5.5",efforts:["high"],observed:true}];
+    routing.engines["claude-agent-acp"].enabled = ["default", "opus"];
+    const issue = configIssues(machine).find(i => i.id === "offered:claude-agent-acp");
+    expect(issue?.text).toContain("no longer offers the engine alias \"default\"");
+    expect(issue?.text).not.toContain("opus");
   });
 });

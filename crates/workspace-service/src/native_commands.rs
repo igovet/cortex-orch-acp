@@ -66,8 +66,17 @@ pub(super) fn fingerprint(file: &mut File) -> CoreResult<(String, u64)> {
 }
 /// Retain oversized authorized read replies, without clipping their JSON content.
 pub(super) fn defer_json(store: &Store, i: &Identity, value: Value) -> CoreResult<Value> {
+    defer_json_over(store, i, value, 32768)
+}
+/// `defer_json` with an explicit inline byte budget (read_batch items use 6144).
+pub(super) fn defer_json_over(
+    store: &Store,
+    i: &Identity,
+    value: Value,
+    inline: usize,
+) -> CoreResult<Value> {
     let bytes = serde_json::to_vec(&value)?;
-    if bytes.len() <= 32768 {
+    if bytes.len() <= inline {
         return Ok(value);
     }
     let dir = store.key().directory().join(&i.task).join(".native-output");
@@ -432,20 +441,12 @@ async fn drain(mut r: impl AsyncRead + Unpin, output: Arc<Mutex<File>>) -> CoreR
     Ok(())
 }
 pub(super) fn denials(db: &rusqlite::Connection, task: &str) -> CoreResult<Vec<String>> {
-    let rows = db.prepare("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='USER_STEERING' ORDER BY id")?
-        .query_map([task], |r| r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
-    let mut paths = std::collections::BTreeSet::new();
-    for raw in rows {
-        let value: Value = serde_json::from_str(&raw)?;
-        if let Some(array) = value["deny_write"].as_array() {
-            for path in array {
-                let path = path.as_str().ok_or(CoreError::Refused("invalid_denial"))?;
-                safe(path)?;
-                paths.insert(path.to_owned());
-            }
-        }
+    // The owner's write denials in force (lifted ones excluded), sorted.
+    let paths = cortex_core::lifecycle::steering::denials(db, task)?;
+    for path in &paths {
+        safe(path)?;
     }
-    Ok(paths.into_iter().collect())
+    Ok(paths)
 }
 fn deletion(argv: &[String]) -> bool {
     if regex::Regex::new(r"\b(rm|unlink|rmdir|shred)\b|--delete|-delete|\bgit\b.*\b(clean|rm)\b")
@@ -777,7 +778,8 @@ pub(super) async fn execute(
                 _=tokio::time::sleep(Duration::from_millis(50))=>{
                     let c=credential.clone();let expected=mode.clone();let denied=denied.clone();let valid=recv(executor.write(move|db|{
                         let i=channels::authenticate(db,&c.channel_id,c.secret(),true)?;
-                        if !readonly && (access::current(db,&i.task)?!=expected || denials(db,&i.task)?!=denied){return Err(CoreError::Refused("access_changed"));}
+                        // A new denial stops a running writer; a lifted one (fewer denials) does not.
+                        if !readonly && (access::current(db,&i.task)?!=expected || denials(db,&i.task)?.iter().any(|p|!denied.contains(p))){return Err(CoreError::Refused("access_changed"));}
                         if !readonly {writable(db,&i,None)?;} Ok(())
                     })?).await;
                     if valid.is_err(){failure=Some("authority_changed");break None;}

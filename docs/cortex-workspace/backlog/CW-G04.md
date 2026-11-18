@@ -1,6 +1,6 @@
 # CW-G04: Confirmed push and ambiguous-outcome reconciliation
 
-**Status:** planned · **Phase:** 3+ · **Size:** L
+**Status:** Partly implemented: push without force is implemented ([IDE and Git](../ide-and-git.md)); reconciliation of an ambiguous push outcome is not confirmed in code · **Phase:** 3+ · **Size:** L
 
 ## Goal
 Push through the Git CLI only after the owner confirms the remote, the branch, the local commit and the expected remote value. The confirmation is bound to the preview version. A lost response becomes an explicit "outcome unknown" state. Reconciliation reads the remote ref and local HEAD and then stops. A push is never force-pushed and never retried automatically.

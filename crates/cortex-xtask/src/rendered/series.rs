@@ -20,7 +20,10 @@ fn status(step: &Value) -> Option<&str> {
 }
 
 fn is_digest(text: &str) -> bool {
-    text.len() == 64 && text.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
 /// Accept only one complete, consistent run; summaries cannot erase failures.
@@ -42,27 +45,61 @@ pub fn summarize(text: &str, exit_code: i32) -> Value {
         }
     }
     let empty = Value::obj();
-    let last = |wanted: &str| steps.iter().rev().find(|step| name(step) == wanted).unwrap_or(&empty).clone();
+    let last = |wanted: &str| {
+        steps
+            .iter()
+            .rev()
+            .find(|step| name(step) == wanted)
+            .unwrap_or(&empty)
+            .clone()
+    };
     let summary = last("visual_audit_summary");
     let incomplete = last("journey_incomplete");
     // Exception evidence is never a successful terminal record, even if a later run_evidence or passing summary claims otherwise.
     let native = last("native_process_evidence");
-    let evidence = if native.truthy() { native.clone() } else { last("run_evidence") };
-    let passed: Vec<&Value> = steps.iter().filter(|step| status(step) == Some("passed")).collect();
-    let failures: Vec<Value> = steps.iter().filter(|step| status(step) == Some("failed")).map(|step| s(name(step))).collect();
-    let required = ["bundled_native_window", "run_evidence", "visual_audit_summary", "owned_process_cleanup"];
+    let evidence = if native.truthy() {
+        native.clone()
+    } else {
+        last("run_evidence")
+    };
+    let passed: Vec<&Value> = steps
+        .iter()
+        .filter(|step| status(step) == Some("passed"))
+        .collect();
+    let failures: Vec<Value> = steps
+        .iter()
+        .filter(|step| status(step) == Some("failed"))
+        .map(|step| s(name(step)))
+        .collect();
+    let required = [
+        "bundled_native_window",
+        "run_evidence",
+        "visual_audit_summary",
+        "owned_process_cleanup",
+    ];
     for wanted in required {
         if steps.iter().filter(|step| name(step) == wanted).count() != 1 {
             errors.push(format!("missing_or_duplicate:{wanted}"));
         }
     }
-    if steps.iter().any(|step| !matches!(status(step), Some("passed") | Some("diagnostic") | Some("not_applicable"))) {
+    if steps.iter().any(|step| {
+        !matches!(
+            status(step),
+            Some("passed") | Some("diagnostic") | Some("not_applicable")
+        )
+    }) {
         errors.push("unsuccessful_step".into());
     }
     if incomplete.truthy() || native.truthy() {
         errors.push("journey_incomplete".into());
     }
-    let tail: Vec<&str> = steps.iter().rev().take(3).rev().map(|step| name(step)).collect();
+    let tail: Vec<&str> = steps
+        .iter()
+        .rev()
+        .take(3)
+        .rev()
+        .map(|step| name(step))
+        .collect();
     if tail != required[1..] {
         errors.push("invalid_terminal_order".into());
     }
@@ -71,17 +108,26 @@ pub fn summarize(text: &str, exit_code: i32) -> Value {
     if status(&binary) != Some("passed") || !digest.is_some_and(is_digest) {
         errors.push("invalid_binary_identity".into());
     }
-    if !steps.iter().any(|step| name(step) == "visual_audit" && status(step) == Some("passed")) {
+    if !steps
+        .iter()
+        .any(|step| name(step) == "visual_audit" && status(step) == Some("passed"))
+    {
         errors.push("missing_visual_audit".into());
     }
-    if status(&summary) != Some("passed") || summary.get("failures").and_then(Value::as_i64) != Some(0) {
+    if status(&summary) != Some("passed")
+        || summary.get("failures").and_then(Value::as_i64) != Some(0)
+    {
         errors.push("invalid_visual_summary".into());
     }
     if status(&last("owned_process_cleanup")) != Some("passed") {
         errors.push("cleanup_not_passed".into());
     }
     // A stage the host cannot offer is named, with the page's own words, as `not_applicable`; it is listed here and never counted as a pass.
-    let not_applicable: Vec<Value> = steps.iter().filter(|step| status(step) == Some("not_applicable")).map(|step| s(name(step))).collect();
+    let not_applicable: Vec<Value> = steps
+        .iter()
+        .filter(|step| status(step) == Some("not_applicable"))
+        .map(|step| s(name(step)))
+        .collect();
     // The common journey closes the app before final evidence, restarts the service, and leaves the outer Wayland compositor
     // running (absent on X11).
     let expected: [(&str, Value); 8] = [
@@ -94,7 +140,11 @@ pub fn summarize(text: &str, exit_code: i32) -> Value {
         ("cores", arr(vec![])),
         ("service", obj(vec![("state", s("running"))])),
     ];
-    if expected.iter().any(|(key, value)| evidence.get(key).is_none_or(|got| canon(got) != canon(value))) {
+    if expected.iter().any(|(key, value)| {
+        evidence
+            .get(key)
+            .is_none_or(|got| canon(got) != canon(value))
+    }) {
         errors.push("invalid_native_evidence".into());
     }
     let compositor_ok = match evidence.get("compositor") {
@@ -105,22 +155,44 @@ pub fn summarize(text: &str, exit_code: i32) -> Value {
     if !compositor_ok {
         errors.push("invalid_compositor_evidence".into());
     }
-    if evidence.get("app_launches").and_then(Value::as_i64).is_none_or(|n| n < 1) {
+    if evidence
+        .get("app_launches")
+        .and_then(Value::as_i64)
+        .is_none_or(|n| n < 1)
+    {
         errors.push("missing_app_launches".into());
     }
     let complete = exit_code == 0 && errors.is_empty();
     let ev = |key: &str| evidence.get(key).cloned().unwrap_or(Value::Null);
-    let stale = steps.iter().filter(|step| name(step) == "accessibility_node_stale").count() as i64;
-    let screens = steps.iter().filter(|step| name(step) == "visual_audit" && status(step) == Some("passed")).count() as i64;
+    let stale = steps
+        .iter()
+        .filter(|step| name(step) == "accessibility_node_stale")
+        .count() as i64;
+    let screens = steps
+        .iter()
+        .filter(|step| name(step) == "visual_audit" && status(step) == Some("passed"))
+        .count() as i64;
     obj(vec![
         ("complete", b(complete)),
         ("exit_code", n(exit_code as i64)),
         ("steps_passed", n(passed.len() as i64)),
-        ("last_step", passed.last().map(|step| s(name(step))).unwrap_or(Value::Null)),
+        (
+            "last_step",
+            passed
+                .last()
+                .map(|step| s(name(step)))
+                .unwrap_or(Value::Null),
+        ),
         ("screens_audited", n(screens)),
         ("failures", arr(failures)),
-        ("evidence_errors", arr(errors.iter().map(|e| s(e.as_str())).collect())),
-        ("reason", incomplete.get("reason").cloned().unwrap_or(Value::Null)),
+        (
+            "evidence_errors",
+            arr(errors.iter().map(|e| s(e.as_str())).collect()),
+        ),
+        (
+            "reason",
+            incomplete.get("reason").cloned().unwrap_or(Value::Null),
+        ),
         ("at", incomplete.get("at").cloned().unwrap_or(Value::Null)),
         ("failure_class", ev("failure_class")),
         ("app", ev("app")),
@@ -136,7 +208,13 @@ pub fn summarize(text: &str, exit_code: i32) -> Value {
         ("cores", ev("cores")),
         ("core_limit", ev("core_limit")),
         ("stale_nodes_tolerated", n(stale)),
-        ("binary_sha256", last("bundled_native_window").get("binary_sha256").cloned().unwrap_or(Value::Null)),
+        (
+            "binary_sha256",
+            last("bundled_native_window")
+                .get("binary_sha256")
+                .cloned()
+                .unwrap_or(Value::Null),
+        ),
         ("not_applicable", arr(not_applicable)),
         ("requested_closes", ev("requested_closes")),
     ])
@@ -145,9 +223,16 @@ pub fn summarize(text: &str, exit_code: i32) -> Value {
 pub fn run(cli: &Cli) -> Res<i32> {
     let artifacts = cli.path("artifacts").ok_or("--artifacts is required")?;
     let logs = cli.path("logs").ok_or("--logs is required")?;
-    let runs: u32 = cli.flag("runs").unwrap_or("5").parse().map_err(|_| "--runs must be a number")?;
+    let runs: u32 = cli
+        .flag("runs")
+        .unwrap_or("5")
+        .parse()
+        .map_err(|_| "--runs must be a number")?;
     let display = cli.flag("display").unwrap_or("wayland");
-    require(matches!(display, "wayland" | "x11"), "--display is wayland or x11")?;
+    require(
+        matches!(display, "wayland" | "x11"),
+        "--display is wayland or x11",
+    )?;
     std::fs::create_dir_all(&logs).map_err(|e| e.to_string())?;
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut bad = 0;
@@ -157,15 +242,28 @@ pub fn run(cli: &Cli) -> Res<i32> {
         let sink = std::fs::File::create(&log).map_err(|e| e.to_string())?;
         let err = sink.try_clone().map_err(|e| e.to_string())?;
         let mut command = Command::new(&me);
-        command.arg("check-rendered").arg("--artifacts").arg(&artifacts);
+        command
+            .arg("check-rendered")
+            .arg("--artifacts")
+            .arg(&artifacts);
         if let Some(root) = cli.path("root") {
             command.arg("--root").arg(root);
         }
         if display == "wayland" {
             command.args(["--journey-wayland", "yes"]);
         }
-        let code = command.stdin(Stdio::null()).stdout(sink).stderr(err).status().map_err(|e| e.to_string())?.code().unwrap_or(-1);
-        let mut result = summarize(&String::from_utf8_lossy(&std::fs::read(&log).map_err(|e| e.to_string())?), code);
+        let code = command
+            .stdin(Stdio::null())
+            .stdout(sink)
+            .stderr(err)
+            .status()
+            .map_err(|e| e.to_string())?
+            .code()
+            .unwrap_or(-1);
+        let mut result = summarize(
+            &String::from_utf8_lossy(&std::fs::read(&log).map_err(|e| e.to_string())?),
+            code,
+        );
         if let Some(expected) = cli.flag("expect-sha256") {
             if result.get("binary_sha256").and_then(Value::as_str) != Some(expected) {
                 result.set("complete", b(false));
@@ -174,13 +272,25 @@ pub fn run(cli: &Cli) -> Res<i32> {
         if !matches!(result.get("complete"), Some(Value::Bool(true))) {
             bad += 1;
         }
-        let mut row = obj(vec![("run", n(number as i64)), ("display", s(display)), ("seconds", n(started.elapsed().as_secs_f64().round() as i64))]);
+        let mut row = obj(vec![
+            ("run", n(number as i64)),
+            ("display", s(display)),
+            ("seconds", n(started.elapsed().as_secs_f64().round() as i64)),
+        ]);
         for (k, v) in result.as_obj().unwrap_or(&[]) {
             row.set(k, v.clone());
         }
         println!("{}", pretty_line(&row));
     }
-    println!("{}", pretty_line(&obj(vec![("series", s(display)), ("runs", n(runs as i64)), ("complete", n((runs - bad) as i64)), ("incomplete", n(bad as i64))])));
+    println!(
+        "{}",
+        pretty_line(&obj(vec![
+            ("series", s(display)),
+            ("runs", n(runs as i64)),
+            ("complete", n((runs - bad) as i64)),
+            ("incomplete", n(bad as i64))
+        ]))
+    );
     Ok(if bad > 0 { 1 } else { 0 })
 }
 
@@ -203,7 +313,13 @@ mod tests {
     }
 
     fn errors(result: &Value) -> Vec<String> {
-        result.get("evidence_errors").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(|e| e.as_str().map(String::from)).collect()
+        result
+            .get("evidence_errors")
+            .and_then(Value::as_arr)
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|e| e.as_str().map(String::from))
+            .collect()
     }
 
     #[test]
@@ -218,40 +334,84 @@ mod tests {
         let na = r#"{"step": "task_worktree_choice", "status": "not_applicable", "reason": "the native host reports task worktrees unavailable"}"#;
         let result = summarize(&lines(&[WINDOW, AUDIT, na, EVIDENCE, SUMMARY, CLEANUP]), 0);
         assert!(complete(&result));
-        assert_eq!(result.get("not_applicable").and_then(Value::as_arr).map(|a| a.len()), Some(1));
+        assert_eq!(
+            result
+                .get("not_applicable")
+                .and_then(Value::as_arr)
+                .map(|a| a.len()),
+            Some(1)
+        );
         let failed = r#"{"step": "native_terminal_round_trip", "status": "failed"}"#;
-        assert!(!complete(&summarize(&lines(&[WINDOW, AUDIT, na, failed, EVIDENCE, SUMMARY, CLEANUP]), 0)));
+        assert!(!complete(&summarize(
+            &lines(&[WINDOW, AUDIT, na, failed, EVIDENCE, SUMMARY, CLEANUP]),
+            0
+        )));
     }
 
     #[test]
     fn each_piece_of_evidence_is_required_and_a_failed_step_cannot_be_hidden() {
         for omit in 0..5 {
             let all = [WINDOW, AUDIT, EVIDENCE, SUMMARY, CLEANUP];
-            let kept: Vec<&str> = all.iter().enumerate().filter(|(i, _)| *i != omit).map(|(_, s)| *s).collect();
-            assert!(!complete(&summarize(&lines(&kept), 0)), "missing piece {omit} was accepted");
+            let kept: Vec<&str> = all
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != omit)
+                .map(|(_, s)| *s)
+                .collect();
+            assert!(
+                !complete(&summarize(&lines(&kept), 0)),
+                "missing piece {omit} was accepted"
+            );
         }
-        let failed = lines(&[WINDOW, AUDIT, r#"{"step": "popovers", "status": "failed"}"#, EVIDENCE, SUMMARY, CLEANUP]);
+        let failed = lines(&[
+            WINDOW,
+            AUDIT,
+            r#"{"step": "popovers", "status": "failed"}"#,
+            EVIDENCE,
+            SUMMARY,
+            CLEANUP,
+        ]);
         let result = summarize(&failed, 0);
         assert!(!complete(&result) && errors(&result).contains(&"unsuccessful_step".to_string()));
     }
 
     #[test]
     fn duplicate_terminal_records_and_a_bad_binary_identity_are_rejected() {
-        assert!(!complete(&summarize(&lines(&[WINDOW, AUDIT, EVIDENCE, EVIDENCE, SUMMARY, CLEANUP]), 0)));
-        let bad = WINDOW.replace("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "xyz");
-        assert!(errors(&summarize(&lines(&[&bad, AUDIT, EVIDENCE, SUMMARY, CLEANUP]), 0)).contains(&"invalid_binary_identity".to_string()));
+        assert!(!complete(&summarize(
+            &lines(&[WINDOW, AUDIT, EVIDENCE, EVIDENCE, SUMMARY, CLEANUP]),
+            0
+        )));
+        let bad = WINDOW.replace(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "xyz",
+        );
+        assert!(errors(&summarize(
+            &lines(&[&bad, AUDIT, EVIDENCE, SUMMARY, CLEANUP]),
+            0
+        ))
+        .contains(&"invalid_binary_identity".to_string()));
     }
 
     #[test]
     fn exception_evidence_cannot_be_hidden_by_run_evidence() {
         let exception = r#"{"step": "native_process_evidence", "status": "diagnostic", "failure_class": "app_exited"}"#;
-        let result = summarize(&lines(&[WINDOW, AUDIT, exception, EVIDENCE, SUMMARY, CLEANUP]), 0);
+        let result = summarize(
+            &lines(&[WINDOW, AUDIT, exception, EVIDENCE, SUMMARY, CLEANUP]),
+            0,
+        );
         assert!(!complete(&result));
     }
 
     #[test]
     fn truncated_json_evidence_blocks_completion() {
-        let text = lines(&[WINDOW, AUDIT, EVIDENCE, r#"{"step": "visual_audit_summary", "status": "pass"#, SUMMARY, CLEANUP]);
+        let text = lines(&[
+            WINDOW,
+            AUDIT,
+            EVIDENCE,
+            r#"{"step": "visual_audit_summary", "status": "pass"#,
+            SUMMARY,
+            CLEANUP,
+        ]);
         assert!(errors(&summarize(&text, 0)).contains(&"malformed_json_evidence".to_string()));
     }
 }

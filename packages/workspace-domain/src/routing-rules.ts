@@ -69,7 +69,9 @@ export function setAffinity(rules: RoutingRules, kind: string, engine: EngineKey
   return next;
 }
 export const leanOf = (rules: RoutingRules, kind: string): EngineKey | null => kind in rules.affinity ? rules.affinity[kind] : WORK_KINDS.find(k => k.id === kind)?.lean ?? null;
-export const modelLabel = (catalogue: Catalogue, engine: EngineKey, id: string) => catalogue[engine].models.find(m => m.id === id)?.label ?? id;
+/** An id the owner reads when nothing names it better. The engine alias `default` (no longer offered) names no concrete model. */
+export const plainModel = (id: string) => id.toLowerCase() === "default" ? "Default (engine alias)" : id;
+export const modelLabel = (catalogue: Catalogue, engine: EngineKey, id: string) => catalogue[engine].models.find(m => m.id === id)?.label ?? plainModel(id);
 /** Enabled ids the engine no longer lists. Nothing is inferred: the owner removes them or waits. */
 export const notOffered = (rules: RoutingRules, catalogue: Catalogue, engine: EngineKey) => rules.engines[engine].enabled.filter(id => !catalogue[engine].models.some(m => m.id === id));
 

@@ -1,7 +1,8 @@
-import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Match, on, onCleanup, Show, Switch } from "solid-js";
 import { accessFor, ENGINE_KEYS, engineLabel, ENGINES, mcpProblems, mcpTools, newMcpServer, parseCommandLine, pathMissing, ROLE_CATALOG, serverStatus, setCoordinatorMode, setGrant, setLevel, suggestLevels, toolsDiff, toolWarnings, type ConnectOutcome, type ConnectResult, type EngineKey, type GrantColumn, type McpEnv, type McpObservation, type McpServer, type Problem, type ToolLevel, type ToolRow } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
-import { A, Count, I, MenuItem, Pop } from "./kit";
+import { A, Count, I, Keyed, MenuItem, Pop } from "./kit";
+import { share } from "./stable";
 import { ActionBar } from "./layout";
 import { HELP } from "./orch-help";
 import { Bar, orchTo, Shell, slug, useMcp, useReadOnly } from "./orch-shared";
@@ -21,7 +22,8 @@ const patchServer = (list: McpServer[], name: string, fn: (s: McpServer) => McpS
 function Matrix(props: { server: McpServer; seen: McpObservation | null; set: (s: McpServer) => void; off?: string; check?: () => void; checking?: boolean; problems: Problem[]; prefix: string }) {
   const ws = useWs();
   const s = () => props.server;
-  const rows = createMemo(() => mcpTools(s(), props.seen));
+  // Every machine read hands over the observation again: equal rows stay the old objects, so the matrix is not drawn again.
+  const rows = createMemo<ToolRow[]>(prev => share(prev, mcpTools(s(), props.seen)), []);
   const warnings = createMemo(() => toolWarnings(s(), rows()));
   const [query, setQuery] = createSignal("");
   const [show, setShow] = createSignal<"all" | "granted" | "new" | "gone" | "warnings">("all");
@@ -81,25 +83,25 @@ function Matrix(props: { server: McpServer; seen: McpObservation | null; set: (s
     <div class="cap muted ws-note" role="status" aria-live="polite">{note()}</div>
     <div class="surface ws-mwrap"><div class="gt ws-matrix" role="grid" aria-label={`Tool access for ${s().name || "this server"}`} onKeyDown={key}>
       <div class="gr omxrow th" role="row"><span role="columnheader"><Chk label="Select every shown tool" checked={visible().length > 0 && visible().every(r => chosen().includes(r.name))} onChange={on => setChosen(on ? visible().map(r => r.name) : [])} /></span><span role="columnheader">Tool</span><span role="columnheader">Coordinator</span><span role="columnheader">Read-only</span><span role="columnheader">Writing</span><span role="columnheader">Consultant</span><span role="columnheader">Always load<span class="sub">Claude only</span></span><span role="columnheader"></span></div>
-      <For each={visible()} fallback={<div class="ws-empty">No tool matches.</div>}>{(r: ToolRow, i) => {
-        const lvl = () => r.level, read = () => lvl() === "read_only" || lvl() === "coordinator", coord = () => lvl() === "coordinator";
+      <Show when={visible().length > 0} fallback={<div class="ws-empty">No tool matches.</div>}><Keyed each={visible()} by={r => r.name}>{(r, i) => {
+        const lvl = () => r().level, read = () => lvl() === "read_only" || lvl() === "coordinator", coord = () => lvl() === "coordinator";
         const coordinatorOff = () => props.off ?? noCoordinator() ?? (s().coordinatorTools ? undefined : "Follows read-only. Choose coordinator tools to set this.");
         return <div class="gr omxrow" role="row">
-          <span role="gridcell"><Chk label={`Select ${r.name}`} checked={chosen().includes(r.name)} data={`${i()}:0`} onChange={on => setChosen(c => on ? [...c, r.name] : c.filter(x => x !== r.name))} /></span>
-          <span role="rowheader" class="trunc"><span class="mono w500 trunc">{r.name}</span><Show when={r.description}><span class="sub trunc">{r.description}</span></Show></span>
-          <span role="gridcell"><Chk label={`${r.name}, coordinator, ${coord() ? "granted" : "not granted"}`} checked={coord()} disabled={coordinatorOff()} data={`${i()}:1`} onChange={on => tick(r.name, "coordinator", on)} /></span>
-          <span role="gridcell"><Chk label={`${r.name}, read-only workers, ${read() ? "granted" : "not granted"}`} checked={read()} disabled={props.off} data={`${i()}:2`} onChange={on => tick(r.name, "read_only", on)} /></span>
-          <span role="gridcell"><Chk label={`${r.name}, writing workers, ${lvl() !== "off" ? "granted" : "not granted"}`} checked={lvl() !== "off"} disabled={props.off} data={`${i()}:3`} onChange={on => tick(r.name, "writing", on)} /></span>
+          <span role="gridcell"><Chk label={`Select ${r().name}`} checked={chosen().includes(r().name)} data={`${i()}:0`} onChange={on => setChosen(c => on ? [...c, r().name] : c.filter(x => x !== r().name))} /></span>
+          <span role="rowheader" class="trunc"><span class="mono w500 trunc">{r().name}</span><Show when={r().description}><span class="sub trunc">{r().description}</span></Show></span>
+          <span role="gridcell"><Chk label={`${r().name}, coordinator, ${coord() ? "granted" : "not granted"}`} checked={coord()} disabled={coordinatorOff()} data={`${i()}:1`} onChange={on => tick(r().name, "coordinator", on)} /></span>
+          <span role="gridcell"><Chk label={`${r().name}, read-only workers, ${read() ? "granted" : "not granted"}`} checked={read()} disabled={props.off} data={`${i()}:2`} onChange={on => tick(r().name, "read_only", on)} /></span>
+          <span role="gridcell"><Chk label={`${r().name}, writing workers, ${lvl() !== "off" ? "granted" : "not granted"}`} checked={lvl() !== "off"} disabled={props.off} data={`${i()}:3`} onChange={on => tick(r().name, "writing", on)} /></span>
           <span role="gridcell" class="cap faint">Never</span>
-          <span role="gridcell"><Chk label={`${r.name}, always load, ${r.always ? "on" : "off"}`} checked={r.always} disabled={props.off ?? (lvl() === "off" ? "Grant the tool first" : undefined)} data={`${i()}:4`} onChange={on => tick(r.name, "always", on)} /></span>
+          <span role="gridcell"><Chk label={`${r().name}, always load, ${r().always ? "on" : "off"}`} checked={r().always} disabled={props.off ?? (lvl() === "off" ? "Grant the tool first" : undefined)} data={`${i()}:4`} onChange={on => tick(r().name, "always", on)} /></span>
           <span class="ws-mstate">
-            <Show when={r.state === "new"}><span class="chip ws-static">New</span></Show>
-            <Show when={r.state === "not_offered"}><span class="chip ws-static st-warn">Not offered</span><button class="ws-att-x" aria-label={`Remove ${r.name}`} onClick={() => { if (!props.off) props.set(setLevel(s(), [r.name], "off")); }}><I n="x" s={12} /></button></Show>
-            <Show when={r.state === "granted" && !r.checked}><span class="cap faint">Not checked</span></Show>
-            <Show when={flagged(r.name)}><span class="st-warn" aria-label={warnings().find(w => w.tool === r.name)?.text}><I n="alert" s={12} /></span></Show>
+            <Show when={r().state === "new"}><span class="chip ws-static">New</span></Show>
+            <Show when={r().state === "not_offered"}><span class="chip ws-static st-warn">Not offered</span><button class="ws-att-x" aria-label={`Remove ${r().name}`} onClick={() => { if (!props.off) props.set(setLevel(s(), [r().name], "off")); }}><I n="x" s={12} /></button></Show>
+            <Show when={r().state === "granted" && !r().checked}><span class="cap faint">Not checked</span></Show>
+            <Show when={flagged(r().name)}><span class="st-warn" aria-label={warnings().find(w => w.tool === r().name)?.text}><I n="alert" s={12} /></span></Show>
           </span>
         </div>;
-      }}</For>
+      }}</Keyed></Show>
     </div></div>
     <Err problems={props.problems} path={`${props.prefix}.allowed_tools`} />
     <Show when={warnings().length > 0}><div class="ws-warns" role="status"><For each={warnings()}>{w => <div class="note-box"><I n="alert" s={14} /><span><Show when={w.tool}><span class="mono">{w.tool}: </span></Show>{w.text}</span></div>}</For></div></Show>
@@ -295,7 +297,9 @@ function EditServer(props: { name: string; tab?: string }) {
       setDiff(x.fresh || x.gone ? `${x.fresh} new, ${x.gone} no longer offered` : "Nothing changed on the server"); setFailed(null);
     } else { setFailed(r.message); setDiff(null); }
   });
-  createEffect(() => { props.name; setObserved(null); setDiff(null); setFailed(null); });
+  // A memo of the name: a refreshed server record with the same name keeps the owner's observed diff.
+  const serverName = createMemo(() => props.name);
+  createEffect(on(serverName, () => { setObserved(null); setDiff(null); setFailed(null); }, { defer: true }));
   const remove = () => ws.open({ kind: "confirm", title: `Remove ${props.name}?`, danger: true, action: "Remove", note: "It leaves the draft. Save to write that. Running tasks keep their tools.", go() { d.set(d.value().filter(x => x.name !== props.name)); ws.go(orchTo(m().id, "tools")); return true; } });
   const duplicate = () => ws.open({ kind: "prompt", title: `Duplicate ${props.name}`, label: "New server name", action: "Duplicate", hint: "Use this to give the same server different engines.", go(name) { const copy = { ...structuredClone(s()!), name, enabled: false, env: [] }; if (mcpProblems(copy, d.value(), true).some(p => p.path === "name")) return false; d.set([...d.value(), copy]); ws.go(orchTo(m().id, "tools", { server: name, tab: "tools" })); return true; } });
   return <Show when={s()} fallback={<Shell wide title="No such server" lead={`${props.name} is not on this machine.`}><div><A class="btn btn-line" to={orchTo(m().id, "tools")}>Back to Tools and MCP</A></div></Shell>}>
@@ -344,25 +348,25 @@ function ServerList() {
     <Show when={d.value().length > 0} fallback={<div class="surface ws-empty">No servers. Add one to give workers extra tools.</div>}>
       <div class="surface"><div class="gt">
         <div class="gr osrow th"><span>Server</span><span>Tools</span><span>Engines</span><span>Network</span><span>Checked</span><span>Enabled</span><span></span></div>
-        <For each={d.value()}>{s => {
-          const status = () => serverStatus(s), seen = () => m().config.mcpObserved[s.name];
-          return <div class="gr osrow ws-pointer" onClick={() => open(s.name)}>
-            <span class="trunc"><A class="ws-cellbtn w500 trunc" to={orchTo(m().id, "tools", { server: s.name, tab: "tools" })} onClick={e => e.stopPropagation()}>{s.name}</A><span class="sub mono trunc">{basename(s.command)}</span>
+        <Keyed each={d.value()} by={s => s.name}>{s => {
+          const status = () => serverStatus(s()), seen = () => m().config.mcpObserved[s().name];
+          return <div class="gr osrow ws-pointer" onClick={() => open(s().name)}>
+            <span class="trunc"><A class="ws-cellbtn w500 trunc" to={orchTo(m().id, "tools", { server: s().name, tab: "tools" })} onClick={e => e.stopPropagation()}>{s().name}</A><span class="sub mono trunc">{basename(s().command)}</span>
               <Show when={status().tone !== "st-ok" && status().tone !== "st-idle"}><span class={`sub trunc ${status().tone}`}>{status().text}</span></Show></span>
-            <span class="cap muted tnum ws-wrap">{counts(s)}</span>
-            <span class="cap muted trunc">{allServer(s)}</span>
-            <span class="cap muted">{s.containment === "none" ? "No sandbox" : s.network ? "On" : "Off"}</span>
+            <span class="cap muted tnum ws-wrap">{counts(s())}</span>
+            <span class="cap muted trunc">{allServer(s())}</span>
+            <span class="cap muted">{s().containment === "none" ? "No sandbox" : s().network ? "On" : "Off"}</span>
             <span class="cap muted tnum">{seen() ? clock(seen()!.at) : ""}</span>
-            <span onClick={e => e.stopPropagation()}><Sw label={`${s.name} enabled`} checked={s.enabled} disabled={off()} onChange={enabled => d.set(patchServer(d.value(), s.name, x => ({ ...x, enabled })))} /></span>
-            <span onClick={e => e.stopPropagation()}><button class="ib ws-ib" popovertarget={off() ? undefined : `m-srv-${slug(s.name)}`} aria-label={`More for ${s.name}`} aria-disabled={off() ? "true" : undefined} data-why={off()}><I n="more" s={14} /></button>
-              <Pop id={`m-srv-${slug(s.name)}`} class="pop-right" align="right" label={s.name}>
-                <MenuItem icon="pencil" label="Edit" onSelect={() => open(s.name)} />
-                <MenuItem icon="refresh" label="Check tools" needs="record_mcp_tools" onSelect={() => check(s)} />
-                <MenuItem icon="copy" label="Duplicate…" onSelect={() => duplicate(s)} />
-                <MenuItem icon="trash" label="Remove…" danger onSelect={() => remove(s)} />
+            <span onClick={e => e.stopPropagation()}><Sw label={`${s().name} enabled`} checked={s().enabled} disabled={off()} onChange={enabled => d.set(patchServer(d.value(), s().name, x => ({ ...x, enabled })))} /></span>
+            <span onClick={e => e.stopPropagation()}><button class="ib ws-ib" popovertarget={off() ? undefined : `m-srv-${slug(s().name)}`} aria-label={`More for ${s().name}`} aria-disabled={off() ? "true" : undefined} data-why={off()}><I n="more" s={14} /></button>
+              <Pop id={`m-srv-${slug(s().name)}`} class="pop-right" align="right" label={s().name}>
+                <MenuItem icon="pencil" label="Edit" onSelect={() => open(s().name)} />
+                <MenuItem icon="refresh" label="Check tools" needs="record_mcp_tools" onSelect={() => check(s())} />
+                <MenuItem icon="copy" label="Duplicate…" onSelect={() => duplicate(s())} />
+                <MenuItem icon="trash" label="Remove…" danger onSelect={() => remove(s())} />
               </Pop></span>
           </div>;
-        }}</For>
+        }}</Keyed>
       </div></div>
     </Show>
     <div class="note-box plain"><I n="lock" s={14} /><span>The senior consultant never receives external servers. A grant is per server and per access class; engines apply to the whole server.</span></div>

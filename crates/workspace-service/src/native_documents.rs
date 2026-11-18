@@ -71,6 +71,25 @@ fn validate(i: &Identity, name: &str, args: &Value) -> CoreResult<()> {
     }
     Ok(())
 }
+/// The attachment descriptors (kind, type, name, size, digest, `source_ref`;
+/// never bytes) of the newest source revision recorded for this document, as
+/// the former runtime reported them. Only captured user input has a source
+/// revision; an ordinary report or the pipeline has none, so its list is empty.
+fn source_attachments(store: &Store, task: &str, report: &str) -> CoreResult<Value> {
+    let raw: Option<String> = store.read(|db| {
+        Ok(db
+            .query_row(
+                "SELECT attachments FROM source_revisions WHERE task_id=? AND report_id=? ORDER BY revision DESC LIMIT 1",
+                (task, report),
+                |r| r.get(0),
+            )
+            .optional()?)
+    })?;
+    Ok(raw
+        .map(|s| serde_json::from_str(&s))
+        .transpose()?
+        .unwrap_or_else(|| json!([])))
+}
 fn page(id_key: &str, id: &str, p: ContentPage) -> Value {
     let mut v = json!({"markdown":p.markdown,"sha256":p.sha256,
         "total_characters":p.total_characters,"next_cursor":p.next_cursor});
@@ -134,7 +153,7 @@ fn discover(i: &Identity, args: &Value) -> CoreResult<Value> {
         let entry = json!({"name":t["name"],"title":t["title"],
             "description":description.chars().take(160).collect::<String>(),
             "description_truncated":description.chars().count()>160,
-            "read_batch_supported":false});
+            "read_batch_supported":crate::native_batch::READS.contains(&t["name"].as_str().unwrap_or(""))});
         let candidate_next = if index + 1 < tools.len() {
             json!(format!(
                 "ntd1.{}.{}.{}",
@@ -168,7 +187,23 @@ fn read(store: &Store, i: &Identity, name: &str, args: &Value) -> CoreResult<Val
     let cursor = args["cursor"].as_str();
     match name {
         "read_report" => {
-            let id = report_id(args)?;
+            // Without report_id and cursor the read starts at the newest beginning
+            // of this task's current pipeline.
+            let id = if args.get("report_id").is_none() && args.get("cursor").is_none() {
+                store
+                    .read(|db| {
+                        Ok(db
+                            .query_row(
+                                "SELECT id FROM reports WHERE task_id=? AND kind='pipeline' ORDER BY rowid DESC LIMIT 1",
+                                [&i.task],
+                                |r| r.get::<_, String>(0),
+                            )
+                            .optional()?)
+                    })?
+                    .ok_or(CoreError::Refused("pipeline_missing"))?
+            } else {
+                report_id(args)?
+            };
             let p = publisher.read_report(&i.task, &id, cursor, count)?;
             let mut value = page("report_id", &id, p);
             let metadata = store.read(|db| {
@@ -199,7 +234,7 @@ fn read(store: &Store, i: &Identity, name: &str, args: &Value) -> CoreResult<Val
             })?;
             value["created_at"] = json!(created);
             value["updated_at"] = json!(updated);
-            value["source_attachments"] = json!([]);
+            value["source_attachments"] = source_attachments(store, &i.task, &id)?;
             for (k, v) in metadata.as_object().unwrap() {
                 value[k] = v.clone();
             }
@@ -231,7 +266,8 @@ fn read(store: &Store, i: &Identity, name: &str, args: &Value) -> CoreResult<Val
                     (text(report,"report_id")?,&i.task),|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?))?;
                 report["created_at"] = json!(created);
                 report["updated_at"] = json!(updated);
-                report["source_attachments"] = json!([]);
+                let attachments = source_attachments(store, &i.task, text(report, "report_id")?)?;
+                report["source_attachments"] = attachments;
             }
             let drafts = publisher.own_drafts(
                 &i.task,

@@ -26,8 +26,15 @@ writing step whose files another unfinished task's worker still holds waits
 for that holding, with one `NATIVE_WRITE_CONFLICT_WAITING` record naming the
 holder task, the step and the overlapping paths
 (`crates/workspace-service/src/native_runtime.rs`), instead of stopping its task
-with `native_continuation_unavailable`. A stop that does name that code reads
-"no planned step could be started" to the owner, never the raw code.
+with `native_continuation_unavailable`. The same holds for a step queued behind
+another task's open access request. While it waits, the task's status reads
+"Waiting for the task “<title>” to release <files>" (projection warning
+`waiting_for_files`), and the step starts by itself once the holding ends; the
+owner is not asked. A stop that does name `native_continuation_unavailable`
+says, from the scheduler's own rules (`claim_obstacles_tx`), which step could
+not start and why: the files and the owner's `deny-write:` rule that denies
+them, an earlier step of the same task whose engine exit was not confirmed, the
+task holding the files, a retry pause, or that no reason was recorded.
 Terminal task and unexpected prompt-error cleanup also stop owned engines
 without requiring manual stop. Partial-launch writer locks remain held through
 shutdown and stay quarantined when exit cannot be confirmed; a leader exit alone

@@ -146,7 +146,7 @@ marker. On a coordinator or worker question they are ordinary answer text: an op
 cancels the task. Use `/cortex-finish` to close a task at any time. Model text alone cannot
 trigger this transition.
 
-The runtime's own stop question (asked when the runtime stops a task on a blocker) is different. It is asked in the task's language (the task's `ru`/`en` setting; for `auto`, the language of the task's own text) and names the reason in plain words (for example "a worker session could not start" / "не удалось запустить сессию воркера"); an unrecognised reason is named as an internal stop with its code in parentheses. The runtime recognises it by a structured marker on the question, not by its wording, so a
+The runtime's own stop question (asked when the runtime stops a task on a blocker) is different. It is asked in the task's language (the task's `ru`/`en` setting; for `auto`, the language of the task's own text) and names the reason in plain words (for example "a worker session could not start" / "не удалось запустить сессию воркера"); an unrecognised reason is named as an internal stop with its code in parentheses. Below that line it says, from recorded facts, what happened (the step by role and goal, what it needed and what prevented it: the reviewer's verdict, words and report; the failing verification commands with their exit codes; the denied files and the rule; the task holding the files), then what each of its two answers does and which one is recommended when one clearly is (`crates/cortex-core/src/lifecycle/stop_notice.rs`). The answers keep their labels. The question's decision record also carries each answer's consequence (`detail`, `action`, `recommended`), its one-line `headline` and `targets` the desktop opens: the blocking task, the review report ("Open review findings") and the denied path. A question the runtime replaces with a later one names it (`replacedBy`), and the Conversation reads it as "Replaced by the question below: <reason>". A driver error that arrives while the task already waits on such a question never replaces it. The runtime recognises it by a structured marker on the question, not by its wording, so a
 coordinator question with the same text never force-finishes the task. Its Finish option (by number,
 stored or rendered English or Russian text, or label) ends the task `CANCELLED` with
 `USER_FORCE_FINISHED`. Continue resumes the runtime flow and never releases the stop. Only an answer
@@ -177,18 +177,64 @@ plain-language sentence in English or Russian; the raw code still follows it in
 brackets (for example `... [result_publication_mismatch]`) so it stays available for
 diagnosis next to the readable reason, never instead of it.
 
-User steering is durably queued by message identity and requirement revision. It
-does not cancel the coordinator turn, change an executing plan, revoke worker
-channels, or classify a worker interruption as an engine failure. The controller
-finishes the current workers, independent review and verification before applying
-queued steering at a planning or reconciliation boundary. Application and the
-transition back to planning commit together. A queued `deny_write` restriction
-takes effect at that boundary; workers already running under their original
-grants may finish. The coordinator receives the retained steering and completed
-worker evidence in its next planning turn. The execution scheduler leaves
-queued `user_message` events unclaimed for that coordinator turn rather than
-consuming their text as a worker-card update. Repeated delivery of the same
-message identity does not create another requirement revision.
+An owner message to a working task (planning, a plan not yet started, execution,
+review, verification or reconciliation, with no question of the coordinator open
+for the owner) is recorded once by its request id (`USER_STEERING`,
+`"delivery":"boundary"`) and interrupts nothing: running workers, their waits and
+channels, review, verification and the coordinator's current turn continue, and
+the task keeps its state. A worker's own open question stays open and answerable.
+The runtime applies the message at the next safe boundary of the coordinator's own
+work (`STEERING_APPLIED`, committed together with the return to planning) and
+hands it to the next coordinator turn (`STEERING_HANDED`):
+
+- sent during a planning turn: when that turn ends; a plan it submitted that has
+  not started is discarded and the coordinator plans again with the message;
+- sent while workers, review or verification run: when the revision reaches
+  reconciliation after its verification passed, or earlier when the runtime
+  returns to the coordinator anyway (failed verification, a failed or stopped
+  worker, a replan). The native host runs one coordinator turn at a time and
+  never beside running workers, so a message does not start a coordinator turn
+  while they run;
+- several messages: in the order sent, in one turn.
+
+That turn runs on the task's coordinator route; its prompt lists the messages
+with their attachment names, and the engine prompt carries the attached files.
+The message is delivered (`STEERING_DELIVERED`) once the engine's reply to that
+turn's prompt is observed (`NATIVE_TURN_SETTLED` of the coordinator channel). If
+the service dies, or the turn ends, before that reply, the next coordinator turn is
+handed the message again, marked `(repeated)` in its prompt. The guarantee is: every
+message reaches at least one coordinator prompt the engine answered, and it is
+recorded delivered exactly once; it can reach the engine twice only when the engine
+received a prompt whose reply the service never saw. The coordinator changes
+running work only through its own channel-verified tools (a new plan or replan
+request), never because the runtime cancelled it. A result never completes past a
+message that is pending or not yet delivered (`completion_pending_input`). Stopping
+work stays an explicit owner action (Stop, worker Stop, command stop).
+
+Messages the owner queues in the desktop (Queue) are sent by the Workspace service,
+window open or not: when the task reaches such a boundary (planning, a plan not yet
+started, reconciliation or a direct answer, nothing open for the owner), the service
+takes the task's queued messages in queue order (each becomes `sending`), records
+each as a boundary message under its own id and settles it in the queue. Until it
+is taken a queued message can be edited, moved or removed; once `sending` it
+refuses `message_taken`. A take interrupted by a restart is finished by the next
+one (the message id makes it idempotent). Send now on a queued row records it at
+once for the earliest boundary.
+
+A message to a task whose coordinator waits for the owner (its question is open),
+is held in recovery, is paused (ACP resumes it) or has finished (it reopens) keeps
+the restart delivery (`"delivery":"restart"`): it is applied at admission, the
+task's unfinished work is fenced and the relaunched coordinator is handed the
+message in the same way.
+
+An explicit `deny-write: <path>` in a message is recorded with it and takes
+effect at once for writes not yet made, whatever the delivery, and
+`allow-write: <path>` lifts it: see the deny-write rules below.
+
+The conversation shows each owner message's state from these facts: taken from
+the queue, received and waiting for the coordinator's next step, or delivered to
+the coordinator with its time. The facts are read with the task's product facts,
+which its runtime events already trigger; nothing polls for them.
 
 A message that arrives while workers, review or verification run is therefore
 applied only after the runtime verification passed: it returns a reviewed and
@@ -222,11 +268,10 @@ choose wrongly. The no-paid controller regressions are in the Rust lifecycle sui
 When the queued message carries an image or uploaded-file attachment (its
 bytes/base64 never forwarded to the already-running turn), the retained
 steering carries the same `source_ref`/`name`/`uri`/`kind`/`availability`
-descriptor the runtime already records for durable capture, plus a derived
-short English `attachment_hint` such as `Attachments: image r_xxx:1
-(screenshot.png) - open with read_source`, so the coordinator is never left
-with only the plain `[image: ...]` text marker and has to guess an attachment
-exists by calling `list_sources`. A text-only message leaves both keys absent.
+descriptor the runtime already records for durable capture. The coordinator turn
+that receives the message names the attachments next to its text, and its engine
+prompt carries the stored files as content blocks. A text-only message has no
+`attachments` key.
 If capture commits before steering is recorded, an identical retry rebuilds the
 descriptors from that task's exact durable source revision, including the original
 availability/reason, before recording the missing steering event. Already-recorded
@@ -301,9 +346,28 @@ a retained session binding.
 Workers may also request additional exact project paths needed for their
 assignment. Safe requests are granted only after runtime validation against role,
 owner deny-write policy, path safety and current workspace writer reservations. An owner
-deny-write rule is created only by an explicit `deny-write: <path>` instruction; wildcard
-or mask characters are rejected, and natural-language phrasing such as "do not modify ..."
-creates no denial;
+deny-write rule is created only by an explicit `deny-write: <path>` instruction in an owner
+message (`deny-write`, any ASCII case, optional spaces around `:`; the path bare or in
+single, double or backtick quotes; trailing `.`, `,` and `;` dropped); wildcard or mask
+characters create no rule, and natural-language phrasing such as "do not modify ..."
+creates no denial. The path is stored in normalized form (`./a//b/` is `a/b`); a path
+outside the project or a private path (`.git`, `.cortex`, ...) refuses the whole message
+with `gateway_path_denied` and nothing is recorded. The rule is recorded with the message
+and applies at once to every write not yet made: file tools refuse it (`write_denied`),
+a writing command already running is stopped (`authority_changed`) and a new one starts
+with an existing denied path read-only, a plan scope touching it is refused (`write_denied`), and a
+scope or access request for it is refused (`scope_conflicts_with_user_policy`,
+`deny_write_policy`). The coordinator's capsule lists the rules
+(`owner_write_denials`, the set in force). The owner lifts a rule with an explicit
+`allow-write: <path>` in a message (same forms, normalization and refusals as
+`deny-write:`; one message that both denies and allows a path refuses with
+`write_rule_conflict`) or with Remove on the task's Write denials list in Work details
+(`allow_write` control; a path not denied refuses with `write_denial_unknown`). A lift
+removes only the owner's own denial of exactly that normalized path (a file inside a
+denied folder is not that denial) and grants nothing else; natural language lifts
+nothing. A lifted path is writable again for later writes, plans and requests; a
+writing command keeps running when a denial is lifted. Rules and lifts are durable
+events, applied in their recorded order, and another task does not inherit them;
 a multi-path request is granted all-or-none. A contested request gets bounded
 runtime retries, then a grant or denial through the same healthy-session
 continuation, without a user access question. Policy, path and role refusals
@@ -315,14 +379,22 @@ ordinary writers already have whole-project write authority in the current
 launch boundary, while the runtime's declared reservations coordinate writers.
 See [orchestration](../orchestration/index.md#worker-questions-and-additional-access).
 
-The coordinator uses the language selected for the submitted message, including
-when reports and context are English. Workers receive an English communication
-rule in their shared generated protocol and in every ordinary, recovery and
-fallback turn. User-facing structured question text and all options are the
-exception: the advertised question contract requires the current turn's
-`user_question_language` (`en` or `ru`). The same strings reach a form or
-text fallback verbatim. Only genuine user decisions belong in that question
-tool; missing project access goes to runtime `access_request`, and unavailable
+Language follows the reader. Everything another worker or the coordinator reads
+is English: worker reports (headings included), summaries, briefs, worker
+messages and the coordinator's instructions to workers. Everything the owner reads
+directly is in the owner's language: the coordinator's messages and questions to
+the owner, the final result text and its not-verified list, a worker's question to
+the owner (question text and option labels) and the runtime's own stop questions.
+The owner's language is the task's `en`/`ru` setting, otherwise the language of the
+goal (`domain::task_language_tx`); it is recorded in `task_language` at task start
+and refreshed at every turn. Every turn's route instructions state it per role
+(`Owner-selected response language: <lang>.` with the coordinator's owner-facing
+scope, or with the worker's `user_question_language: <lang>.` and its English
+rule), and every worker brief carries `user_question_language`. The coordinator
+composes the owner-facing result from English reports in the owner's language. The
+same question strings reach a form or text fallback verbatim. Only genuine user
+decisions belong in that question tool; missing project access goes to runtime
+`access_request` for a writing worker, a read-only role reports it, and unavailable
 evidence is reported as a limitation. Exact quotes and explicitly requested
 project-artifact languages are preserved. This is model instruction, not automatic translation or a claim
 that arbitrary model output can be deterministically language-validated.
@@ -337,9 +409,9 @@ certifying unfinished work. The runtime stop question keeps its own Finish optio
 Two plain "stop" answers once failed to stop a task because only the coordinator
 interpreted them (2026-10-22).
 
-A message that arrives while workers, review or verification run is queued for the
-next safe point and acknowledged at once ("Got it. I will take this into account after
-the current step."); it used to wait 13-35 minutes with no sign it was received.
+A message that arrives while workers, review or verification run is recorded at once
+and waits for the next safe point; the desktop shows it as "Received, waiting for the
+coordinator's next step", then "Delivered to the coordinator" with the time. It used to wait 13-35 minutes with no sign it was received.
 
 A long runtime verification command updates its tool card once a minute with its
 position and elapsed time (`Verify project · 2/4 · 12 min`); a full Storybook run was
