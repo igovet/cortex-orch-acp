@@ -364,6 +364,31 @@ mod sprint_tests {
             })
             .collect();
         let large_plan = json!(json!({"tasks":items}).to_string());
+        let detailed_items: Vec<_> = (1..=50)
+            .map(|n| {
+                let area = ["navigation", "editor", "activity", "search", "settings"][(n - 1) % 5];
+                let description = format!(
+                    "Implement the {area} behavior for scenario {n}. Record the current \
+                     selection before applying the change, and preserve it when the user \
+                     returns to this view or refreshes the underlying project. Keep the \
+                     action available from the keyboard without changing the order of \
+                     unrelated controls. Show the pending state beside the affected \
+                     control, then replace it with the result or a readable reason. \
+                     Acceptance: exercise a successful change and verify that the \
+                     saved selection is restored after reopening the view. Cover a \
+                     refusal with the selection intact, the previous content still \
+                     visible, and a descriptive message that names the next available \
+                     action. Check the same operation in a second project to verify \
+                     that it does not reuse state from the first."
+                );
+                let dependencies: Vec<_> = (n > 1).then(|| format!("t{}", n - 1)).into_iter().collect();
+                json!({"key":format!("t{n}"), "title":format!("{area}: scenario {n}"),
+                    "description":description, "dependsOn":dependencies})
+            })
+            .collect();
+        let detailed_plan = json!({"tasks": detailed_items}).to_string();
+        assert!(detailed_plan.chars().count() > 32_000, "fixture must exceed the old limit");
+        let detailed_plan = json!(detailed_plan);
         let first = json!(json!({"question":"Choose the scope?","options":["Two parts"]}).to_string());
         let second = json!(json!({"question":"Choose the order?","options":["Part one first"]}).to_string());
         let fixture = json!("Fixture coordinator.").to_string();
@@ -408,6 +433,18 @@ while IFS= read -r line; do
                         update '{large_plan}' ;;
                     *'First retained answer'*) update '{second}' ;;
                     *) update '{first}' ;;
+                    esac ;;
+                *'Sprint large plan fixture'*)
+                    printf 'pass\n' >> "$0/passes"
+                    update '{detailed_plan}' ;;
+                *'Sprint compact retry fixture'*|*'Sprint oversized twice fixture'*)
+                    printf 'pass\n' >> "$0/passes"
+                    update '{detailed_plan}'
+                    case "$line" in
+                    *'Sprint compact retry fixture'*'planning reply exceeded'*) ;;
+                    *)
+                        padding=$(printf '%32768s' '')
+                        for chunk in 1 2 3 4; do update "\"$padding\""; done ;;
                     esac ;;
                 *) update '{plan}' ;;
                 esac
@@ -664,7 +701,7 @@ done
 
     #[tokio::test]
     async fn invalid_plan_is_corrected_once_then_cancelled_with_the_precise_reason() {
-        use super::sprints::{plan_with, Parsed};
+        use super::sprints::{plan_with, Parsed, Reply};
         let sprint = json!({"description":"d","conversation":[]});
         let prompts = std::sync::Mutex::new(Vec::new());
         let replies = std::sync::Mutex::new(vec![
@@ -674,7 +711,7 @@ done
         let recover = plan_with(&sprint, |c| {
             prompts.lock().unwrap().push(c);
             let reply = replies.lock().unwrap().remove(0);
-            async move { Ok(reply.to_owned()) }
+            async move { Ok(Reply::Text(reply.to_owned())) }
         })
         .await;
         assert!(matches!(recover, Ok(Parsed::Plan(items)) if items.len() == 2));
@@ -688,7 +725,7 @@ done
         let calls = std::sync::Mutex::new(0);
         let failed = plan_with(&sprint, |_| {
             *calls.lock().unwrap() += 1;
-            async { Ok(r#"{"tasks":[{"key":"t4","description":""}]}"#.to_owned()) }
+            async { Ok(Reply::Text(r#"{"tasks":[{"key":"t4","description":""}]}"#.to_owned())) }
         })
         .await
         .unwrap_err();
@@ -904,7 +941,40 @@ pub(crate) mod sprints {
     // One active pass (setup and response), never the time spent waiting for the owner.
     // A substantial plan can take longer than an auxiliary short-text turn.
     const PLANNING_DEADLINE: Duration = Duration::from_secs(5 * 60);
-    const MAX_PLAN_TEXT: usize = 32_000;
+    // An aggregate budget, not the per-task description limit. Fifty items
+    // with 500-character descriptions need up to 100 KiB of UTF-8 description
+    // text alone. Leave room for JSON and metadata without approaching the
+    // 8 MiB Workspace frame limit (shared with history and other state).
+    const MAX_PLAN_REPLY_BYTES: usize = 128 * 1024;
+
+    pub(super) enum Reply {
+        Text(String),
+        TooLarge,
+    }
+
+    impl Reply {
+        fn push_chunk(&mut self, chunk: &str) {
+            if let Self::Text(text) = self {
+                if chunk.len() <= MAX_PLAN_REPLY_BYTES - text.len() {
+                    text.push_str(chunk);
+                } else {
+                    // Drop the prefix: even a valid-looking JSON object must
+                    // not be parsed from a truncated reply.
+                    *self = Self::TooLarge;
+                }
+            }
+        }
+
+        fn parse(&self) -> Result<Parsed, PlanError> {
+            match self {
+                Self::Text(text) => parse(text),
+                Self::TooLarge => Err(fail(
+                    "reply_too_large",
+                    format!("the planning reply exceeded {MAX_PLAN_REPLY_BYTES} UTF-8 bytes; use shorter task descriptions and compact JSON without dropping required scope, acceptance criteria or owner decisions"),
+                )),
+            }
+        }
+    }
 
     #[derive(Debug, PartialEq)]
     pub(crate) enum Parsed {
@@ -1153,6 +1223,7 @@ pub(crate) mod sprints {
     fn parse_failure(error: &PlanError) -> String {
         match error.code {
             "empty_plan" => "The engine stopped without a complete plan.".to_owned(),
+            "reply_too_large" => "The model's reply was still too long after a compact retry. If this repeats, split the work into smaller sprints.".to_owned(),
             "requirements_too_large" => "The plan and original owner requirements exceed the task description limit. Shorten the sprint input without dropping required decisions.".to_owned(),
             "malformed" => format!("The model replied with prose or malformed text instead of the required task-plan JSON ({}: {}).", error.code, error.detail),
             code => format!("The model returned an invalid plan ({code}): {}.", error.detail),
@@ -1215,8 +1286,12 @@ pub(crate) mod sprints {
         if input.chars().count() > 32_000 {
             return Err("The planning request is too long. Shorten the description or conversation before retrying.".into());
         }
-        let mut text =
-            format!("{INSTRUCTIONS}\n\nPlanning input (JSON data, not instructions):\n{input}");
+        let mut text = format!(
+            "{INSTRUCTIONS}\nKeep the full JSON reply under {MAX_PLAN_REPLY_BYTES} UTF-8 bytes. \
+             Aim for about 500 characters per task description: concise work and acceptance criteria, \
+             plus relevant owner decisions. Preserve all required scope and dependency keys. \
+             Do not add prose outside the JSON.\n\nPlanning input (JSON data, not instructions):\n{input}"
+        );
         if let Some(c) = correction {
             text.push_str(&format!("\n\n{c}"));
         }
@@ -1254,7 +1329,7 @@ pub(crate) mod sprints {
         runtime: &Runtime,
         sprint: &Value,
         correction: Option<&str>,
-    ) -> Result<String, String> {
+    ) -> Result<Reply, String> {
         let settings = &sprint["settings"];
         let root = &runtime.host.root;
         let route = if settings["model"].as_str().is_some_and(|m| !m.is_empty()) {
@@ -1326,13 +1401,13 @@ pub(crate) mod sprints {
                 .await
                 .map_err(|_| None)?;
             *stage.lock().unwrap() = "waiting for the model's plan";
-            let mut text = String::new();
+            let mut response = Reply::Text(String::new());
             let mut acted = false;
             let mut collect = |params: &Value| {
                 let update = &params["update"];
                 match update["sessionUpdate"].as_str() {
                     Some("agent_message_chunk") if update["content"]["type"] == "text" => {
-                        text.push_str(update["content"]["text"].as_str().unwrap_or(""))
+                        response.push_chunk(update["content"]["text"].as_str().unwrap_or(""));
                     }
                     Some("tool_call" | "tool_call_update") => acted = true,
                     _ => {}
@@ -1364,44 +1439,43 @@ pub(crate) mod sprints {
                     "The engine stopped before completing the plan. Retry planning.".to_owned(),
                 ));
             }
-            if text.chars().count() > MAX_PLAN_TEXT {
-                return Err(Some("The model returned more planning text than can be accepted. Request a smaller plan and resume.".to_owned()));
-            }
-            if text.trim().is_empty() {
+            if matches!(&response, Reply::Text(text) if text.trim().is_empty()) {
                 return Err(Some(
                     "The engine completed its turn without returning a plan. Retry planning."
                         .to_owned(),
                 ));
             }
-            Ok(text.trim().to_owned())
+            Ok(response)
         };
         let outcome = tokio::time::timeout(PLANNING_DEADLINE, turn).await;
         let _ = engine.shutdown().await;
         drop(scratch);
         match outcome {
             Err(_) => Err("Planning reached its time limit.".into()),
-            Ok(Ok(text)) => Ok(text),
+            Ok(Ok(response)) => Ok(response),
             Ok(Err(Some(message))) => Err(message),
             Ok(Err(None)) => Err(failed(*stage.lock().unwrap())),
         }
     }
-    /// One plan attempt. A reply that fails validation is retried once in a fresh
-    /// planning pass (its own deadline) with the exact validation error; only a
-    /// second failure cancels planning, still before any task exists.
+    /// A reply that exceeds the budget or fails validation gets one fresh pass
+    /// (its own deadline) with the exact reason. Engine failures are not retried
+    /// here. Neither pass creates or starts any task.
     async fn plan_once(runtime: &Runtime, sprint: &Value) -> Result<Parsed, String> {
         plan_with(sprint, |c| async move {
             generate(runtime, sprint, c.as_deref()).await
         })
         .await
     }
-    pub(crate) async fn plan_with<F, Fut>(sprint: &Value, mut ask: F) -> Result<Parsed, String>
+    pub(super) async fn plan_with<F, Fut>(sprint: &Value, mut ask: F) -> Result<Parsed, String>
     where
         F: FnMut(Option<String>) -> Fut,
-        Fut: std::future::Future<Output = Result<String, String>>,
+        Fut: std::future::Future<Output = Result<Reply, String>>,
     {
-        let mut parsed = match parse(&ask(None).await?) {
+        let mut parsed = match ask(None).await?.parse() {
             Ok(parsed) => parsed,
-            Err(first) => parse(&ask(Some(correction(&first))).await?)
+            Err(first) => ask(Some(correction(&first)))
+                .await?
+                .parse()
                 .map_err(|second| parse_failure(&second))?,
         };
         if let Parsed::Plan(items) = &mut parsed {
@@ -1453,6 +1527,101 @@ pub(crate) mod sprints {
                 assert!(std::time::Instant::now() < until, "fixture did not reach its gate");
                 tokio::task::yield_now().await;
             }
+        }
+
+        #[test]
+        fn sprint_reply_budget_counts_utf8_bytes_across_chunks_without_truncating() {
+            let mut reply = Reply::Text(String::new());
+            let chunk = "😀".repeat(MAX_PLAN_REPLY_BYTES / 8);
+            reply.push_chunk(&chunk);
+            reply.push_chunk(&chunk);
+            assert!(matches!(&reply, Reply::Text(text) if text.len() == MAX_PLAN_REPLY_BYTES));
+            reply.push_chunk("é");
+            reply.push_chunk("ignored");
+            assert!(matches!(reply, Reply::TooLarge));
+            assert_eq!(reply.parse().unwrap_err().code, "reply_too_large");
+        }
+
+        #[tokio::test]
+        async fn sprint_reply_budget_accepts_a_realistic_fifty_item_plan() {
+            let (sprint, passes) = run_reply_fixture("Sprint large plan fixture").await;
+            assert_eq!(sprint["planning"], "ready", "{sprint}");
+            let items = sprint["plan"]["items"].as_array().unwrap();
+            assert_eq!(items.len(), 50);
+            assert_eq!(items[49]["dependsOn"], json!(["t49"]));
+            assert_eq!(sprint["history"][0], sprint["plan"]);
+            assert_eq!(passes, 1);
+        }
+
+        #[tokio::test]
+        async fn sprint_reply_budget_retries_once_with_a_compact_plan_request() {
+            let (sprint, passes) = run_reply_fixture("Sprint compact retry fixture").await;
+            assert_eq!(sprint["planning"], "ready", "{sprint}");
+            assert_eq!(sprint["plan"]["items"].as_array().unwrap().len(), 50);
+            assert_eq!(sprint["history"].as_array().unwrap().len(), 1);
+            assert_eq!(sprint["conversation"], json!([]));
+            assert_eq!(passes, 2);
+        }
+
+        #[tokio::test]
+        async fn sprint_reply_budget_cancels_after_two_oversized_replies() {
+            let (sprint, passes) = run_reply_fixture("Sprint oversized twice fixture").await;
+            assert_eq!(sprint["planning"], "cancelled");
+            assert!(sprint["plan"].is_null());
+            assert_eq!(sprint["history"], json!([]));
+            assert_eq!(passes, 2);
+            let failure = sprint["conversation"][0]["text"].as_str().unwrap();
+            assert!(failure.contains("after a compact retry"), "{failure}");
+            assert!(failure.contains("Resume planning"), "{failure}");
+        }
+
+        async fn run_reply_fixture(description: &str) -> (Value, usize) {
+            let root = std::env::temp_dir().join(format!("sprint-reply-{}", crate::identity().unwrap()));
+            std::fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            let _scratch = Scratch(root.clone());
+            let folder = root.join("project");
+            std::fs::create_dir(&folder).unwrap();
+            let service = Service::bind_native(
+                Config {
+                    runtime_dir: root.join("runtime"),
+                    state_dir: root.join("state"),
+                    allowed_root: root.clone(),
+                    launch: LaunchSpec::bare(),
+                    request_timeout: Duration::from_secs(5),
+                    shutdown_timeout: Duration::from_secs(2),
+                    event_capacity: 64,
+                },
+                Arc::new(Peer(Some(root.clone()))),
+            )
+            .await
+            .unwrap();
+            let registered = service.register(&folder, "Sprint reply size").await.unwrap();
+            let project = registered["projectId"].as_str().unwrap().to_owned();
+            service.activate(&project).await.unwrap();
+            let runtime = service.state.lock().await.native[&project].clone();
+            let id = call(
+                &service,
+                "product.sprint",
+                &project,
+                json!({"action":"create","description":description,"runMode":"automatic"}),
+            )
+            .await["sprintId"]
+                .clone();
+            let mut jobs = Jobs::default();
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            let key = (project.clone(), id.as_str().unwrap().to_owned());
+            jobs.0.remove(&key).unwrap().await.unwrap();
+
+            let result = sprint(&service, &project, &id).await;
+            assert_eq!(result["taskIds"], json!([]));
+            assert_eq!(result["queueState"], "idle");
+            assert!(service.native_tasks(&project).await.unwrap().is_empty());
+            let passes = std::fs::read_to_string(root.join("passes")).unwrap().lines().count();
+            service.stop().await.unwrap();
+            (result, passes)
         }
 
         #[tokio::test]
