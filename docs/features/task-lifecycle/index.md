@@ -213,6 +213,11 @@ decision. The runtime never inserts a passing review or verification event for
 force-finish. Unlike ordinary coordinator planning, it does not require another
 worker or a model acceptance decision; unlike `COMPLETED`, it makes no quality
 claim about the deliverable.
+The desktop treats this decision as the owner's close as is: the machine
+presents a force-finished task with no saved disposition as closed as is and not
+verified, so it leaves the Inbox, archives without a question (by Archive or
+automatically) and settles its sprint dependency like any closed task. A saved
+disposition always wins; nothing is certified.
 
 Only an immutable, attempt-owned report and its structured result close a node.
 A reviewer, required whenever the project changed, submits APPROVE, REQUEST_CHANGES, BLOCK or INCOMPLETE. A reviewer that could not cover the whole change submits INCOMPLETE; a fresh reviewer then reviews what it left uncovered, at most twice, before the owner is asked ([review outcomes](../orchestration/index.md)). When the runtime stops a task with its own question, the driver ends and the question is the one stop shown; its answer relaunches the coordinator. Changes produce

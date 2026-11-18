@@ -1417,6 +1417,25 @@ pub(crate) mod sprints {
         }
     }
     const UNSETTLED: &str = "A result has missing or unsuccessful checks.";
+    /// The disposition a sprint member is settled by: its saved one, or, for a task the
+    /// owner finished through the runtime alone (Finish on its stop question) with none
+    /// saved, the owner's close as is, read from the same projection rule the board uses.
+    pub(super) fn member_disposition(record: &Value, task: Option<&Value>) -> (String, Option<String>) {
+        let status = record["status"].as_str().unwrap_or("").to_owned();
+        let closed = record["closedAs"].as_str().map(str::to_owned);
+        let resolved = task.is_some_and(|t| {
+            t["phase"] == "stopped"
+                && t["runtimeState"] == "CANCELLED"
+                && t["warnings"].as_array().is_some_and(|w| {
+                    w.iter().any(|w| w == "owner_resolved_without_certification")
+                        && !w.iter().any(|w| w == "contradictory_evidence")
+                })
+        });
+        if status.is_empty() && record["archive"].is_null() && resolved {
+            return ("done".into(), Some(closed.unwrap_or_else(|| "as_is".into())));
+        }
+        (status, closed)
+    }
     #[cfg(test)]
     mod settle_tests {
         use super::*;
@@ -1430,6 +1449,26 @@ pub(crate) mod sprints {
                 Some("This sprint is in manual mode.")
             );
             assert_eq!(with_settle_failure(None, Some(why)), None);
+        }
+        #[test]
+        fn a_member_finished_through_the_runtime_settles_as_closed_as_is() {
+            let resolved = json!({"phase":"stopped","runtimeState":"CANCELLED","warnings":["owner_resolved_without_certification"]});
+            let none = (String::new(), None);
+            let as_is = ("done".to_owned(), Some("as_is".to_owned()));
+            assert_eq!(member_disposition(&json!({}), Some(&resolved)), as_is);
+            // A run the runtime cancelled by itself, or contradictory evidence, settles nothing.
+            let plain = json!({"phase":"stopped","runtimeState":"CANCELLED","warnings":[]});
+            assert_eq!(member_disposition(&json!({}), Some(&plain)), none);
+            let mut odd = resolved.clone();
+            odd["warnings"] = json!(["owner_resolved_without_certification", "contradictory_evidence"]);
+            assert_eq!(member_disposition(&json!({}), Some(&odd)), none);
+            assert_eq!(member_disposition(&json!({}), None), none);
+            // A saved disposition always wins.
+            let saved = json!({"status":"done","closedAs":"cancel"});
+            assert_eq!(
+                member_disposition(&saved, Some(&resolved)),
+                ("done".to_owned(), Some("cancel".to_owned()))
+            );
         }
     }
     /// The outcome of one automatic settle for one task.
@@ -1999,15 +2038,15 @@ pub(crate) mod sprints {
                 .flatten()
                 .filter_map(|t| t.as_str().map(str::to_owned))
                 .collect();
-            let mut status: HashMap<String, String> = members
+            let disposition: HashMap<String, (String, Option<String>)> = members
                 .iter()
-                .map(|t| {
-                    (
-                        t.clone(),
-                        records[t]["status"].as_str().unwrap_or("").to_owned(),
-                    )
-                })
+                .map(|t| (t.clone(), member_disposition(&records[t], tasks.get(t))))
                 .collect();
+            let mut status: HashMap<String, String> = disposition
+                .iter()
+                .map(|(t, (s, _))| (t.clone(), s.clone()))
+                .collect();
+            let closed_as = |t: &str| disposition.get(t).and_then(|d| d.1.clone());
             // Only a real acceptance settles a newly finished result, and only while the
             // sprint is in Automatic (a Manual queue pauses below).
             let sprint_automatic = crate::machine::task_review::automatic_mode(sprint);
@@ -2042,10 +2081,8 @@ pub(crate) mod sprints {
                 if matches!(
                     phase.as_str(),
                     "not_started" | "result" | "stopped" | "failed"
-                ) && matches!(
-                    records[task]["closedAs"].as_str(),
-                    Some("external" | "as_is")
-                ) && status.get(task).is_some_and(|s| s == "done")
+                ) && matches!(closed_as(task).as_deref(), Some("external" | "as_is"))
+                    && status.get(task).is_some_and(|s| s == "done")
                 {
                     phase = "result".into();
                 }
@@ -2062,7 +2099,7 @@ pub(crate) mod sprints {
                 Some("This sprint is in manual mode.")
             } else if phases.iter().any(Option::is_none) {
                 Some("A sprint task is missing; review the queue.")
-            } else if members.iter().any(|t| records[t]["closedAs"] == "cancel") {
+            } else if members.iter().any(|t| closed_as(t).as_deref() == Some("cancel")) {
                 Some("A task was cancelled. Review the task before continuing the queue.")
             } else if phases.iter().flatten().any(|p| {
                 matches!(

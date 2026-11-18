@@ -268,3 +268,16 @@ A body no saved record references yet, such as a file attached to a draft that w
 not sent, is kept for 24 hours after its upload or last renewal. A task's creation
 and message files are also kept by Core in its own private store, so removing a
 product-state body never touches what a task already received.
+
+Files attached to an answer (a coordinator question, every member of a batch and a
+sprint-planning question) are kept exactly like message files. Once an answer is
+recorded, the product state references its files under `answerFiles.<task>`, taken
+from Core's own record of the answer's stored files (each with its exact digest), so
+the settled question card's chips open for as long as the task exists, archived
+included. Deleting or purging the task, alone or with its sprint, removes those
+references with its messages, and the bodies go once nothing else references them.
+An answer recorded before this was kept is referenced on the next product read
+(or cleanup) when its body is still saved here at its recorded size; a body already
+removed stays unavailable and its chip says so. Nothing is attributed by guess: the
+reference only keeps a body, and which question shows a file still follows
+`answerAttachments`.

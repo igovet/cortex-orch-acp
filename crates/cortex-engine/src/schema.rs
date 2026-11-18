@@ -39,9 +39,14 @@ pub fn catalogue(role: &str, profile: Option<&str>, stage: Option<&str>) -> Resu
     Ok(tools)
 }
 pub fn validate(schema: &Value, v: &Value) -> Result<()> {
-    fn valid(s: &Value, v: &Value, depth: usize) -> bool {
+    fn valid(
+        s: &Value,
+        v: &Value,
+        depth: usize,
+        path: &mut String,
+    ) -> std::result::Result<(), &'static str> {
         if depth > 64 {
-            return false;
+            return Err("depth_limit");
         }
         if let Some(t) = s.get("type") {
             let matches_type = |t: &Value| match t.as_str() {
@@ -58,32 +63,35 @@ pub fn validate(schema: &Value, v: &Value) -> Result<()> {
                 .as_array()
                 .map_or_else(|| matches_type(t), |types| types.iter().any(matches_type));
             if !ok {
-                return false;
+                return Err("wrong_type");
             }
         }
         if let Some(a) = s["enum"].as_array() {
             if !a.contains(v) {
-                return false;
+                return Err("invalid_enum");
             }
         }
         if let Some(a) = s["anyOf"].as_array() {
-            if !a.iter().any(|s| valid(s, v, depth + 1)) {
-                return false;
+            if !a
+                .iter()
+                .any(|s| valid(s, v, depth + 1, &mut path.clone()).is_ok())
+            {
+                return Err("no_matching_alternative");
             }
         }
         if let Some(n) = s.get("not") {
-            if valid(n, v, depth + 1) {
-                return false;
+            if valid(n, v, depth + 1, &mut path.clone()).is_ok() {
+                return Err("excluded_value");
             }
         }
         if let Some(i) = s.get("if") {
-            let branch = if valid(i, v, depth + 1) {
+            let branch = if valid(i, v, depth + 1, &mut path.clone()).is_ok() {
                 s.get("then")
             } else {
                 s.get("else")
             };
-            if branch.is_some_and(|s| !valid(s, v, depth + 1)) {
-                return false;
+            if let Some(branch) = branch {
+                valid(branch, v, depth + 1, path)?;
             }
         }
         if let Some(text) = v.as_str() {
@@ -91,11 +99,11 @@ pub fn validate(schema: &Value, v: &Value) -> Result<()> {
             if s["minLength"].as_u64().is_some_and(|n| len < n)
                 || s["maxLength"].as_u64().is_some_and(|n| len > n)
             {
-                return false;
+                return Err("string_length");
             }
             if let Some(pattern) = s["pattern"].as_str() {
                 if !regex::Regex::new(pattern).is_ok_and(|r| r.is_match(text)) {
-                    return false;
+                    return Err("invalid_pattern");
                 }
             }
         }
@@ -103,23 +111,26 @@ pub fn validate(schema: &Value, v: &Value) -> Result<()> {
             if s["minimum"].as_f64().is_some_and(|min| n < min)
                 || s["maximum"].as_f64().is_some_and(|max| n > max)
             {
-                return false;
+                return Err("number_out_of_bounds");
             }
         }
         if let Some(obj) = v.as_object() {
-            if s["required"].as_array().is_some_and(|r| {
-                r.iter()
-                    .any(|k| !obj.contains_key(k.as_str().unwrap_or("")))
+            if let Some(missing) = s["required"].as_array().and_then(|keys| {
+                keys.iter()
+                    .filter_map(Value::as_str)
+                    .find(|k| !obj.contains_key(*k))
             }) {
-                return false;
+                path.push_str(&format!(".{missing}"));
+                return Err("missing_required_field");
             }
             for (k, v) in obj {
                 if let Some(prop) = s["properties"].get(k) {
-                    if !valid(prop, v, depth + 1) {
-                        return false;
-                    }
+                    let end = path.len();
+                    path.push_str(&format!(".{k}"));
+                    valid(prop, v, depth + 1, path)?;
+                    path.truncate(end);
                 } else if s["additionalProperties"] == false {
-                    return false;
+                    return Err("unexpected_property");
                 }
             }
         }
@@ -128,31 +139,53 @@ pub fn validate(schema: &Value, v: &Value) -> Result<()> {
             if s["minItems"].as_u64().is_some_and(|m| n < m)
                 || s["maxItems"].as_u64().is_some_and(|m| n > m)
             {
-                return false;
+                return Err("array_length");
             }
             for (i, v) in a.iter().enumerate() {
                 if s["uniqueItems"] == true && a[..i].contains(v) {
-                    return false;
+                    return Err("duplicate_item");
                 }
                 if let Some(item) = s.get("items") {
-                    if !valid(item, v, depth + 1) {
-                        return false;
-                    }
+                    let end = path.len();
+                    path.push_str(&format!("[{i}]"));
+                    valid(item, v, depth + 1, path)?;
+                    path.truncate(end);
                 }
             }
         }
-        true
-    }
-    if valid(schema, v, 0) {
         Ok(())
-    } else {
-        Err(Error::Invalid)
     }
+    let mut path = String::from("arguments");
+    valid(schema, v, 0, &mut path).map_err(|reason| Error::InvalidField {
+        field: path,
+        reason,
+    })
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn schema_examples_and_nested_edit_failures_match_the_advertised_contract() {
+        for tool in snapshot()["tools"].as_object().unwrap().values() {
+            if let Some(examples) = tool["inputSchema"]["examples"].as_array() {
+                for args in examples {
+                    validate(&tool["inputSchema"], args).unwrap();
+                }
+            }
+        }
+        let schema = snapshot()["tools"]
+            .as_object()
+            .unwrap()
+            .values()
+            .find(|t| t["name"] == "project_edit")
+            .unwrap()["inputSchema"]
+            .clone();
+        let args = json!({"path":"fixture","edits":[{"old_string":"x","new_string":""},{"old_string":"y"}]});
+        assert!(
+            matches!(validate(&schema,&args),Err(Error::InvalidField{field,reason:"missing_required_field"}) if field=="arguments.edits[1].new_string")
+        );
+    }
     #[test]
     fn nullable_output_types_still_check_their_other_constraints() {
         let schema = json!({"type":["string","null"],"pattern":"^r_[0-9a-f]{12}$"});

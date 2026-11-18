@@ -276,6 +276,7 @@ async fn purge_impl(
         .as_object_mut()
         .ok_or_else(invalid)?
         .remove(task);
+    super::attachment_files::forget_answers(product, task);
     for s in product["sprints"].as_array_mut().ok_or_else(invalid)? {
         s["taskIds"]
             .as_array_mut()
@@ -525,6 +526,7 @@ pub async fn delete_sprint(
             .as_object_mut()
             .ok_or_else(invalid)?
             .remove(task);
+        super::attachment_files::forget_answers(&mut product, task);
         deleted.push(json!(task));
         product["sprints"][index]["keptWorktrees"] = json!(kept);
         product["sprints"][index]["deletedTaskIds"] = json!(deleted);

@@ -300,6 +300,35 @@ fn removing_the_last_reference_deletes_the_body_and_keeps_every_other() {
 }
 
 #[test]
+fn an_answer_file_lives_as_long_as_its_task_record() {
+    let state = temp("answers");
+    let answered = b"answer shot".to_vec();
+    let stray = b"never sent".to_vec();
+    let refs = upload(&state, &json!([inline("shot.png", &answered)])).unwrap();
+    upload(&state, &json!([inline("stray.png", &stray)])).unwrap();
+    age(&state, &sha(&answered));
+    age(&state, &sha(&stray));
+    let mut product = json!({"tasks":{"t":{"archive":{"at":1,"previousStatus":"done"}}},
+        "messages":[],"comments":{},"sprints":[],"answerFiles":{"t":{"attachments":refs}}});
+    settings::write_json(&product_path(&state, "p").unwrap(), &product).unwrap();
+    let exists = |b: &[u8]| directory(&state).join(sha(b)).exists();
+    {
+        let _lock = settings::Lock::new(&state, "machine.lock").unwrap();
+        // Referenced (an archived task keeps its answers): kept; nothing references the stray.
+        assert_eq!(sweep_locked(&state, UNSENT_GRACE).unwrap(), 1);
+    }
+    assert!(exists(&answered) && !exists(&stray));
+    assert_eq!(read(&state, &sha(&answered)).unwrap(), answered);
+    // Deleting the task releases its answers with it.
+    forget_answers(&mut product, "t");
+    assert_eq!(product["answerFiles"], json!({}));
+    settings::write_json(&product_path(&state, "p").unwrap(), &product).unwrap();
+    let _lock = settings::Lock::new(&state, "machine.lock").unwrap();
+    assert_eq!(sweep_locked(&state, UNSENT_GRACE).unwrap(), 1);
+    assert!(!exists(&answered));
+}
+
+#[test]
 fn an_unreadable_product_file_stops_the_sweep() {
     let state = temp("unreadable");
     let digest = put(&state, b"keep").unwrap();

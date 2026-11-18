@@ -98,7 +98,8 @@ export type Result = { kind?: "answer" | "work" | "unknown"; acceptanceAvailable
 export type TaskStatus = "draft" | "working" | "needs_you" | "stopping" | "paused" | "review" | "ready_to_merge" | "done" | "failed" | "cancelled";
 /** Exactly what the owner accepted. `open` keeps the checks that had not passed, so an override can never read as a clean pass. */
 export type Acceptance = { automatic?: boolean; version: number; digest: string; at?: number | null; open?: { failed: number; not_run: number; unverified: number } | null };
-export type Integration = { method: "squash" | "pr" | "commit"; targetBranch: string; digest: string; mock?: true; message?: string; title?: string; draft?: boolean };
+/** `url`: the address GitHub CLI reported for a pull request, recorded only when it is https on the repository's remote host. */
+export type Integration = { method: "squash" | "pr" | "commit"; targetBranch: string; digest: string; mock?: true; message?: string; title?: string; draft?: boolean; url?: string };
 /** One side of a conflict block as the three-way view shows it. `hit` lists the lines that differ. */
 export type CodeSide = { ref: string; start: number; lines: string[]; hit: number[] };
 export type BlockChoice = "ours" | "theirs" | "both" | "cortex";
@@ -296,7 +297,11 @@ export type RepoCheckout = {
   id: string; projectId: string; kind: "main" | "worktree"; branch: string; path: string; taskId: string | null; label: string | null;
   base: string; upstream?: string; ahead: number; behind: number; behindOf: Record<string, number>; files: GitFile[]; draft: string;
   sources: Record<string, string>; updateConflict: MergeSeed | null;
+  /** A merge or rebase stopped in this checkout, as Git records it; absent or null when none is. */
+  operation?: CheckoutOperation | null;
 };
+/** A merge or rebase stopped in a checkout: the files still in conflict and, for a rebase, the branch and commit it started from. */
+export type CheckoutOperation = { kind: "merge" | "rebase"; conflicts: string[]; branch?: string | null; origHead?: string | null; onto?: string | null };
 /** The Git facts of one project. `remote` is the credential-redacted display URL, not a Git remote name. */
 export type ProjectRepo = { projectId: string; hasGit?: boolean; remote: string; tree: string[]; sources: Record<string, string>; commits: Commit[]; branches: Branch[]; checkouts: RepoCheckout[]; fetchedAt: number | null; mock?: true };
 export type ChangeScope = { id: string; label: string; sub?: string; paths: string[] };
@@ -369,7 +374,9 @@ export type WorkspaceCommand =
   | { type: "rename_task"; taskId: string; title: string }
   | { type: "edit_task"; taskId: string; expectedVersion: string; title: string; description: string; attachments: AttachmentInput[]; settings: TaskSettings; checkout: { kind: CheckoutChoice["kind"] } }
   | { type: "generate_title"; taskId: string; fail?: boolean }
-  | { type: "start_task" | "continue_task" | "retry_task" | "confirm_stop" | "clear_issue" | "restore_task" | "flush_queue" | "stop_resolution" | "abort_merge" | "finish_merge" | "update_from_target"; taskId: string; now?: number }
+  | { type: "start_task" | "continue_task" | "retry_task" | "confirm_stop" | "clear_issue" | "restore_task" | "flush_queue" | "stop_resolution" | "abort_merge" | "finish_merge"; taskId: string; now?: number }
+  /** Merges the task's target branch into its own branch, once the owner confirmed it for the result they reviewed (`digest`). */
+  | { type: "update_from_target"; taskId: string; confirmed: boolean; digest: string; now?: number }
   | { type: "retry_delivery"; messageId: string }
   | { type: "resolve_with_cortex"; taskId: string; guidance?: string; attachments?: AttachmentInput[]; now?: number }
   | { type: "resolve_block"; taskId: string; path: string; blockId: string; choice: Exclude<BlockChoice, "cortex"> }
@@ -390,7 +397,13 @@ export type WorkspaceCommand =
   | { type: "git_commit"; checkoutId: string; message: string; amend?: boolean; confirmed?: boolean; now?: number }
   | { type: "git_fetch"; projectId: string; now: number }
   | { type: "git_init"; projectId: string; confirmed: boolean }
-  | { type: "git_pull"; checkoutId: string; now?: number }
+  /** Without `mode` it only fast-forwards; `merge` or `rebase` brings in remote commits the branch lacks, as the owner chose. */
+  | { type: "git_pull"; checkoutId: string; mode?: "merge" | "rebase"; now?: number }
+  /** A merge or rebase stopped in the checkout: finished once its conflicts are resolved, or aborted back to where it started. */
+  | { type: "git_pull_continue"; checkoutId: string; now?: number }
+  | { type: "git_pull_abort"; checkoutId: string; confirmed: boolean; now?: number }
+  /** A task's recorded pull request in the system browser; the address comes from the machine, never from the page. */
+  | { type: "open_pull_request"; projectId: string; taskId: string }
   | { type: "git_push"; checkoutId: string; remote: string; branch: string; confirmed: boolean }
   | { type: "create_branch"; projectId: string; name: string; at?: string }
   | { type: "revert_commit"; checkoutId: string; sha: string; confirmed: boolean; now?: number }

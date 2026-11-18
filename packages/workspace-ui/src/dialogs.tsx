@@ -3,7 +3,7 @@ import { capabilityOf, type Attachment } from "@cortex/workspace-domain";
 import { attachmentPreview } from "./attachments";
 import { autoGrow } from "./autogrow";
 import { EditTask } from "./task-edit";
-import { CommitDialog } from "./git-actions";
+import { CommitDialog, PullDialog, UpdateDialog } from "./git-actions";
 import { createAttachments, createDictation, MessageComposer } from "./composer";
 import { useWs } from "./ctx";
 import { I, MenuItem, Modal, Pop, useWantOverview } from "./kit";
@@ -23,6 +23,8 @@ export type WsDialog =
   | { kind: "delete"; checkoutId: string }
   | { kind: "push"; checkoutId: string }
   | { kind: "commit"; checkoutId: string; taskId?: string }
+  | { kind: "pull"; checkoutId: string; taskId?: string }
+  | { kind: "update"; taskId: string }
   | { kind: "revert"; checkoutId: string; path: string; hunk?: number }
   | { kind: "revert-commit"; checkoutId: string; sha: string; message: string }
   | { kind: "amend"; checkoutId: string; message: string; pushed: boolean }
@@ -135,9 +137,8 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
   const def = () => view().project.defaultBranch;
   const setTarget = (branch: string) => ws.run({ type: "set_target", taskId: t().id, branch: branch === def() ? null : branch });
   const behind = () => behindTarget(checkout(), target());
-  const update = () => {
-    ws.ok({ type: "update_from_target", taskId: t().id, now: ws.store.clock() }, () => { props.onClose(); ws.go({ name: "task", machine: view().machine.id, task: t().id, tab: "changes" }); });
-  };
+  // Its own confirmation: the update changes the reviewed tree and withdraws an acceptance, so it is never one press here.
+  const update = () => ws.open({ kind: "update", taskId: t().id });
   // A result without acceptance is accepted for exactly this version on confirmation, then merged;
   // a refused merge leaves the acceptance on record and the dialog open, and nothing is resent by itself.
   const pending = () => !t().acceptance;
@@ -203,8 +204,8 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
         <Show when={!same()}>
         <Show when={behind() !== null} fallback={<div class="chk"><I n="help" s={14} class="faint" /><span>Not compared with <span class="mono">{target()}</span> yet</span></div>}>
           <div class="chk"><I n={behind() ? "alert" : "check-circle"} s={14} class={behind() ? "st-warn" : "st-ok"} /><span>{behind() ? <>Behind <span class="mono">{target()}</span> by {behind()} commit{behind() === 1 ? "" : "s"}</> : <>Up to date with <span class="mono">{target()}</span></>}</span>
-            {/* Only where the machine offers it: the native service has no such operation, and a control that always fails is not shown. */}
-            <Show when={behind() && ws.can(capabilityOf("update_from_target"))}><span class="src"><button class="btn btn-line btn-sm ws-pre-btn" onClick={update}>Update from {target()}</button></span></Show></div>
+            {/* Only where the machine offers it, for a task with a worktree of its own; a control that always fails is not shown. */}
+            <Show when={behind() && isWorktree() && ws.can(capabilityOf("update_from_target"))}><span class="src"><button class="btn btn-line btn-sm ws-pre-btn" onClick={update}>Update from {target()}…</button></span></Show></div>
         </Show>
         <Show when={files() !== null} fallback={<div class="chk"><I n="help" s={14} class="faint" /><span>{ws.t("noCheckoutState")}</span></div>}>
           <div class="chk"><I n={files() ? "alert" : "check-circle"} s={14} class={files() ? "st-warn" : "st-ok"} /><span>{isWorktree() ? "Worktree" : "Project folder"} {files() ? `has ${files()} uncommitted file${files() === 1 ? "" : "s"}` : "is clean"}</span><span class="src">{files() ? (ws.store.mode === "demo" ? "Not part of this merge" : "Will be committed after confirmation") : "No uncommitted files"}</span></div>
@@ -387,6 +388,8 @@ export function ReviewDialogs() {
     <Modal open={open("delete")} onClose={close} label="Delete worktree"><Show when={of("delete")} keyed>{x => <DeleteWorktree d={x} onClose={close} />}</Show></Modal>
     <Modal open={open("branch")} onClose={close} label="Create a branch"><Show when={of("branch")} keyed>{x => <NewBranch d={x} onClose={close} />}</Show></Modal>
     <Modal open={open("commit")} onClose={close} label="Commit"><Show when={of("commit")} keyed>{x => <CommitDialog checkoutId={x.checkoutId} taskId={x.taskId} onClose={close} />}</Show></Modal>
+    <Modal open={open("pull")} onClose={close} label="Pull"><Show when={of("pull")} keyed>{x => <PullDialog checkoutId={x.checkoutId} taskId={x.taskId} onClose={close} />}</Show></Modal>
+    <Modal open={open("update")} onClose={close} label="Update from target"><Show when={of("update")} keyed>{x => <UpdateDialog taskId={x.taskId} onClose={close} />}</Show></Modal>
     <Modal open={open("push")} onClose={close} label="Push"><Show when={of("push")} keyed>{x => {
       const found = () => { for (const r of ws.store.state().repos) { const c = r.checkouts.find(k => k.id === x.checkoutId); if (c) return { remote: r.remote, branch: c.branch }; } return null; };
       return <Confirm title={`Push ${found()?.branch} to ${found()?.remote}?`} note={ws.t("pushNote")} action="Push" onClose={close} onGo={() => run({ type: "git_push", checkoutId: x.checkoutId, remote: found()!.remote, branch: found()!.branch, confirmed: true })} />;

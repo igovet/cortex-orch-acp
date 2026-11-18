@@ -126,6 +126,9 @@ impl Gateway {
                     "message":format!("authority_refused: {code}"),
                     "data":{"code":code,"retryable":false,"hint":refusal_hint(code)}}})
             }
+            Err(Error::InvalidField { field, reason }) => {
+                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"invalid_arguments","data":{"code":"invalid_arguments","field":field,"reason":reason,"hint":"Consult tools_discover for this tool and correct the indicated argument."}}})
+            }
             Err(Error::Invalid) => {
                 json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"invalid_arguments",
                     "data":{"code":"invalid_arguments","retryable":false,

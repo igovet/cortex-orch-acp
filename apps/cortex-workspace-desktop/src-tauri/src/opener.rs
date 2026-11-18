@@ -78,6 +78,21 @@ pub fn system_opener() -> Option<(PathBuf, &'static [&'static str])> {
     find_system_opener(SYSTEM_OPENERS)
 }
 
+/// One plain `https://host/path` address a browser may be handed: no credentials, no
+/// whitespace or control characters, and nothing an opener could read as an option.
+pub fn web_address(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let host = rest.split('/').next().unwrap_or("");
+    url.len() <= 2048
+        && !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        && !url.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
 /// VS Code's arguments for a folder, or for a file at a line inside that folder.
 pub fn vs_code_args(root: &str, file: Option<&str>, line: u64) -> Vec<OsString> {
     match file {
@@ -128,6 +143,23 @@ pub async fn engine_login(program: &str, args: &[OsString]) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_plain_https_address_goes_to_the_browser() {
+        assert!(web_address("https://github.com/owner/repo/pull/7"));
+        for url in [
+            "http://github.com/owner/repo/pull/7",
+            "file:///etc/passwd",
+            "--help",
+            "https://user:pw@github.com/x",
+            "https://github.com/a b",
+            "https://github.com/a\nb",
+            "https:///path",
+            "javascript:alert(1)",
+        ] {
+            assert!(!web_address(url), "{url}");
+        }
+    }
 
     fn folder(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("cw-opener-{}-{name}", std::process::id()));

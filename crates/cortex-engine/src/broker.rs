@@ -309,6 +309,18 @@ impl Broker {
             env: vec![],
         })
     }
+    /// Codex reads its base instructions from a session-private file for this broker's lifetime.
+    pub fn write_model_instructions(&self, text: &str) -> Result<PathBuf> {
+        let path = self.directory.join("model-instructions.md");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)?;
+        file.write_all(text.as_bytes())?;
+        Ok(path)
+    }
     pub fn endpoint(&self) -> &Path {
         &self.endpoint
     }

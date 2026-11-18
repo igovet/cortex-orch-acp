@@ -149,6 +149,7 @@ impl Bridge {
                     }
                     if system {
                         methods.push(json!("native.open_logs"));
+                        methods.push(json!("native.open_pull_request"));
                     }
                 }
                 Ok(value)
@@ -185,6 +186,10 @@ impl Bridge {
                 .map_err(|text| format!("{REFUSED}{text}")),
             "native.open_logs" => self
                 .open_logs()
+                .await
+                .map_err(|text| format!("{REFUSED}{text}")),
+            "native.open_pull_request" => self
+                .open_pull_request(&call.message)
                 .await
                 .map_err(|text| format!("{REFUSED}{text}")),
             _ => self.shared.request(call).await,
@@ -251,6 +256,33 @@ impl Bridge {
             )
             .await?;
         }
+        Ok(json!({"outcome":"opened"}))
+    }
+    /// A task's pull request in the system browser. The address comes from the service, which
+    /// recorded it from GitHub CLI and checks it against the repository's remote host; it is
+    /// checked here again to be one plain https address before any program sees it.
+    async fn open_pull_request(&self, message: &Value) -> Result<Value, String> {
+        let reply = self
+            .rpc(
+                "machine.call",
+                json!({"op":"repo.locate","projectId":message["projectId"],"params":{"pullRequest":message["taskId"]}}),
+            )
+            .await?;
+        if reply["ok"] != true {
+            return Err(reply["message"]
+                .as_str()
+                .unwrap_or("This pull request could not be found.")
+                .to_owned());
+        }
+        let url = reply["result"]["url"]
+            .as_str()
+            .filter(|u| opener::web_address(u))
+            .ok_or("This pull request's address is not a plain https address, so it was not opened.")?;
+        let (program, args) =
+            opener::system_opener().ok_or("No browser opener is installed on this machine.")?;
+        let mut args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
+        args.push(url.into());
+        opener::launch(&program, &args, "The browser could not open this pull request.").await?;
         Ok(json!({"outcome":"opened"}))
     }
     async fn open_logs(&self) -> Result<Value, String> {

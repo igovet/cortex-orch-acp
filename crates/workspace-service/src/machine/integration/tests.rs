@@ -446,7 +446,7 @@ async fn pull_request_requires_a_pushed_branch_and_records_one_attempt() {
     fs::write(
         &gh,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\necho 'Creating pull request for task into main'\necho 'https://github.com/owner/repo/pull/7'\n",
             env.base.join("gh-args").display()
         ),
     )
@@ -460,7 +460,12 @@ async fn pull_request_requires_a_pushed_branch_and_records_one_attempt() {
     );
     git(
         &env.root,
-        &["remote", "add", "origin", remote.to_str().unwrap()],
+        &["remote", "add", "origin", "https://github.com/owner/repo.git"],
+    );
+    // Pushes go to the local bare repository; nothing contacts the remote host.
+    git(
+        &env.root,
+        &["remote", "set-url", "--push", "origin", remote.to_str().unwrap()],
     );
     let digest = env.evidence(&[]).await;
     env.save(record(&env, &digest, json!({})));
@@ -503,6 +508,39 @@ async fn pull_request_requires_a_pushed_branch_and_records_one_attempt() {
     assert_eq!(saved["prAttempt"]["state"], "unknown");
     // Status is not "done": a pull request only starts review.
     assert_eq!(saved["status"], "ready_to_merge");
+    // The address gh printed is recorded, because it is https on the remote's own host.
+    assert_eq!(
+        saved["integration"]["url"],
+        "https://github.com/owner/repo/pull/7"
+    );
+    let mut g = Git::new();
+    let found = pull_request_address(&env.root, "p1", &env.state, &json!({"pullRequest":"t1"}), &mut g)
+        .await
+        .unwrap();
+    assert_eq!(found, json!({"url":"https://github.com/owner/repo/pull/7"}));
+    // Checked again when it is opened: a remote moved to another host no longer vouches for it.
+    git(
+        &env.root,
+        &["remote", "set-url", "origin", "git@gitlab.example.invalid:owner/repo.git"],
+    );
+    let refused = pull_request_address(&env.root, "p1", &env.state, &json!({"pullRequest":"t1"}), &mut g)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, "pull_request_unsafe");
+    // A task without a recorded pull request has nothing to open.
+    let mut saved = super::super::native::product(&env.state, "p1").unwrap();
+    saved["tasks"]["t1"]["integration"]
+        .as_object_mut()
+        .unwrap()
+        .remove("url");
+    settings::write_json(&product_path(&env.state, "p1").unwrap(), &saved).unwrap();
+    assert_eq!(
+        pull_request_address(&env.root, "p1", &env.state, &json!({"pullRequest":"t1"}), &mut g)
+            .await
+            .unwrap_err()
+            .code,
+        "pull_request_unknown"
+    );
 }
 #[tokio::test]
 async fn private_index_sees_non_ascii_helper_names() {
@@ -581,4 +619,184 @@ async fn a_second_integration_in_the_same_repository_is_refused_at_once() {
     let saved = super::super::native::product(&env.state, "p1").unwrap();
     assert_eq!(saved["tasks"]["t1"]["status"], "done");
     assert_eq!(saved["tasks"]["t2"]["status"], "ready_to_merge");
+}
+
+/// The project folder on main and the task branch in a worktree of its own, with main
+/// moved on by `main_file` (another file, or a conflicting a.txt) after the task began.
+fn update_env(name: &str, main_file: (&str, &str)) -> (Env, PathBuf) {
+    let env = Env::new(name);
+    fs::write(env.root.join("a.txt"), "task side\n").unwrap();
+    git(&env.root, &["commit", "-q", "-am", "Task edits a"]);
+    git(&env.root, &["checkout", "-q", "main"]);
+    let wt = env.base.join("task-wt");
+    git(&env.root, &["worktree", "add", "-q", wt.to_str().unwrap(), "task"]);
+    fs::write(env.root.join(main_file.0), main_file.1).unwrap();
+    git(&env.root, &["add", "."]);
+    git(&env.root, &["commit", "-q", "-m", "Main moved"]);
+    (env, wt)
+}
+fn task_in(env: &Env, wt: &Path, digest: &str) -> Value {
+    record(
+        env,
+        digest,
+        json!({"checkout":{"kind":"worktree","path":wt.to_str().unwrap(),"branch":"task"}}),
+    )
+}
+fn update(digest: &str, request: &str) -> Value {
+    json!({"confirmed":true,"taskId":"t1","digest":digest,"method":"update","requestId":request})
+}
+
+#[tokio::test]
+async fn update_from_target_merges_the_target_into_the_task_branch_and_withdraws_the_acceptance() {
+    let (env, wt) = update_env("update", ("other.txt", "main moved\n"));
+    let main = git(&env.root, &["rev-parse", "main"]);
+    let task_head = git(&wt, &["rev-parse", "HEAD"]);
+    let digest = env.evidence(&[]).await;
+    env.save(task_in(&env, &wt, &digest));
+    // Confirmation first, as for every integration.
+    let mut unconfirmed = update(&digest, "u0");
+    unconfirmed["confirmed"] = json!(false);
+    assert_eq!(env.run(unconfirmed).await.unwrap_err().code, "confirmation_required");
+    assert_eq!(
+        env.run(update(&digest, "u1")).await.unwrap(),
+        json!({"done":true,"updated":true})
+    );
+    // The target is untouched; the task branch has a merge of it on top of its own commit.
+    assert_eq!(git(&env.root, &["rev-parse", "main"]), main);
+    assert_eq!(
+        git(&wt, &["show", "-s", "--format=%P", "HEAD"]),
+        format!("{task_head} {main}")
+    );
+    assert_eq!(fs::read_to_string(wt.join("other.txt")).unwrap(), "main moved\n");
+    assert_clean(&wt);
+    let saved = env.overlay();
+    assert_eq!(saved["acceptance"], Value::Null);
+    assert_eq!(saved["automaticReady"], false);
+    assert!(saved["requiresFreshResult"]["resultId"].is_string());
+    assert_eq!(saved["status"], "ready_to_merge");
+    // Nothing left to bring in, and the withdrawn acceptance cannot be used to merge.
+    assert_eq!(env.run(update(&digest, "u2")).await.unwrap_err().code, "up_to_date");
+    assert_eq!(env.run(squash(&digest)).await.unwrap_err().code, "stale_result");
+}
+
+#[tokio::test]
+async fn update_from_target_is_refused_before_any_change_when_it_could_lose_or_race_work() {
+    let (env, wt) = update_env("update-refused", ("other.txt", "main moved\n"));
+    let head = git(&wt, &["rev-parse", "HEAD"]);
+    let digest = env.evidence(&[]).await;
+    // Uncommitted changes in the task's worktree: never stashed, never merged over.
+    fs::write(wt.join("a.txt"), "uncommitted\n").unwrap();
+    env.save(task_in(&env, &wt, &digest));
+    let refused = env.run(update(&digest, "d1")).await.unwrap_err();
+    assert_eq!(refused.code, "dirty_checkout", "{}", refused.message);
+    assert_eq!(git(&wt, &["rev-parse", "HEAD"]), head);
+    assert_eq!(fs::read_to_string(wt.join("a.txt")).unwrap(), "uncommitted\n");
+    git(&wt, &["checkout", "-q", "--", "a.txt"]);
+    // Not finished yet, or working in the shared project folder.
+    let mut working = task_in(&env, &wt, &digest);
+    working["status"] = json!("working");
+    env.save(working);
+    assert_eq!(env.run(update(&digest, "d2")).await.unwrap_err().code, "not_finished");
+    env.save(record(&env, &digest, json!({})));
+    assert_eq!(env.run(update(&digest, "d3")).await.unwrap_err().code, "same_branch");
+    // A result other than the one reviewed is stale.
+    env.save(task_in(&env, &wt, &digest));
+    assert_eq!(
+        env.run(update(&"0".repeat(64), "d4")).await.unwrap_err().code,
+        "stale_result"
+    );
+    // Workers running again: the run is not complete, so nothing is merged under them.
+    let store = Store::open(context::key(&env.root).unwrap(), OpenMode::Initialize).unwrap();
+    store
+        .write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='RUNNING' WHERE task_id='r1'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let running = env.run(update(&digest, "d5")).await.unwrap_err();
+    assert_eq!(running.code, "result_unavailable");
+    assert!(running.message.contains("still running"), "{}", running.message);
+    assert_eq!(git(&wt, &["rev-parse", "HEAD"]), head);
+    assert_clean(&wt);
+}
+
+#[tokio::test]
+async fn an_update_conflict_is_the_tasks_own_and_abort_returns_the_reviewed_tree_exactly() {
+    let (env, wt) = update_env("update-conflict", ("a.txt", "main side\n"));
+    let main = git(&env.root, &["rev-parse", "main"]);
+    let head = git(&wt, &["rev-parse", "HEAD"]);
+    let index = git(&wt, &["write-tree"]);
+    let digest = env.evidence(&[]).await;
+    env.save(task_in(&env, &wt, &digest));
+    let refused = env.run(update(&digest, "c1")).await.unwrap_err();
+    assert_eq!(refused.code, "merge_conflict", "{}", refused.message);
+    assert!(refused.message.contains("1 conflicting file"), "{}", refused.message);
+    assert_eq!(git(&env.root, &["rev-parse", "main"]), main);
+    let saved = env.overlay();
+    assert_eq!(saved["conflict"], "conflict");
+    assert_eq!(saved["merge"]["kind"], "update");
+    assert_eq!(saved["merge"]["source"], "main");
+    assert_eq!(saved["merge"]["into"], "task");
+    assert_eq!(saved["merge"]["files"][0]["path"], "a.txt");
+    assert!(saved["requiresFreshResult"]["resultId"].is_string());
+    // The task's Abort merge puts back the reviewed tree, and with it a current result.
+    let mut product = super::super::native::product(&env.state, "p1").unwrap();
+    let lock = Lock::new(&env.state, "machine.lock").unwrap();
+    let mut g = Git::new();
+    crate::machine::task_merge::run(
+        &env.root,
+        "p1",
+        "t1",
+        &env.state,
+        &mut product,
+        &json!({"action":"abort_merge","taskId":"t1","requestId":"c2"}),
+        &mut g,
+        lock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(git(&wt, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&wt, &["write-tree"]), index);
+    assert_clean(&wt);
+    let saved = env.overlay();
+    assert_eq!(saved["conflict"], "none");
+    assert_eq!(saved["merge"], Value::Null);
+    assert_eq!(saved["requiresFreshResult"], Value::Null);
+}
+
+#[tokio::test]
+async fn a_resolved_update_conflict_finishes_as_a_merge_and_needs_a_fresh_result() {
+    let (env, wt) = update_env("update-finish", ("a.txt", "main side\n"));
+    let head = git(&wt, &["rev-parse", "HEAD"]);
+    let main = git(&env.root, &["rev-parse", "main"]);
+    let digest = env.evidence(&[]).await;
+    env.save(task_in(&env, &wt, &digest));
+    assert_eq!(env.run(update(&digest, "f1")).await.unwrap_err().code, "merge_conflict");
+    fs::write(wt.join("a.txt"), "task side\nmain side\n").unwrap();
+    git(&wt, &["add", "a.txt"]);
+    let mut product = super::super::native::product(&env.state, "p1").unwrap();
+    let lock = Lock::new(&env.state, "machine.lock").unwrap();
+    let mut g = Git::new();
+    crate::machine::task_merge::run(
+        &env.root,
+        "p1",
+        "t1",
+        &env.state,
+        &mut product,
+        &json!({"action":"finish_merge","taskId":"t1","requestId":"f2"}),
+        &mut g,
+        lock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        git(&wt, &["show", "-s", "--format=%P", "HEAD"]),
+        format!("{head} {main}")
+    );
+    assert_clean(&wt);
+    let saved = env.overlay();
+    assert_eq!(saved["conflict"], "none");
+    assert_eq!(saved["acceptance"], Value::Null);
+    // The tree changed: the reviewed result is not current, so it cannot be accepted again as is.
+    assert!(saved["requiresFreshResult"]["resultId"].is_string());
 }

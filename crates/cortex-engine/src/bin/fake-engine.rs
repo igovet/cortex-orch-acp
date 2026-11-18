@@ -364,8 +364,12 @@ pub async fn main() {
                         // codex-acp spreads this config's features into every thread's
                         // `features` table, which replaces the launcher's feature layers.
                         assert_eq!(
-                            std::env::var(cortex_engine::environment::CODEX_CONFIG).ok(),
-                            Some(cortex_engine::environment::codex_thread_config()),
+                            serde_json::from_str::<Value>(&std::env::var("CODEX_CONFIG").unwrap())
+                                .unwrap()["features"],
+                            serde_json::from_str::<Value>(
+                                &cortex_engine::environment::codex_thread_config()
+                            )
+                            .unwrap()["features"],
                             "a launcher-backed session without its thread feature config"
                         );
                         serde_json::from_str::<Vec<Value>>(&handed).unwrap()
@@ -460,6 +464,20 @@ pub async fn main() {
                     }
                 }
                 let raw = r["params"]["prompt"][0]["text"].as_str().unwrap_or("");
+                let base = if let Some(text) = session_metas
+                    .get(&sid)
+                    .and_then(|v| v["systemPrompt"].as_str())
+                {
+                    text.to_owned()
+                } else {
+                    std::env::var("CODEX_CONFIG")
+                        .ok()
+                        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                        .and_then(|v| {
+                            std::fs::read_to_string(v["model_instructions_file"].as_str()?).ok()
+                        })
+                        .unwrap_or_default()
+                };
                 if mode == "mcp-host" {
                     let expectation = raw.rsplit_once("\n\n").map_or(raw, |(_, v)| v);
                     let entries = &external_entries[&sid];
@@ -617,7 +635,7 @@ pub async fn main() {
                 if full_scenario.trim() == "language-ru"
                     && matches!(mode, "desktop-worker" | "desktop-reviewer")
                 {
-                    let observed = raw.contains("Owner-selected response language: ru.");
+                    let observed = base.contains("Owner-selected response language: ru.");
                     wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":format!("{mode} language observed: {observed}.")}}}})).await.unwrap();
                 }
                 let context = raw
@@ -670,7 +688,7 @@ pub async fn main() {
                     assert!(raw.contains("Never lose constraint α"));
                     assert!(raw.contains("NATIVE_CONTEXT_COMPACTED"));
                     if full_scenario != "compaction-claude" {
-                        assert!(raw.contains("Derived from this channel's served schemas"));
+                        assert!(base.contains("Derived from this channel's served schemas"));
                     }
                 }
                 if mode == "desktop-coordinator" && full_scenario.trim() == "saved-settings" {
@@ -678,7 +696,7 @@ pub async fn main() {
                     std::fs::write(
                         "observed-settings.json",
                         json!({"model":models.get(&sid),"effort":efforts.get(&sid),"option":effort_option(),
-                            "language":raw.contains("Owner-selected response language: ru.")})
+                            "language":base.contains("Owner-selected response language: ru.")})
                         .to_string(),
                     )
                     .unwrap();
@@ -772,7 +790,7 @@ pub async fn main() {
                             .trim()
                             == "settings-ru"
                         {
-                            assert!(raw.contains("Owner-selected response language: ru."));
+                            assert!(base.contains("Owner-selected response language: ru."));
                             assert_eq!(models.get(&sid).map(String::as_str), Some("fixture-other"));
                             wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Observed owner task model and language."}}}})).await.unwrap();
                         }
@@ -1025,6 +1043,7 @@ pub async fn main() {
                         "project_edit",
                         "project_git",
                         "command_run",
+                        "command_status",
                         "read_large_output",
                         "access_request",
                         "project_mkdir",
@@ -1106,8 +1125,8 @@ pub async fn main() {
                     continue;
                 }
                 if mode == "native-host" && text == "native-activity" {
-                    assert!(raw.contains("## Skills already included"));
-                    assert!(raw.contains("# Cortex tool cheat sheet (code mode)"));
+                    assert!(base.contains("## Skills already included"));
+                    assert!(base.contains("# Cortex tool cheat sheet (code mode)"));
                     for update in [
                         json!({"sessionUpdate":"tool_call","toolCallId":"same-call","title":"Fixture step","status":"in_progress","rawInput":{"secret":"private-fixture-value"}}),
                         json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"private-fixture-value"}}),

@@ -228,6 +228,44 @@ pub(super) fn task(
     }
     Ok(Some(result))
 }
+/// The project's tasks whose runtime record is the owner's close as is (Finish on the
+/// runtime's stop question, or a Close task whose saved disposition was not written),
+/// with when the runtime last confirmed it in milliseconds. It is the same rule the task
+/// projection applies (`owner_resolved_without_certification` on a bound, consistent
+/// CANCELLED record), so the owner's records and the board can never disagree.
+pub fn owner_closed(db: &Connection, project: &str, root: &str) -> CoreResult<Vec<(String, Option<i64>)>> {
+    let mut query = db.prepare(
+        "SELECT t.task_id FROM workspace_tasks t
+         JOIN workspace_executions e ON e.execution_id=t.execution_id AND e.task_id=t.task_id
+         JOIN runtime_tasks r ON r.task_id=e.runtime_task_id
+         WHERE t.project_id=? AND r.state='CANCELLED' ORDER BY t.sequence LIMIT 10001",
+    )?;
+    let ids = query
+        .query_map([project], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if ids.len() > 10000 {
+        return Err(CoreError::Refused("machine_reply_too_large"));
+    }
+    let mut out = Vec::new();
+    for id in ids {
+        let Some(t) = task(db, project, root, &id)? else {
+            continue;
+        };
+        if t.phase == "stopped"
+            && t.runtime_state.as_deref() == Some("CANCELLED")
+            && t.warnings.iter().any(|w| w == "owner_resolved_without_certification")
+            && !t.warnings.iter().any(|w| w == "contradictory_evidence")
+        {
+            let at = t
+                .last_confirmed_at
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|d| d.timestamp_millis());
+            out.push((id, at));
+        }
+    }
+    Ok(out)
+}
 /// Native hosts never write task_orchestration. A recovery with a recorded
 /// blocker states its reason; one whose owned processes all settled is an
 /// ended turn waiting for the owner. Anything else stays unconfirmed.

@@ -826,9 +826,35 @@ impl Service {
                         "limit":request.get("limit").cloned().unwrap_or(json!(100))}})).await?;
                 return Ok(reply["data"]["value"].clone());
             }
-            return native.command(project.to_owned(), request).await;
+            let answered = command && request["operation"] == "decisions.answer";
+            let project = project.to_owned();
+            let reply = native.command(project.clone(), request).await;
+            if answered && reply.is_ok() {
+                self.retain_answer_files(&project).await;
+            }
+            return reply;
         }
         Err(self.inactive(project).await)
+    }
+    /// The files of a recorded answer are kept like message files from this moment on.
+    /// Best effort: the next product read references whatever this could not.
+    async fn retain_answer_files(&self, project: &str) {
+        let root = self
+            .state
+            .lock()
+            .await
+            .projects
+            .iter()
+            .find(|p| p.project_id == project)
+            .map(|p| p.canonical_root.clone());
+        let Some(root) = root else {
+            return;
+        };
+        let (state, project) = (self.config.state_dir.clone(), project.to_owned());
+        let _ = tokio::task::spawn_blocking(move || {
+            machine::attachment_files::retain_answer_files(&root, &state, &project)
+        })
+        .await;
     }
     /// Why a project has no native runtime: unknown, or registered but not running.
     async fn inactive(&self, project: &str) -> io::Error {

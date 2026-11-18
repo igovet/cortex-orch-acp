@@ -24,6 +24,8 @@ pub enum Error {
     FrameTooLarge,
     #[error("invalid_arguments")]
     Invalid,
+    #[error("invalid_arguments")]
+    InvalidField { field: String, reason: &'static str },
     #[error("authority_refused")]
     Forbidden,
     /// An authority refusal that names its stable, secret-free refusal code

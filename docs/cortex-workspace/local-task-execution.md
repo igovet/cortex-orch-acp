@@ -1397,8 +1397,11 @@ are read when the owner opens it. A chip that can be opened opens a preview of a
 file, offers **Save a copy** through the system's save dialog; the owner picks the
 destination. A chip with only a name cannot be opened: worker-guidance records carry
 names, and an older recorded copy may have kept only the name. A file whose saved
-body is gone says so when opened. Answers to questions keep their files
-with the delivered answer, without a chip on the answered card. Each submission permits up to eight
+body is gone says so when opened. Answers to questions (single, batch and
+sprint planning) keep their files with the delivered answer, and the answered card
+shows them as chips. The service's product state references an answer's files as it
+does a sent message's, so they stay openable while the task exists, archived
+included, and go with the task's deletion (see [attachment files](consistency-and-recovery.md#attachment-files)). Each submission permits up to eight
 files and 4 MiB of combined decoded bytes. A question batch shares that bound.
 Text is required alongside attachments.
 

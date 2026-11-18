@@ -4,14 +4,24 @@
 use serde_json::Value;
 use std::time::Duration;
 
-/// Evidence reads a batch may contain: never a write, command, project or skill read.
-pub(crate) const READS: [&str; 6] = [
+/// Read-only tools a batch may contain: no mutation, command launch, question,
+/// submission, request, availability probe or recursion. Each still runs through
+/// its own handler, so a batched read has exactly a direct call's authority.
+pub(crate) const READS: [&str; 14] = [
+    "command_status",
     "list_reports",
+    "list_route_options",
     "list_sources",
+    "project_git",
+    "project_read",
+    "read_capsule",
     "read_draft",
     "read_large_output",
     "read_report",
+    "read_skill",
     "read_source",
+    "task_get_context",
+    "tools_discover",
 ];
 pub(crate) const REQUEST_BYTES: usize = 32768;
 pub(crate) const ITEM_BYTES: usize = 6144;
@@ -78,9 +88,43 @@ mod tests {
         .unwrap();
         let ok = json!({"calls":[{"id":"a","tool":"list_reports","arguments":{}}]});
         preflight(&offered, &ok).unwrap();
+        // Every newly batchable read a worker is offered passes admission.
+        let widened = json!({"calls":[
+            {"id":"f","tool":"project_read","arguments":{"path":"README.md"}},
+            {"id":"d","tool":"project_read","arguments":{"path":"."}},
+            {"id":"g","tool":"project_git","arguments":{"kind":"status","request_key":"k"}},
+            {"id":"s","tool":"read_skill","arguments":{"skill":"tool-discipline"}},
+            {"id":"c","tool":"command_status","arguments":{"tool_call_ref":"native-command:x"}},
+            {"id":"p","tool":"read_capsule","arguments":{}},
+            {"id":"t","tool":"tools_discover","arguments":{"name":"project_read"}}]});
+        preflight(&offered, &widened).unwrap();
+        // Coordinator-only reads pass for the coordinator and are unoffered to a worker.
+        let coordinator = cortex_engine::schema::catalogue("coordinator", None, None).unwrap();
+        let planning = json!({"calls":[{"id":"r","tool":"list_route_options","arguments":{}},
+            {"id":"x","tool":"task_get_context","arguments":{}}]});
+        preflight(&coordinator, &planning).unwrap();
+        assert_eq!(
+            preflight(&offered, &planning),
+            Err(("tool_not_available", "calls[0].tool".to_owned()))
+        );
+        // A batchable tool keeps its own argument contract.
+        assert_eq!(
+            preflight(&offered, &json!({"calls":[{"id":"g","tool":"project_git","arguments":{"kind":"log","request_key":"k"}}]})),
+            Err(("invalid_arguments", "calls[0].arguments".to_owned()))
+        );
+        // Every advertised read_batch enum lists only batchable tools that catalogue serves.
+        for (role, profile, stage) in [("coordinator", None, None), ("worker", Some("worker-backend-dev"), Some("review")), ("worker", Some("worker-senior-consultant"), Some("execution"))] {
+            let tools = cortex_engine::schema::catalogue(role, profile, stage).unwrap();
+            let batch = tools.iter().find(|t| t["name"] == "read_batch").unwrap();
+            for name in batch["inputSchema"]["properties"]["calls"]["items"]["properties"]["tool"]["enum"].as_array().unwrap() {
+                let name = name.as_str().unwrap();
+                assert!(READS.contains(&name), "{name}");
+                assert!(tools.iter().any(|t| t["name"] == name), "{role} {profile:?}: {name}");
+            }
+        }
         for (args, code, field) in [
             (
-                json!({"calls":[{"id":"a","tool":"project_read","arguments":{"path":"x"}}]}),
+                json!({"calls":[{"id":"a","tool":"project_write","arguments":{"path":"x"}}]}),
                 "tool_not_available",
                 "calls[0].tool",
             ),

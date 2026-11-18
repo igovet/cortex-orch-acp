@@ -414,7 +414,7 @@ function QueueRow(props: { message: Accessor<Message>; ids: Accessor<string[]>; 
 
 const CLOSED_TEXT: Partial<Record<ComposerMode, string>> = {
   draft: "Start the task to send a message.",
-  closed: "This task is closed. Nothing more can be sent to it.", ended: "This run has ended. Nothing more can be sent to it.", archived: "This task is archived. Restore it to continue.",
+  closed: "This task is closed. Nothing more can be sent to it.", ended: "This run has ended. Nothing more can be sent to it; Close task moves it to Done.", archived: "This task is archived. Restore it to continue.",
   offline: "Sending is off because the machine is disconnected. Use Re-check state above to reconnect.",
   unconfirmed: "Sending is off because this task's state is not confirmed. Use Re-check state above.",
 };

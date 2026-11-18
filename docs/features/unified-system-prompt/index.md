@@ -3,6 +3,20 @@
 > Status: migrated from the former ACP reference. Statements were not re-verified line by line against source in this pass; claims without a source path are unverified until reviewed. The former Python runtime was removed on 2026-11-16: references to its modules and tests were dropped, and statements that cited them describe behavior carried from that implementation that has not been re-verified against the Rust runtime.
 
 
+## Current Rust delivery
+
+The Rust host composes the role and route instructions once per native task session. Claude receives a plain string in session metadata's `systemPrompt`, which replaces the Claude Code preset. Codex reads a private per-session file through `CODEX_CONFIG.model_instructions_file`, which replaces its model base instructions. Each engine can add its own protocol or service messages. Project skill listings, recovery context, attachments and the assignment travel as user input. Both engines use `tools_discover` for the active Cortex catalogue. Short-text sessions use a separate text-generation system instruction.
+
+The remainder of this page is the historical ACP reference unless a section is
+explicitly marked as current. In particular, its former environment switches,
+edition builder and `_meta.cortexBaseInstructions` delivery table do not describe
+the Rust session path above. `tools/list` remains an ACP transport bootstrap
+operation, while models use the advertised `tools_discover` Cortex tool.
+
+## Historical ACP reference
+
+The environment switches, editions and private adapter fields described below refer to the former implementation.
+
 The writing-worker prompt in both editions distinguishes recognized
 missing/incomplete/stale file-read preconditions from access refusals. It directs
 a current same-channel read and a rebuilt valid edit under existing authority,
@@ -435,7 +449,7 @@ or denial bypass. It also covers project-only path reservations, installed
 host-history/export discovery, exact-session identity and explicit completeness;
 the consultant remains packet-only.
 
-## Delivery
+## Historical delivery (former ACP adapter)
 
 | | Claude (claude-agent-acp) | Codex (codex-acp, private adapter) |
 |---|---|---|

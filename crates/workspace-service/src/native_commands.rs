@@ -31,6 +31,43 @@ use tokio::{
 };
 pub(super) type Running =
     Arc<Mutex<std::collections::HashMap<String, crate::native_owner_controls::RunningCommand>>>;
+/// Retain value-free provenance when a launch or settlement fails. A store failure
+/// can also prevent recording the diagnostic; the original error still propagates.
+pub(super) async fn record_failure(
+    ex: &StoreExecutor,
+    credential: &Credential,
+    key: &str,
+    phase: &'static str,
+    error: &CoreError,
+) {
+    let class = match error {
+        CoreError::Io(e) => format!("io_{:?}", e.kind()),
+        CoreError::Sql(rusqlite::Error::SqliteFailure(e, _)) => format!("sqlite_{:?}", e.code),
+        CoreError::Sql(_) => "sqlite".into(),
+        CoreError::Refused(
+            code @ ("invalid_cwd"
+            | "command_output_create_failed"
+            | "output_integrity_mismatch"
+            | "command_handle_identity_mismatch"),
+        ) => (*code).into(),
+        _ => return,
+    };
+    let c = credential.clone();
+    let key = key.to_owned();
+    if let Ok(receiver) = ex.write(move |db| {
+        let i = channels::authenticate(db,&c.channel_id,c.secret(),true)?;
+        let reference: Option<String> = db.query_row("SELECT json_extract(result_json,'$.tool_call_ref') FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=? AND operation='command_run'",(&i.task,&c.channel_id,&key),|r|r.get(0)).optional()?.flatten();
+        let observed = match &reference {
+            None => "before_command_intent",
+            Some(reference) => {
+                let launched: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='NATIVE_COMMAND_PROCESS' AND json_extract(payload_json,'$.ref')=?)",(&i.task,reference),|r|r.get(0))?;
+                if launched { "after_process_registration" } else { "after_command_intent" }
+            }
+        };
+        lifecycle::event_tx(db,&i.task,"NATIVE_COMMAND_DIAGNOSTIC",json!({"class":class,"phase":phase,"stage":observed,"channel_id":c.channel_id,"ref":reference}))?;
+        Ok(())
+    }) { let _ = receiver.await; }
+}
 pub(super) async fn check_digest(root: PathBuf, argv: &[String]) -> Option<String> {
     // Reads/no-ops cannot verify a check: avoid a worktree scan for them.
     if cortex_core::lifecycle::completion::trivial_command(argv) {
@@ -43,6 +80,15 @@ pub(super) async fn check_digest(root: PathBuf, argv: &[String]) -> Option<Strin
 }
 pub(super) fn supports(n: &str) -> bool {
     matches!(n, "command_run" | "project_git")
+}
+fn create_command_output(output_dir: &std::path::Path, file: &str) -> CoreResult<File> {
+    OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(output_dir.join(file))
+        .map_err(|_| CoreError::Refused("command_output_create_failed"))
 }
 async fn recv<T>(r: tokio::sync::oneshot::Receiver<CoreResult<T>>) -> CoreResult<T> {
     r.await
@@ -285,6 +331,22 @@ pub(super) async fn outside_capture(
     running.lock().await.remove(&reference);
     result
 }
+
+#[cfg(test)]
+mod output_tests {
+    use super::create_command_output;
+    use cortex_core::CoreError;
+    use std::path::Path;
+
+    #[test]
+    fn output_create_failure_is_reported_before_process_registration() {
+        let result = create_command_output(Path::new("/dev/null"), "output.bin");
+        assert!(matches!(
+            result,
+            Err(CoreError::Refused("command_output_create_failed"))
+        ));
+    }
+}
 // PID alone is not an identity: boot ID and /proc start ticks fence reuse.
 fn process_identity(pid: u32) -> Option<Value> {
     let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
@@ -488,8 +550,10 @@ pub(super) async fn execute(
         let saved:Option<(String,String,String)>=store.read(|db|Ok(db.query_row("SELECT operation,digest,result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?",
             (&i.task,&c.channel_id,a["request_key"].as_str()),|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?))?;
         if let Some((op,hash,v))=saved {if op!=n||hash!=h{return Err(CoreError::Refused("request_key_conflict"));}let v:Value=serde_json::from_str(&v)?;
-            if v["settled"]!=true {return Err(CoreError::Refused("command_outcome_unknown"));}
-            return Ok((i,mode,Vec::new(),Some(v),PathBuf::new()));
+            let value = if n == "command_run" {
+                crate::native_command_handles::public_status(store,&i.task,&v)?
+            } else if v["settled"]==true { v } else {return Err(CoreError::Refused("command_outcome_unknown"));};
+            return Ok((i,mode,Vec::new(),Some(value),PathBuf::new()));
         }
         let scopes=store.write(|db|{
             if n=="command_run" {if i.role!="worker"||i.profile.as_deref()==Some("worker-senior-consultant"){return Err(CoreError::Refused("worker_required"));}
@@ -599,7 +663,10 @@ pub(super) async fn execute(
         || cwd
             .components()
             .any(|p| matches!(p, std::path::Component::ParentDir))
-        || cwd.canonicalize()? != cwd
+        || cwd
+            .canonicalize()
+            .map_err(|_| CoreError::Refused("invalid_cwd"))?
+            != cwd
         || !cwd.is_dir()
     {
         return Err(CoreError::Refused("invalid_cwd"));
@@ -648,12 +715,7 @@ pub(super) async fn execute(
     );
     let id = format!("lo_{}", &crate::native_effects::identity()?[..12]);
     let file = format!("{id}.bin");
-    let out = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(output_dir.join(&file))?;
+    let out = create_command_output(&output_dir, &file)?;
     let profile = if name == "project_git" {
         "git_context"
     } else if readonly {

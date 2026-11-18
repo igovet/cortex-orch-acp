@@ -3,6 +3,7 @@
 //! nothing is ever delegated to another runtime.
 mod conflicts;
 mod effects;
+mod update;
 use super::{
     context,
     git::Git,
@@ -38,6 +39,104 @@ fn stale() -> Refused {
 fn unavailable(message: &str) -> Refused {
     refuse("result_unavailable", message)
 }
+/// The task's current runtime result, bound to the `digest` the owner reviewed: only a
+/// completed execution (no worker still running, nothing paused or failed) whose
+/// evidence still matches. `incomplete` is what the owner reads otherwise.
+async fn verified_result(
+    root: &Path,
+    project: &str,
+    task: &str,
+    digest: &Value,
+    record: &Value,
+    incomplete: &str,
+) -> Result<Value> {
+    let Some(store) = context::open(root, OpenMode::LiveReadOnly)? else {
+        return Err(unavailable(
+            "Activate Cortex and review its runtime result first.",
+        ));
+    };
+    // Exactly the result-state part of retained _facts: a quiet/failed/paused
+    // execution is not a completed result. No synthesis/check/receipt is inferred.
+    let completed = store
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT EXISTS(
+             SELECT 1 FROM workspace_executions e JOIN workspace_tasks t USING(task_id)
+             JOIN runtime_tasks r ON r.task_id=e.runtime_task_id
+             JOIN tasks base ON base.id=r.task_id
+             JOIN acp_host_sessions s ON s.session_id=e.acp_session_id
+             JOIN task_owners o ON o.task_id=r.task_id
+             WHERE t.project_id=? AND e.task_id=? AND e.execution_id=t.execution_id
+             AND r.state='COMPLETED' AND r.revision>=0 AND (r.blocker IS NULL OR r.blocker='')
+             AND base.project_root=? AND s.project_root=base.project_root
+             AND s.task_id=r.task_id AND o.epoch=e.owner_epoch
+             AND NOT EXISTS(SELECT 1 FROM workspace_starts w
+                 WHERE w.execution_id=e.execution_id AND w.state='unknown'))",
+                (project, task, root.to_string_lossy().as_ref()),
+                |row| row.get::<_, bool>(0),
+            )?)
+        })
+        .map_err(context::core)?;
+    if !completed {
+        return Err(unavailable(incomplete));
+    }
+    let execution = store
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT execution_id FROM workspace_tasks WHERE project_id=? AND task_id=?",
+                (project, task),
+                |r| r.get::<_, String>(0),
+            )?)
+        })
+        .map_err(context::core)?;
+    let native = super::task_facts::native_observation(root).await;
+    super::task_facts::integration_result(
+        &store,
+        root,
+        project,
+        &execution,
+        digest,
+        native.as_deref(),
+        record,
+    )
+}
+/// The recorded address of the pull request created for a task, for the desktop's own
+/// opener: only an `https` address on the host of this repository's `origin` remote,
+/// checked again now against the remote as it is configured today.
+pub async fn pull_request_address(
+    root: &Path,
+    project: &str,
+    state: &Path,
+    params: &Value,
+    git: &mut Git,
+) -> Result<Value> {
+    let task = params["pullRequest"].as_str().ok_or_else(malformed)?;
+    let saved = super::native::product(state, project)?;
+    let integration = &saved["tasks"][task]["integration"];
+    if integration["method"] != "pr" {
+        return Err(refuse(
+            "no_pull_request",
+            "No pull request was created for this task from this app.",
+        ));
+    }
+    let Some(url) = integration["url"].as_str() else {
+        return Err(refuse(
+            "pull_request_unknown",
+            "GitHub CLI did not report this pull request's address, so it was not recorded. Find it on GitHub.",
+        ));
+    };
+    let remote = git
+        .out(root, &["remote", "get-url", "origin"])
+        .await
+        .unwrap_or_default();
+    if effects::pull_request_url(url, &remote).as_deref() != Some(url) {
+        return Err(refuse(
+            "pull_request_unsafe",
+            "The recorded pull request address is not on this repository's remote host, so it was not opened.",
+        ));
+    }
+    Ok(serde_json::json!({ "url": url }))
+}
 pub async fn run(
     root: &Path,
     project: &str,
@@ -62,6 +161,11 @@ pub async fn run(
         "integration_in_progress",
         REPO_BUSY,
     )?;
+    // Bringing the target into the task branch is its own admission, under the same
+    // repository lock; it never touches the target.
+    if params["method"] == "update" {
+        return update::run(root, project, state, params, git).await;
+    }
     // Integrate reads the saved overlay, not the enriched product projection. The
     // checks below run without the machine lock; the record they read is checked
     // again under it before the durable intent.
@@ -113,59 +217,15 @@ pub async fn run(
             ),
         ));
     }
-    let Some(store) = context::open(root, OpenMode::LiveReadOnly)? else {
-        return Err(unavailable(
-            "Activate Cortex and review its runtime result first.",
-        ));
-    };
-    // Exactly the result-state part of retained _facts: a quiet/failed/paused
-    // execution is not a completed result. No synthesis/check/receipt is inferred.
-    let completed = store
-        .read(|db| {
-            Ok(db.query_row(
-                "SELECT EXISTS(
-             SELECT 1 FROM workspace_executions e JOIN workspace_tasks t USING(task_id)
-             JOIN runtime_tasks r ON r.task_id=e.runtime_task_id
-             JOIN tasks base ON base.id=r.task_id
-             JOIN acp_host_sessions s ON s.session_id=e.acp_session_id
-             JOIN task_owners o ON o.task_id=r.task_id
-             WHERE t.project_id=? AND e.task_id=? AND e.execution_id=t.execution_id
-             AND r.state='COMPLETED' AND r.revision>=0 AND (r.blocker IS NULL OR r.blocker='')
-             AND base.project_root=? AND s.project_root=base.project_root
-             AND s.task_id=r.task_id AND o.epoch=e.owner_epoch
-             AND NOT EXISTS(SELECT 1 FROM workspace_starts w
-                 WHERE w.execution_id=e.execution_id AND w.state='unknown'))",
-                (project, task, root.to_string_lossy().as_ref()),
-                |row| row.get::<_, bool>(0),
-            )?)
-        })
-        .map_err(context::core)?;
-    if !completed {
-        return Err(unavailable(
-            "Only a completed runtime result can be accepted.",
-        ));
-    }
-    let execution = store
-        .read(|db| {
-            Ok(db.query_row(
-                "SELECT execution_id FROM workspace_tasks WHERE project_id=? AND task_id=?",
-                (project, task),
-                |r| r.get::<_, String>(0),
-            )?)
-        })
-        .map_err(context::core)?;
-    let native = super::task_facts::native_observation(root).await;
-    let verified = match super::task_facts::integration_result(
-        &store,
+    let verified = verified_result(
         root,
         project,
-        &execution,
+        task,
         &params["digest"],
-        native.as_deref(),
         record,
-    ) {
-        value => value?,
-    };
+        "Only a completed runtime result can be accepted.",
+    )
+    .await?;
     let path = super::retention::task_path(root, record, git).await?;
     if record["requiresFreshResult"]
         == serde_json::json!({"resultId":verified["resultId"],"version":verified["version"]})

@@ -1152,3 +1152,85 @@ async fn archived_work_is_deleted_only_after_the_owner_confirms_it() {
     assert_eq!(fs::read(f.root.join("a.txt")).ok(), dirty);
     f.service.stop().await.unwrap();
 }
+async fn read(f: &Fixture) -> Value {
+    f.service
+        .machine(
+            serde_json::from_value(json!({"op":"product.read","projectId":f.id,"params":{}}))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+#[tokio::test]
+async fn a_task_the_owner_finished_through_the_runtime_reads_closed_and_archives_without_a_question() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/task_lifecycle_python.json")).unwrap();
+    // A bound, consistent CANCELLED runtime task with no saved disposition.
+    let case = fixture["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "close-external-CANCELLED")
+        .unwrap();
+    let f = Fixture::new().await;
+    let store = f.store();
+    store
+        .write(|db| {
+            for row in case["rows"].as_array().unwrap() {
+                let row = f.replace(row);
+                db.execute(
+                    row[0].as_str().unwrap(),
+                    rusqlite::params_from_iter(row[1].as_array().unwrap().iter().map(sql)),
+                )?;
+            }
+            db.execute(
+                "UPDATE runtime_tasks SET updated_at='2026-01-02T03:04:05.000000+00:00' WHERE task_id='r1'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    fs::create_dir_all(f.path().parent().unwrap()).unwrap();
+    fs::write(f.path(), json!({"tasks":{"t1":{"title":"Kept"}}}).to_string()).unwrap();
+    // A run the runtime cancelled by itself is not the owner's close: Archive still refuses.
+    let plain = read(&f).await;
+    assert!(plain["result"]["tasks"]["t1"]["status"].is_null(), "{plain}");
+    let refused = f.call(json!({"action":"archive","taskId":"t1"})).await;
+    assert_eq!(refused["code"], "not_done", "{refused}");
+    // Finish chosen on the runtime's stop question.
+    store
+        .write(|db| {
+            db.execute(
+                "UPDATE runtime_tasks SET blocker='user_force_finished' WHERE task_id='r1'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let closed = read(&f).await;
+    let t = &closed["result"]["tasks"]["t1"];
+    assert_eq!(t["status"], "done", "{closed}");
+    assert_eq!(t["closedAs"], "as_is");
+    assert_eq!(t["notVerifiedByCortex"], true);
+    assert_eq!(t["doneAt"], 1_767_323_045_000u64);
+    assert_eq!(t["title"], "Kept");
+    let archived = f.call(json!({"action":"archive","taskId":"t1"})).await;
+    assert_eq!(archived["ok"], true, "{archived}");
+    let saved: Value = serde_json::from_slice(&fs::read(f.path()).unwrap()).unwrap();
+    let t = &saved["tasks"]["t1"];
+    assert!(t["archive"]["at"].is_u64(), "{saved}");
+    assert_eq!(t["archive"]["previousStatus"], "done");
+    assert_eq!(t["status"], "done");
+    assert_eq!(t["closedAs"], "as_is");
+    assert_eq!(t["archiveQuestion"], false);
+    // A saved disposition always wins over the runtime's.
+    fs::write(
+        f.path(),
+        json!({"tasks":{"t1":{"status":"done","closedAs":"cancel","doneAt":7}}}).to_string(),
+    )
+    .unwrap();
+    let kept = read(&f).await;
+    assert_eq!(kept["result"]["tasks"]["t1"]["closedAs"], "cancel", "{kept}");
+    assert_eq!(kept["result"]["tasks"]["t1"]["doneAt"], 7);
+    f.service.stop().await.unwrap();
+}

@@ -440,7 +440,8 @@ mod evidence_tests {
 pub(super) fn correctable(code: &str) -> bool {
     matches!(
         code,
-        "open_failed_check"
+        "command_not_settled"
+            | "open_failed_check"
             | "omitted_failed_check"
             | "check_blocker_required"
             | "invalid_native_result"
@@ -537,6 +538,7 @@ fn report_structure(store: &Store, i: &Identity, args: &Value) -> CoreResult<Opt
 /// `missing` names the exact missing sections for `report_sections_missing`.
 pub(super) fn refusal_reply_with(code: &str, missing: Option<Vec<String>>) -> Value {
     let hint = match code {
+        "command_not_settled" => "An owned command has no final receipt. Use command_status to inspect it before submitting a successful result, or report a failed assignment with its blocker.",
         "draft_guidance_remaining" => "The report still contains a report template's guidance comment line (<!-- ... -->). Replace it with the content it asks for.",
         "report_sections_missing" => "The report lacks required sections of its template (listed in missing). Add each as a level-two heading with its exact English text, keep the rest, and submit again; the request_key may stay the same.",
         "review_project_revision_changed" => "The project changed while you reviewed it; the review is now bound to the current state. Re-read what changed, then submit with a fresh request_key.",
@@ -650,6 +652,12 @@ pub(super) fn submit(
         .read(|db| channels::authenticate(db, &credential.channel_id, credential.secret(), true))?;
     if &i != expected {
         return Err(CoreError::Refused("channel_identity_changed"));
+    }
+    let active = store.read(|db| Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND operation='command_run' AND json_type(result_json,'$.handle')='object' AND json_extract(result_json,'$.settled') IS NOT 1)",
+        (&i.task,&credential.channel_id),|row|row.get::<_,bool>(0))?))?;
+    if active && args["assignment_outcome"] != "failed" {
+        return Err(CoreError::Refused("command_not_settled"));
     }
     let checks = validate_result(store, credential, &i, args, &evidence)?;
     let assignment = i

@@ -25,7 +25,7 @@ preconditions and retry contract; never guess synonyms, probe errors to discover
 requirements, inspect private runtime state, or copy argument contracts into skills.
 
 Batch independent reads; keep dependent reads, mutations and approvals sequential.
-When offered, read_batch groups eligible independent Cortex evidence pages using its live schema; it is not an evaluator or a transaction. Preserve each item's status and native paging metadata. Deferred, failed or unrun items remain incomplete until resolved; an outer reply alone proves no inner success.
+When offered, read_batch groups eligible independent read-only Cortex reads using its live schema; it is not an evaluator or a transaction. Preserve each item's status and native paging metadata. Deferred, failed or unrun items remain incomplete until resolved; an outer reply alone proves no inner success.
 Inspect success, errors and truncation before relying on a result. A wrapper must
 expose the complete nested result, including exit status or running handle.
 Inspect content if structuredContent is absent.

@@ -20,7 +20,14 @@ fn save(state: &Path, project: &str, task: &str, product: &Value) -> Result<()> 
         project,
         task,
         &product["tasks"][task],
-        &["conflict", "merge", "acceptance", "resolvedBy", "status"],
+        &[
+            "conflict",
+            "merge",
+            "acceptance",
+            "resolvedBy",
+            "status",
+            "requiresFreshResult",
+        ],
     )?;
     let _lock = Lock::wait(state, "machine.lock")?;
     let mut saved = super::native::product(state, project)?;
@@ -95,6 +102,12 @@ pub async fn run(
                 return Err(unknown());
             }
             let record = &mut product["tasks"][task];
+            // An aborted update from the target leaves exactly the reviewed tree, so the
+            // result is current again; acceptance is still the owner's to give again.
+            if record["merge"]["kind"] == "update" {
+                record["requiresFreshResult"] =
+                    record["merge"]["before"]["requiresFreshResult"].clone();
+            }
             record["conflict"] = json!("none");
             record["merge"] = Value::Null;
             record["acceptance"] = Value::Null;

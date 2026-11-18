@@ -276,6 +276,16 @@ async fn cleanup_and_sprint_deletion_use_native_temp_store_with_start_fences() {
         json!({"action":"patch","sprintId":sprint,"patch":{"taskIds":["member"]}}),
     )
     .await;
+    // Each task's answer files are kept with it and released with it.
+    let product_path = f.state.join("product").join(format!("{}.json", f.id));
+    let answer_ref = |name: &str| json!({"attachments":[{"name":name,"mimeType":"image/png","size":1,"sha256":"a".repeat(64)}]});
+    let mut saved: Value = serde_json::from_slice(&fs::read(&product_path).unwrap()).unwrap();
+    saved["answerFiles"] = json!({"member":answer_ref("m.png"),"other":answer_ref("o.png")});
+    fs::write(&product_path, saved.to_string()).unwrap();
+    let answers = || -> Value {
+        serde_json::from_slice::<Value>(&fs::read(&product_path).unwrap()).unwrap()["answerFiles"]
+            .clone()
+    };
     assert_eq!(
         f.call(
             "product.sprint",
@@ -322,6 +332,7 @@ async fn cleanup_and_sprint_deletion_use_native_temp_store_with_start_fences() {
         .await;
     assert_eq!(result["done"], true);
     assert_eq!(result["taskIds"], json!(["member"]));
+    assert_eq!(answers(), json!({"other":answer_ref("o.png")}));
     assert_eq!(
         f.ok(
             "product.sprint",
@@ -358,6 +369,7 @@ async fn cleanup_and_sprint_deletion_use_native_temp_store_with_start_fences() {
     let cleanup = f.ok("cleanup.run", json!({})).await;
     assert_eq!(cleanup["removed"], 1);
     assert_eq!(cleanup["skipped"], 0);
+    assert_eq!(answers(), json!({}));
     assert_eq!(f.ok("overview", json!({})).await["cleanup"], cleanup);
     store
         .read(|db| {

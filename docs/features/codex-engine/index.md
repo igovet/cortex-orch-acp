@@ -11,6 +11,14 @@ the codex-acp-specific pieces: pinned install identity/integrity and the
 launch/env mapping, configuration-option mapping, evidence and instruction
 delivery.
 
+For the current Rust workspace session path, Cortex writes the composed
+instructions to a session-private `model-instructions.md` and passes it through
+`CODEX_CONFIG.model_instructions_file`. The native Codex session therefore does
+not receive Cortex instructions in the user turn. The adapter compatibility
+notes below retain the `_meta.systemPrompt` and `thread/start` terminology for
+the historical ACP adapter contract. Model-facing Cortex discovery is always
+`tools_discover`; ACP `tools/list` is only transport bootstrap.
+
 ## Schema discovery and evidence batches
 
 Native Codex Code Mode is supplied by the engine, not Cortex.
@@ -659,46 +667,7 @@ keeps that value-free reason (`error`, `field`, `expected`, `correction`, never
 `received` or the body) in the worker's display history. Whether a live worker
 now reads descriptions first has not been observed yet.
 
-Each `codex-acp` session's role instructions also end with a generated tool
-cheat sheet. When instruction
-delivery is qualified, `live_adapters._session_new_meta_for` renders it at
-session creation from the same catalogue the channel's `tools/list` serves
-(`channeled_base_tools()` plus `mcp_tools.tool_definitions()` for that role
-kind, role id and the plan node's latest stage, resolved by task and attempt),
-and appends it to the instructions before
-`build_codex_session_new_meta` turns them into `_meta.systemPrompt`. Claude
-and OpenCode sessions never receive it. Every offered Cortex tool gets one line
-with its required fields, then its `optional:` fields; enum values follow `=`
-(at most six, the rest counted), an array of objects shows its item fields one
-level deep, `?` marking an optional one, and every field that is not a string
-carries a `: type` suffix (`edits[{old_string, new_string, replace_all?:
-boolean}]`, `command?: string[]`). Numeric fields also show advertised inclusive
-`minimum`/`maximum` as `1..2000`, one-sided bounds as `>=1` or `<=2000`,
-and exclusive bounds as `>1` or `<2000`; unbounded fields add nothing.
-For example, `project_read` shows `limit: integer 1..2000` from its live
-schema, not a copied limit. Length/item-count bounds and field descriptions
-remain in the full schema. This is argument guidance, not a validation or
-permission change, and does not update existing sessions. The type suffix was added after a live
-2026-10-22 Codex worker sent the argv-array `checks[].command`, then shown by
-name only, as a string and was refused. The first six tools in a fixed order (`result_submit`,
-`command_run`, `project_read`, `project_edit`, `plan_submit`,
-`synthesis_submit`, `access_request`, `ask_question`, `read_report`,
-`read_skill` when offered, then the rest in name order) also get one example
-call in code mode's own shape, `await tools.mcp__cortex__<tool>({...})`, with
-placeholder values for the required fields only. Field descriptions stay in the
-advertised schema. The text is
-bounded to 8,000: a tool whose entry would exceed the budget is omitted
-together with the rest, and an explicit note states how many were omitted.
-Because it is rendered from the schemas rather than written by hand, it cannot
-drift from the advertised contract; the `native_instructions` tests in `workspace-service`
-check (as did the former Python suite) the budget, the codex-only delivery, coverage of the whole channel
-catalogue with optional fields, enum, numeric-bound and item-field rendering, that a schema
-change changes the rendered text, and that review-stage required fields and
-example calls include `verdict`. The Codex base prompt tells the model to take
-Cortex arguments from this sheet instead of querying `ALL_TOOLS` (see
-[working economy and code mode](../unified-system-prompt/index.md#working-economy-and-code-mode)).
-Whether live Codex workers make fewer calls with it has not been observed in a
-paid live check.
+The Rust host puts Cortex role and route instructions in a private per-session file selected by Codex's `model_instructions_file` thread configuration. A bounded Codex supplement renders signatures from the served schemas, with required and optional fields, numeric and length bounds, array item types and schema examples where available. The full contract and the catalogue for the current channel are available through `tools_discover` on both engines.
 
 What code mode shows of a nested tool is a TypeScript declaration Codex derives
 from the MCP `inputSchema` (Codex 0.159.1 `code-mode-protocol`

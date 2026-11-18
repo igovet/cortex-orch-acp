@@ -9,6 +9,7 @@ import { ActionBar, revealWhenCut } from "./layout";
 import { behindTarget, conflictLine, finishBlocked, taskCheckout } from "./review-model";
 import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, languageLabel, modeLabel, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, usesMachineRoute, workerFace, workerModel, workersOutcome, type SessionModel } from "./session-model";
 import { CHECK_ICON, VERIFICATION } from "./worker";
+import { archiveBlocked } from "./git-actions-model";
 
 const useModel = (id: () => string) => {
   const ws = useWs();
@@ -57,6 +58,8 @@ export function titleBlock(m: SessionModel): string | null {
     if (sameBranch(t, v.target)) return t.integrationFacts?.commitAvailable ? finishBlocked(t) : null;
     return v.project.hasGit !== false ? finishBlocked(t) : closeBlocked(m);
   }
+  if (m.mode === "ended") return closeBlocked(m);
+  if (m.mode === "closed") return archiveBlocked(t) ?? null;
   return m.mode === "paused" ? closeBlocked(m) : null;
 }
 
@@ -76,6 +79,7 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
   };
   const mode = () => m()?.mode;
   const blocked = () => m() ? closeBlocked(m()!) : null;
+  const archiveWhy = () => archiveBlocked(props.view.task);
   return <>
     <Show when={mode() === "live" && props.view.task.conflict === "none" && ((m()?.open.length ?? 0) > 0 || (props.view.column === "needs" && props.view.task.observedPhase !== "recovery"))}><button class="btn btn-primary" onClick={go}>Answer</button></Show>
     <Show when={props.view.task.status === "review" && mode() === "review"}><A class="btn btn-primary" to={{ name: "task", machine: props.view.machine.id, task: props.view.id, tab: "changes", sub: "diff" }}>Review changes</A></Show>
@@ -89,6 +93,14 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
         <button class="btn btn-primary" aria-describedby={blocked() ? why() : undefined} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("close_task")} onClick={() => { if (!blocked()) ws.closeTask(props.view.id); }}>Close as is…</button>
       </Show>
       </Show>
+    </Show>
+    {/* A run that ended by itself (failed or cancelled) only waits for the owner to close it. */}
+    <Show when={mode() === "ended"}>
+      <button class="btn btn-primary" aria-describedby={blocked() ? why() : undefined} aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("close_task")} onClick={() => { if (!blocked()) ws.closeTask(props.view.id); }}>Close task…</button>
+    </Show>
+    {/* A closed task's next step is the Archive: one command, with its work, and nothing asks. */}
+    <Show when={mode() === "closed"}>
+      <button class="btn btn-line" aria-describedby={archiveWhy() ? why() : undefined} aria-disabled={archiveWhy() ? "true" : undefined} data-why={archiveWhy()} {...ws.needs("archive_task")} onClick={() => { if (!archiveWhy()) ws.archiveTask(props.view.id); }}><I n="archive" s={12} />Archive</button>
     </Show>
     {/* A held task waits for the owner: say what is expected with one concrete action, not only a message box. */}
     <Show when={mode() === "live" && props.view.task.observedPhase === "recovery" && props.view.task.conflict === "none"}><button class="btn btn-primary" {...ws.needs("retry_task")} onClick={() => ws.run({ type: "retry_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Continue</button></Show>
@@ -146,6 +158,8 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
     if (t().observedPhase === "recovery" && !m().view.unknown) return "Continue lets the coordinator decide the next step from the recorded state; nothing is replayed. Or send a message.";
     if (t().status === "review") return `Finished. Accepting v${t().result?.version ?? ""} is your decision.`;
     if (t().status === "ready_to_merge") return t().acceptance ? "Waiting for you to confirm." : m().view.project.hasGit === false ? "Review the result before closing the task." : sameBranch(t(), m().view.target) ? "Nothing is committed or closed without your confirmation." : "Nothing merges without your confirmation.";
+    if (m().mode === "ended") return "The run ended by itself. Close task moves it to Done and keeps what was done.";
+    if (m().mode === "closed" && !archiveBlocked(t())) return "Archive moves it to the Archive with its work, without asking anything.";
     return m().mode === "live" ? `${open() ? `${open()} question${open() === 1 ? "" : "s"} for you. ` : ""}Next step is Review.` : paused() ? "Resume, or send any message. Nothing was deleted." : "";
   };
   const base = () => { const b = m().session.base; if (!b) return []; const behind = behindTarget(checkout(), b.branch); return [["Base", behind ? `${b.branch}, ${behind} behind` : b.branch, true] as [string, string, boolean]]; };
@@ -237,6 +251,8 @@ export function CloseDialog(props: { taskId: string | null; onClose: () => void 
   const openedTask = createMemo(() => props.taskId);
   createEffect(on(openedTask, id => { if (id) setChoice("as_is"); }));
   const paused = () => m()?.mode === "paused";
+  // A failed or cancelled run has nothing left to stop or keep working on.
+  const ended = () => m()?.mode === "ended";
   const close = () => {
     const id = props.taskId!;
     ws.ok({ type: "close_task", taskId: id, choice: choice(), confirmed: true, now: ws.store.clock() }, () => { props.onClose(); });
@@ -250,12 +266,12 @@ export function CloseDialog(props: { taskId: string | null; onClose: () => void 
           <label class="rc"><input type="radio" name="close-choice" checked={choice() === "as_is"} onChange={() => setChoice("as_is")} /><span><span class="t">Close as is</span><span class="d">{checkedResult(model()) ? "Keep what was done. The checked result and its evidence stay on record, and the task moves to Done." : "Keep what was done and decide about merging later. The result carries a lasting Not verified warning."}</span></span></label>
           <label class="rc danger"><input type="radio" name="close-choice" checked={choice() === "cancel"} onChange={() => setChoice("cancel")} /><span><span class="t">Cancel task</span><span class="d">Nothing from this task is needed. The task moves to Done as Cancelled. The checkout stays until you delete it.</span></span></label>
         </div>
-        <Show when={paused()} fallback={<Show when={ws.can(capabilityOf("continue_task"))}><div class="note-box plain"><I n="pause" s={14} /><span>Only want to pause? <button class="lnk" {...ws.needs("stop_task")} onClick={() => { const id = props.taskId!; props.onClose(); ws.stopTask(id); }}>Stop</button> keeps everything and can be resumed. It needs no confirmation.</span></div></Show>}>
+        <Show when={!ended()}><Show when={paused()} fallback={<Show when={ws.can(capabilityOf("continue_task"))}><div class="note-box plain"><I n="pause" s={14} /><span>Only want to pause? <button class="lnk" {...ws.needs("stop_task")} onClick={() => { const id = props.taskId!; props.onClose(); ws.stopTask(id); }}>Stop</button> keeps everything and can be resumed. It needs no confirmation.</span></div></Show>}>
           <div class="note-box plain"><I n="pause" s={14} /><span>Only want to pause? This task is already stopped, and Resume picks it up again.</span></div>
-        </Show>
+        </Show></Show>
       </div>
       <ActionBar place="dialog" hint="Closing keeps the work. Deleting it is a separate, explicit step in the Archive.">
-        <button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>{paused() ? "Keep it paused" : "Keep working"}</button>
+        <button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>{paused() ? "Keep it paused" : ended() ? "Keep it open" : "Keep working"}</button>
         <Show when={choice() === "as_is"} fallback={<button class="btn btn-danger btn-lg" onClick={close}>Cancel task</button>}><button class="btn btn-primary btn-lg" onClick={close}>Close task</button></Show>
       </ActionBar>
     </>}</Show>

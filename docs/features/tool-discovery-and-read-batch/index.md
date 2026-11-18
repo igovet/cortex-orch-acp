@@ -13,13 +13,18 @@ Existing individual tools, all 23 profiles and ordinary engine loading remain.
 This is not a Cortex-owned Code Mode sandbox or a two-tool replacement for MCP.
 
 `read_batch` is offered to every role whose catalogue lists it (every
-coordinator, worker and consultant catalogue), and discovery entries mark the six
+coordinator, worker and consultant catalogue), and discovery entries mark the
 batchable reads with `read_batch_supported: true`.
 
-`read_batch` groups explicitly selected independent evidence pages:
-`list_reports`, `read_report`, `read_draft`, `list_sources`, `read_source`
-and `read_large_output`, and only those the calling channel is itself offered.
-The advertised item schema refuses any other tool name (`-32602`), and the
+`read_batch` groups explicitly selected independent read-only reads:
+`project_read` (files and directory listings), `project_git` (status and diff),
+`read_skill`, `list_reports`, `read_report`, `read_draft`, `list_sources`,
+`read_source`, `read_large_output`, `read_capsule`, `tools_discover`,
+`command_status` (workers) and `task_get_context` and `list_route_options`
+(coordinator), and only those the calling channel is itself offered. Each
+catalogue advertises its own item enum (the consultant's lists no project, Git or
+command tool). The advertised item schema refuses any other tool name (`-32602`
+`invalid_arguments` at `arguments.calls[i].tool`, reason `invalid_enum`), and the
 runtime refuses the whole batch before any member executes, as a tool error
 naming the exact location, when the request exceeds its byte or depth bound
 (`request_too_large`, `invalid_arguments` at `calls`), an id repeats
@@ -27,12 +32,16 @@ naming the exact location, when the request exceeds its byte or depth bound
 `calls[i].tool`) or a member's arguments do not match that tool's own schema
 (`calls[i].arguments`). Each member then runs, one at a time and in order,
 through exactly the handler a direct call of that tool uses, so it has the same
-guards, paging and size bounds and returns the same result.
+guards, path rules, paging and size bounds, leaves the same side records (a batched
+`project_read` grants the same channel read coverage; `project_git` retains its
+snapshot under its `request_key`) and returns the same result. A refusal of a
+member, such as a private path, is that item's error in the standard shape.
 Arguments are declarative JSON, not expressions or references to prior results.
-Commands, external calls, publishing, lifecycle actions, project/skill reads,
-recursive discovery/batching and mutations are prohibited.
+Writes, command launches, questions, submissions, access/scope/escalation
+requests, availability probes (`check_preflight`), external calls, publishing,
+lifecycle actions and recursive batching are not batchable.
 
-Images returned by `read_source` require its individual MCP call; a batch returns
+Images returned by `read_source` or `project_read` require an individual MCP call; a batch returns
 an explicit `batch_multimodal_unsupported` item error instead of flattening an
 image block into apparent text evidence. Text/base64 source metadata is preserved.
 
@@ -151,3 +160,7 @@ For a live CLI case, use one writing worker in a new disposable project. First m
 Expected schemas/catalogue come from the selected worker role/stage, never the first matching reply. Authenticated coordinator/reviewer/other-attempt reads in the same snapshot are other-actor observations, not worker evidence. Fresh repeated idempotent worker reads are allowed, not deduplicated: every selected occurrence must independently satisfy exact binding and expected semantics. Duplicate observations, reused request correlation, foreign/unbound identities or one wrong/error/withheld/truncated/incomplete occurrence block the matrix even beside a correct reply. Missing required shapes also fail. Checkout schema parity is not live process build attestation; establish current-build adoption separately before the case.
 
 A missing client-dispatched malformed call, unsupported native cancellation interleaving, absent binding, failed/ambiguous/replayed/truncated/pending evidence or an unexpected catalogue/page size is a concrete blocker. Do not relabel it passed or spend repeated paid calls trying to manufacture the signal. This matrix does not qualify GUI rendering, costs, latency or unobservable host actions.
+
+Codex and Claude use the same model-facing `tools_discover` call to find Cortex tools and inspect an unfamiliar input schema. The engine's MCP client still obtains its initial registrations through the protocol handshake. An invalid argument response names the schema field and the failed constraint. For an atomic edit that fails to match, the field identifies the replacement in the ordered array.
+
+A supervised `command_run` that continues beyond five seconds after its launch handshake returns its reference and a pending state. The original channel can use `command_status` while continuing other work. An identical request key refers to the same command. Only the settled record supplies the final exit or failure.

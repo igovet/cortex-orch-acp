@@ -15,7 +15,7 @@
       "3e946d87446b3ec49cc082b380e7198735b299949bc21d531ded7b8d4d759ba6",
       "dd22f845de9a9fb932298321b11157af1a8252148bb444866a3a17dae0908403",
       "a52ca615939f3714c64471792231f2bdb6972c8841b6cf39e9b95bc9b5456c0b",
-      "50ccc5e45983eb9087cb983cc10f931aa90bffde63e2c8ddb2a0cb04fdea9da5",
+      "1f8fb0d47af4f5908d1aecbf200dfc9390052c48ed64e880485579584618a641",
       "bc435e82a8df0a1318baf41887e89812a8d9b6d1d8d87e49629983e31c52d699",
       "42193729d9b5c6484d62fdbffc0ac31d62214f7362bb6178956878d23f95e991",
       "c4ea64359920227f296a8210ec4d849cee48d51c777b2ae1c68d1a647a9af49e",
@@ -50,7 +50,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-accessibility-auditor|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -74,7 +75,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-accessibility-fixer|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -106,7 +108,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-accessibility-fixer|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -130,7 +133,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-architect|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -154,7 +158,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-architect|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -178,7 +183,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-backend-dev|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -210,7 +216,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-backend-dev|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -234,7 +241,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-build-verification|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -258,7 +266,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-build-verification|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -282,7 +291,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-code-reviewer|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -306,7 +316,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-code-reviewer|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -330,7 +341,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-data-engineer|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -362,7 +374,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-data-engineer|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -386,7 +399,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-database-architect|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -410,7 +424,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-database-architect|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -434,7 +449,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-debugger|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -466,7 +482,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-debugger|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -490,7 +507,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-devops-engineer|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -522,7 +540,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-devops-engineer|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -546,7 +565,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-explorer|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -570,7 +590,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-explorer|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -594,7 +615,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-frontend-dev|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -626,7 +648,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-frontend-dev|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -650,7 +673,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-fullstack-dev|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -682,7 +706,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-fullstack-dev|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -706,7 +731,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-general|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -738,7 +764,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-general|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -762,7 +789,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-mobile-dev|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -794,7 +822,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-mobile-dev|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -818,7 +847,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-performance-engineer|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -842,7 +872,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-performance-engineer|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -866,7 +897,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-planner|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -890,7 +922,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-planner|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -914,7 +947,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-qa-engineer|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -946,7 +980,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-qa-engineer|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -970,7 +1005,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-refactorer|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -1002,7 +1038,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-refactorer|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -1026,7 +1063,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-security-auditor|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -1050,7 +1088,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-security-auditor|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -1074,7 +1113,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-senior-consultant|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -1084,7 +1124,7 @@
       "13c446dfab1f219f3179c065bb2950f278f6a19cee53be9b4334dc3fe8791210",
       "88669a75ea6255ba46bd3d2e46280852fd4e80c77ab6179970826cbf4b8f174b",
       "d6b133ed9657b577407a4306c4066fa46e4a16caabd1e6426a75437cc7ae4798",
-      "50ccc5e45983eb9087cb983cc10f931aa90bffde63e2c8ddb2a0cb04fdea9da5",
+      "b6d7980e98920f896ec48635ed418fcb7e4b1ed565a248cec890f2d71a062eb6",
       "bc435e82a8df0a1318baf41887e89812a8d9b6d1d8d87e49629983e31c52d699",
       "9cea49b28f4963d5debf4301525e0e1995d27499f241bd0a7879c84fbbd6e32f",
       "337c7e9b672c49be550aa67b796f04db7d9fe857a98c065a1f2979337462f686",
@@ -1100,7 +1140,7 @@
       "13c446dfab1f219f3179c065bb2950f278f6a19cee53be9b4334dc3fe8791210",
       "88669a75ea6255ba46bd3d2e46280852fd4e80c77ab6179970826cbf4b8f174b",
       "d6b133ed9657b577407a4306c4066fa46e4a16caabd1e6426a75437cc7ae4798",
-      "50ccc5e45983eb9087cb983cc10f931aa90bffde63e2c8ddb2a0cb04fdea9da5",
+      "b6d7980e98920f896ec48635ed418fcb7e4b1ed565a248cec890f2d71a062eb6",
       "bc435e82a8df0a1318baf41887e89812a8d9b6d1d8d87e49629983e31c52d699",
       "9cea49b28f4963d5debf4301525e0e1995d27499f241bd0a7879c84fbbd6e32f",
       "337c7e9b672c49be550aa67b796f04db7d9fe857a98c065a1f2979337462f686",
@@ -1138,7 +1178,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-technical-writer|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -1162,7 +1203,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-ux-designer|execution": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -1186,7 +1228,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "41925c3c7c666d94fae18d5aaf680ec9ed0532019b2a1bb1d7b0852735b40d94",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ],
     "worker|worker-ux-designer|review": [
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
@@ -1210,7 +1253,8 @@
       "a45601abf5f5f38a08881fddc494ca260016c3149e478b22a35b06d217ec0705",
       "a19720b95eaa601d73dd2dab901cec0e146ad1c64aa869867897ec935f0c00b3",
       "655d34933cee3df304e12005c48d8824139d4638df98d21776ddcf21644d3fd5",
-      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a"
+      "723f12979ab49b9f6507d13d3613ac5b7d7a7e624c605f98cd77eaab31d6543a",
+      "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d"
     ]
   },
   "origin": "Python schema parity snapshot; no Python runtime dependency",
@@ -1522,7 +1566,21 @@
             },
             "maxItems": 64,
             "minItems": 1,
-            "type": "array"
+            "type": "array",
+            "examples": [
+              [
+                {
+                  "old_string": "before",
+                  "new_string": "after"
+                }
+              ],
+              [
+                {
+                  "old_string": "obsolete",
+                  "new_string": ""
+                }
+              ]
+            ]
           },
           "path": {
             "description": "Existing project-relative UTF-8 regular file. A writing worker may change any project path except private storage and paths the user protected. The assignment's declared scope is the agreed work area that coordinates parallel writers, not an enforced boundary: reserve any other path with access_request before changing it. Requires a prior text read on this channel and an unchanged SHA-256; a partial read suffices. Refuses links and binary files.",
@@ -1541,7 +1599,18 @@
           "path",
           "edits"
         ],
-        "type": "object"
+        "type": "object",
+        "examples": [
+          {
+            "path": "README.md",
+            "edits": [
+              {
+                "old_string": "old heading",
+                "new_string": "new heading"
+              }
+            ]
+          }
+        ]
       },
       "name": "project_edit",
       "title": "Project edit"
@@ -3175,16 +3244,16 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Read independent task evidence in one bounded declarative JSON call. Preflight all members before any execution; allowlisted reads only, sequential, no evaluator, commands, mutations, external tools or recursion. Current authority is rechecked between reads and before delivery; authority loss withholds every body. A deferred item (a result above the inline bound) is a normal outcome: fetch it with read_large_output by its large_output_id. Only an item error or an item that did not run makes the result incomplete and an MCP error. Images require individual read_source. Ordinary individual tools remain available.",
+      "description": "Run independent read-only Cortex reads in one bounded declarative JSON call. Batchable members on this channel: command_status, list_reports, list_sources, project_git, project_read, read_capsule, read_draft, read_large_output, read_report, read_skill, read_source, tools_discover. Preflight checks every member before any runs; members then run sequentially, each through the same handler, authorization, path rules, paging and limits as a direct call of that tool, with the same side records (for example project_read coverage). No evaluator, mutations, commands, questions, submissions, requests, external tools or recursion. Current authority is rechecked between reads and before delivery; authority loss withholds every body. A deferred item (a result above the inline bound) is a normal outcome: fetch it with read_large_output by its large_output_id before relying on its content. Only an item error or an item that did not run makes the result incomplete and an MCP error. An image result needs an individual call of that tool. Ordinary individual tools remain available.",
       "inputSchema": {
         "additionalProperties": false,
         "description": "Structured fields; use the exact advertised properties.",
         "properties": {
           "calls": {
-            "description": "Required: 1 to 8 items; [] is rejected. Independent evidence reads, executed sequentially, not a snapshot. Each item has a unique id (1 to 32 letters/digits/_/-), an allowlisted tool and native arguments. Whole compact UTF-8 request is at most 32768 bytes and 16 container levels. Preflight rejects the whole batch before execution on any invalid item. Five-second admission budget, not a hard timeout. Native paging metadata is preserved; At most 6144 compact UTF-8 bytes per inline native result and 65536 for the structured envelope; larger results defer as exact JSON up to 1048576 bytes. Oversized read_large_output pages fail instead of spilling again. A deferred item is not an error; an item error or an unrun item makes the result incomplete and an MCP error.",
+            "description": "Required: 1 to 8 items; [] is rejected. Independent read-only reads, executed sequentially, not a snapshot. Each item has a unique id (1 to 32 letters/digits/_/-), a batchable tool and native arguments. Whole compact UTF-8 request is at most 32768 bytes and 16 container levels. Preflight rejects the whole batch before execution on any invalid item. Five-second admission budget, not a hard timeout. Native paging metadata is preserved; At most 6144 compact UTF-8 bytes per inline native result and 65536 for the structured envelope; larger results defer as exact JSON up to 1048576 bytes. Oversized read_large_output pages fail instead of spilling again. A deferred item is not an error; an item error or an unrun item makes the result incomplete and an MCP error.",
             "items": {
               "additionalProperties": false,
-              "description": "One independent read. Images require individual read_source; no commands, external tools, project/skill reads or recursive batches.",
+              "description": "One independent read-only read. Writes, commands, questions, submissions, access or scope requests, availability probes and read_batch itself are not batchable; call them individually. An image result is an item error; read it with an individual call.",
               "properties": {
                 "arguments": {
                   "additionalProperties": true,
@@ -3201,14 +3270,20 @@
                   "type": "string"
                 },
                 "tool": {
-                  "description": "Exact allowlisted Cortex evidence-read name, also currently offered on this channel.",
+                  "description": "Exact batchable read-only Cortex tool name offered on this channel; any other name refuses the whole batch before anything runs.",
                   "enum": [
+                    "command_status",
                     "list_reports",
                     "list_sources",
+                    "project_git",
+                    "project_read",
+                    "read_capsule",
                     "read_draft",
                     "read_large_output",
                     "read_report",
-                    "read_source"
+                    "read_skill",
+                    "read_source",
+                    "tools_discover"
                   ],
                   "maxLength": 64,
                   "minLength": 1,
@@ -4242,7 +4317,12 @@
             ]
           }
         },
-        "type": "object"
+        "type": "object",
+        "examples": [
+          {
+            "name": "project_read"
+          }
+        ]
       },
       "name": "tools_discover",
       "title": "Tools discover"
@@ -5450,7 +5530,12 @@
         "required": [
           "path"
         ],
-        "type": "object"
+        "type": "object",
+        "examples": [
+          {
+            "path": "README.md"
+          }
+        ]
       },
       "name": "project_read",
       "title": "Project read"
@@ -6040,7 +6125,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Run one brokered command (argv, no implicit shell) as the owner. Writing workers in Development or Auto get host-writable mounts, an outside cwd and ordinary host resources without routine approval; in Guarded, and for read-only roles in every mode, the host is read-only except tool caches and temp, and writes stay in the granted project scope. Read-only/Guarded commands use private scratch at /var/tmp, not the host directory; a missing path there does not prove host absence. For authorized host-only reads, use an offered outside_command with consent before executing, not a guessed mount or a retry after permission refusal. Read-only investigators cannot use that route: report the capability gap for runtime replanning to a suitable writing specialist, without broadening the requested read. Deletion commands recognized from the argv text (rm, unlink, rmdir, shred -u, find -delete, git clean/rm, rsync --delete, also through common wrappers and sh -c) require consent (Auto answers it itself) and are refused to read-only roles; a deletion inside a script, interpreter or build tool is not recognized. Docker and arbitrary code can bypass direct masks; capability never authorizes hazardous or production actions. Returns argv, exit_code, a tool_call_ref (the evidence a passed result_submit check must cite), output inline up to 64 KiB with output_truncated and the full byte_count, and large_output_id: the complete output is always retained, verifies checks whatever its size and pages with read_large_output, so never redirect or truncate a check's output yourself. Not available to coordinators or consultants.",
+      "description": "Run one brokered command (argv, no implicit shell) as the owner. Writing workers in Development or Auto get host-writable mounts, an outside cwd and ordinary host resources without routine approval; in Guarded, and for read-only roles in every mode, the host is read-only except tool caches and temp, and writes stay in the granted project scope. Read-only/Guarded commands use private scratch at /var/tmp, not the host directory; a missing path there does not prove host absence. For authorized host-only reads, use an offered outside_command with consent before executing, not a guessed mount or a retry after permission refusal. Read-only investigators cannot use that route: report the capability gap for runtime replanning to a suitable writing specialist, without broadening the requested read. Deletion commands recognized from the argv text (rm, unlink, rmdir, shred -u, find -delete, git clean/rm, rsync --delete, also through common wrappers and sh -c) require consent (Auto answers it itself) and are refused to read-only roles; a deletion inside a script, interpreter or build tool is not recognized. Docker and arbitrary code can bypass direct masks; capability never authorizes hazardous or production actions. Returns argv, exit_code, a tool_call_ref (the evidence a passed result_submit check must cite), output inline up to 64 KiB with output_truncated and the full byte_count, and large_output_id: the complete output is always retained, verifies checks whatever its size and pages with read_large_output, so never redirect or truncate a check's output yourself. Not available to coordinators or consultants. Long commands return running with tool_call_ref. Use command_status on this channel until settled.",
       "inputSchema": {
         "additionalProperties": false,
         "description": "Structured fields; use the exact advertised properties.",
@@ -6079,7 +6164,17 @@
           "argv",
           "request_key"
         ],
-        "type": "object"
+        "type": "object",
+        "examples": [
+          {
+            "argv": [
+              "git",
+              "status",
+              "--short"
+            ],
+            "request_key": "inspect-status"
+          }
+        ]
       },
       "name": "command_run",
       "title": "Command run"
@@ -6750,6 +6845,185 @@
       },
       "name": "read_skill",
       "title": "Read skill"
+    },
+    "92ee79024b33114b897a2b9e8cea8d27abbb5d013de22b5e7c6e3ed3e9366e0d": {
+      "_meta": {
+        "anthropic/alwaysLoad": true
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Read the state or final receipt of a command started on this channel. Only a settled receipt establishes its outcome.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "tool_call_ref": {
+            "description": "Exact reference returned by command_run.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "required": [
+          "tool_call_ref"
+        ],
+        "type": "object"
+      },
+      "name": "command_status",
+      "title": "Command status"
+    },
+    "b6d7980e98920f896ec48635ed418fcb7e4b1ed565a248cec890f2d71a062eb6": {
+      "_meta": {
+        "anthropic/alwaysLoad": true
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Run independent read-only Cortex reads in one bounded declarative JSON call. Batchable members on this channel: list_reports, list_sources, read_capsule, read_draft, read_large_output, read_report, read_skill, read_source, tools_discover. Preflight checks every member before any runs; members then run sequentially, each through the same handler, authorization, path rules, paging and limits as a direct call of that tool, with the same side records (for example project_read coverage). No evaluator, mutations, commands, questions, submissions, requests, external tools or recursion. Current authority is rechecked between reads and before delivery; authority loss withholds every body. A deferred item (a result above the inline bound) is a normal outcome: fetch it with read_large_output by its large_output_id before relying on its content. Only an item error or an item that did not run makes the result incomplete and an MCP error. An image result needs an individual call of that tool. Ordinary individual tools remain available.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Structured fields; use the exact advertised properties.",
+        "properties": {
+          "calls": {
+            "description": "Required: 1 to 8 items; [] is rejected. Independent read-only reads, executed sequentially, not a snapshot. Each item has a unique id (1 to 32 letters/digits/_/-), a batchable tool and native arguments. Whole compact UTF-8 request is at most 32768 bytes and 16 container levels. Preflight rejects the whole batch before execution on any invalid item. Five-second admission budget, not a hard timeout. Native paging metadata is preserved; At most 6144 compact UTF-8 bytes per inline native result and 65536 for the structured envelope; larger results defer as exact JSON up to 1048576 bytes. Oversized read_large_output pages fail instead of spilling again. A deferred item is not an error; an item error or an unrun item makes the result incomplete and an MCP error.",
+            "items": {
+              "additionalProperties": false,
+              "description": "One independent read-only read. Writes, commands, questions, submissions, access or scope requests, availability probes and read_batch itself are not batchable; call them individually. An image result is an item error; read it with an individual call.",
+              "properties": {
+                "arguments": {
+                  "additionalProperties": true,
+                  "description": "Native arguments matching the current inner inputSchema from tools_discover. No expressions or output references.",
+                  "properties": {},
+                  "required": [],
+                  "type": "object"
+                },
+                "id": {
+                  "description": "Unique case-sensitive item identity, 1 to 32 letters/digits/_/-.",
+                  "maxLength": 32,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                "tool": {
+                  "description": "Exact batchable read-only Cortex tool name offered on this channel; any other name refuses the whole batch before anything runs.",
+                  "enum": [
+                    "list_reports",
+                    "list_sources",
+                    "read_capsule",
+                    "read_draft",
+                    "read_large_output",
+                    "read_report",
+                    "read_skill",
+                    "read_source",
+                    "tools_discover"
+                  ],
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "tool",
+                "arguments"
+              ],
+              "type": "object"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "calls"
+        ],
+        "type": "object"
+      },
+      "name": "read_batch",
+      "title": "Read batch"
+    },
+    "1f8fb0d47af4f5908d1aecbf200dfc9390052c48ed64e880485579584618a641": {
+      "_meta": {
+        "anthropic/alwaysLoad": true
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Run independent read-only Cortex reads in one bounded declarative JSON call. Batchable members on this channel: list_reports, list_route_options, list_sources, project_git, project_read, read_capsule, read_draft, read_large_output, read_report, read_skill, read_source, task_get_context, tools_discover. Preflight checks every member before any runs; members then run sequentially, each through the same handler, authorization, path rules, paging and limits as a direct call of that tool, with the same side records (for example project_read coverage). No evaluator, mutations, commands, questions, submissions, requests, external tools or recursion. Current authority is rechecked between reads and before delivery; authority loss withholds every body. A deferred item (a result above the inline bound) is a normal outcome: fetch it with read_large_output by its large_output_id before relying on its content. Only an item error or an item that did not run makes the result incomplete and an MCP error. An image result needs an individual call of that tool. Ordinary individual tools remain available.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Structured fields; use the exact advertised properties.",
+        "properties": {
+          "calls": {
+            "description": "Required: 1 to 8 items; [] is rejected. Independent read-only reads, executed sequentially, not a snapshot. Each item has a unique id (1 to 32 letters/digits/_/-), a batchable tool and native arguments. Whole compact UTF-8 request is at most 32768 bytes and 16 container levels. Preflight rejects the whole batch before execution on any invalid item. Five-second admission budget, not a hard timeout. Native paging metadata is preserved; At most 6144 compact UTF-8 bytes per inline native result and 65536 for the structured envelope; larger results defer as exact JSON up to 1048576 bytes. Oversized read_large_output pages fail instead of spilling again. A deferred item is not an error; an item error or an unrun item makes the result incomplete and an MCP error.",
+            "items": {
+              "additionalProperties": false,
+              "description": "One independent read-only read. Writes, commands, questions, submissions, access or scope requests, availability probes and read_batch itself are not batchable; call them individually. An image result is an item error; read it with an individual call.",
+              "properties": {
+                "arguments": {
+                  "additionalProperties": true,
+                  "description": "Native arguments matching the current inner inputSchema from tools_discover. No expressions or output references.",
+                  "properties": {},
+                  "required": [],
+                  "type": "object"
+                },
+                "id": {
+                  "description": "Unique case-sensitive item identity, 1 to 32 letters/digits/_/-.",
+                  "maxLength": 32,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                "tool": {
+                  "description": "Exact batchable read-only Cortex tool name offered on this channel; any other name refuses the whole batch before anything runs.",
+                  "enum": [
+                    "list_reports",
+                    "list_route_options",
+                    "list_sources",
+                    "project_git",
+                    "project_read",
+                    "read_capsule",
+                    "read_draft",
+                    "read_large_output",
+                    "read_report",
+                    "read_skill",
+                    "read_source",
+                    "task_get_context",
+                    "tools_discover"
+                  ],
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "tool",
+                "arguments"
+              ],
+              "type": "object"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "calls"
+        ],
+        "type": "object"
+      },
+      "name": "read_batch",
+      "title": "Read batch"
     }
   }
 }

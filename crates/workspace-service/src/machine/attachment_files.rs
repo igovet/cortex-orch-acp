@@ -388,6 +388,117 @@ pub fn migrate(state: &Path, project: &str, saved: &mut Value) -> Result<()> {
     }
     Ok(())
 }
+/// The files the owner attached to answers, as references the product file keeps under
+/// `answerFiles.<task>.attachments`, so they live exactly as long as the task's own
+/// messages: through archive, until the task (or its sprint) is deleted or purged.
+/// The source is Core's own record of each answered question's stored files
+/// (`USER_ANSWER_ATTACHMENTS`, an exact digest per file), so an answer recorded before
+/// this existed is covered too, without attributing anything by guess. Only a file whose
+/// body is still saved here, at its recorded size, is referenced. Answers true when the
+/// product value changed.
+pub fn answer_references(
+    store: &cortex_core::Store,
+    state: &Path,
+    project: &str,
+    product: &mut Value,
+) -> Result<bool> {
+    let rows = store
+        .read(|db| {
+            let mut query = db.prepare(
+                "SELECT x.task_id,e.payload_json FROM workspace_tasks t
+                 JOIN workspace_executions x ON x.task_id=t.task_id
+                 JOIN runtime_events e ON e.task_id=x.runtime_task_id
+                 WHERE t.project_id=? AND e.type='USER_ANSWER_ATTACHMENTS' ORDER BY e.id",
+            )?;
+            let rows = query
+                .query_map([project], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .map_err(super::context::core)?;
+    if rows.is_empty() {
+        return Ok(false);
+    }
+    if product.get("answerFiles").is_none_or(Value::is_null) {
+        product["answerFiles"] = json!({});
+    }
+    if !product["answerFiles"].is_object() {
+        return Err(refuse(
+            "state_unreadable",
+            "Saved answer files are unreadable.",
+        ));
+    }
+    let mut changed = false;
+    for (task, payload) in rows {
+        if product["tasks"][&task]["purged"] == true {
+            continue;
+        }
+        let Ok(payload) = serde_json::from_str::<Value>(&payload) else {
+            continue;
+        };
+        for d in payload["attachments"].as_array().into_iter().flatten() {
+            if d["availability"] != "stored" {
+                continue;
+            }
+            let item = json!({"name":d["name"],"mimeType":d["mime"],"size":d["size_bytes"],"sha256":d["sha256"]});
+            if !is_reference(&item) {
+                continue;
+            }
+            let saved = &mut product["answerFiles"][&task];
+            if !saved["attachments"].is_array() {
+                *saved = json!({"attachments":[]});
+            }
+            if saved["attachments"]
+                .as_array()
+                .is_some_and(|a| a.contains(&item))
+            {
+                continue;
+            }
+            let Ok(path) = body_path(state, item["sha256"].as_str().unwrap_or("")) else {
+                continue;
+            };
+            if !fs::symlink_metadata(&path)
+                .is_ok_and(|m| m.is_file() && Some(m.len()) == item["size"].as_u64())
+            {
+                continue;
+            }
+            if let Some(list) = saved["attachments"].as_array_mut() {
+                list.push(item);
+                changed = true;
+            }
+        }
+    }
+    // A task with nothing kept leaves no empty entry behind.
+    if let Some(map) = product["answerFiles"].as_object_mut() {
+        map.retain(|_, v| v["attachments"].as_array().is_some_and(|a| !a.is_empty()));
+    }
+    Ok(changed)
+}
+/// After an answer commits: its saved files become referenced at once, under the
+/// machine lock, so no sweep can take them in between.
+pub fn retain_answer_files(root: &Path, state: &Path, project: &str) -> Result<()> {
+    let Some(store) = super::context::open(root, cortex_core::OpenMode::LiveReadOnly)? else {
+        return Ok(());
+    };
+    let _lock = settings::Lock::new(state, "machine.lock")?;
+    let path = product_path(state, project)?;
+    let mut saved = settings::read_json(&path, json!({}))?;
+    if answer_references(&store, state, project, &mut saved)? {
+        settings::write_json(&path, &saved)?;
+    }
+    Ok(())
+}
+/// The answer files of one task are released with it (purge, sprint deletion).
+pub fn forget_answers(product: &mut Value, task: &str) {
+    if let Some(map) = product
+        .get_mut("answerFiles")
+        .and_then(Value::as_object_mut)
+    {
+        map.remove(task);
+    }
+}
 /// Delete every body no saved product file references, except one renewed within
 /// `grace` (an upload not sent yet). The caller holds `machine.lock`. Any unreadable
 /// product file stops the sweep before anything is deleted.

@@ -287,7 +287,8 @@ async fn pull_request(plan: &Plan<'_>, product: &mut Value, git: &mut Git) -> Re
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        // gh prints the new pull request's address; nothing else of its output is kept.
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
     if super::truth(&plan.params["draft"]) {
@@ -298,25 +299,117 @@ async fn pull_request(plan: &Plan<'_>, product: &mut Value, git: &mut Git) -> Re
             "gh_failed",
             "GitHub CLI could not create the pull request. Check gh login and repository access.",
         )),
-        Ok(mut child) => tokio::time::timeout(Duration::from_secs(25), child.wait()).await,
+        Ok(child) => tokio::time::timeout(Duration::from_secs(25), child.wait_with_output()).await,
     };
-    match outcome {
+    let printed = match outcome {
         Err(_) => {
             return Err(refuse(
                 "unknown_outcome",
                 "GitHub did not answer. Check your pull requests before retrying.",
             ))
         }
-        Ok(Ok(status)) if status.success() => {}
+        Ok(Ok(output)) if output.status.success() => output.stdout,
         Ok(_) => return Err(refuse(
             "gh_failed",
             "GitHub CLI could not create the pull request. Check gh login and repository access.",
         )),
-    }
-    product["tasks"][plan.task]["integration"] = json!({"method":"pr","targetBranch":plan.target,
+    };
+    let mut integration = json!({"method":"pr","targetBranch":plan.target,
         "digest":plan.params["digest"],"title":plan.message});
+    // Recorded only when it is an https address on this repository's remote host; an
+    // address that cannot be checked is left out, never guessed.
+    let remote = git
+        .out(plan.root, &["remote", "get-url", "origin"])
+        .await
+        .unwrap_or_default();
+    let reported = String::from_utf8_lossy(&printed[..printed.len().min(65536)]).into_owned();
+    if let Some(url) = reported
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .and_then(|l| pull_request_url(l.trim(), &remote))
+    {
+        integration["url"] = json!(url);
+    }
+    product["tasks"][plan.task]["integration"] = integration;
     save(plan, product)?;
     Ok(json!({"done":true}))
+}
+/// The host of a Git remote address: `https://[user@]host[:port]/…`,
+/// `ssh://[user@]host[:port]/…` or the scp form `[user@]host:path`, lowercased.
+fn remote_host(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    let authority = match remote.split_once("://") {
+        Some((_, rest)) => rest.split('/').next()?,
+        None if !remote.starts_with('/') && !remote.starts_with('.') => remote.split_once(':')?.0,
+        None => return None,
+    };
+    let host = authority.rsplit('@').next()?;
+    let host = host.split(':').next()?;
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+/// `text` when it is a pull request address this app may hand to the system browser:
+/// `https`, no credentials or port, the remote's own host, and the path of one pull
+/// request (`/<owner>/<repository>/pull/<number>`). `None` otherwise.
+pub(super) fn pull_request_url(text: &str, remote: &str) -> Option<String> {
+    if text.len() > 2048 || text.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return None;
+    }
+    let rest = text.strip_prefix("https://")?;
+    let (host, path) = rest.split_once('/')?;
+    if host.is_empty()
+        || !host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        || remote_host(remote).as_deref() != Some(host.to_ascii_lowercase().as_str())
+    {
+        return None;
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    let name = |s: &str| {
+        !s.is_empty()
+            && !s.starts_with('.')
+            && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    };
+    let shaped = parts.len() == 4
+        && name(parts[0])
+        && name(parts[1])
+        && parts[2] == "pull"
+        && !parts[3].is_empty()
+        && parts[3].len() <= 12
+        && parts[3].bytes().all(|b| b.is_ascii_digit());
+    shaped.then(|| text.to_owned())
+}
+#[cfg(test)]
+mod address_tests {
+    use super::pull_request_url;
+    #[test]
+    fn only_an_https_pull_request_address_on_the_remote_host_is_kept() {
+        let ok = "https://github.com/owner/repo/pull/42";
+        for remote in [
+            "https://github.com/owner/repo.git",
+            "https://user@GitHub.com:443/owner/repo",
+            "git@github.com:owner/repo.git",
+            "ssh://git@github.com/owner/repo.git",
+        ] {
+            assert_eq!(pull_request_url(ok, remote).as_deref(), Some(ok), "{remote}");
+        }
+        for (url, remote) in [
+            ("http://github.com/owner/repo/pull/42", "git@github.com:o/r.git"),
+            ("https://evil.example/owner/repo/pull/42", "git@github.com:o/r.git"),
+            ("https://github.com/owner/repo/pull/42", "/srv/git/repo.git"),
+            ("https://github.com/owner/repo/pull/42", ""),
+            ("https://user:pw@github.com/owner/repo/pull/42", "git@github.com:o/r.git"),
+            ("https://github.com:8443/owner/repo/pull/42", "git@github.com:o/r.git"),
+            ("https://github.com/owner/repo/issues/42", "git@github.com:o/r.git"),
+            ("https://github.com/owner/repo/pull/42?x=1", "git@github.com:o/r.git"),
+            ("https://github.com/owner/repo/pull/42 x", "git@github.com:o/r.git"),
+            ("https://github.com/../repo/pull/42", "git@github.com:o/r.git"),
+            ("javascript:alert(1)", "git@github.com:o/r.git"),
+        ] {
+            assert_eq!(pull_request_url(url, remote), None, "{url} {remote}");
+        }
+    }
 }
 async fn squash(
     plan: &Plan<'_>,

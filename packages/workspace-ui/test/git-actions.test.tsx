@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { capabilityOf, emptyWorkspace, MACHINE_COMMANDS, type CommandEnvelope, type CommandReceipt, type PortUpdate, type QueryOperation, type QueryResults, type RepoCheckout, type WorkspacePort, type WorkspaceState } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
-import { DIVERGED, gitItems, gitPrimary, RUNNING, type GitFacts } from "../src/git-actions-model";
+import { DETACHED, DIRTY, DIVERGED, gitItems, gitPrimary, PR_UNKNOWN, RUNNING, STOPPED, type GitFacts } from "../src/git-actions-model";
 import { openTargets } from "../src/git-actions";
 import { buildIndex } from "../src/selectors";
 import { draftTask, flush, projection } from "./support";
@@ -33,7 +33,7 @@ describe("the title band's Git action for each state", () => {
     expect(gitPrimary(facts(world(checkout({ files: [file("a.ts")] }))))).toMatchObject({ id: "commit", label: "Commit…", why: undefined });
     expect(gitPrimary(facts(world(checkout({ ahead: 2 }))))).toMatchObject({ id: "push", label: "Push" });
     expect(gitPrimary(facts(world(checkout({ behind: 1 }))))).toMatchObject({ id: "pull", label: "Pull" });
-    expect(gitPrimary(facts(world(checkout({ ahead: 2, behind: 1 }))))).toMatchObject({ id: "pull_push", label: "Pull and push" });
+    expect(gitPrimary(facts(world(checkout({ ahead: 2, behind: 1 }))))).toMatchObject({ id: "pull", label: "Pull…" });
     const merge = world(checkout({ id: "p:wt", kind: "worktree", branch: "task/fix", taskId: "t", files: [file("a.ts")] }), ready);
     expect(gitPrimary(facts(merge))).toMatchObject({ id: "merge", label: "Merge…", strong: true });
     // A recorded pull request does not end the task: Merge stays its next step, and Create PR… says one is open.
@@ -59,7 +59,7 @@ describe("the title band's Git action for each state", () => {
       commit: "Nothing to commit", fetch: undefined, pull: "Nothing to pull in the last fetched state. Fetch to check the upstream.", push: "Nothing to push", pull_push: "Nothing to pull in the last fetched state. Fetch to check the upstream.",
       update: undefined, merge: "Result not accepted yet", pr: "Result not accepted yet", archive: "Available when the task is done",
     });
-    expect(items.find(i => i.id === "update")?.label).toBe("Update from main");
+    expect(items.find(i => i.id === "update")?.label).toBe("Update from main…");
     const noGh = world(checkout({ id: "p:wt", kind: "worktree", branch: "task/fix", taskId: "t" }), ready);
     noGh.machines[0].ghAvailable = false;
     expect(gitItems(facts(noGh)).find(i => i.id === "pr")?.why).toBe("GitHub CLI not available");
@@ -81,6 +81,40 @@ describe("the title band's Git action for each state", () => {
   it("acts on the project folder without a task, with no task-only items", () => {
     const ids = gitItems(facts(world(checkout({ files: [file("a.ts")] }), null))).map(i => i.id);
     expect(ids).toEqual(["commit", "fetch", "pull", "push", "pull_push"]);
+  });
+});
+
+describe("a stopped pull, Update from the target and View PR", () => {
+  const op = (conflicts: string[]) => ({ kind: "merge" as const, conflicts });
+  it("puts a stopped pull first: Resolve conflicts, then Continue, with Abort always there and every other action off", () => {
+    const f = facts(world(checkout({ operation: op(["a.ts"]), files: [file("a.ts")] }), null));
+    expect(gitPrimary(f)).toMatchObject({ id: "resolve", label: "Resolve conflicts", strong: true });
+    const why = Object.fromEntries(gitItems(f).map(i => [i.id, i.why]));
+    expect(gitItems(f).map(i => i.id)).toEqual(["commit", "fetch", "pull", "push", "pull_push", "resolve", "continue", "abort_pull"]);
+    expect([why.commit, why.pull, why.push, why.pull_push]).toEqual([STOPPED, STOPPED, STOPPED, STOPPED]);
+    expect(why.continue).toMatch(/Resolve 1 conflicting file/);
+    expect(why.abort_pull).toBeUndefined();
+    const done = facts(world(checkout({ operation: { kind: "rebase", conflicts: [] } }), null));
+    expect(gitPrimary(done)).toMatchObject({ id: "continue", label: "Continue rebase", why: undefined });
+  });
+  it("leaves a task's own update conflict to the task", () => {
+    const s = world(checkout({ id: "p:wt", kind: "worktree", branch: "task/fix", taskId: "t", operation: op(["a.ts"]) }), { ...ready, conflict: "conflict" });
+    expect(gitItems(facts(s)).some(i => i.id === "resolve")).toBe(false);
+  });
+  it("offers Update from the target only for a finished worktree task behind it, never over uncommitted work or a live worker", () => {
+    const at = (patch: Partial<RepoCheckout>, task: object = {}) => gitItems(facts(world(checkout({ id: "p:wt", kind: "worktree", branch: "task/fix", taskId: "t", behindOf: { main: 2 }, ...patch }), { ...ready, ...task }))).find(i => i.id === "update");
+    expect(at({})?.why).toBeUndefined();
+    expect(at({ behindOf: { main: 0 } })?.why).toBe("Up to date with main");
+    expect(at({ files: [file("a.ts")] })?.why).toMatch(/uncommitted changes/);
+    expect(at({}, { process: "live" })?.why).toMatch(/A task is working in this checkout/);
+    expect(at({}, { status: "working" })?.why).toBe("Available for a finished task");
+  });
+  it("shows View PR only for a recorded pull request, and says when its address was not reported", () => {
+    const pr = (url?: string) => world(checkout({ id: "p:wt", kind: "worktree", branch: "task/fix", taskId: "t" }), { ...ready, integration: { method: "pr", targetBranch: "main", digest: "d", ...(url ? { url } : {}) } });
+    expect(gitItems(facts(pr("https://github.com/o/r/pull/1"))).find(i => i.id === "view_pr")?.why).toBeUndefined();
+    expect(gitItems(facts(pr())).find(i => i.id === "view_pr")?.why).toBe(PR_UNKNOWN);
+    expect(gitItems(facts(pr("https://github.com/o/r/pull/1"), { offered: t => t !== "open_pull_request" })).some(i => i.id === "view_pr")).toBe(false);
+    expect(gitItems(facts(world(checkout({ id: "p:wt", kind: "worktree", branch: "task/fix", taskId: "t" }), ready))).some(i => i.id === "view_pr")).toBe(false);
   });
 });
 
@@ -164,20 +198,35 @@ describe("the band on screen", () => {
     expect(confirm.getAttribute("aria-disabled")).toBeNull();
   });
 
-  it("offers no Pull and push on diverged histories: it says they diverged, a fast-forward is impossible and where to reconcile", async () => {
+  it("on diverged histories asks merge or rebase in its own dialog, and pulls only after the owner confirms", async () => {
     const s = world(checkout({ ahead: 1, behind: 2 }), null);
     const p = port(() => ({}));
     const { root } = await open(s, "/m/local/p/p/board", p);
     const primary = gitPrimaryButton(root);
-    expect(primary.getAttribute("aria-label")).toBe("Pull and push");
+    expect(primary.getAttribute("aria-label")).toBe("Pull…");
     expect(band(root).querySelector(".hg-sync")?.textContent).toBe("↑1↓2");
-    // Nothing to run: the button opens the menu, where Pull and push, Pull and Push each say why they are off.
-    expect(primary.getAttribute("aria-haspopup")).toBe("menu");
-    primary.click(); await settle();
-    expect(p.commands).toEqual([]);
     const menu = root.querySelector("#m-git")!.textContent!;
     expect(menu).toContain(DIVERGED);
     expect(menu).toContain("The remote has commits you do not have. Pull first.");
+    primary.click(); await settle();
+    expect(p.commands).toEqual([]);
+    const dialog = root.querySelector<HTMLDialogElement>("dialog[open]")!;
+    expect(dialog.textContent).toContain("this branch has 1 commit that");
+    expect(dialog.textContent).toContain("has 2 commits that this branch does not");
+    const radios = [...dialog.querySelectorAll<HTMLInputElement>("input[type=radio]")];
+    expect(radios.map(r => r.checked)).toEqual([true, false]);
+    radios[1].click(); await settle();
+    [...dialog.querySelectorAll("button")].find(b => b.textContent === "Pull with rebase")!.click(); await settle();
+    expect(p.commands.map(c => c.payload)).toEqual([expect.objectContaining({ type: "git_pull", checkoutId: "p:main", mode: "rebase" })]);
+  });
+
+  it("refuses a merge or rebase pull over uncommitted tracked changes, and offers Commit… instead", async () => {
+    const s = world(checkout({ ahead: 1, behind: 2, files: [file("a.ts")] }), null);
+    const f = facts(s);
+    expect(gitItems(f).find(i => i.id === "pull")?.why).toBe(DIRTY);
+    // Untracked files alone do not block: Git refuses to overwrite one.
+    expect(gitItems(facts(world(checkout({ ahead: 1, behind: 2, files: [file("n.ts", "untracked")] }), null))).find(i => i.id === "pull")?.why).toBeUndefined();
+    expect(gitItems(facts(world(checkout({ ahead: 1, behind: 2, branch: "" }), null))).find(i => i.id === "pull")?.why).toBe(DETACHED);
   });
 
   it("shows Git's classified refusal of a pull beside the button, and pushes nothing", async () => {
@@ -211,7 +260,7 @@ describe("the band on screen", () => {
     expect(primary.classList.contains("btn-primary")).toBe(true);
     expect([...band(root).querySelectorAll("button")].filter(b => b.textContent === "Merge…")).toHaveLength(1);
     // This port offers every command, so Update from main is listed too; the real service does not offer it today.
-    expect(menuLabels(root)).toEqual(["Commit…", "Fetch", "Pull", "Push", "Pull and push", "Update from main", "Merge locally…", "Create PR…", "Archive task"]);
+    expect(menuLabels(root)).toEqual(["Commit…", "Fetch", "Pull", "Push", "Pull and push", "Update from main…", "Merge locally…", "Create PR…", "Archive task"]);
     primary.click(); await settle();
     expect(root.querySelector("dialog[open]")?.getAttribute("data-dialog")).toBe("Finish task");
   });

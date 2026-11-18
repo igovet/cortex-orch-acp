@@ -107,14 +107,44 @@ pub(crate) fn compose(name: &str, stage: Option<&str>, engine: EngineKind) -> Co
         .collect::<Vec<_>>();
     let mut text = p.body.clone();
     text.push_str("\n## Native capability boundary\n\nThis host is partially migrated. Only the tools advertised on this channel are available. Missing capabilities must be reported, never replaced with native engine mutations or invented receipts.\n");
+    text.push_str("\nUse tools_discover to list the Cortex tools offered to this channel and obtain the exact schema before using an unfamiliar tool. After a JSON parsing error, split a large edit into smaller independent changes.\n");
     if engine == EngineKind::Codex {
+        let start = text.len();
         text.push_str("\n# Cortex tool cheat sheet (code mode)\n\nDerived from this channel's served schemas. Use actual arguments, not placeholders. Call tools as `await tools.mcp__cortex__<name>({...})`.\n");
+        let mut tools = tools;
+        let priority = [
+            "tools_discover",
+            "result_submit",
+            "command_run",
+            "command_status",
+            "project_read",
+            "project_edit",
+            "plan_submit",
+            "read_skill",
+        ];
+        tools.sort_by_key(|t| {
+            priority
+                .iter()
+                .position(|n| t["name"] == *n)
+                .unwrap_or(priority.len())
+        });
         for tool in tools {
-            text.push_str(&format!(
+            let mut entry = format!(
                 "\n- {}: {}\n",
                 tool["name"].as_str().unwrap(),
                 signature(&tool["inputSchema"])
-            ));
+            );
+            if let Some(example) = tool["inputSchema"]["examples"].get(0) {
+                entry.push_str(&format!(
+                    "  await tools.mcp__cortex__{}({example})\n",
+                    tool["name"].as_str().unwrap()
+                ));
+            }
+            if text.len() - start + entry.len() > 7850 {
+                text.push_str("Further signatures are available through tools_discover.\n");
+                break;
+            }
+            text.push_str(&entry);
         }
     }
     Ok(text)
@@ -132,8 +162,33 @@ fn signature(schema: &Value) -> String {
             } else {
                 "?"
             };
-            // Full field schemas preserve enums, nested fields and numeric/string bounds.
-            format!("{name}{mark}={field}")
+            let kind = field["type"].as_str().unwrap_or("value");
+            let detail = if let Some(items) = field.get("items") {
+                if items.get("properties").is_some() {
+                    format!("[{{{}}}]", signature(items))
+                } else {
+                    format!("[{}]", items["type"].as_str().unwrap_or("value"))
+                }
+            } else if let Some(values) = field.get("enum") {
+                values.to_string()
+            } else {
+                kind.to_owned()
+            };
+            let min = field
+                .get("minimum")
+                .or(field.get("minLength"))
+                .or(field.get("minItems"));
+            let max = field
+                .get("maximum")
+                .or(field.get("maxLength"))
+                .or(field.get("maxItems"));
+            let bounds = match (min, max) {
+                (Some(lo), Some(hi)) => format!(" {lo}..{hi}"),
+                (Some(lo), None) => format!(" >= {lo}"),
+                (None, Some(hi)) => format!(" <= {hi}"),
+                _ => String::new(),
+            };
+            format!("{name}{mark}={detail}{bounds}")
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -233,6 +288,6 @@ mod tests {
         let s = signature(
             &serde_json::json!({"required":["n"],"properties":{"n":{"type":"integer","minimum":1,"maximum":3},"choice":{"enum":["a","b"]}}}),
         );
-        assert!(s.contains("n=") && s.contains("\"minimum\":1") && s.contains("choice?="));
+        assert!(s.contains("n=") && s.contains("1..3") && s.contains("choice?="));
     }
 }

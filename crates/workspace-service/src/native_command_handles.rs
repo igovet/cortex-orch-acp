@@ -208,7 +208,7 @@ pub(super) async fn execute(
     args: Value,
     profile: String,
 ) -> CoreResult<Value> {
-    let status = format!("{id}.status");
+    let status_file = format!("{id}.status");
     let stopping = format!("{id}.stop");
     let spec = Spec {
         root: root.clone(),
@@ -218,7 +218,7 @@ pub(super) async fn execute(
         writes,
         protected,
         output: dir.join(&output),
-        status: dir.join(&status),
+        status: dir.join(&status_file),
         stop: dir.join(&stopping),
         reference: reference.clone(),
         timeout: args["timeout_seconds"].as_u64().unwrap_or(1800),
@@ -262,7 +262,7 @@ pub(super) async fn execute(
             if supervisor::identity(child.id().unwrap()).as_ref() != Some(&v["ready"]) {
                 return Err(CoreError::Refused("command_handle_identity_mismatch"));
             }
-            h = json!({"reference":reference,"identity":v["ready"],"status":status,"stop":stopping,
+            h = json!({"reference":reference,"identity":v["ready"],"status":status_file,"stop":stopping,
                 "output":output,"id":id,"argv":argv,"cwd":cwd,"profile":profile,"mode":mode,"denied":denied});
             let handle = h.clone();
             let t = i.task.clone();
@@ -300,44 +300,116 @@ pub(super) async fn execute(
             done: finished,
         },
     );
-    let result = async {
-        let status = loop {
-            let status = observe(&dir, &h)?;
-            if status["state"] == "finished" {
-                break status;
+    let status_executor = ex.clone();
+    let status_credential = c.clone();
+    let pending_reference = reference.clone();
+    let diagnostic_channel = c.clone();
+    let diagnostic_key = args["request_key"].as_str().unwrap().to_owned();
+    let monitor = tokio::spawn(async move {
+        let mut phase = "process_observation";
+        let result = async {
+            let status = loop {
+                let status = observe(&dir, &h)?;
+                if status["state"] == "finished" {
+                    break status;
+                }
+                if *cancelled.borrow()
+                    || authorize(&ex, &c, &mode, &denied, readonly, &reference, false)
+                        .await
+                        .is_err()
+                {
+                    stop(&dir, &h)?;
+                }
+                tokio::select! { _=tokio::time::sleep(Duration::from_millis(50))=>{},
+                _=cancelled.changed()=>{} }
+            };
+            phase = "settlement";
+            let after = native_commands::check_digest(root, &argv).await;
+            let revision = if before == after { after } else { None };
+            let actor = c.channel_id;
+            let task = i.task;
+            let key = args["request_key"].as_str().unwrap().to_owned();
+            let h = h.clone();
+            recv(ex.publication(move |s| settle(s, &task, &actor, &key, &h, &status, revision))?)
+                .await
+        }
+        .await;
+        // A child handle is only reaped here; its independent supervisor is not
+        // killed on service death. A lost observer cannot invent a command result.
+        let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+        if result.is_ok() {
+            done.send_replace(true);
+        } else {
+            if let Err(error) = &result {
+                native_commands::record_failure(
+                    &ex,
+                    &diagnostic_channel,
+                    &diagnostic_key,
+                    phase,
+                    error,
+                )
+                .await;
             }
-            if *cancelled.borrow()
-                || authorize(&ex, &c, &mode, &denied, readonly, &reference, false)
-                    .await
-                    .is_err()
-            {
-                stop(&dir, &h)?;
-            }
-            tokio::select! { _=tokio::time::sleep(Duration::from_millis(50))=>{},
-            _=cancelled.changed()=>{} }
-        };
-        let after = native_commands::check_digest(root, &argv).await;
-        let revision = if before == after { after } else { None };
-        let actor = c.channel_id;
-        let task = i.task;
-        let key = args["request_key"].as_str().unwrap().to_owned();
-        let h = h.clone();
-        recv(ex.publication(move |s| settle(s, &task, &actor, &key, &h, &status, revision))?).await
+            let h = guard.handle.clone();
+            let _ = recv(ex.publication(move |s| unknown(s, &unknown_task, &h))?).await;
+        }
+        drop(guard);
+        running.lock().await.remove(&reference);
+        result.map_err(|_| CoreError::Refused("command_outcome_unknown"))
+    });
+    match tokio::time::timeout(Duration::from_secs(5), monitor).await {
+        Ok(joined) => joined
+            .map_err(|_| CoreError::Refused("command_outcome_unknown"))?
+            .map(crate::native_sources::reply),
+        Err(_) => {
+            recv(status_executor.publication(move |store| {
+                let c = status_credential;
+                let identity =
+                    store.read(|db| channels::authenticate(db, &c.channel_id, c.secret(), true))?;
+                status(store, &identity.task, &c.channel_id, &pending_reference)
+            })?)
+            .await
+        }
     }
-    .await;
-    // A child handle is only reaped here; its independent supervisor is not
-    // killed on service death. A lost observer cannot invent a command result.
-    let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
-    if result.is_ok() {
-        done.send_replace(true);
-    } else {
-        let h = guard.handle.clone();
-        let _ = recv(ex.publication(move |s| unknown(s, &unknown_task, &h))?).await;
-    }
-    drop(guard);
-    running.lock().await.remove(&reference);
-    result.map(crate::native_sources::reply)
 }
+pub(super) fn public_status(store: &Store, task: &str, record: &Value) -> CoreResult<Value> {
+    if record["settled"] == true {
+        let mut value = record.clone();
+        value
+            .as_object_mut()
+            .ok_or(CoreError::Refused("invalid_command_handle"))?
+            .remove("handle");
+        return Ok(value);
+    }
+    let h = &record["handle"];
+    if !h.is_object() || h["reference"] != record["tool_call_ref"] {
+        return Err(CoreError::Refused("command_outcome_unknown"));
+    }
+    if store.read(|db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='NATIVE_COMMAND_RECOVERED' AND json_extract(payload_json,'$.ref')=? AND json_extract(payload_json,'$.handle_state')='unknown')",(task,h["reference"].as_str()),|r| r.get::<_,bool>(0))?))? {
+        return Err(CoreError::Refused("command_outcome_unknown"));
+    }
+    let status = observe(&directory(store, task), h)
+        .map_err(|_| CoreError::Refused("command_outcome_unknown"))?;
+    Ok(
+        json!({"state":if status["state"]=="finished" {"settling"} else {"running"},
+        "tool_call_ref":h["reference"],"complete":false,"settled":false}),
+    )
+}
+
+pub(super) fn status(
+    store: &Store,
+    task: &str,
+    channel: &str,
+    reference: &str,
+) -> CoreResult<Value> {
+    use rusqlite::OptionalExtension;
+    let raw: String = store.read(|db| Ok(db.query_row(
+        "SELECT result_json FROM runtime_requests WHERE task_id=? AND actor=? AND operation='command_run' AND json_extract(result_json,'$.tool_call_ref')=?",
+        (task,channel,reference), |row| row.get::<_,String>(0)).optional()?))?
+        .ok_or(CoreError::Refused("unknown_command_ref"))?;
+    public_status(store, task, &serde_json::from_str(&raw)?).map(crate::native_sources::reply)
+}
+
 pub(super) async fn recover(runtime: &crate::native_runtime::Runtime) -> CoreResult<()> {
     let ex = runtime.host.executor.clone();
     let running = runtime.host.commands.clone();

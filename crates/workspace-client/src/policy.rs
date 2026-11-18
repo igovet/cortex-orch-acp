@@ -418,6 +418,23 @@ fn authorize_body(body: Value, phone: bool) -> Result<Call, String> {
         }
         return Ok(call);
     }
+    // A task's recorded pull request, opened in the system browser. Only the project and the
+    // task are named; the service reads and checks the address, the shell never takes one.
+    if call.operation == "native.open_pull_request" {
+        let map = call.message.as_object().ok_or_else(refused)?;
+        workspace_protocol::validate("Identity", &call.message["projectId"])
+            .map_err(|_| refused())?;
+        workspace_protocol::validate("Identity", &call.message["taskId"]).map_err(|_| refused())?;
+        let task = call.message["taskId"].as_str().unwrap_or("");
+        if map.len() != 2
+            || !task
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_:.-".contains(&b))
+        {
+            return Err(refused());
+        }
+        return Ok(call);
+    }
     if call.operation == "native.save_attachment" {
         // The name is only a suggestion for the save dialog. The owner still chooses where it goes.
         let map = call.message.as_object().ok_or_else(refused)?;
@@ -467,9 +484,11 @@ fn authorize_body(body: Value, phone: bool) -> Result<Call, String> {
             .map_err(|_| refused())?;
         return Ok(call);
     }
-    // The desktop owner lifts one of their own write denials: the rule's text as recorded, which
-    // the runtime matches exactly against its own denials. It names no location to open.
-    if !phone && call.operation == "executions.control" && call.message["action"] == "allow_write" {
+    // The owner lifts one of their own write denials: the rule's text as recorded, which the
+    // runtime matches exactly against its own denials. It names no location to open. A phone
+    // sends it too: it already answers permission requests and writes `allow-write:` in a
+    // message, so the control grants it nothing more.
+    if call.operation == "executions.control" && call.message["action"] == "allow_write" {
         let map = call.message.as_object().ok_or_else(refused)?;
         if map.len() != 5
             || map.keys().any(|key| {
@@ -754,6 +773,18 @@ mod tests {
     #[test]
     fn the_desktop_keeps_its_machine_bound_operations() {
         assert!(desktop("native.pick_folder", json!({})));
+        // A pull request is named by its task only; an address from the page is refused.
+        assert!(desktop(
+            "native.open_pull_request",
+            json!({"projectId":"p","taskId":"t"})
+        ));
+        for message in [
+            json!({"projectId":"p","taskId":"t","url":"https://example.invalid/"}),
+            json!({"projectId":"p"}),
+            json!({"projectId":"p","taskId":"../t"}),
+        ] {
+            assert!(!desktop("native.open_pull_request", message.clone()), "{message}");
+        }
         assert!(desktop(
             "native.engine_login",
             json!({"engine":"codex-acp"})
@@ -793,8 +824,11 @@ mod tests {
         let mut other = lift.clone();
         other["action"] = json!("worker_stop");
         assert!(!desktop("executions.control", other));
-        // The phone does not send it.
-        assert!(!phone("executions.control", lift));
+        // The phone sends the same exact shape, and nothing looser.
+        assert!(phone("executions.control", lift.clone()));
+        let mut loose = lift;
+        loose["cwd"] = json!("/tmp");
+        assert!(!phone("executions.control", loose));
     }
 
     #[test]
@@ -815,6 +849,10 @@ mod tests {
             ("native.engine_login", json!({"engine":"codex-acp"})),
             ("native.open_logs", json!({})),
             ("native.open_editor", json!({"projectId":"p"})),
+            (
+                "native.open_pull_request",
+                json!({"projectId":"p","taskId":"t"}),
+            ),
             ("native.notify", json!({})),
             ("service.stop", json!({})),
         ] {

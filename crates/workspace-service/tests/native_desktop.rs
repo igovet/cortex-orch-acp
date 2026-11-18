@@ -3968,6 +3968,63 @@ async fn answer_attachments_journey() {
             Ok(())
         })
         .unwrap();
+    // The answer's file is kept like a message's: a saved product record references it,
+    // so the retention sweep keeps it past the unsent grace while it removes a stale
+    // upload nothing references, and the settled question's chip still opens.
+    let state = f.0.join("state");
+    let product_file = state.join("product").join(format!("{id}.json"));
+    let saved = |path: &std::path::Path| -> Value {
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    };
+    let task = created["target"].as_str().unwrap();
+    let digest = shot["sha256"].as_str().unwrap().to_owned();
+    let kept = |p: &Value| {
+        p["answerFiles"][task]["attachments"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|r| r["sha256"] == json!(digest)))
+    };
+    assert!(kept(&saved(&product_file)), "{}", saved(&product_file));
+    let stray = sent_file(&service, "stray.txt", "text/plain", b"never sent").await;
+    let age = |sha: &Value| {
+        std::fs::File::options()
+            .write(true)
+            .open(state.join("attachments").join(sha.as_str().unwrap()))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(25 * 3600))
+            .unwrap();
+    };
+    age(&shot["sha256"]);
+    age(&stray["sha256"]);
+    machine(&service, "cleanup.run", "", json!({})).await;
+    assert!(state.join("attachments").join(&digest).is_file());
+    assert!(!state
+        .join("attachments")
+        .join(stray["sha256"].as_str().unwrap())
+        .exists());
+    let opened = machine(
+        &service,
+        "product.attachment",
+        "",
+        json!({"action":"read","sha256":digest}),
+    )
+    .await;
+    assert_eq!(opened["size"], json!(PNG_BYTES.len()), "{opened}");
+    // An answer recorded before answers were kept (no saved reference) becomes
+    // referenced from Core's exact record on the next product read, and is then kept.
+    let mut legacy = saved(&product_file);
+    legacy.as_object_mut().unwrap().remove("answerFiles");
+    std::fs::write(&product_file, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    machine(&service, "product.read", &id, Value::Null).await;
+    assert!(kept(&saved(&product_file)), "{}", saved(&product_file));
+    age(&shot["sha256"]);
+    machine(&service, "cleanup.run", "", json!({})).await;
+    machine(
+        &service,
+        "product.attachment",
+        "",
+        json!({"action":"read","sha256":digest}),
+    )
+    .await;
     service.stop().await.unwrap();
     let _ = runner.await;
 }

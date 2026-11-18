@@ -219,7 +219,10 @@ pub(crate) fn model_label(options: &Value, model: &str) -> Option<String> {
         .iter()
         .find(|o| o["id"] == "model" || o["category"] == "model")?;
     let entry = find(&option["options"], model)?;
-    let name = entry["name"].as_str().map(str::trim).filter(|n| !n.is_empty() && *n != model)?;
+    let name = entry["name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|n| !n.is_empty() && *n != model)?;
     let description = entry["description"]
         .as_str()
         .map(str::trim)
@@ -590,6 +593,15 @@ impl NativeHost {
         } else {
             "native_session_start_failed"
         };
+        let instructions = format!("{instructions}\n\n{}", route.instructions);
+        let project_context = crate::native_skills::project_files(
+            &identity.role,
+            identity.profile.as_deref(),
+            identity.stage.as_deref(),
+        )
+        .then(|| crate::native_skills::section(&self.root))
+        .flatten()
+        .unwrap_or_default();
         let mut attempt: u32 = 0;
         let (session, engine, broker, external) = loop {
             attempt += 1;
@@ -635,7 +647,9 @@ impl NativeHost {
                     }
                     None => false,
                 };
-                engine = Some(Engine::launch(launch, policy.clone()).await?);
+                let instruction_file = (engine_kind == cortex_engine::environment::EngineKind::Codex)
+                    .then(|| broker.as_ref().unwrap().write_model_instructions(&instructions)).transpose()?;
+                engine = Some(Engine::launch_with_model_instructions(launch, policy.clone(), instruction_file.as_deref()).await?);
                 let e = engine.as_ref().unwrap();
                 let b = broker.as_ref().unwrap();
                 phase = "broker_bind";
@@ -676,7 +690,11 @@ impl NativeHost {
                 // Every Claude session starts without native shell/edit/subagent
                 // tools, bypass, hooks, plugins, skills or other MCP configuration.
                 let meta = (engine_kind == cortex_engine::environment::EngineKind::Claude)
-                    .then(crate::native_engine_policy::claude_session_meta);
+                    .then(|| {
+                        let mut meta = crate::native_engine_policy::claude_session_meta();
+                        meta["systemPrompt"] = json!(&instructions);
+                        meta
+                    });
                 let s = e
                     .start_session_with_meta(&self.root, servers, meta, route.deadline)
                     .await?;
@@ -840,19 +858,8 @@ impl NativeHost {
             broker,
             external,
             session,
-            instructions: format!(
-                "{instructions}{}\n\n{}",
-                // Only roles served project_read see the project's own skills.
-                crate::native_skills::project_files(
-                    &identity.role,
-                    identity.profile.as_deref(),
-                    identity.stage.as_deref()
-                )
-                .then(|| crate::native_skills::section(&self.root))
-                .flatten()
-                .unwrap_or_default(),
-                route.instructions
-            ),
+            instructions,
+            project_context,
             engine_kind,
             policy,
             delivered_attachments: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -888,6 +895,7 @@ pub struct SessionDriver {
     external: Vec<crate::native_mcp::Attachment>,
     session: Session,
     instructions: String,
+    project_context: String,
     engine_kind: cortex_engine::environment::EngineKind,
     policy: Arc<CorePolicy>,
     /// Retained attachment bodies already delivered to this engine session.
@@ -917,7 +925,10 @@ impl SessionDriver {
                 .write(move |db| cortex_core::recovery_context::delivery_tx(db, &c))?,
         )
         .await?;
-        let prompt = format!("{}\n\n{}\n\n{}", self.instructions, capsule, text);
+        let mut prompt = format!("{}\n\n{capsule}\n\n{text}", self.project_context);
+        if self.engine_kind == cortex_engine::environment::EngineKind::OpenCode {
+            prompt = format!("{}\n\n{prompt}", self.instructions);
+        }
         let task = self
             .policy
             .check(true)
@@ -1563,7 +1574,7 @@ impl CorePolicy {
         .await
         .map_err(tool_error)
     }
-    /// `read_batch`: up to eight allowlisted evidence reads, preflighted together,
+    /// `read_batch`: up to eight batchable read-only reads, preflighted together,
     /// then executed one at a time through the same handler a direct call uses,
     /// with channel authority rechecked between items.
     async fn batch(
@@ -1772,7 +1783,11 @@ impl CorePolicy {
                 );
             }
             if crate::native_commands::supports(&name) {
-                return crate::native_commands::execute(
+                let key = arguments["request_key"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned();
+                let result = crate::native_commands::execute(
                     self.executor.clone(),
                     self.credential.clone(),
                     self.root.clone(),
@@ -1782,8 +1797,18 @@ impl CorePolicy {
                     &name,
                     arguments,
                 )
-                .await
-                .map_err(tool_error);
+                .await;
+                if let Err(error) = &result {
+                    crate::native_commands::record_failure(
+                        &self.executor,
+                        &self.credential,
+                        &key,
+                        "command_call",
+                        error,
+                    )
+                    .await;
+                }
+                return result.map_err(tool_error);
             }
             if crate::native_project::supports(&name) || crate::native_sources::supports(&name) {
                 let result = receive(

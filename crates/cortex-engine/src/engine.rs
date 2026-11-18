@@ -432,8 +432,25 @@ impl Inner {
 }
 impl Engine {
     pub async fn launch(spec: LaunchSpec, policy: Arc<dyn PermissionPolicy>) -> Result<Self> {
+        Self::launch_with_model_instructions(spec, policy, None).await
+    }
+    pub async fn launch_with_model_instructions(
+        spec: LaunchSpec,
+        policy: Arc<dyn PermissionPolicy>,
+        instructions: Option<&std::path::Path>,
+    ) -> Result<Self> {
         policy.authority().await?;
-        let env = spec.launch_environment()?;
+        let mut env = spec.launch_environment()?;
+        if let Some(path) = instructions {
+            if spec.engine != crate::environment::EngineKind::Codex || !path.is_absolute() {
+                return Err(Error::Invalid);
+            }
+            let mut config: Value =
+                serde_json::from_str(&crate::environment::codex_thread_config())
+                    .map_err(|_| Error::Invalid)?;
+            config["model_instructions_file"] = json!(path);
+            env.insert(crate::environment::CODEX_CONFIG.into(), config.to_string());
+        }
         let mut child = Command::new(&spec.executable)
             .args(&spec.args)
             .current_dir(&spec.cwd)

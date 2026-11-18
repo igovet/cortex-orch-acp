@@ -98,7 +98,7 @@
           "name": "Build and sign the APK for the selected channel",
           "env": {
             "CORTEX_ANDROID_KEYSTORE_PASSWORD": "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}",
-            "CORTEX_ANDROID_KEY_ALIAS": "${{ secrets.ANDROID_KEY_ALIAS || cortex-workspace }}"
+            "CORTEX_ANDROID_KEY_ALIAS": "${{ secrets.ANDROID_KEY_ALIAS || 'cortex-workspace' }}"
           },
           "run": "case \"$GITHUB_REF\" in\n  refs/heads/main) channel_flag=--release ;;\n  refs/heads/dev) channel_flag= ;;\n  *) exit 1 ;;\nesac\n[ -n \"${JAVA_HOME_17_X64:-}\" ] || { echo \"JDK 17 is not available on this runner\" >&2; exit 1; }\nexport JAVA_HOME=\"$JAVA_HOME_17_X64\"\nexport NDK_HOME=\"${ANDROID_NDK_LATEST_HOME:-}\"\nexport CORTEX_ANDROID_KEYSTORE=\"$RUNNER_TEMP/release.jks\"\nscripts/build-android-apk.sh $channel_flag"
         },

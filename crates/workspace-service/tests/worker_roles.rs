@@ -196,7 +196,15 @@ async fn role_peer() {
                     .rsplit_once("\n\n")
                     .map_or(raw.as_str(), |(_, t)| t)
                     .to_owned();
-                let mut record = json!({"prompt":raw,"blocks":r["params"]["prompt"].as_array().map_or(0,|a|a.len()),
+                let system = meta["systemPrompt"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        let v: Value =
+                            serde_json::from_str(&std::env::var("CODEX_CONFIG").ok()?).ok()?;
+                        std::fs::read_to_string(v["model_instructions_file"].as_str()?).ok()
+                    });
+                let mut record = json!({"system":system,"prompt":raw,"blocks":r["params"]["prompt"].as_array().map_or(0,|a|a.len()),
                     "mode":mode,"meta":meta});
                 let mut refused = false;
                 if let Some(calls) = tail.strip_prefix("call:") {
@@ -457,6 +465,7 @@ fn precise_error(reply: &Value) -> Result<String, String> {
 }
 
 struct Turn {
+    system: String,
     prompt: String,
     tools: Vec<Value>,
     replies: Vec<Value>,
@@ -486,6 +495,7 @@ async fn turn(d: &SessionDriver, home: &Path, calls: &[Value]) -> Turn {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(Value::Null);
     Turn {
+        system: record["system"].as_str().unwrap_or("").to_owned(),
         prompt: record["prompt"].as_str().unwrap_or("").to_owned(),
         tools: record["tools"]["result"]["tools"]
             .as_array()
@@ -625,6 +635,19 @@ async fn battery(
     // 1. Session-start bundle, structurally.
     let first = turn(&d, &home, &[]).await;
     let prompt = first.prompt.clone();
+    let system = if engine == EngineKind::OpenCode {
+        &prompt
+    } else {
+        &first.system
+    };
+    if engine != EngineKind::OpenCode {
+        ledger.check(
+            role,
+            "role instructions only in the system layer",
+            !prompt.contains(FIXTURE_INSTRUCTIONS) && system.contains("tools_discover"),
+            "",
+        );
+    }
     ledger.check(role, "turn ends", first.stop == "end_turn", &first.stop);
     // The engine mode follows the channel's capability: a read-only profile or a
     // review-stage session is never in a mode that writes or skips the engine's
@@ -672,29 +695,29 @@ async fn battery(
     ledger.check(
         role,
         "profile body delivered",
-        !body.is_empty() && prompt.contains(body.trim()),
+        !body.is_empty() && system.contains(body.trim()),
         "instructions.json body",
     );
     ledger.check(
         role,
         "inlined skills section",
-        prompt.contains("## Skills already included"),
+        system.contains("## Skills already included"),
         "",
     );
     ledger.check(
         role,
         "route instructions",
-        prompt.contains(FIXTURE_INSTRUCTIONS),
+        system.contains(FIXTURE_INSTRUCTIONS),
         "",
     );
-    let cheat = prompt.contains("# Cortex tool cheat sheet (code mode)");
+    let cheat = system.contains("# Cortex tool cheat sheet (code mode)");
     if engine == EngineKind::Codex {
         let missing: Vec<_> = expected
             .iter()
             .filter(|t| {
-                !prompt.contains(&format!("\n{t}:"))
-                    && !prompt.contains(&format!("- {t}"))
-                    && !prompt.contains(&format!("`{t}`"))
+                !system.contains(&format!("\n{t}:"))
+                    && !system.contains(&format!("- {t}"))
+                    && !system.contains(&format!("`{t}`"))
             })
             .cloned()
             .collect();
@@ -819,7 +842,7 @@ async fn battery(
                     && event["capsule"]["sha256"]
                         .as_str()
                         .is_some_and(|s| s.len() == 64)
-                    && prompt.contains(FIXTURE_INSTRUCTIONS),
+                    && system.contains(FIXTURE_INSTRUCTIONS),
                 "",
             );
             ledger.check(

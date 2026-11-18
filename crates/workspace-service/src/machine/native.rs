@@ -312,6 +312,11 @@ pub async fn run(
                     )
                     .await
                 }
+                // The recorded pull request address of a task, for the desktop's opener.
+                "repo.locate" if params.get("pullRequest").is_some() => {
+                    super::integration::pull_request_address(root, project, state, params, &mut git)
+                        .await
+                }
                 "repo.locate" => {
                     let wanted = params["checkoutId"]
                         .as_str()

@@ -913,7 +913,7 @@ async fn channel_source_project_and_commands() {
         &w,
         "project_edit",
         json!({"path":"src/overlap","edits":[{"old_string":"aa","new_string":"b"}]}),
-        json!({"/result/isError":true,"/result/structuredContent/code":"gateway_edit_not_unique","/result/structuredContent/field":"edits"}),
+        json!({"/result/isError":true,"/result/structuredContent/code":"gateway_edit_not_unique","/result/structuredContent/field":"edits[0].old_string"}),
     )
     .await;
     // Ordered replacements are atomic, including when a later anchor is absent.
@@ -922,7 +922,7 @@ async fn channel_source_project_and_commands() {
         "project_edit",
         json!({"path":"src/overlap","edits":[
         {"old_string":"aaa","new_string":"first"},{"old_string":"missing","new_string":"second"}]}),
-        json!({"/result/isError":true,"/result/structuredContent/code":"gateway_edit_not_found","/result/structuredContent/field":"edits"}),
+        json!({"/result/isError":true,"/result/structuredContent/code":"gateway_edit_not_found","/result/structuredContent/field":"edits[1].old_string"}),
     )
     .await;
     assert_eq!(
@@ -935,7 +935,7 @@ async fn channel_source_project_and_commands() {
         &w,
         "project_edit",
         json!({"path":"src/overlap","edits":[{"old_string":"b","new_string":"b"}]}),
-        json!({"/result/isError":true,"/result/structuredContent/code":"gateway_edit_no_change","/result/structuredContent/field":"edits"}),
+        json!({"/result/isError":true,"/result/structuredContent/code":"gateway_edit_no_change","/result/structuredContent/field":"edits[0].new_string"}),
     )
     .await;
     check(
@@ -949,7 +949,7 @@ async fn channel_source_project_and_commands() {
         &w,
         "project_edit",
         json!({"path":"src/overlap","edits":[{"old_string":"éé","new_string":"x"}]}),
-        json!({"/result/isError":true,"/result/structuredContent/code":"gateway_edit_not_unique","/result/structuredContent/field":"edits"}),
+        json!({"/result/isError":true,"/result/structuredContent/code":"gateway_edit_not_unique","/result/structuredContent/field":"edits[0].old_string"}),
     )
     .await;
     check(&w,"project_edit",json!({"path":"src/overlap","edits":[{"old_string":"éé","new_string":"x","replace_all":true}]}),
@@ -1043,6 +1043,42 @@ async fn channel_source_project_and_commands() {
     )
     .await;
     if verification_available(&p.0) {
+        // Hold a real process until the same channel has read a file, replayed
+        // its key and polled the command. A blocking MCP handler cannot pass.
+        let args = json!({"argv":["/bin/sh","-c","while [ ! -f release-command ]; do sleep 0.1; done"],"timeout_seconds":20,"request_key":"background"});
+        let pending = json!({"/result/structuredContent/state":"running","/result/structuredContent/settled":false});
+        check(&w, "command_run", args.clone(), pending.clone()).await;
+        let reference: String = s.read(|db| Ok(db.query_row("SELECT json_extract(result_json,'$.tool_call_ref') FROM runtime_requests WHERE request_key='background'",[],|r|r.get(0))?)).unwrap();
+        check(&w, "command_run", args, pending.clone()).await;
+        check(
+            &w,
+            "command_status",
+            json!({"tool_call_ref":reference}),
+            pending,
+        )
+        .await;
+        check(
+            &w,
+            "project_read",
+            json!({"path":"src/value"}),
+            json!({"/result/isError":false}),
+        )
+        .await;
+        std::fs::write(p.0.join("release-command"), "ready").unwrap();
+        tokio::time::timeout(Duration::from_secs(8),async {
+            loop {
+                if s.read(|db| Ok(db.query_row("SELECT json_extract(result_json,'$.settled') IS 1 FROM runtime_requests WHERE request_key='background'",[],|r|r.get::<_,bool>(0))?)).unwrap() { break; }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }).await.unwrap();
+        check(&w,"command_status",json!({"tool_call_ref":reference}),json!({"/result/structuredContent/exit_code":0,"/result/structuredContent/settled":true})).await;
+        check(
+            &w,
+            "command_run",
+            json!({"argv":["/bin/true"],"cwd":p.0.join("absent-cwd"),"request_key":"missing-cwd"}),
+            json!({"/result/structuredContent/code":"invalid_cwd"}),
+        )
+        .await;
         // A writing role's declared reservation does not restrict project writes.
         check(&w,"command_run",json!({"argv":["/usr/bin/touch","new-unreserved"],"request_key":"unreserved"}),
             json!({"/result/structuredContent/exit_code":0,"/result/structuredContent/profile":"development"})).await;
@@ -1232,6 +1268,41 @@ async fn channel_source_project_and_commands() {
             json!({"/result/isError":true}),
         )
         .await;
+        let other: String = s.read(|db| Ok(db.query_row("SELECT json_extract(result_json,'$.tool_call_ref') FROM runtime_requests WHERE request_key='background'",[],|row|row.get(0))?)).unwrap();
+        check(
+            &r,
+            "command_status",
+            json!({"tool_call_ref":other}),
+            json!({"/result/structuredContent/code":"unknown_command_ref"}),
+        )
+        .await;
+        // Fail only the final receipt transaction after the process has run.
+        s.write(|db| { db.execute_batch("CREATE TRIGGER fixture_refuse_settlement BEFORE INSERT ON large_outputs BEGIN SELECT RAISE(ABORT,'fixture'); END")?; Ok(()) }).unwrap();
+        let lost = json!({"argv":["/bin/true"],"request_key":"settlement-failure"});
+        check(
+            &r,
+            "command_run",
+            lost.clone(),
+            json!({"/result/structuredContent/code":"command_outcome_unknown"}),
+        )
+        .await;
+        s.write(|db| {
+            db.execute_batch("DROP TRIGGER fixture_refuse_settlement")?;
+            Ok(())
+        })
+        .unwrap();
+        check(
+            &r,
+            "command_run",
+            lost,
+            json!({"/result/structuredContent/code":"command_outcome_unknown"}),
+        )
+        .await;
+        s.read(|db|{
+            let count:i64=db.query_row("SELECT count(*) FROM runtime_events WHERE type='NATIVE_COMMAND_DIAGNOSTIC' AND json_extract(payload_json,'$.phase')='settlement' AND json_extract(payload_json,'$.stage')='after_process_registration'",[],|row|row.get(0))?;
+            assert_eq!(count,1);
+            Ok(())
+        }).unwrap();
     }
     r.shutdown().await.unwrap();
     drop(s);
@@ -2591,11 +2662,17 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
 /// The configured-session record carries the engine's own name for the model: an alias such as
 /// `default` reads with the concrete model its entry describes.
 async fn engine_model_name_is_recorded_with_the_configured_session() {
-    for (model, label) in [("default", Some("Default (Opus 5.5)")), ("fixture-model", Some("Fixture"))] {
+    for (model, label) in [
+        ("default", Some("Default (Opus 5.5)")),
+        ("fixture-model", Some("Fixture")),
+    ] {
         let p = Project::new();
         std::fs::write(p.0.join("model-alias"), "").unwrap();
         let h = p.host().await;
-        let o = h.create("t".into(), "Work".into(), "owner".into()).await.unwrap();
+        let o = h
+            .create("t".into(), "Work".into(), "owner".into())
+            .await
+            .unwrap();
         let s = p.store();
         s.write(|db| {
             db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='t'", [])?;
@@ -2606,7 +2683,14 @@ async fn engine_model_name_is_recorded_with_the_configured_session() {
         let mut route = p.route();
         route.model = model.into();
         let d = h
-            .dispatch("t".into(), o, SessionRole::Worker { assignment: "a".into() }, route)
+            .dispatch(
+                "t".into(),
+                o,
+                SessionRole::Worker {
+                    assignment: "a".into(),
+                },
+                route,
+            )
             .await
             .unwrap();
         let payload: Value = serde_json::from_str(&s.read(|db| Ok(db.query_row(
@@ -5379,18 +5463,42 @@ async fn recovery_project_operations_and_structured_tool_errors() {
             "/result/structuredContent/results/2/status":"error",
             "/result/structuredContent/results/2/error/code":"not_found",
             "/result/structuredContent/results/3/status":"ok"}), "end_turn").await;
-    // A project or skill read, a write and a recursive batch are not batchable reads:
-    // the advertised item schema refuses them before anything runs.
-    for tool in ["project_read", "read_skill", "project_write", "read_batch"] {
+    // A write, a decision, a probe and a recursive batch are not batchable: the advertised
+    // item enum refuses them before anything runs, naming the exact field and constraint.
+    for tool in ["project_write", "plan_submit", "check_preflight", "read_batch"] {
         checked(
             &d,
             "read_batch",
             json!({"calls":[{"id":"x","tool":tool,"arguments":{}}]}),
-            json!({"/error/code":-32602,"/error/data/code":"invalid_arguments"}),
+            json!({"/error/code":-32602,"/error/data/code":"invalid_arguments",
+                "/error/data/field":"arguments.calls[0].tool","/error/data/reason":"invalid_enum"}),
             "refusal",
         )
         .await;
     }
+    // Newly batchable reads run through their own handlers. A private path is refused
+    // inside the batch exactly as a direct call refuses it; the other items still deliver.
+    std::fs::write(p.0.join("notes.txt"), "batched line\n").unwrap();
+    checked(&d, "read_batch", json!({"calls":[
+        {"id":"file","tool":"project_read","arguments":{"path":"notes.txt"}},
+        {"id":"dir","tool":"project_read","arguments":{"path":"."}},
+        {"id":"private","tool":"project_read","arguments":{"path":".cortex/cortex.sqlite3"}},
+        {"id":"skill","tool":"read_skill","arguments":{"skill":"no-such-skill"}},
+        {"id":"ctx","tool":"task_get_context","arguments":{}},
+        {"id":"tool","tool":"tools_discover","arguments":{"name":"read_report"}}]}),
+        json!({"/result/isError":true,"/result/structuredContent/outcome":"incomplete",
+            "/result/structuredContent/executed_count":6,
+            "/result/structuredContent/results/0/status":"ok",
+            "/result/structuredContent/results/0/result/content":"1\tbatched line\n",
+            "/result/structuredContent/results/1/status":"ok",
+            "/result/structuredContent/results/2/status":"error",
+            "/result/structuredContent/results/2/error/code":"private_or_invalid_path",
+            "/result/structuredContent/results/3/status":"error"}), "end_turn").await;
+    checked(&d, "project_read", json!({"path":".cortex/cortex.sqlite3"}),
+        json!({"/result/isError":true,"/result/structuredContent/code":"private_or_invalid_path"}), "end_turn").await;
+    // A batched project_read leaves the same channel read coverage as a direct read.
+    checked(&d, "read_batch", json!({"calls":[{"id":"file","tool":"project_read","arguments":{"path":"notes.txt"}}]}),
+        json!({"/result/isError":false,"/result/structuredContent/results/0/result/read_coverage_complete":true}), "end_turn").await;
     // At most eight items, unique ids, member arguments valid for that member.
     let nine: Vec<_> = (0..9)
         .map(|n| json!({"id":format!("i{n}"),"tool":"list_reports","arguments":{}}))

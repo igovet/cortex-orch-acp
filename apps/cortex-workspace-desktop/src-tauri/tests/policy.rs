@@ -728,6 +728,7 @@ fn every_request_the_real_port_sends_is_allowed() {
             }
             "native.save_attachment" => json!({"name":"shot.png","data":"eA=="}),
             "native.engine_login" => json!({"engine":"claude-agent-acp"}),
+            "native.open_pull_request" => json!({"projectId":"wp_1","taskId":"wt_1"}),
             "native.query" => native(
                 "tasks.page",
                 json!({"target":"wp_1","cursor":null,"limit":50}),

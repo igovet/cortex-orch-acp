@@ -115,13 +115,34 @@ pub async fn complete(
     launch.cwd = scratch.0.clone();
     let claude = launch.engine == EngineKind::Claude;
     let asked = Arc::new(AtomicBool::new(false));
-    let engine = Engine::launch(launch, Arc::new(DenyAll(asked.clone())))
-        .await
-        .map_err(|_| "engine_unavailable")?;
+    let system = "Generate the requested short editable text. Use the supplied context. Respond with text only.";
+    let prompt_dir = Scratch::new().map_err(|_| "no_private_directory")?;
+    let path = prompt_dir.0.join("model-instructions.md");
+    if !claude {
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .and_then(|mut f| f.write_all(system.as_bytes()))
+            .map_err(|_| "no_private_directory")?;
+    }
+    let engine = Engine::launch_with_model_instructions(
+        launch,
+        Arc::new(DenyAll(asked.clone())),
+        (!claude).then_some(path.as_path()),
+    )
+    .await
+    .map_err(|_| "engine_unavailable")?;
     let step = STEP.min(budget);
     let turn = async {
         engine.initialize(step).await.map_err(|_| "engine_failed")?;
-        let meta = claude.then(crate::native_engine_policy::claude_session_meta);
+        let meta = claude.then(|| {
+            let mut meta = crate::native_engine_policy::claude_session_meta();
+            meta["systemPrompt"] = Value::from(system);
+            meta
+        });
         let session = engine
             .start_session_with_meta(&scratch.0, vec![], meta, step)
             .await

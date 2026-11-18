@@ -34,12 +34,13 @@ describe("a diverged checkout in the title band", () => {
     const why = Object.fromEntries(gitItems(f).map(i => [i.id, i.why]));
     expect(why.push).toBe(`${PULL_FIRST} ${DIVERGED}`);
     expect(why.push).toContain("The remote has commits you do not have. Pull first.");
-    expect(why.pull).toBe(DIVERGED);
+    // Pull… asks how to bring the remote commits in (merge or rebase); Pull and push stays off until the branch has them.
+    expect(why.pull).toBeUndefined();
     expect(why.pull_push).toBe(DIVERGED);
     expect(DIVERGED).toMatch(/diverged/);
-    expect(DIVERGED).toMatch(/terminal/);
+    expect(DIVERGED).toMatch(/merge or rebase/);
     expect(DIVERGED).not.toMatch(/force/i);
-    expect(gitPrimary(f)).toMatchObject({ id: "pull_push", label: "Pull and push", why: DIVERGED });
+    expect(gitPrimary(f)).toMatchObject({ id: "pull", label: "Pull…", why: undefined });
     // Only ahead, or only behind, is unchanged.
     expect(gitPrimary(facts(world(checkout({ ahead: 1 }))))).toMatchObject({ id: "push", why: undefined });
     expect(gitPrimary(facts(world(checkout({ behind: 1 }))))).toMatchObject({ id: "pull", why: undefined });

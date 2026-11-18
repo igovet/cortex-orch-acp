@@ -97,6 +97,8 @@ export function AcceptBlocker(props: { m: SessionModel; id?: string }) {
   };
   const ask = (text: string) => ws.run({ type: "request_changes", taskId: t().id, text, now: ws.store.clock() });
   const conflict = (): Route => ({ name: "task", machine: props.m.view.machine.id, task: t().id, tab: "changes", sub: "conflict" });
+  const closableAsIs = () => !!reason() && t().status === "review" && t().result?.acceptanceAvailable === false && t().reviewActions?.pending !== true
+    && t().conflict === "none" && props.m.mode === "review";
   return <>
     <Show when={ws.store.acceptanceIssue()?.taskId === t().id && !t().acceptance && ws.store.acceptanceIssue()}>{issue => <Strip class="rv-accept-error" tone="fail" role="alert" icon={<I n="alert" s={14} class="st-bad" />}
       action={<button class="btn btn-line btn-sm" onClick={() => void ws.store.reload()}>Refresh result</button>}>{issue().message} Acceptance was not confirmed. Refresh the result before trying again.</Strip>}</Show>
@@ -112,7 +114,11 @@ export function AcceptBlocker(props: { m: SessionModel; id?: string }) {
       </Match>
       <Match when={t().reviewActions?.unblockAction === "request_changes" || t().result?.acceptanceAvailable === false}><button class="btn btn-line btn-sm" {...ws.needs("request_changes")} onClick={() => ws.open({ kind: "changes", taskId: t().id, text: "Please complete the missing review and checks, then publish a fresh result." })}>Request a new result…</button></Match>
       <Match when={t().reviewActions?.unblockAction === "refresh"}><button class="btn btn-line btn-sm" onClick={() => void ws.store.reload()}>Refresh result</button></Match>
-    </Switch>}>{sentence(why())}</Strip>}</Show></>;
+    </Switch>}>{sentence(why())}</Strip>}</Show>
+    {/* A runtime result that can never be accepted (its evidence is unavailable, or it comes from an earlier version) still has
+        a way to finish: the owner can close it as is, marked not verified. */}
+    <Show when={closableAsIs()}><Strip class="rv-close" tone="info" role="status" icon={<I n="circle" s={14} class="faint" />}
+      action={<button class="btn btn-line btn-sm" {...ws.needs("close_task")} onClick={() => ws.closeTask(t().id)}>Close as is…</button>}>Or keep what was done without accepting it.</Strip></Show></>;
 }
 
 /** The decision on a result, at the top of Changes: the version, its checks, Request changes and Accept, in one row. */

@@ -352,7 +352,7 @@ fn thread_features(session: bool) -> io::Result<()> {
         None => return Err(invalid()),
         Some(raw) => raw.into_string().map_err(|_| invalid())?,
     };
-    if raw.len() > 4096 {
+    if raw.len() > 8192 {
         return Err(invalid());
     }
     let data: Value = serde_json::from_str(&raw).map_err(|_| invalid())?;
@@ -361,7 +361,16 @@ fn thread_features(session: bool) -> io::Result<()> {
         .get("features")
         .and_then(Value::as_object)
         .ok_or_else(invalid)?;
-    if object.len() != 1
+    let instruction_file = object.get("model_instructions_file");
+    if instruction_file.is_some_and(|v| {
+        !v.as_str().is_some_and(|s| {
+            let path = Path::new(s);
+            path.is_absolute()
+                && path
+                    .file_name()
+                    .is_some_and(|n| n == "model-instructions.md")
+        })
+    }) || object.len() != 1 + usize::from(instruction_file.is_some())
         || features.len() != CODEX_DISABLED_FEATURES.len()
         || !CODEX_DISABLED_FEATURES
             .iter()

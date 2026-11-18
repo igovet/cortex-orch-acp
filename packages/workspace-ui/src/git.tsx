@@ -1,6 +1,7 @@
 import { createMemo, createSignal, createUniqueId, For, Show } from "solid-js";
 import { GitLetter } from "./diff";
-import type { Commit, GitFile, ProjectRepo, RepoCheckout } from "@cortex/workspace-domain";
+import type { CheckoutOperation, Commit, GitFile, ProjectRepo, RepoCheckout } from "@cortex/workspace-domain";
+import { operationWord, STOPPED, stoppedPull, updateBlocked } from "./git-actions-model";
 import { useWs } from "./ctx";
 import { A, Count, I, Keyed, MenuItem, place, Pop, useWantOverview } from "./kit";
 import { ActionBar, revealCutIn, SectionHead, Toolbar } from "./layout";
@@ -28,14 +29,20 @@ function Status(props: { repo: ProjectRepo; c: RepoCheckout; codeAt: (path: stri
   const c = () => props.c;
   const task = createMemo(() => c().taskId ? ws.store.index().byId.get(c().taskId!) ?? null : null);
   const merge = () => { const t = task()?.task; return t && inConflict(t) ? t.merge : null; };
-  const group = (stage: GitFile["stage"]) => c().files.filter(f => f.stage === stage);
+  // A pull (or the owner's own merge or rebase) stopped here: its conflicted files are listed apart, each marked resolved by staging it.
+  const stopped = () => stoppedPull(c(), task()?.task);
+  const conflicted = () => new Set(stopped()?.conflicts ?? []);
+  const group = (stage: GitFile["stage"]) => c().files.filter(f => f.stage === stage && !(stage === "unstaged" && conflicted().has(f.path)));
   const staged = () => group("staged").length + (merge()?.files.filter(fileResolved).length ?? 0) + (merge()?.clean.length ?? 0);
   // Nothing staged means everything is committed, as in most Git tools: the button never sits dead beside a list of changes.
-  const blocked = () => merge() ? "Resolve the conflict first" : !c().files.length ? "There are no changes to commit" : !c().draft.trim() ? "Write a commit message first" : undefined;
+  const blocked = () => merge() ? "Resolve the conflict first" : stopped() ? STOPPED : !c().files.length ? "There are no changes to commit" : !c().draft.trim() ? "Write a commit message first" : undefined;
   const stagesAll = () => !merge() && group("staged").length === 0 && c().files.length > 0;
   const remote = () => !!props.repo.remote.trim();
   const noUpstream = () => c().upstream !== undefined ? !c().upstream : !props.repo.remote;
-  const pullBlocked = () => noUpstream() ? "No upstream is configured for this checkout" : !c().behind ? "No incoming commits in the last fetched state. Fetch to check the upstream." : undefined;
+  const diverged = () => !noUpstream() && c().ahead > 0 && c().behind > 0;
+  const pullBlocked = () => stopped() ? STOPPED : noUpstream() ? "No upstream is configured for this checkout" : !c().behind ? "No incoming commits in the last fetched state. Fetch to check the upstream." : undefined;
+  // Diverged histories ask how to bring the remote commits in; otherwise Pull fast-forwards.
+  const pull = () => { if (pullBlocked()) return; if (diverged()) ws.open({ kind: "pull", checkoutId: c().id, ...(c().taskId ? { taskId: c().taskId! } : {}) }); else ws.run({ type: "git_pull", checkoutId: c().id, now: ws.store.clock() }); };
   let commitButton: HTMLButtonElement | undefined, refreshButton: HTMLButtonElement | undefined, committing = false;
   // Staging and committing are one action: the button stays busy to the end, and neither a click nor Ctrl+Enter starts it twice.
   const commit = () => {
@@ -60,7 +67,7 @@ function Status(props: { repo: ProjectRepo; c: RepoCheckout; codeAt: (path: stri
         <button class="ib" aria-label="Refresh Git status" ref={refreshButton} onClick={() => void ws.busy(ws.store.refreshProjectFacts(props.repo.projectId, true), refreshButton)}><I n="refresh" /></button>
         <Show when={remote()}>
         <button class="ib" aria-label="Fetch" {...ws.needs("git_fetch")} aria-describedby={describe(ws.gate("git_fetch"))} onClick={() => ws.run({ type: "git_fetch", projectId: props.repo.projectId, now: ws.store.clock() })}><I n="refresh" /></button>
-        <button class="ib" data-why={pullBlocked()} aria-label="Pull" {...ws.needs("git_pull")} aria-disabled={pullBlocked() || !ws.can("workspace.git_pull") ? "true" : undefined} aria-describedby={describe(pullBlocked() || !ws.can("workspace.git_pull"))} onClick={() => { if (!pullBlocked()) ws.run({ type: "git_pull", checkoutId: c().id, now: ws.store.clock() }); }}><I n="download" /></button>
+        <button class="ib" data-why={pullBlocked()} aria-label={diverged() ? "Pull…" : "Pull"} {...ws.needs("git_pull")} aria-disabled={pullBlocked() || !ws.can("workspace.git_pull") ? "true" : undefined} aria-describedby={describe(pullBlocked() || !ws.can("workspace.git_pull"))} onClick={pull}><I n="download" /></button>
         <button class="ib" aria-label="Push" {...ws.needs("git_push")} aria-describedby={describe(ws.gate("git_push"))} onClick={() => ws.open({ kind: "push", checkoutId: c().id })}><I n="upload" /></button>
         </Show>
       </>} />
@@ -69,6 +76,11 @@ function Status(props: { repo: ProjectRepo; c: RepoCheckout; codeAt: (path: stri
         <SectionHead class="git-g" title="Conflicts" count={conflictFacts(m()).leftFiles} />
         <For each={m().files.filter(f => !fileResolved(f))}>{f => <A class="gf" to={conflictTo()}><Row path={f.path} status="C" /><span class="acts on"><span class="btn btn-line btn-sm">Resolve</span></span></A>}</For>
       </>}</Show>
+      <Show when={stopped()?.conflicts.length}>
+        <SectionHead class="git-g" title="Conflicts" count={stopped()!.conflicts.length} />
+        <For each={stopped()!.conflicts}>{path => <div class="gf"><button class="ws-gf" onClick={() => props.codeAt(path)}><Row path={path} status="C" /></button>
+          <span class="acts on"><button class="btn btn-line btn-sm" {...ws.needs("git_stage")} onClick={() => ws.run({ type: "git_stage", checkoutId: c().id, path, staged: true })}>Mark resolved</button></span></div>}</For>
+      </Show>
       <Show when={staged() > 0}><SectionHead class="git-g" title="Staged" count={staged()} /></Show>
       <For each={merge()?.files.filter(fileResolved) ?? []}>{f => <div class="gf"><Row path={f.path} status="M" /></div>}</For>
       <For each={merge()?.clean ?? []}>{f => <div class="gf"><Row path={f.path} status={f.status} /></div>}</For>
@@ -165,7 +177,8 @@ function Worktrees(props: { repo: ProjectRepo | null; summary: ProjectSummary; p
         <MenuItem icon="external" label={ws.externalLabel()} disabled={ws.noOpener("workspace.open_editor", "noExternal")} onSelect={() => { const x = c(); if (x) ws.run({ type: "open_editor", projectId: x.projectId, checkoutId: x.id }); }} />
         <Show when={task()}>{v => <>
           <div class="mi-sep"></div>
-          <MenuItem icon="refresh" label="Update from base…" disabled={finished()} needs="update_from_target" onSelect={() => { ws.run({ type: "update_from_target", taskId: v().id, now: ws.store.clock() }); }} />
+          <Show when={v().task.checkout.kind === "worktree" && !sameBranch(v().task, v().target)}>
+            <MenuItem icon="refresh" label={`Update from ${v().target}…`} disabled={finished() ?? updateBlocked(c(), v())} needs="update_from_target" onSelect={() => ws.open({ kind: "update", taskId: v().id })} /></Show>
           <Show when={!sameBranch(v().task, v().target)}>
           <MenuItem icon="merge" label="Merge…" disabled={mergeable()} needs="integrate" onSelect={() => ws.open({ kind: "merge", taskId: v().id, how: "squash" })} />
           <Show when={props.repo?.remote.trim()}><PrItem taskId={v().id} blocked={mergeable()} /></Show>
@@ -189,14 +202,36 @@ export function NoGit(props: { projectId: string }) {
     <button class="btn btn-line ws-mt8" {...ws.needs("git_init")} onClick={create}>Create empty repository</button></div>;
 }
 
+/**
+ * A pull, or the owner's own merge or rebase, stopped in the checkout on view: what stopped it, and its two ways out. Continue
+ * finishes it once every conflicted file is resolved and marked resolved; Abort returns the checkout exactly to where it was.
+ */
+export function StoppedPull(props: { checkout: RepoCheckout; op: CheckoutOperation }) {
+  const ws = useWs();
+  const word = () => operationWord(props.op);
+  const left = () => props.op.conflicts.length;
+  const into = () => props.checkout.branch || props.op.branch || "this checkout";
+  const go = () => ws.run({ type: "git_pull_continue", checkoutId: props.checkout.id, now: ws.store.clock() });
+  const abort = () => ws.open({ kind: "confirm", title: `Abort the ${word()}?`, action: `Abort ${word()}`, danger: true,
+    note: `Returns ${into()} to exactly where it was before the ${word()}: the same commit, staged files and tracked files. Any conflict you resolved here is discarded. Untracked files stay.`,
+    go: () => ws.run({ type: "git_pull_abort", checkoutId: props.checkout.id, confirmed: true, now: ws.store.clock() }).then(r => r.ok) });
+  const why = () => left() ? `Resolve ${left()} conflicting file${left() === 1 ? "" : "s"} and mark ${left() === 1 ? "it" : "them"} resolved first` : undefined;
+  return <div class={`strip ${left() ? "bad" : "warn"}`} role="status"><I n="alert" s={14} class={left() ? "st-bad" : "st-warn"} />
+    <span>{left() ? <>The {word()} into <span class="mono">{into()}</span> stopped at {left()} conflicting file{left() === 1 ? "" : "s"}. Open each one, keep what should stay, then Mark resolved. Nothing was stashed or reset.</> : <>Every conflict of the {word()} into <span class="mono">{into()}</span> is resolved. Continue to finish it.</>}</span>
+    <span class="acts"><button class="btn btn-primary btn-sm" aria-disabled={why() ? "true" : undefined} data-why={why()} {...(why() ? {} : ws.needs("git_pull_continue"))} onClick={() => { if (!why()) void go(); }}>Continue {word()}</button>
+      <button class="btn btn-line btn-sm" {...ws.needs("git_pull_abort")} onClick={abort}>Abort {word()}…</button></span></div>;
+}
+
 /** Status of one checkout on the left, history or branches on the right. Everything here changes memory only. */
 export function GitView(props: { summary: ProjectSummary; repo: ProjectRepo | null; checkout: RepoCheckout | null; right: "history" | "branches"; onRight: (right: "history" | "branches") => void; onPick: (id: string) => void; codeAt: (path: string) => void }) {
   const ws = useWs();
   const task = createMemo(() => { const id = props.checkout?.taskId; return id ? ws.store.index().byId.get(id) ?? null : null; });
   const stuck = () => { const t = task(); return t && inConflict(t.task) && t.task.conflict !== "resolving" ? t : null; };
+  const stopped = () => stoppedPull(props.checkout, task()?.task);
   return <Show when={props.summary.project.hasGit !== false} fallback={<NoGit projectId={props.summary.project.id} />}><Show when={props.repo && props.checkout} fallback={<div class="note-panel"><span class="w500">No Git record for this project</span><span>{ws.t("noGitFacts")}</span></div>}>
     <Show when={stuck()}>{v => <div class="strip bad"><I n="alert" s={14} class="st-bad" /><span>Merging <span class="mono">{v().task.merge?.source}</span> into <span class="mono">{v().task.merge?.into}</span>: {conflictFacts(v().task.merge!).leftFiles} file{conflictFacts(v().task.merge!).leftFiles === 1 ? "" : "s"} with conflicts.</span>
       <span class="acts"><A class="btn btn-primary btn-sm" to={{ name: "task", machine: v().machine.id, task: v().id, tab: "changes", sub: "conflict" }}>Resolve</A><button class="btn btn-line btn-sm" {...ws.needs("resolve_with_cortex")} onClick={() => ws.open({ kind: "cortex", taskId: v().id })}>Resolve automatically…</button><button class="btn btn-line btn-sm" {...ws.needs("abort_merge")} onClick={() => ws.run({ type: "abort_merge", taskId: v().id, now: ws.store.clock() })}>Abort merge</button></span></div>}</Show>
+    <Show when={stopped()}>{op => <StoppedPull checkout={props.checkout!} op={op()} />}</Show>
     <div class="git-body">
       <Status repo={props.repo!} c={props.checkout!} codeAt={props.codeAt} />
       <section class="git-right" aria-label="History" ref={revealCutIn}>

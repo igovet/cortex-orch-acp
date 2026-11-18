@@ -512,7 +512,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     const shared = negotiate(localCapabilities("workspace-ui", "0", remote.operations), remote);
     offered = shared.operations;
     attachmentSupport = remote.attachments === true;
-    return { everything: false, operations: [...(attachmentSupport ? ["workspace.attachments"] : []), ...WIRE_OPERATIONS.filter(operation => offered.includes(operation)), ...(serviceMethods.includes("native.pick_folder") ? ["workspace.pick_folder"] : []), ...(serviceMethods.includes("directories.search") ? ["workspace.search_folders"] : []), ...(serviceMethods.includes("projects.register") ? ["workspace.add_project"] : []), ...(serviceMethods.includes("projects.rename") ? ["workspace.rename_project"] : []), ...(serviceMethods.includes("projects.activate") ? ["workspace.activate_project"] : []), ...(serviceMethods.includes("projects.remove") ? ["workspace.remove_project"] : []), ...(serviceMethods.includes("native.open_editor") ? ["workspace.open_editor"] : []), ...(serviceMethods.includes("native.open_editor.vscode") ? ["workspace.open_vscode"] : []), ...(serviceMethods.includes("native.open_logs") ? ["workspace.open_logs"] : []), ...(serviceMethods.includes("remote.status") ? [FEATURES.remoteAccess] : []), ...(machineOn ? [...MACHINE_COMMANDS.map(capabilityOf), FEATURES.editFiles, "workspace.worker_messages", ...(serviceMethods.includes("native.query") ? [] : [FEATURES.workerAttachments]), ...(taskWorktrees ? ["workspace.task_worktrees"] : []), "workspace.task_route"] : [])] };
+    return { everything: false, operations: [...(attachmentSupport ? ["workspace.attachments"] : []), ...WIRE_OPERATIONS.filter(operation => offered.includes(operation)), ...(serviceMethods.includes("native.pick_folder") ? ["workspace.pick_folder"] : []), ...(serviceMethods.includes("directories.search") ? ["workspace.search_folders"] : []), ...(serviceMethods.includes("projects.register") ? ["workspace.add_project"] : []), ...(serviceMethods.includes("projects.rename") ? ["workspace.rename_project"] : []), ...(serviceMethods.includes("projects.activate") ? ["workspace.activate_project"] : []), ...(serviceMethods.includes("projects.remove") ? ["workspace.remove_project"] : []), ...(serviceMethods.includes("native.open_editor") ? ["workspace.open_editor"] : []), ...(serviceMethods.includes("native.open_editor.vscode") ? ["workspace.open_vscode"] : []), ...(serviceMethods.includes("native.open_logs") ? ["workspace.open_logs"] : []), ...(serviceMethods.includes("native.open_pull_request") ? ["workspace.open_pull_request"] : []), ...(serviceMethods.includes("remote.status") ? [FEATURES.remoteAccess] : []), ...(machineOn ? [...MACHINE_COMMANDS.map(capabilityOf), FEATURES.editFiles, "workspace.worker_messages", ...(serviceMethods.includes("native.query") ? [] : [FEATURES.workerAttachments]), ...(taskWorktrees ? ["workspace.task_worktrees"] : []), "workspace.task_route"] : [])] };
   }
 
   async function projectTasks(project: ProjectLocator, cached = false) {
@@ -1288,6 +1288,8 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       case "finish_merge":
         await taskCall(task(command.taskId), {action:"finish_merge",taskId:command.taskId});
         return say(command.taskId, "I resolved the conflict in the task checkout. Rerun the required checks and return a fresh result for review. Do not merge or push the target branch.");
+      // Bound to the result the owner reviewed; the machine merges the target into the task branch, never the other way.
+      case "update_from_target": await machine("product.integrate", task(command.taskId), { requestId, taskId: command.taskId, method: "update", confirmed: command.confirmed, digest: command.digest }); return ok();
       case "abort_merge": await taskCall(task(command.taskId), {action:"abort_merge",taskId:command.taskId}); return ok();
       case "resolve_with_cortex":
         await say(command.taskId, "Resolve the retained Git merge conflict in this task's own checkout. Preserve both intended changes, run the required checks, and return a fresh result for my review. Do not merge or push the target branch. Owner guidance: " + (command.guidance ?? ""), command.attachments);
@@ -1386,7 +1388,9 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       case "git_fetch": await machine("git", command.projectId, { requestId, action: "fetch" }); return ok();
       // One native owner operation, bound to the command identity; never replay an uncertain Git effect.
       case "git_init": await machine("git", command.projectId, { requestId, action: "git_init", confirmed: command.confirmed }); return ok();
-      case "git_pull": return git(command.checkoutId, { action: "pull" });
+      case "git_pull": return git(command.checkoutId, { action: "pull", ...(command.mode ? { mode: command.mode } : {}) });
+      case "git_pull_continue": return git(command.checkoutId, { action: "pull_continue" });
+      case "git_pull_abort": return git(command.checkoutId, { action: "pull_abort", confirmed: command.confirmed });
       case "git_push": return git(command.checkoutId, { action: "push", remote: command.remote, branch: command.branch, confirmed: command.confirmed });
       case "create_branch": await machine("git", command.projectId, { requestId, action: "branch", name: command.name, at: command.at }); return ok();
       case "revert_commit": return git(command.checkoutId, { action: "revert_commit", sha: command.sha, confirmed: command.confirmed });
@@ -1396,6 +1400,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       case "save_storage": return local({ retentionDays: command.retentionDays, autoArchiveDays: command.autoArchiveDays });
       case "set_worktree_root": return local({ worktreeRoot: command.path });
       case "open_logs": await transport.request("native.open_logs", {}); return ok();
+      case "open_pull_request": await transport.request("native.open_pull_request", { projectId: command.projectId, taskId: command.taskId }); return ok();
       case "run_diagnostics": await machine("diagnostics.run"); return ok();
       case "run_cleanup": await machine("cleanup.run"); return ok();
       case "save_surface":

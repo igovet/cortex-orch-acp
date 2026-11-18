@@ -24,7 +24,12 @@ pub(super) fn digest(b: &[u8]) -> String {
 pub(super) fn supports(n: &str) -> bool {
     matches!(
         n,
-        "project_read" | "project_write" | "project_edit" | "access_request" | "read_large_output"
+        "command_status"
+            | "project_read"
+            | "project_write"
+            | "project_edit"
+            | "access_request"
+            | "read_large_output"
     )
 }
 fn text<'a>(v: &'a Value, k: &str) -> CoreResult<&'a str> {
@@ -608,11 +613,16 @@ pub(super) fn execute(
     name: &str,
     args: &Value,
 ) -> CoreResult<Value> {
-    let result = execute_inner(store, i, c, name, args);
+    let mut failed_field: Option<String> = None;
+    let result = execute_inner(store, i, c, name, args, &mut failed_field);
+    let error_reply = |code| match &failed_field {
+        Some(field) => crate::native_tool_errors::reply_at(code, field),
+        None => file_error(code),
+    };
     if let (Err(e), Some(key)) = (&result, args["request_key"].as_str()) {
         if matches!(name, "project_write" | "project_edit") {
             let hash = digest(&serde_json::to_vec(&json!([name, args]))?);
-            let reply = file_error(e.code());
+            let reply = error_reply(e.code());
             store.write(|db| {
                 db.execute(
                     "INSERT OR IGNORE INTO runtime_requests VALUES (?,?,?,?,?,?)",
@@ -630,6 +640,7 @@ pub(super) fn execute(
         }
     }
     match result {
+        Err(e) if failed_field.is_some() => Ok(error_reply(e.code())),
         Err(e)
             if matches!(
                 e.code(),
@@ -650,7 +661,16 @@ fn execute_inner(
     c: &Credential,
     name: &str,
     args: &Value,
+    failed_field: &mut Option<String>,
 ) -> CoreResult<Value> {
+    if name == "command_status" {
+        return crate::native_command_handles::status(
+            store,
+            &i.task,
+            &c.channel_id,
+            text(args, "tool_call_ref")?,
+        );
+    }
     if name == "project_read" {
         return read(store, i, c, args);
     }
@@ -746,9 +766,11 @@ fn execute_inner(
         text(args, "content")?.to_owned()
     } else {
         let mut next = previous.clone();
-        for edit in args["edits"]
+        for (index, edit) in args["edits"]
             .as_array()
             .ok_or(CoreError::Refused("invalid_edits"))?
+            .iter()
+            .enumerate()
         {
             let old = text(edit, "old_string")?;
             let new = text(edit, "new_string")?;
@@ -760,12 +782,15 @@ fn execute_inner(
                 .filter(|(offset, _)| next[*offset..].starts_with(old))
                 .count();
             if old == new {
+                *failed_field = Some(format!("edits[{index}].new_string"));
                 return Err(CoreError::Refused("gateway_edit_no_change"));
             }
             if count == 0 {
+                *failed_field = Some(format!("edits[{index}].old_string"));
                 return Err(CoreError::Refused("gateway_edit_not_found"));
             }
             if count > 1 && edit["replace_all"] != true {
+                *failed_field = Some(format!("edits[{index}].old_string"));
                 return Err(CoreError::Refused("gateway_edit_not_unique"));
             }
             next = if edit["replace_all"] == true {

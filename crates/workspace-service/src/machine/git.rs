@@ -17,6 +17,8 @@ use tokio::{
     process::Command,
 };
 pub(super) mod listing;
+#[cfg(test)]
+mod pull_tests;
 mod snapshot_reuse;
 const MAX_DIFF: usize = 400000;
 const MAX_TREE: usize = 20000;
@@ -91,7 +93,21 @@ pub(super) fn failure(verb: &str, stderr: &str) -> Refused {
     {
         return refuse(
             "push_not_fast_forward",
-            next("The remote branch has commits this checkout does not have, so the push would not be a fast-forward.", "Fetch, then merge or rebase the remote branch in the terminal (Ctrl+J), and push again. Cortex never force-pushes."),
+            next("The remote branch has commits this checkout does not have, so the push would not be a fast-forward.", "Fetch, then choose Pull… to merge or rebase the remote commits (or do it in the terminal, Ctrl+J), and push again. Cortex never force-pushes."),
+        );
+    }
+    if verb == "pull"
+        && has(&[
+            "you have unstaged changes",
+            "your index contains uncommitted changes",
+            "would be overwritten by merge",
+            "would be overwritten by checkout",
+            "untracked working tree files would be",
+        ])
+    {
+        return refuse(
+            "dirty_checkout",
+            next("Pulling would overwrite files in this checkout that are not committed.", "Commit them, or move them out of the way, then pull again. Cortex does not stash."),
         );
     }
     if has(&[
@@ -104,7 +120,7 @@ pub(super) fn failure(verb: &str, stderr: &str) -> Refused {
             "pull_not_fast_forward",
             next(
                 "The local and remote histories diverged, so Git cannot fast-forward this branch.",
-                "Merge or rebase the remote branch in the terminal (Ctrl+J), then push.",
+                "Choose Pull… to merge or rebase the remote commits, then push.",
             ),
         );
     }
@@ -157,6 +173,18 @@ pub(super) fn failure(verb: &str, stderr: &str) -> Refused {
     refuse(
         "git_failed",
         "Git refused this operation. Inspect the checkout in Git; no automatic retry was made.",
+    )
+}
+/// A pull or another merge or rebase is stopped in the checkout.
+const OPERATION_OPEN: &str = "A merge or rebase is stopped in this checkout. Continue or abort it first; nothing was pulled.";
+const NO_OPERATION: &str = "No merge or rebase is in progress in this checkout. Refresh Git status.";
+/// A merge or rebase that stopped at conflicts, as the owner reads it.
+fn stopped_at(operation: &Value) -> Refused {
+    let n = operation["conflicts"].as_array().map_or(0, Vec::len);
+    let kind = if operation["kind"] == "rebase" { "rebase" } else { "merge" };
+    refuse(
+        "pull_conflict",
+        format!("The {kind} stopped at {n} conflicting file{}. Nothing was stashed or reset. Resolve {}, mark {} resolved and Continue, or Abort to return to where the checkout was before the pull.", if n == 1 { "" } else { "s" }, if n == 1 { "it" } else { "them" }, if n == 1 { "it" } else { "them" }),
     )
 }
 fn args(values: &[&str]) -> Vec<String> {
@@ -711,6 +739,70 @@ impl Git {
             Err(refused) if refused.code == "repo_too_large" => Ok(false),
             Err(refused) => Err(refused),
         }
+    }
+    /// True when tracked files differ from HEAD, staged or not. Untracked files do not
+    /// count: Git itself refuses a merge or rebase that would overwrite one.
+    pub(super) async fn tracked_dirty(&mut self, path: &Path) -> Result<bool> {
+        Ok(!self.tracked_changes(path).await?.is_empty())
+    }
+    /// A merge or rebase stopped in this checkout, read from Git's own state files: its
+    /// kind, the files still in conflict and, for a rebase, the commit and branch it
+    /// started from. `null` when neither is in progress. Reads only.
+    pub(super) async fn operation(&mut self, path: &Path) -> Result<Value> {
+        let found = self
+            .run(
+                path,
+                args(&[
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-path",
+                    "MERGE_HEAD",
+                    "--git-path",
+                    "rebase-merge",
+                    "--git-path",
+                    "rebase-apply",
+                ]),
+                false,
+                None,
+            )
+            .await?;
+        let places: Vec<PathBuf> = found.text.lines().map(PathBuf::from).collect();
+        if !found.ok || places.len() != 3 {
+            return Ok(Value::Null);
+        }
+        // `rebase-apply` without `rebasing` is `git am`, which is not a pull.
+        let rebase = if places[1].is_dir() {
+            Some(&places[1])
+        } else if places[2].join("rebasing").exists() {
+            Some(&places[2])
+        } else {
+            None
+        };
+        let kind = match (rebase, places[0].is_file()) {
+            (Some(_), _) => "rebase",
+            (None, true) => "merge",
+            (None, false) => return Ok(Value::Null),
+        };
+        let listed = self
+            .out(path, &["diff", "--name-only", "--diff-filter=U", "-z"])
+            .await?;
+        let conflicts: Vec<&str> = listed.split('\0').filter(|n| !n.is_empty()).collect();
+        let mut found = json!({"kind":kind,"conflicts":conflicts});
+        if let Some(dir) = rebase {
+            let read = |name: &str| {
+                fs::read_to_string(dir.join(name))
+                    .ok()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty())
+            };
+            found["origHead"] = json!(read("orig-head"));
+            found["branch"] = json!(read("head-name").map(|h| h
+                .strip_prefix("refs/heads/")
+                .map(str::to_owned)
+                .unwrap_or(h)));
+            found["onto"] = json!(read("onto"));
+        }
+        Ok(found)
     }
     pub async fn status(&mut self, path: &Path) -> Result<Vec<Value>> {
         let mut items = self.tracked_changes(path).await?;
@@ -1279,7 +1371,14 @@ impl Git {
                     }
                 }
             }
-            checkouts.push(checkout(
+            // A merge or rebase stopped here (a pull's, a task update's or the owner's own in
+            // the terminal), so every screen shows it and offers its way out.
+            let operation = if path.is_dir() {
+                self.operation(path).await?
+            } else {
+                Value::Null
+            };
+            let mut record = checkout(
                 &id,
                 project,
                 if i == 0 { "main" } else { "worktree" },
@@ -1292,7 +1391,9 @@ impl Git {
                 behind,
                 files,
                 product["drafts"][&id].as_str().unwrap_or(""),
-            ));
+            );
+            record["operation"] = operation;
+            checkouts.push(record);
         }
         snapshot["checkouts"] = json!(checkouts);
         // These are saved machine task baselines, not lifecycle/acceptance decisions.
@@ -1523,6 +1624,192 @@ impl Git {
         )
         .into_bytes())
     }
+    /// Pull into the checkout: `ff` (the default) only fast-forwards; `merge` and
+    /// `rebase` bring in remote commits the local branch lacks, as the owner chose. Never
+    /// stashes, resets or force-pushes; a pull that stops at a conflict stays stopped for
+    /// the owner, with Continue and an exact Abort.
+    async fn pull(&mut self, path: &Path, p: &Value) -> Result<()> {
+        let mode = p["mode"].as_str().unwrap_or("ff");
+        if !matches!(mode, "ff" | "merge" | "rebase") {
+            return Err(refuse(
+                "unsupported_action",
+                "Choose merge or rebase for this pull.",
+            ));
+        }
+        if !self.operation(path).await?.is_null() {
+            return Err(refuse("operation_in_progress", OPERATION_OPEN));
+        }
+        if self
+            .out(path, &["branch", "--show-current"])
+            .await?
+            .trim()
+            .is_empty()
+        {
+            return Err(refuse("detached_checkout", "This checkout is not on a branch (detached HEAD), so there is nothing to pull into. Check out a branch first."));
+        }
+        if !self
+            .success(path, &["rev-parse", "--verify", "--quiet", "@{u}"])
+            .await?
+        {
+            return Err(refuse("upstream_required","No upstream is configured. Configure a remote and tracking branch before pulling."));
+        }
+        if mode == "ff" {
+            return self.checked(path, args(&["pull", "--ff-only"])).await;
+        }
+        // An abort restores HEAD, the index and every tracked file exactly only when none
+        // of them had uncommitted changes; Git keeps untracked files and refuses to
+        // overwrite one.
+        if self.tracked_dirty(path).await? {
+            return Err(refuse("dirty_checkout", "This checkout has uncommitted changes. Commit them first; Cortex does not stash, and a merge or rebase over uncommitted changes could not be aborted exactly. Nothing was pulled."));
+        }
+        // Command-line options win over pull.rebase, pull.ff and the autostash settings.
+        let argv: &[&str] = if mode == "merge" {
+            &["pull", "--no-rebase", "--ff", "--no-edit", "--no-autostash"]
+        } else {
+            &["pull", "--rebase", "--no-autostash"]
+        };
+        let out = self.run(path, args(argv), false, None).await?;
+        let stopped = self.operation(path).await?;
+        if !stopped.is_null() {
+            return Err(stopped_at(&stopped));
+        }
+        if !out.ok {
+            return Err(failure("pull", &out.error));
+        }
+        Ok(())
+    }
+    /// A merge a task's update or integration left in its checkout is finished or aborted
+    /// from the task, which keeps its record in step.
+    async fn held_by_task(
+        &mut self,
+        root: &Path,
+        project: &str,
+        state: &Path,
+        path: &Path,
+    ) -> Result<()> {
+        let saved = product(state, project)?;
+        let here = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        for record in saved["tasks"].as_object().into_iter().flat_map(|m| m.values()) {
+            let retained = record["merge"].is_object()
+                && record["merge"]["finished"] != true
+                && matches!(
+                    record["conflict"].as_str(),
+                    Some("conflict" | "resolving" | "failed")
+                );
+            let at = match record["checkout"]["kind"].as_str() {
+                Some("worktree") => record["checkout"]["path"]
+                    .as_str()
+                    .map(|p| fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p))),
+                _ => Some(root.clone()),
+            };
+            if retained && at.as_deref() == Some(here.as_path()) {
+                return Err(refuse(
+                    "task_merge",
+                    format!("This merge belongs to the task “{}”. Finish or abort it from the task.", record["title"].as_str().unwrap_or("")),
+                ));
+            }
+        }
+        Ok(())
+    }
+    /// Back to exactly where the checkout was before the pull: HEAD, the index and the
+    /// tracked files. Checked afterwards; anything else is reported, never retried.
+    async fn pull_abort(&mut self, path: &Path, p: &Value) -> Result<()> {
+        let operation = self.operation(path).await?;
+        if operation.is_null() {
+            return Err(refuse("no_operation", NO_OPERATION));
+        }
+        if p["confirmed"] != true {
+            return Err(refuse(
+                "confirmation_required",
+                "Confirm before aborting the pull.",
+            ));
+        }
+        let head = self.out(path, &["rev-parse", "HEAD"]).await?;
+        let (expected, branch) = if operation["kind"] == "rebase" {
+            let orig = operation["origHead"]
+                .as_str()
+                .filter(|s| valid_sha(s))
+                .ok_or_else(|| refuse("git_state_unknown", "Git's record of where this rebase started is missing, so Cortex cannot check an abort. Inspect it in the terminal (Ctrl+J)."))?
+                .to_owned();
+            self.checked(path, args(&["rebase", "--abort"])).await?;
+            (orig, operation["branch"].as_str().map(str::to_owned))
+        } else {
+            self.checked(path, args(&["merge", "--abort"])).await?;
+            (head.trim().to_owned(), None)
+        };
+        let now = self.out(path, &["rev-parse", "HEAD"]).await?;
+        let on = self.out(path, &["branch", "--show-current"]).await?;
+        if now.trim() != expected
+            || branch.is_some_and(|b| b != on.trim())
+            || !self.operation(path).await?.is_null()
+            || self.tracked_dirty(path).await?
+        {
+            return Err(refuse("git_state_unknown", "Git aborted, but this checkout is not exactly where it was before the pull. Inspect it in the terminal (Ctrl+J); nothing else was changed or retried."));
+        }
+        Ok(())
+    }
+    /// Finish a stopped pull once every conflicted file is resolved and marked resolved:
+    /// the merge commit, or the rest of the rebase, which may stop again at its next
+    /// conflict.
+    async fn pull_continue(&mut self, path: &Path) -> Result<()> {
+        let operation = self.operation(path).await?;
+        if operation.is_null() {
+            return Err(refuse("no_operation", NO_OPERATION));
+        }
+        let left = operation["conflicts"].as_array().map_or(0, Vec::len);
+        if left > 0 {
+            return Err(refuse(
+                "unresolved_conflict",
+                format!("{left} file{} still in conflict. Resolve {}, mark {} resolved, then continue.", if left == 1 { " is" } else { "s are" }, if left == 1 { "it" } else { "them" }, if left == 1 { "it" } else { "them" }),
+            ));
+        }
+        // Only leftover markers block; whitespace that the remote commits brought is theirs.
+        let check = self
+            .run(path, args(&["diff", "--cached", "--check"]), false, None)
+            .await?;
+        if check.text.contains("leftover conflict marker") {
+            return Err(refuse("conflict_markers", "A file marked resolved still contains conflict markers (<<<<<<<, =======, >>>>>>>). Edit it, mark it resolved again, then continue."));
+        }
+        if operation["kind"] == "merge" {
+            let head = self.out(path, &["rev-parse", "HEAD"]).await?;
+            let merge_head = self.out(path, &["rev-parse", "MERGE_HEAD"]).await?;
+            self.checked(
+                path,
+                args(&["-c", "core.editor=true", "commit", "--no-edit"]),
+            )
+            .await?;
+            let parents = self
+                .out(path, &["show", "-s", "--format=%P", "HEAD"])
+                .await?;
+            // Hooks stay active; success alone cannot show a hook did not replace HEAD.
+            if parents.split_whitespace().collect::<Vec<_>>() != vec![head.trim(), merge_head.trim()]
+                || !self.operation(path).await?.is_null()
+            {
+                return Err(refuse("git_state_unknown", "Git made the merge commit, but it is not the commit Cortex expected. Inspect the checkout in the terminal (Ctrl+J); nothing was retried."));
+            }
+            return Ok(());
+        }
+        let out = self
+            .run(
+                path,
+                args(&["-c", "core.editor=true", "rebase", "--continue"]),
+                false,
+                None,
+            )
+            .await?;
+        let again = self.operation(path).await?;
+        if !again.is_null() {
+            if again["conflicts"].as_array().is_some_and(|c| !c.is_empty()) {
+                return Err(stopped_at(&again));
+            }
+            return Err(refuse("rebase_stopped", "Git stopped the rebase again without a conflict, for example because a commit became empty. Inspect it in the terminal (Ctrl+J), or abort the pull."));
+        }
+        if !out.ok {
+            return Err(failure("rebase", &out.error));
+        }
+        Ok(())
+    }
     pub async fn action(
         &mut self,
         root: &Path,
@@ -1543,6 +1830,8 @@ impl Git {
                 "A fetch, pull or push of this project is still running. Try again when it finishes.")?,
             "commit" | "revert_commit" | "git_init" => Lock::long(state, &git_lock, "git_in_progress",
                 "A commit in this project is still running. Try again when it finishes.")?,
+            "pull_continue" | "pull_abort" => Lock::long(state, &git_lock, "git_in_progress",
+                "A pull of this project is still being continued or aborted. Try again when it finishes.")?,
             _ => Lock::new(state, &git_lock)?,
         };
         if action == "git_init" {
@@ -1705,14 +1994,14 @@ impl Git {
                 product["drafts"].as_object_mut().unwrap().remove(&wanted);
                 settings::write_json(&product_path(state, project)?, &product)?;
             }
-            "pull" => {
-                if !self
-                    .success(&path, &["rev-parse", "--verify", "--quiet", "@{u}"])
-                    .await?
-                {
-                    return Err(refuse("upstream_required","No upstream is configured. Configure a remote and tracking branch before pulling."));
+            "pull" => self.pull(&path, p).await?,
+            "pull_continue" | "pull_abort" => {
+                self.held_by_task(root, project, state, &path).await?;
+                if action == "pull_abort" {
+                    self.pull_abort(&path, p).await?;
+                } else {
+                    self.pull_continue(&path).await?;
                 }
-                self.checked(&path, args(&["pull", "--ff-only"])).await?;
             }
             "push" => {
                 let branch = p["branch"].as_str().unwrap_or("");

@@ -29,14 +29,30 @@ pub async fn product(root: &Path, state: &Path, project: &str, git: &mut Git) ->
     }
     let options = match open(root, OpenMode::LiveReadOnly)? {
         None => Vec::new(),
-        Some(store) => store.read(|db| {
+        Some(store) => {
+            let rows = store.read(|db| {
             let mut query = db.prepare("SELECT t.task_id,o.options_json FROM workspace_tasks t
                 JOIN workspace_task_options o USING(task_id) WHERE t.project_id=? ORDER BY t.sequence LIMIT 10001")?;
             let rows = query.query_map([project], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?
                 .collect::<std::result::Result<Vec<_>,_>>()?;
             if rows.len() > 10000 { return Err(CoreError::Refused("machine_reply_too_large")); }
             Ok(rows)
-        }).map_err(core)?,
+        }).map_err(core)?;
+            owner_closed(&store, project, &mut value)?;
+            // Files attached to answers are kept like message files. An answer recorded
+            // before this was kept becomes referenced here; the save happens now when the
+            // machine lock is free, otherwise with the caller's own save.
+            if super::attachment_files::answer_references(&store, state, project, &mut value)? {
+                if let Ok(Some(_lock)) = settings::Lock::try_new(state, "machine.lock") {
+                    let path = product_path(state, project)?;
+                    let mut fresh = settings::read_json(&path, json!({}))?;
+                    if super::attachment_files::answer_references(&store, state, project, &mut fresh)? {
+                        settings::write_json(&path, &fresh)?;
+                    }
+                }
+            }
+            rows
+        }
     };
     let has_git = git.is_repo(root).await?;
     let mut branch = None;
@@ -119,6 +135,34 @@ pub async fn product(root: &Path, state: &Path, project: &str, git: &mut Git) ->
         ));
     }
     Ok(value)
+}
+/// A task the owner finished through the runtime alone (Finish on its stop question, or a
+/// Close task whose saved disposition was never written) is the owner's close as is: it
+/// reads, archives, settles its sprint and is cleaned up like one. A saved status or
+/// archive always wins; nothing here certifies the work.
+fn owner_closed(store: &Store, project: &str, value: &mut Value) -> Result<()> {
+    let key = store.key().root().to_string_lossy().into_owned();
+    let closed = store
+        .read(|db| cortex_core::projections::owner_closed(db, project, &key))
+        .map_err(core)?;
+    for (task, at) in closed {
+        let record = &mut value["tasks"][&task];
+        if !record.is_object() {
+            *record = json!({});
+        }
+        if !record["status"].is_null() || !record["archive"].is_null() {
+            continue;
+        }
+        record["status"] = json!("done");
+        if record["closedAs"].is_null() {
+            record["closedAs"] = json!("as_is");
+        }
+        record["notVerifiedByCortex"] = json!(true);
+        if record["doneAt"].is_null() {
+            record["doneAt"] = json!(at.and_then(|n| u64::try_from(n).ok()).unwrap_or_else(now_ms));
+        }
+    }
+    Ok(())
 }
 async fn worktree_base(root: &Path, state: &Path, git: &mut Git) -> Result<PathBuf> {
     let common = git
