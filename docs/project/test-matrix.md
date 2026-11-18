@@ -101,6 +101,8 @@ The earlier Python runner's timing observations (eight pytest workers, batch gro
 
 ### Nested-sandbox portability
 
+For final runtime verification, use the [bounded verification command groups](verification.md#running-the-suite-inside-a-runtime-sandbox), not the aggregate command. The verifier's current 20-minute per-command deadline does not cover the sum of the suite's step deadlines.
+
 The default suite may itself run inside Cortex's runtime verification sandbox. Lifecycle verification uses a test-only launch seam, not nested bubblewrap; real subprocess outcomes, retention, cancellation and revision checks remain exercised. Production sandbox preparation remains fail-closed and has no bypass. Fixed git-context commands use a separate test-only preparation seam. Tests that execute real bubblewrap assert explicit fail-closed preparation where a user namespace cannot be created, never an inferred pass; set `CORTEX_REQUIRE_NAMESPACE_FIXTURES=1` on a host with unprivileged namespaces to run the positive journeys. See [verification](verification.md#running-the-suite-inside-a-runtime-sandbox).
 
 ### Release-grade run

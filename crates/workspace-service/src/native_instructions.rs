@@ -107,7 +107,14 @@ pub(crate) fn compose(name: &str, stage: Option<&str>, engine: EngineKind) -> Co
         .collect::<Vec<_>>();
     let mut text = p.body.clone();
     text.push_str("\n## Native capability boundary\n\nThis host is partially migrated. Only the tools advertised on this channel are available. Missing capabilities must be reported, never replaced with native engine mutations or invented receipts.\n");
-    text.push_str("\nUse tools_discover to list the Cortex tools offered to this channel and obtain the exact schema before using an unfamiliar tool. After a JSON parsing error, split a large edit into smaller independent changes.\n");
+    let discovery = if engine == EngineKind::Claude {
+        "`mcp__cortex__tools_discover`"
+    } else {
+        "`tools_discover`"
+    };
+    text.push_str(&format!(
+        "\nUse {discovery} only for the Cortex server's active tools and schemas. For external MCP tools, including code indexes, use the engine's tool list or search if offered. Read the tool's live description and schema and use the exact name advertised by the engine. Do not substitute the Cortex namespace or infer a tool name from a display title. If the external tool is not advertised, fall back to authorized project reads where available and report the limitation. Do not guess a tool name.\n\nAfter a JSON parsing error, split a large edit into smaller independent changes.\n"
+    ));
     if engine == EngineKind::Codex {
         let start = text.len();
         text.push_str("\n# Cortex tool cheat sheet (code mode)\n\nDerived from this channel's served schemas. Use actual arguments, not placeholders. Call tools as `await tools.mcp__cortex__<name>({...})`.\n");

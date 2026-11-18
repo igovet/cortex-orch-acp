@@ -346,12 +346,26 @@ mod sprint_tests {
     };
 
     /// No-paid ACP peer (a POSIX shell script): a two-task plan only for a read-only planning turn.
+    /// The deadline journey additionally gates its reply after two clarifications.
     fn peer_script() -> String {
         let plan = json!({"tasks": [
             {"key": "t1", "title": "First", "description": "Do the first part", "dependsOn": []},
             {"key": "t2", "title": "Second", "description": "Do the second part", "dependsOn": ["t1"]}]})
         .to_string();
         let plan = json!(plan).to_string();
+        let items: Vec<_> = (1..=39)
+            .map(|n| {
+                let deps = if n > 1 {
+                    vec![format!("t{}", n - 1)]
+                } else {
+                    vec![]
+                };
+                json!({"key":format!("t{n}"),"description":format!("Plan part {n}; verify its documented result."),"dependsOn":deps})
+            })
+            .collect();
+        let large_plan = json!(json!({"tasks":items}).to_string());
+        let first = json!(json!({"question":"Choose the scope?","options":["Two parts"]}).to_string());
+        let second = json!(json!({"question":"Choose the order?","options":["Part one first"]}).to_string());
         let fixture = json!("Fixture coordinator.").to_string();
         let other = json!("not read-only").to_string();
         format!(
@@ -382,7 +396,22 @@ while IFS= read -r line; do
     *'"method":"session/prompt"'*)
         case "$line" in
         *'You only plan user tasks'*)
-            if [ "$mode" = read-only ]; then update '{plan}'; else update '{other}'; fi ;;
+            if [ "$mode" != read-only ]; then
+                update '{other}'
+            else
+                case "$line" in
+                *'Sprint deadline fixture'*)
+                    case "$line" in
+                    *'First retained answer'*'Second retained answer'*)
+                        : > "$0/entered"
+                        while [ ! -f "$0/release" ]; do /usr/bin/sleep .02; done
+                        update '{large_plan}' ;;
+                    *'First retained answer'*) update '{second}' ;;
+                    *) update '{first}' ;;
+                    esac ;;
+                *) update '{plan}' ;;
+                esac
+            fi ;;
         *) update '{fixture}' ;;
         esac
         printf '{{"jsonrpc":"2.0","id":%s,"result":{{"stopReason":"end_turn"}}}}\n' "$id" ;;
@@ -391,14 +420,18 @@ done
 "#
         )
     }
-    struct Peer;
+    pub(super) struct Peer(pub(super) Option<std::path::PathBuf>);
     impl NativeRoutes for Peer {
         fn route(&self, root: &Path, _: &str) -> CoreResult<SessionRoute> {
             Ok(SessionRoute {
                 launch: EngineLaunch {
                     engine: EngineKind::Codex,
                     executable: "/bin/sh".into(),
-                    args: vec!["-c".into(), peer_script()],
+                    args: vec![
+                        "-c".into(),
+                        peer_script(),
+                        self.0.as_deref().unwrap_or(root).display().to_string(),
+                    ],
                     cwd: root.into(),
                     native_home: root.into(),
                     credential_directory: root.into(),
@@ -420,7 +453,7 @@ done
             })
         }
     }
-    async fn call(service: &Service, op: &str, project: &str, params: Value) -> Value {
+    pub(super) async fn call(service: &Service, op: &str, project: &str, params: Value) -> Value {
         let reply = service
             .machine(
                 serde_json::from_value(json!({"op":op,"projectId":project,"params":params}))
@@ -431,7 +464,7 @@ done
         assert_eq!(reply["ok"], true, "{op}: {reply}");
         reply["result"].clone()
     }
-    async fn sprint(service: &Service, project: &str, id: &Value) -> Value {
+    pub(super) async fn sprint(service: &Service, project: &str, id: &Value) -> Value {
         call(service, "product.board", project, json!({})).await["sprints"]
             .as_array()
             .unwrap()
@@ -699,7 +732,7 @@ done
                 shutdown_timeout: Duration::from_secs(2),
                 event_capacity: 64,
             },
-            Arc::new(Peer),
+            Arc::new(Peer(None)),
         )
         .await
         .unwrap();
@@ -868,7 +901,9 @@ pub(crate) mod sprints {
         "Use the language requested in the input. Do not claim project inspection or completed work."
     );
     const PASS_EVERY: Duration = Duration::from_secs(2);
-    const PLANNING_DEADLINE: Duration = Duration::from_secs(90);
+    // One active pass (setup and response), never the time spent waiting for the owner.
+    // A substantial plan can take longer than an auxiliary short-text turn.
+    const PLANNING_DEADLINE: Duration = Duration::from_secs(5 * 60);
     const MAX_PLAN_TEXT: usize = 32_000;
 
     #[derive(Debug, PartialEq)]
@@ -1344,9 +1379,7 @@ pub(crate) mod sprints {
         let _ = engine.shutdown().await;
         drop(scratch);
         match outcome {
-            Err(_) => Err(
-                "Planning reached its time limit. Retry planning with a smaller request.".into(),
-            ),
+            Err(_) => Err("Planning reached its time limit.".into()),
             Ok(Ok(text)) => Ok(text),
             Ok(Err(Some(message))) => Err(message),
             Ok(Err(None)) => Err(failed(*stage.lock().unwrap())),
@@ -1405,6 +1438,182 @@ pub(crate) mod sprints {
             }
         }
     }
+    #[cfg(test)]
+    mod budget_tests {
+        use super::*;
+        use crate::{
+            native_driver::sprint_tests::{call, sprint, Peer},
+            Config, LaunchSpec,
+        };
+        use std::os::unix::fs::DirBuilderExt;
+
+        async fn wait_for(mut condition: impl FnMut() -> bool) {
+            let until = std::time::Instant::now() + Duration::from_secs(5);
+            while !condition() {
+                assert!(std::time::Instant::now() < until, "fixture did not reach its gate");
+                tokio::task::yield_now().await;
+            }
+        }
+
+        #[tokio::test]
+        async fn sprint_budget_covers_slow_plan_after_two_answers_and_keeps_stop_and_resume() {
+            let root = std::env::temp_dir().join(format!("sprint-budget-{}", crate::identity().unwrap()));
+            std::fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+            let _scratch = Scratch(root.clone());
+            let folder = root.join("project");
+            std::fs::create_dir(&folder).unwrap();
+            let service = Service::bind_native(
+                Config {
+                    runtime_dir: root.join("runtime"),
+                    state_dir: root.join("state"),
+                    allowed_root: root.clone(),
+                    launch: LaunchSpec::bare(),
+                    request_timeout: Duration::from_secs(5),
+                    shutdown_timeout: Duration::from_secs(2),
+                    event_capacity: 64,
+                },
+                Arc::new(Peer(Some(root.clone()))),
+            )
+            .await
+            .unwrap();
+            let registered = service.register(&folder, "Sprint budget").await.unwrap();
+            let project = registered["projectId"].as_str().unwrap().to_owned();
+            service.activate(&project).await.unwrap();
+            let runtime = service.state.lock().await.native[&project].clone();
+            let description = format!(
+                "Sprint deadline fixture\n{}",
+                "Plan a separate bounded work item.\n".repeat(200)
+            );
+            let id = call(
+                &service,
+                "product.sprint",
+                &project,
+                json!({"action":"create","description":description}),
+            )
+            .await["sprintId"]
+                .clone();
+            let key = (project.clone(), id.as_str().unwrap().to_owned());
+            let state = |planning| {
+                call(
+                    &service,
+                    "product.sprint",
+                    &project,
+                    json!({"action":"patch","sprintId":id,"patch":{"planning":planning}}),
+                )
+            };
+            let mut jobs = Jobs::default();
+
+            // Only explicit advances move the clock, even while awaiting real pipe IO.
+            // Tokio does not auto-advance while a blocking task is running.
+            let (keep_clock, hold) = std::sync::mpsc::channel::<()>();
+            let (started, running) = tokio::sync::oneshot::channel();
+            let clock_guard = tokio::task::spawn_blocking(move || {
+                let _ = started.send(());
+                let _ = hold.recv();
+            });
+            running.await.unwrap();
+            tokio::time::pause();
+
+            for (question, answer) in [
+                ("Choose the scope?", "First retained answer"),
+                ("Choose the order?", "Second retained answer"),
+            ] {
+                service
+                    .sprint_pass(&project, &runtime, &mut jobs, false)
+                    .await
+                    .unwrap();
+                jobs.0.remove(&key).unwrap().await.unwrap();
+                let asked = sprint(&service, &project, &id).await;
+                assert_eq!(asked["planning"], "question");
+                assert_eq!(
+                    asked["conversation"].as_array().unwrap().last().unwrap()["text"],
+                    question
+                );
+                tokio::time::advance(Duration::from_secs(601)).await;
+                service
+                    .sprint_pass(&project, &runtime, &mut jobs, false)
+                    .await
+                    .unwrap();
+                assert!(jobs.0.is_empty());
+                assert_eq!(sprint(&service, &project, &id).await, asked);
+                // Match the desktop's description-only answer delivery: note, then wake.
+                call(
+                    &service,
+                    "product.sprint",
+                    &project,
+                    json!({"action":"note","sprintId":id,"kind":"answer","text":answer}),
+                )
+                .await;
+                state("planning").await;
+            }
+
+            // Prove Stop aborts a live turn and doesn't wait for the deadline.
+            let entered = root.join("entered");
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            wait_for(|| entered.exists()).await;
+            let stopped = jobs.0[&key].abort_handle();
+            state("cancelled").await;
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            assert!(jobs.0.is_empty());
+            wait_for(|| stopped.is_finished()).await;
+            assert_eq!(sprint(&service, &project, &id).await["planning"], "cancelled");
+            std::fs::remove_file(&entered).unwrap();
+
+            // A genuinely stalled retry still ends at a finite deadline.
+            state("planning").await;
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            wait_for(|| entered.exists()).await;
+            tokio::time::advance(Duration::from_secs(301)).await;
+            jobs.0.remove(&key).unwrap().await.unwrap();
+            let timed_out = sprint(&service, &project, &id).await;
+            assert_eq!(timed_out["planning"], "cancelled");
+            assert_eq!(
+                timed_out["conversation"].as_array().unwrap().last().unwrap()["text"],
+                "Planning reached its time limit. Resume planning to retry. No task was executed."
+            );
+            std::fs::remove_file(&entered).unwrap();
+
+            // The same request succeeds if the model takes two minutes, not five.
+            state("planning").await;
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            wait_for(|| entered.exists()).await; // the fake peer saw both retained answers
+            tokio::time::advance(Duration::from_secs(120)).await;
+            std::fs::write(root.join("release"), "").unwrap();
+            jobs.0.remove(&key).unwrap().await.unwrap();
+            let ready = sprint(&service, &project, &id).await;
+            assert_eq!(
+                ready["planning"], "ready",
+                "planner did not accept the slower reply: {:?}",
+                ready["conversation"].as_array().unwrap().last()
+            );
+            assert_eq!(ready["description"], description);
+            assert_eq!(ready["plan"]["version"], 1);
+            let items = ready["plan"]["items"].as_array().unwrap();
+            assert_eq!(items.len(), 39);
+            assert_eq!(items[38]["dependsOn"], json!(["t38"]));
+            assert_eq!(ready["conversation"], timed_out["conversation"]);
+            assert_eq!(ready["taskIds"], json!([]));
+            assert_eq!(ready["queueState"], "idle");
+
+            tokio::time::resume();
+            drop(keep_clock);
+            clock_guard.await.unwrap();
+            service.stop().await.unwrap();
+        }
+    }
+
     /// The queue's pause reason, naming a settle that could not finish instead of
     /// blaming the checks of a result that never reached them.
     pub(super) fn with_settle_failure<'a>(

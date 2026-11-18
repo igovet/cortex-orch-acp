@@ -20,6 +20,8 @@ use tokio::{
     process::Command,
 };
 const OUTPUT: usize = 1024 * 1024;
+// Leave startup/cleanup margin above a 900-second bounded build or test step.
+const VERIFICATION_DEADLINE: Duration = Duration::from_secs(20 * 60);
 pub(super) fn identity() -> CoreResult<String> {
     let mut bytes = [0u8; 32];
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
@@ -32,6 +34,7 @@ pub(super) struct Output {
     pub code: Option<i32>,
     pub complete: bool,
     pub truncated: bool,
+    failure: Option<&'static str>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
 }
@@ -71,17 +74,24 @@ async fn capture(
     let out = tokio::spawn(drain(child.stdout.take().unwrap()));
     let err = tokio::spawn(drain(child.stderr.take().unwrap()));
     let status = tokio::select! {
-        s = tokio::time::timeout(deadline, child.wait()) => s.ok(),
-        _ = async { while !*cancel.borrow_and_update() { if cancel.changed().await.is_err() { std::future::pending::<()>().await; } } } => None,
+        s = tokio::time::timeout(deadline, child.wait()) => match s {
+            Ok(Ok(status)) => Ok(status),
+            Ok(Err(_)) => Err("command_wait_failed"),
+            Err(_) => Err("command_timeout"),
+        },
+        _ = async { while !*cancel.borrow_and_update() { if cancel.changed().await.is_err() { std::future::pending::<()>().await; } } } => Err("owner_stopped"),
     };
-    let code = match status {
-        Some(Ok(status)) => status.code(),
-        _ => {
+    let (code, failure) = match status {
+        Ok(status) => match status.code() {
+            Some(code) => (Some(code), None),
+            None => (None, Some("command_signalled")),
+        },
+        Err(reason) => {
             unsafe {
                 libc::kill(-(pid as i32), libc::SIGKILL);
             };
             let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
-            None
+            (None, Some(reason))
         }
     };
     // Restricted verifier descendants cannot escape their process group.
@@ -108,6 +118,7 @@ async fn capture(
             code,
             complete: code.is_some() && !a && !b,
             truncated: a || b,
+            failure: failure.or((a || b).then_some("command_output_limit")),
             stdout,
             stderr,
         }),
@@ -118,6 +129,7 @@ async fn capture(
                 code,
                 complete: false,
                 truncated: true,
+                failure: failure.or(Some("command_output_unavailable")),
                 stdout: vec![],
                 stderr: vec![],
             })
@@ -172,10 +184,10 @@ async fn verify_in(
     .map_err(|_| refused())?
     .map_err(|_| CoreError::Refused("native_verification_sandbox_unavailable"))?;
     let c = Command::from(sandbox.command(argv)?);
-    let result = capture(c, Duration::from_secs(60), cancel).await;
+    let result = capture(c, VERIFICATION_DEADLINE, cancel).await;
     let receipt = match result {
         Ok(o) => json!({"complete":o.complete,"exit_code":o.code,"output_truncated":o.truncated,
-            "stdout":String::from_utf8_lossy(&o.stdout),"stderr":String::from_utf8_lossy(&o.stderr)}),
+            "failure":o.failure,"stdout":String::from_utf8_lossy(&o.stdout),"stderr":String::from_utf8_lossy(&o.stderr)}),
         Err(e) => {
             json!({"complete":false,"exit_code":null,"output_truncated":false,"failure":e.code()})
         }
@@ -1292,7 +1304,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn truncation_and_timeout_never_become_complete_passes() {
+    async fn sandboxed_verifier_retains_only_bounded_output() {
         let f = Fixture::new();
         if !sandbox_available(&f.0).await {
             return;
@@ -1311,6 +1323,14 @@ mod tests {
         // Device reads remain usable; full output limits still block a passing check.
         assert_eq!(r["observation"]["output_truncated"], true);
         assert_eq!(r["observation"]["complete"], false);
+        assert_eq!(r["observation"]["exit_code"], 0);
+        assert_eq!(r["observation"]["failure"], "command_output_limit");
+    }
+    #[tokio::test]
+    async fn capture_distinguishes_timeout_signal_refusal_and_output_limit() {
+        // Capture itself does not need a user namespace. Keep this test active
+        // even where the real sandbox must fail closed before executing argv.
+        let f = Fixture::new();
         let mut c = command(
             &f.0,
             &[
@@ -1325,6 +1345,8 @@ mod tests {
         let r = capture(c, Duration::from_secs(2), receiver).await.unwrap();
         assert!(r.truncated);
         assert!(!r.complete);
+        assert_eq!(r.code, Some(0));
+        assert_eq!(r.failure, Some("command_output_limit"));
         assert_eq!(r.stdout.len(), OUTPUT);
         let c = command(&f.0, &["/bin/sleep".into(), "2".into()]);
         let (_cancel, receiver) = tokio::sync::watch::channel(false);
@@ -1333,6 +1355,30 @@ mod tests {
             .unwrap();
         assert!(!r.complete);
         assert_eq!(r.code, None);
+        assert_eq!(r.failure, Some("command_timeout"));
+        assert!(!r.truncated);
+
+        let (_cancel, receiver) = tokio::sync::watch::channel(false);
+        let c = command(&f.0, &["/bin/sh".into(), "-c".into(), "kill -TERM $$".into()]);
+        let r = capture(c, Duration::from_secs(2), receiver).await.unwrap();
+        assert!(!r.complete);
+        assert_eq!(r.code, None);
+        assert_eq!(r.failure, Some("command_signalled"));
+
+        // A program's own nonzero exit (including a refusal) is terminal.
+        let (_cancel, receiver) = tokio::sync::watch::channel(false);
+        let c = command(&f.0, &["/bin/sh".into(), "-c".into(), "exit 2".into()]);
+        let r = capture(c, Duration::from_secs(2), receiver).await.unwrap();
+        assert!(r.complete);
+        assert_eq!(r.code, Some(2));
+        assert_eq!(r.failure, None);
+
+        let (_cancel, receiver) = tokio::sync::watch::channel(true);
+        let c = command(&f.0, &["/bin/sleep".into(), "2".into()]);
+        let r = capture(c, Duration::from_secs(2), receiver).await.unwrap();
+        assert!(!r.complete);
+        assert_eq!(r.code, None);
+        assert_eq!(r.failure, Some("owner_stopped"));
     }
     /// A program the owner installed through a version manager (a `/usr/local/bin`-style
     /// link into a directory under the read-only home) is found by the coordinator's plan

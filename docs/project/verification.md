@@ -277,6 +277,38 @@ scripts/cortex-xtask.sh test-fast
 
 ## Running the suite inside a runtime sandbox
 
+The runtime's final verifier allows 20 minutes of child execution and retains up to
+1 MiB per stream for each command. The aggregate suite's sequential deadlines exceed
+that budget. For full default-suite coverage, use `scripts/cortex-xtask.sh test-fast
+--list` to enumerate steps (this does not run tests), then declare independent
+verifier commands using `--only`. Keep the generated order: one command each for
+`build`, `cargo`, `desktop`, `ui`, `remote`, `desktop-ui`, `phone-ui` and
+`paseo-typecheck`, then up to five `paseo-…` steps per command. For example:
+
+```text
+["scripts/cortex-xtask.sh", "test-fast", "--only", "build"]
+["scripts/cortex-xtask.sh", "test-fast", "--only", "cargo"]
+```
+
+Use comma-separated names for a group; cover each listed step exactly once. This
+checkout's 21 default Paseo test scripts need five groups, leaving room for
+`check-generated` and `package check` within the 16-command plan limit. A group of
+five uses at most 15 minutes 25 seconds for the test processes, plus wrapper and
+startup time. Keep all commands sequential, in the same checkout, with `build`
+before suites that launch its service binary. Confirm the ignored `target/`
+directory exists before verification so the sandbox can preserve build artifacts
+between commands. Install the locked dependencies in each Node step directory and
+confirm that `timeout --version` resolves to GNU coreutils on the verifier's
+owner tool search path (some distributions expose GNU as `gnutimeout` while
+`timeout` resolves to uutils). Do not substitute shortened or redirected output
+for complete receipts. A namespace, time, output, or prerequisite failure still
+blocks acceptance. The grouped budget requires a runtime built with that budget;
+editing a checkout does not change an already-running verifier.
+
+Outside the runtime, `scripts/cortex-xtask.sh test-fast` remains the standalone
+bounded owner command, with the same prerequisites. A standalone result does not
+replace exact reviewed runtime receipts.
+
 Lifecycle tests replace only verification launch preparation with a test-only
 runner: literal commands still execute, and production retains output, exit status,
 cancellation and revision checks. Git-context tests likewise use a real fixed git

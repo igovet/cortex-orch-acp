@@ -39,6 +39,9 @@ engine permission requests keep their response correlation until an answer or
 cancellation, rather than expiring after 30 seconds; disconnect clears pending waits.
 Sessions accept client MCP entries no engine is handed, such as the HTTP
 server Paseo injects into every session; an unconfigured stdio server still refuses.
+Cortex tool discovery lists only Cortex tools. For external MCP, use the exact
+tool name and description advertised by the engine for the current session;
+if a code index is not offered, use the available project reads instead.
 Question cards use Python's Paseo card shape, and the cancel Paseo sends before a
 follow-up message is held for five seconds as in Python, so the message steers and
 `/cortex-answer` still answers instead of pausing the task.
@@ -403,6 +406,10 @@ withdrawn probes do not count as failed worker checks. Check programs are probed
 Clickable controls use a pointer; disabled controls use the default cursor and text fields keep the text cursor.
 Ready to merge distinguishes local content already in the target branch from its last-fetched push status. Already-contained work offers owner-confirmed closure, not another merge. Shared-checkout tasks on their target branch use recorded task-file evidence: committed content offers closure even after later sibling edits; known pending files offer Commit to that branch without sweeping other files into the commit. Unknown attribution offers Close as is or Done outside the app, never a same-branch merge. Board cards can be moved manually only to Done, with “Done outside the app” confirmation after the task stops. This durable owner decision is not acceptance, merging or passing checks; sprint dependencies can continue. Every way a task ends without acceptance has a closing step: a failed or cancelled run offers Close task… in its title band, a runtime result that can never be accepted offers Close as is…, and Finish on the runtime's stop question counts as the owner's close as is (not verified), so it archives and settles its sprint like any closed task. A closed task's title band offers Archive, which never asks. See [local review and Git behavior](docs/cortex-workspace/local-task-execution.md).
 Pointer and keyboard focus keep their behavior without adding decorative outlines or shifting controls.
+
+Sprint planning gives each active planner pass up to five minutes. Time spent
+waiting for your answers does not count. Stop or a timeout keeps the draft and
+answers; Resume tries again without starting any sprint tasks.
 
 Workspace saves a task from its description, then names it asynchronously through
 its configured model route. Owner renames always win; unavailable naming
@@ -865,6 +872,8 @@ scripts/cortex-xtask.sh check-pins               # reviewed dependency pins
 scripts/cortex-xtask.sh test-fast                # bounded no-paid cargo, Vitest and Paseo suites
 scripts/cortex-paseo-tools.sh acp-smoke          # no-paid startup smoke
 ```
+
+For final runtime verification of this checkout, use the [bounded suite command groups](docs/project/verification.md#running-the-suite-inside-a-runtime-sandbox) so the verifier can retain a receipt for each group.
 
 ## Security
 

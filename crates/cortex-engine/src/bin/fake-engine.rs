@@ -481,7 +481,17 @@ pub async fn main() {
                 if mode == "mcp-host" {
                     let expectation = raw.rsplit_once("\n\n").map_or(raw, |(_, v)| v);
                     let entries = &external_entries[&sid];
-                    if expectation == "none" {
+                    if expectation.starts_with("review-") {
+                        let meta = &session_metas[&sid];
+                        assert_eq!(meta["claudeCode"]["options"]["strictMcpConfig"], true);
+                        assert_eq!(servers[&sid]["name"], "cortex");
+                        let boundary = meta["systemPrompt"]
+                            .as_str()
+                            .and_then(|prompt| prompt.rsplit_once("## Native capability boundary"))
+                            .map_or("", |(_, boundary)| boundary);
+                        std::fs::write("review-mcp-boundary", boundary).unwrap();
+                    }
+                    if matches!(expectation, "none" | "review-none") {
                         assert!(entries.is_empty());
                     } else {
                         assert_eq!(entries.len(), 1);
@@ -535,6 +545,13 @@ pub async fn main() {
                             .unwrap();
                             match (id, method) {
                                 (2, _) => {
+                                    if expectation == "review-read" {
+                                        assert_eq!(
+                                            reply["result"]["tools"],
+                                            json!([{"name":"lookup","description":"Look up entries in the fixture index.",
+                                                "inputSchema":{"type":"object","additionalProperties":false}}])
+                                        );
+                                    }
                                     let names: Vec<_> = reply["result"]["tools"]
                                         .as_array()
                                         .unwrap()

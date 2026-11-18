@@ -125,8 +125,10 @@ after bounded reads and each publication phase. Drafts are restricted to their
 creating principal; report references used as worker results must belong to that
 same principal and task. Pipeline creation remains runtime-only. Pending draft
 replacement receipts never replay an ambiguous file effect. Schema discovery
-exposes only the effective channel catalogue with channel-bound cursors; it does
-not grant an unavailable tool. Oversized authorized JSON replies are retained
+exposes only the effective Cortex channel catalogue with channel-bound cursors.
+External MCP tools are advertised separately by the engine under their own
+server names. Discovery and prompt guidance do not add tools or change grants.
+Oversized authorized JSON replies are retained
 whole for bounded output paging and marked incomplete until read. Native input
 redaction is unavailable, so the document tools no longer advertise
 `redact_values`; a call that sends it fails schema validation.
@@ -569,9 +571,12 @@ execution cutover or production-account qualification is implied.
 
 The native host driver alone claims graph nodes, schedules mandatory independent
 review after observed changes, consumes verdict/fix loops and certifies completion.
-Its final verifier launches argv directly with a cleared environment, a 60-second
-deadline and at most 1 MiB retained per output stream. Incomplete, signalled,
-nonzero or truncated output cannot pass. Bubblewrap namespace/mount preparation is
+Its final verifier launches argv directly with a filtered environment, a 20-minute
+per-command child deadline and at most 1 MiB retained per output stream. The
+launch budget accommodates a single bounded build or test step; it does not
+cover an entire multi-step suite. Raw runtime receipts distinguish timeout,
+cancellation, a signalled child and unavailable or truncated output. Incomplete,
+signalled, nonzero or truncated output cannot pass. Bubblewrap namespace/mount preparation is
 mandatory and failure reports `native_verification_sandbox_unavailable`; plan
 preflight preserves that reason rather than claiming the executable is missing.
 Plan preflight looks a bare program name up on the same command search path the
@@ -808,7 +813,7 @@ session requests read-only/plan mode, refuses unavailable configuration, and clo
 at its 30-second deadline or output limit. This is not hostile-code isolation.
 Owner renames and purge tombstones are checked under the same durable product lock
 before applying a title. No task execution or owner-default update is implied.
-Sprint planning uses the same auxiliary manager with a 90-second deadline and bounded structured output, in an empty temporary directory without project tools or runtime channels. It plans from the description and owner conversation, not project inspection. Native read-only/plan mode and rejected tool-call output are not hostile-code containment. Cancel/retry fences late output. The auxiliary turn repeats its structured-output contract; invalid prose is never guessed into tasks. Failure notices use service-owned explanations, not raw engine errors, prompts or credentials. Only explicit materialization saves user-task drafts; planning never starts their executions. The owner selects Project folder or Separate worktree for the sprint; materialization copies that checkout kind to every task through the existing task-create/start route. Worktree mode remains per-task Git checkout separation, not hostile-code containment. Project-folder tasks share the owner’s files, and a non-Git folder still falls back to the project folder. Existing saved sprints and running checkouts are not moved. Up to eight failed planning attempts retain bounded, non-content diagnostics (stage, stop reason, event/text counts, elapsed time, cancellation/deadline flags and exception class), without prompts, answers, output or raw errors. They diagnose future failures, not the cause of an earlier untraced stop.
+Sprint planning runs a separate auxiliary session in an empty temporary directory without project tools or runtime channels. Each pass bounds engine initialization, configuration and model response to five minutes, with smaller per-request setup deadlines and bounded structured output. An open owner question has no running planner turn. It plans from the description and owner conversation, not project inspection. Native read-only/plan mode and rejected tool-call output are not hostile-code containment. The planner driver aborts the turn when it observes Stop and checks the sprint's current planning state before publishing a result. The auxiliary turn repeats its structured-output contract; invalid prose is never guessed into tasks. Failure notices use service-owned explanations, not raw engine errors, prompts or credentials. Only explicit materialization saves user-task drafts; planning never starts their executions. The owner selects Project folder or Separate worktree for the sprint; materialization copies that checkout kind to every task through the existing task-create/start route. Worktree mode remains per-task Git checkout separation, not hostile-code containment. Project-folder tasks share the owner’s files, and a non-Git folder still falls back to the project folder. Existing saved sprints and running checkouts are not moved.
 The service may restore the exact durable, settled COMPLETED session for owner actions. It does not adopt a database owner for a live task or alter generic ACP ownership checks. Retained technical blockers remain unpassed evidence, not fabricated passes; acknowledging them still requires explicit owner consent and current result binding. A real failed executable check is not an acknowledgement waiver.
 Review follow-ups retain implementation content only while the observed source digest is unchanged; new checks and runtime evidence still govern acceptance. Missing-command/tool blockers survive session-owner renewal only for the exact unchanged check and source; permissions, stale attempts and passing evidence are not carried forward by this rule. Git integration enumerates literal user paths, never helper-directory pathspecs, and restores the previous index selection on failed staging/commit without discarding user file contents. Held question-batch drafts rebind only across display-version changes with identical question, option, owner, requirement and permission identities; all members still undergo the normal server version checks. Multi-item sprint descriptions use the planner's per-item scope and relevant plain-text owner answers, without service-appended sibling work or serialized conversation records. Unanswered explicit owner decisions belong to the relevant item, never the implementing model. A sole item additionally retains original requirements and plain-text follow-ups. Model-generated decomposition is not filesystem access enforcement.
 New managed checkout names use a bounded ASCII description slug and a stable suffix,

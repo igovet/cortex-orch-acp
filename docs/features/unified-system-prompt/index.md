@@ -5,13 +5,14 @@
 
 ## Current Rust delivery
 
-The Rust host composes the role and route instructions once per native task session. Claude receives a plain string in session metadata's `systemPrompt`, which replaces the Claude Code preset. Codex reads a private per-session file through `CODEX_CONFIG.model_instructions_file`, which replaces its model base instructions. Each engine can add its own protocol or service messages. Project skill listings, recovery context, attachments and the assignment travel as user input. Both engines use `tools_discover` for the active Cortex catalogue. Short-text sessions use a separate text-generation system instruction.
+The Rust host composes the role and route instructions once per native task session. Claude receives a plain string in session metadata's `systemPrompt`, which replaces the Claude Code preset. Codex reads a private per-session file through `CODEX_CONFIG.model_instructions_file`, which replaces its model base instructions. Each engine can add its own protocol or service messages. Project skill listings, recovery context, attachments and the assignment travel as user input. Both engines use `tools_discover` for the active Cortex catalogue; Claude's prompt identifies it by its native name, `mcp__cortex__tools_discover`. The prompt directs models to the engine's tool list or search for external tools, to use the advertised name and schema without replacing the server namespace, and to report unavailable tools rather than guess. Short-text sessions use a separate text-generation system instruction.
 
 The remainder of this page is the historical ACP reference unless a section is
 explicitly marked as current. In particular, its former environment switches,
 edition builder and `_meta.cortexBaseInstructions` delivery table do not describe
-the Rust session path above. `tools/list` remains an ACP transport bootstrap
-operation, while models use the advertised `tools_discover` Cortex tool.
+the Rust session path above. The engine queries each MCP server's `tools/list`
+to load its tool descriptions and schemas. `tools_discover` is a model-facing
+tool on the Cortex server only.
 
 ## Historical ACP reference
 

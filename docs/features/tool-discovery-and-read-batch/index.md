@@ -9,6 +9,10 @@ Focused coverage: the `cortex-engine` gateway tests, the `workspace-service` `na
 Cortex `tools/list` record, including current role/stage narrowing and engine
 metadata. Unknown and unoffered names have the same value-free error. Discovery
 never inspects external MCP servers or grants permission to call a tool.
+For external tools, consult the engine's session tool list or search if offered.
+Use the name, description and schema advertised there, not the Cortex namespace
+or a tool's display title. An absent code-index tool calls for the applicable
+project-read fallback, not a guessed alias.
 Existing individual tools, all 23 profiles and ordinary engine loading remain.
 This is not a Cortex-owned Code Mode sandbox or a two-tool replacement for MCP.
 

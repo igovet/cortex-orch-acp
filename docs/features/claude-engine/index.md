@@ -22,9 +22,15 @@ instruction channel is unchanged in behavior: `sessionSystemPrompt` in
 the `_meta.systemPrompt` string override or preset-append object, else the
 Claude Code preset, and the result is the SDK `options.systemPrompt`. The
 options spread, disallowed tools, hooks and `_meta.claudeCode.toolName`
-for compaction and tool calls are unchanged in meaning (Cortex sends no
-`_meta.claudeCode` options in the native session path). `toolName` on a permission request is still present only for MCP tools
-and subagent calls, exactly as on 0.97.0.
+for compaction and tool calls are unchanged in meaning. `toolName` on a permission
+request is still present only for MCP tools and subagent calls, as on 0.97.0.
+
+In the Rust native task path, Cortex sends strict MCP configuration via
+`_meta.claudeCode.options` and supplies separate named relays in
+`session/new.mcpServers`. The system prompt identifies
+`mcp__cortex__tools_discover` as Cortex-only. For external tools, use the exact
+engine-advertised identity and the external server's description and schema.
+An unavailable tool or server does not become a Cortex tool.
 
 Behavior changes relevant to Cortex:
 

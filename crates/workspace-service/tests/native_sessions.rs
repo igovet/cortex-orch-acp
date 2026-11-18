@@ -4403,10 +4403,12 @@ async fn native_workspace_binding_projects_activity_and_scoped_skills() {
 }
 
 async fn configured_external_worker_grants() {
-    for (role, expectation) in [
-        ("worker-explorer", "read"),
-        ("worker-backend-dev", "write"),
-        ("worker-senior-consultant", "none"),
+    for (role, stage, engine, expectation) in [
+        ("worker-explorer", "execution", EngineKind::Codex, "read"),
+        ("worker-backend-dev", "execution", EngineKind::Codex, "write"),
+        ("worker-senior-consultant", "execution", EngineKind::Codex, "none"),
+        ("worker-code-reviewer", "review", EngineKind::Claude, "review-read"),
+        ("worker-code-reviewer", "review", EngineKind::Claude, "review-none"),
     ] {
         let p = Project::new();
         let config = Project::new(); // Separate from the project; never owner configuration.
@@ -4423,7 +4425,8 @@ async fn configured_external_worker_grants() {
                 "command":exe,"args":["external-fixture"],"allowed_tools":["lookup","write"],
                 "read_only_tools":["lookup"],"coordinator_tools":["lookup"],
                 "read_paths":[exe],"runtime_dir_env":["FIXTURE_RUNTIME"],"roles":["worker"],
-                "env":{"FIXTURE_SECRET":"memory-only-fixture"}
+                "env":{"FIXTURE_SECRET":"memory-only-fixture"},
+                "enabled": expectation != "review-none"
             }}})
             .to_string(),
         )
@@ -4439,9 +4442,11 @@ async fn configured_external_worker_grants() {
             },
         )
         .unwrap();
-        registry
-            .validate_client(&json!([{"name":"fixture","command":"/untrusted/override"}]))
-            .unwrap();
+        if expectation != "review-none" {
+            registry
+                .validate_client(&json!([{"name":"fixture","command":"/untrusted/override"}]))
+                .unwrap();
+        }
         assert!(registry
             .validate_client(&json!([{"name":"unconfigured","command":exe}]))
             .is_err());
@@ -4457,12 +4462,14 @@ async fn configured_external_worker_grants() {
         std::fs::create_dir(p.0.join("src")).unwrap();
         let store = p.store();
         store.write(|db|{
-            db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='t'",[])?;
+            let state = if stage == "review" { "REVIEWING" } else { "EXECUTING" };
+            db.execute("UPDATE runtime_tasks SET state=?,revision=1 WHERE task_id='t'",[state])?;
             // `docs/styleguide.md` does not exist yet: it is withheld, never refused.
-            db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n',?,'Work','[]',?,'execution','running','a',NULL)",[role,r#"["src","docs/styleguide.md"]"#])?;
+            db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n',?,'Work','[]',?,?,'running','a',NULL)",[role,r#"["src","docs/styleguide.md"]"#,stage])?;
             Ok(())
         }).unwrap();
         let mut route = p.route();
+        route.launch.engine = engine;
         route.launch.args = vec!["mcp-host".into()];
         let d = h
             .dispatch(
@@ -4476,8 +4483,9 @@ async fn configured_external_worker_grants() {
             .await
             .unwrap();
         assert_eq!(
-            d.prompt(expectation)
+            tokio::time::timeout(Duration::from_secs(5), d.prompt(expectation))
                 .await
+                .unwrap_or_else(|_| panic!("fixture {role}/{expectation}: prompt did not finish"))
                 .unwrap_or_else(|e| panic!(
                     "fixture {role}: {e}; {}",
                     std::fs::read_to_string(p.0.join("mcp-probe")).unwrap_or_default()
@@ -4485,6 +4493,17 @@ async fn configured_external_worker_grants() {
                 .stop_reason,
             "end_turn"
         );
+        if stage == "review" {
+            let boundary = std::fs::read_to_string(p.0.join("review-mcp-boundary")).unwrap();
+            assert!(
+                boundary.contains("mcp__cortex__tools_discover"),
+                "review discovery must identify the Cortex-only tool by its Claude name"
+            );
+            assert!(boundary.contains("exact name advertised by the engine"));
+            assert!(boundary.contains("If the external tool is not advertised"));
+            assert!(!boundary.contains("mcp__fixture__"));
+            assert!(!boundary.contains("# Cortex tool cheat sheet"));
+        }
         assert_eq!(
             p.0.join("src/external-write").exists(),
             expectation == "write"
@@ -4495,7 +4514,7 @@ async fn configured_external_worker_grants() {
             let withheld:i64=db.query_row("SELECT count(*) FROM runtime_events WHERE type='NATIVE_EXTERNAL_MCP_WITHHELD'",[],|r|r.get(0))?;
             assert_eq!(withheld,0,"a not-yet-created scope withholds nothing");
             let count:i64=db.query_row("SELECT count(*) FROM runtime_requests WHERE operation='external_call'",[],|r|r.get(0))?;
-            assert_eq!(count,match expectation {"write"=>2,"read"=>1,_=>0});
+            assert_eq!(count,match expectation {"write"=>2,"read" | "review-read"=>1,_=>0});
             let saved:String=db.query_row("SELECT coalesce(group_concat(result_json),'') FROM runtime_requests WHERE operation='external_call'",[],|r|r.get(0))?;
             assert!(!saved.contains("FIXTURE_SECRET"));
             Ok(())
@@ -4773,7 +4792,7 @@ fn external_fixture() {
                 json!({"protocolVersion":"2025-11-25","capabilities":{},"serverInfo":{"name":"fixture","version":"1"}})
             }
             "tools/list" => {
-                json!({"tools":[{"name":"lookup","inputSchema":{"type":"object"}},{"name":"write","inputSchema":{"type":"object"}}]})
+                json!({"tools":[{"name":"lookup","description":"Look up entries in the fixture index.","inputSchema":{"type":"object","additionalProperties":false}},{"name":"write","inputSchema":{"type":"object"}}]})
             }
             "tools/call" => {
                 let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap();
@@ -5884,6 +5903,13 @@ fn main() {
             println!("plain-folder lifecycle passed");
             return;
         }
+        if mode == "external-worker-grants" {
+            tokio::time::timeout(Duration::from_secs(45), configured_external_worker_grants())
+                .await
+                .expect("external worker grants exceeded deadline");
+            println!("external worker grants, including Claude review discovery, passed");
+            return;
+        }
         // `engine-modes`: only the native permission and engine-mode scenarios.
         if mode == "engine-modes" {
             tokio::time::timeout(Duration::from_secs(90), async {
@@ -5941,7 +5967,9 @@ fn main() {
         .await
         .expect("native session scenarios exceeded deadline");
     });
-    if !["synthesis-feedback", "engine-modes", "plain-folder"].contains(&mode.as_str()) {
+    if !["synthesis-feedback", "engine-modes", "plain-folder", "external-worker-grants"]
+        .contains(&mode.as_str())
+    {
         println!("native source/project/command, read-only, Git and access/outside scenarios asserted with existing session regressions (fake ACP/relay processes, disposable stores; unavailable verification is reported above)");
     }
 }
