@@ -688,6 +688,45 @@ describe("real port", () => {
       expect(await p.command(envelope({type:"close_task",taskId:"task-1",choice:"as_is",confirmed:true,now:1},"close"))).toMatchObject({ok:true});
       expect(s.calls.filter(c => c.operation === "executions.control").at(-1)!.message).toMatchObject({action:"close_task",confirmed:true});
       expect(asked.filter(c=>c.op==="product.task").at(-1)?.params).toEqual({action:"close",taskId:"task-1",choice:"as_is",confirmed:true});
+      // The saved task's close is checked first, before the run records its resolution.
+      expect(asked.filter(c=>c.op==="product.task").at(-2)?.params).toEqual({action:"close",taskId:"task-1",choice:"as_is",confirmed:true,preflight:true});
+    });
+
+    it("closes only the displayed Workspace task when its execution records disagree", async () => {
+      const { s, p, asked, ready } = helper();
+      await ready();
+      asked.length = 0;
+      s.calls.length = 0;
+      expect(await p.command(envelope({ type: "close_task", taskId: "task-1", choice: "unconfirmed",
+        executionId: "e", expectedVersion: "25", confirmed: true, now: 1 }, "close-records"))).toMatchObject({ ok: true });
+      expect(asked.filter(c => c.op === "product.task").map(c => c.params)).toEqual([
+        { action: "close_unconfirmed", taskId: "task-1", executionId: "e", expectedVersion: "25", confirmed: true },
+      ]);
+      expect(s.calls.some(c => c.operation === "executions.control")).toBe(false);
+    });
+
+    it("a refused close never closes the run, and a close refused after the run closed says so", async () => {
+      const { s, p, asked, ready } = helper();
+      await ready();
+      const unknown = "A dispatched action still has an unknown outcome. Inspect the task activity before handing its folder to the next task.";
+      const machine = s.answers["machine.call"]!;
+      let refuseWhen: (params: Record<string, unknown> | undefined) => boolean = params => params?.preflight === true;
+      s.answers["machine.call"] = message => {
+        const call = message as (typeof asked)[number];
+        if (call.op === "product.task" && call.params?.action === "close" && refuseWhen(call.params)) { asked.push(call); return { ok: false, code: "native_outside_outcome_unknown", message: unknown }; }
+        return machine(message);
+      };
+      s.calls.length = 0;
+      const first = await p.command(envelope({type:"close_task",taskId:"task-1",choice:"as_is",confirmed:true,now:1},"close-1"));
+      expect(first).toMatchObject({ ok: false, outcome: "native_outside_outcome_unknown", message: unknown });
+      expect(s.calls.some(c => c.operation === "executions.control")).toBe(false);
+      // A refusal that arrives only after the run closed (the state changed in between) is explicit about it.
+      refuseWhen = params => params?.preflight !== true;
+      const second = await p.command(envelope({type:"close_task",taskId:"task-1",choice:"as_is",confirmed:true,now:2},"close-2"));
+      expect(s.calls.filter(c => c.operation === "executions.control").at(-1)!.message).toMatchObject({action:"close_task"});
+      expect(second.ok).toBe(false);
+      expect(second.message).toContain(unknown);
+      expect(second.message).toContain("The task's run is already closed; close the task again to finish it.");
     });
 
     it("carries actual bytes for prompt, queue and queued delivery", async () => {

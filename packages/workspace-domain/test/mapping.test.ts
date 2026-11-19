@@ -65,6 +65,15 @@ describe("task mapping", () => {
     expect(mapTask({...resolved,warnings:[...resolved.warnings,"contradictory_evidence"]},ctx).status).not.toBe("done");
     expect(mapTask({...resolved,warnings:[]},ctx).status).toBe("cancelled");
   });
+  it("does not certify an unconfirmed close or let stale owner facts supersede it", () => {
+    const native = mapTask(wireTask({phase:"unknown",runtimeState:null,executionState:"unknown",
+      warnings:["contradictory_evidence","owner_closed_unconfirmed"]}), ctx);
+    const task = overlayTask(native, {status:"ready_to_merge", acceptance:{automatic:true,version:2,digest:"old"}}, "dev");
+    expect(task).toMatchObject({status:"closed_unverified",closedAs:"unconfirmed",process:"unknown",notVerifiedByCortex:true,acceptance:null});
+    expect(dependencyReady(task, "automatic")).toBe(false);
+    expect(dependencyReady(task, "hybrid")).toBe(false);
+    expect(boardPhase({...emptyWorkspace(), tasks:[task]}, task.id)).toBe("closed_unverified");
+  });
   it("carries the observed coordinator route separately from editable settings", () => {
     const route = { model: "Observed Model", effort: "High" };
     expect(mapTask(wireTask({ coordinatorRoute: route }), ctx).coordinatorRoute).toEqual(route);

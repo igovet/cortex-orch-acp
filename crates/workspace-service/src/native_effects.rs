@@ -20,6 +20,12 @@ use tokio::{
     process::Command,
 };
 const OUTPUT: usize = 1024 * 1024;
+/// Bounds of one Git listing used to observe the project (its paths, index, ignored
+/// directories and ignored files). A dependency or build folder can hold most of a
+/// project's files, so these are far above `OUTPUT`; a listing past either bound is
+/// reported (`project_unobservable_too_many_paths`, or unavailable), never truncated.
+const LISTING_OUTPUT: usize = 256 * 1024 * 1024;
+const LISTING_DEADLINE: Duration = Duration::from_secs(120);
 // Leave startup/cleanup margin above a 900-second bounded build or test step.
 const VERIFICATION_DEADLINE: Duration = Duration::from_secs(20 * 60);
 pub(super) fn identity() -> CoreResult<String> {
@@ -38,25 +44,38 @@ pub(super) struct Output {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
 }
-async fn drain(mut stream: impl AsyncRead + Unpin) -> std::io::Result<(Vec<u8>, bool)> {
+async fn drain(
+    mut stream: impl AsyncRead + Unpin,
+    limit: usize,
+) -> std::io::Result<(Vec<u8>, bool)> {
     let mut kept = Vec::new();
-    let mut buffer = [0; 8192];
+    let mut buffer = vec![0; 64 * 1024];
     let mut truncated = false;
     loop {
         let n = stream.read(&mut buffer).await?;
         if n == 0 {
             break;
         }
-        let take = n.min(OUTPUT - kept.len());
+        let take = n.min(limit - kept.len());
         kept.extend_from_slice(&buffer[..take]);
         truncated |= take < n;
     }
     Ok((kept, truncated))
 }
 async fn capture(
+    cmd: Command,
+    deadline: Duration,
+    cancel: tokio::sync::watch::Receiver<bool>,
+) -> CoreResult<Output> {
+    capture_limited(cmd, deadline, cancel, OUTPUT).await
+}
+/// `capture` keeping at most `limit` bytes of each stream (the rest is drained and
+/// the output marked truncated, so incomplete).
+async fn capture_limited(
     mut cmd: Command,
     deadline: Duration,
     mut cancel: tokio::sync::watch::Receiver<bool>,
+    limit: usize,
 ) -> CoreResult<Output> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -71,8 +90,8 @@ async fn capture(
         }
     })?;
     let pid = child.id().ok_or_else(refused)?;
-    let out = tokio::spawn(drain(child.stdout.take().unwrap()));
-    let err = tokio::spawn(drain(child.stderr.take().unwrap()));
+    let out = tokio::spawn(drain(child.stdout.take().unwrap(), limit));
+    let err = tokio::spawn(drain(child.stderr.take().unwrap(), OUTPUT.min(limit)));
     let status = tokio::select! {
         s = tokio::time::timeout(deadline, child.wait()) => match s {
             Ok(Ok(status)) => Ok(status),
@@ -198,6 +217,9 @@ async fn verify_in(
     )
 }
 async fn git(root: &Path, args: &[&str]) -> CoreResult<Vec<u8>> {
+    git_with_limit(root, args, LISTING_OUTPUT).await
+}
+async fn git_with_limit(root: &Path, args: &[&str], output_limit: usize) -> CoreResult<Vec<u8>> {
     let mut argv = vec![
         "/usr/bin/git".to_owned(),
         "-c".into(),
@@ -207,7 +229,18 @@ async fn git(root: &Path, args: &[&str]) -> CoreResult<Vec<u8>> {
     ];
     argv.extend(args.iter().map(|s| s.to_string()));
     let (_cancel, receiver) = tokio::sync::watch::channel(false);
-    let o = capture(command(root, &argv), Duration::from_secs(10), receiver).await?;
+    let o = capture_limited(
+        command(root, &argv),
+        LISTING_DEADLINE,
+        receiver,
+        output_limit,
+    )
+    .await?;
+    // A listing past its byte bound is reported as such: it never stands in, cut
+    // short, for the whole project.
+    if o.truncated && o.code == Some(0) {
+        return Err(CoreError::Refused("project_unobservable_too_many_paths"));
+    }
     if !o.complete || o.code != Some(0) {
         return Err(CoreError::Refused("project_revision_unavailable"));
     }
@@ -330,7 +363,12 @@ pub(super) async fn git_ref(root: &Path, args: &[&str]) -> CoreResult<Output> {
     }
     Ok(result)
 }
-async fn git_head(root: &Path) -> CoreResult<Vec<u8>> {
+struct CheckoutHead {
+    commit: Option<String>,
+    /// Preserve the project digest input, including the symbolic ref when present.
+    digest_input: Vec<u8>,
+}
+async fn git_head(root: &Path) -> CoreResult<CheckoutHead> {
     let head = git_ref(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).await?;
     let symbolic = git_ref(root, &["symbolic-ref", "--quiet", "HEAD"]).await?;
     if head.code == Some(1) {
@@ -348,10 +386,24 @@ async fn git_head(root: &Path) -> CoreResult<Vec<u8>> {
             return Err(refused());
         }
     }
-    let mut bytes = head.stdout;
-    bytes.push(0);
-    bytes.extend(symbolic.stdout);
-    Ok(bytes)
+    let commit = if head.code == Some(0) {
+        let oid = std::str::from_utf8(&head.stdout)
+            .map_err(|_| refused())?
+            .trim_end_matches('\n');
+        if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(refused());
+        }
+        Some(oid.to_owned())
+    } else {
+        None
+    };
+    let mut digest_input = head.stdout;
+    digest_input.push(0);
+    digest_input.extend(symbolic.stdout);
+    Ok(CheckoutHead {
+        commit,
+        digest_input,
+    })
 }
 /// How completely one observation covers the project. A waiver of review is never
 /// granted while any entry stands in by metadata only or the observation is incomplete.
@@ -370,6 +422,7 @@ impl Flags {
 }
 struct Observed {
     digest: String,
+    head: Option<String>,
     ignored: Option<String>,
     flags: Flags,
     /// Per-file identity of the top-level checkout (only when asked for): a content
@@ -442,6 +495,7 @@ async fn observe_with(
     Ok((
         EvidenceSnapshot {
             project_digest: Some(o.digest),
+            head: o.head,
             ignored_digest: o.ignored,
             metadata_only: o.flags.metadata_only,
             cap_reached: o.flags.cap_reached,
@@ -470,7 +524,7 @@ struct Listing {
     index: Vec<u8>,
     pruned: Option<BTreeSet<Vec<u8>>>,
     ignored: Option<Vec<u8>>,
-    head: Vec<u8>,
+    head: CheckoutHead,
 }
 async fn observe_checkout(
     root: PathBuf,
@@ -582,10 +636,19 @@ fn plain_listing(root: &Path, with_ignored: bool) -> CoreResult<Listing> {
         index: Vec::new(),
         pruned: None,
         ignored: with_ignored.then(Vec::new),
-        head: b"plain-folder".to_vec(),
+        head: CheckoutHead {
+            commit: None,
+            digest_input: b"plain-folder".to_vec(),
+        },
     })
 }
 async fn git_listing(root: &Path, with_ignored: bool) -> CoreResult<Listing> {
+    git_listing_with_ignored_limit(root, with_ignored.then_some(LISTING_OUTPUT)).await
+}
+async fn git_listing_with_ignored_limit(
+    root: &Path,
+    ignored_output_limit: Option<usize>,
+) -> CoreResult<Listing> {
     let root = root.to_owned();
     const EXCLUDE: [&str; 4] = [
         ":(exclude).cortex",
@@ -634,10 +697,11 @@ async fn git_listing(root: &Path, with_ignored: bool) -> CoreResult<Listing> {
         .map(<[u8]>::to_vec)
         .collect(),
     );
-    // Ignored files are covered by metadata only; an incomplete listing is "unobserved".
-    // A digest-only observation never lists them: they feed only the ignored digest.
-    let ignored = if with_ignored {
-        git(
+    // Spend a separate listing budget on ignored metadata. An overflow here
+    // must not discard the deliverable listing or supply a partial digest.
+    // A digest-only observation never requests this listing.
+    let ignored = if let Some(limit) = ignored_output_limit {
+        git_with_limit(
             &root,
             &pathspec(&[
                 "ls-files",
@@ -646,6 +710,7 @@ async fn git_listing(root: &Path, with_ignored: bool) -> CoreResult<Listing> {
                 "--exclude-standard",
                 "-z",
             ]),
+            limit,
         )
         .await
         .ok()
@@ -725,7 +790,12 @@ async fn observe_listed(
                     // Ignored files are not deliverable content: they feed the ignored digest.
                     nested_ignored.push((path.clone(), nested.ignored));
                 }
-                Err(e) if e.code() == "project_revision_unavailable" => {
+                Err(e)
+                    if matches!(
+                        e.code(),
+                        "project_revision_unavailable" | "project_unobservable_too_many_paths"
+                    ) =>
+                {
                     flags.incomplete = true;
                     value.push_str(":unobserved");
                 }
@@ -734,22 +804,25 @@ async fn observe_listed(
         }
         heads.insert(path, value);
     }
-    let root2 = root.clone();
+    let CheckoutHead {
+        commit,
+        digest_input,
+    } = head;
     let digest = tokio::task::spawn_blocking(move || {
         let mut manifest = std::collections::BTreeMap::new();
         let mut raw_manifest = std::collections::BTreeMap::new();
         let (d, f) = tree_collect_in(
-            &root2,
+            &root,
             &paths,
             &index,
-            Some(&head),
+            Some(&digest_input),
             &heads,
             (FILE_LIMIT, TOTAL_LIMIT, TIME_LIMIT),
             (with_manifest != ManifestMode::None).then_some(&mut manifest),
             (with_manifest == ManifestMode::Review).then_some(&mut raw_manifest),
             pruned.as_ref(),
         )?;
-        let i = ignored.and_then(|l| ignored_tree(&root2, &l));
+        let i = ignored.and_then(|l| ignored_tree(&root, &l));
         Ok::<_, CoreError>((d, i, f, manifest, raw_manifest))
     })
     .await
@@ -757,11 +830,10 @@ async fn observe_listed(
     let manifest = digest.3;
     let raw_manifest = digest.4;
     flags.merge(digest.2);
-    if let Some((_, f)) = &digest.1 {
-        flags.merge(*f);
-    }
-    flags.incomplete |= digest.1.is_none();
-    let mut ignored = digest.1.map(|(d, _)| d);
+    // Ignored files are not deliverable content: an ignored digest that could not be
+    // observed leaves it `None` (no review waiver can rest on it) but never makes the
+    // deliverable observation, or its per-file manifest, incomplete.
+    let mut ignored = digest.1;
     if !nested_ignored.is_empty() {
         use sha2::Digest;
         let mut h = sha2::Sha256::new();
@@ -779,10 +851,10 @@ async fn observe_listed(
         if ignored.is_some() {
             ignored = Some(hex(h));
         }
-        flags.incomplete |= ignored.is_none();
     }
     Ok(Observed {
         digest: digest.0,
+        head: commit,
         ignored,
         flags,
         manifest,
@@ -997,6 +1069,165 @@ mod tests {
         git_cmd(dir, &["add", "lib"]);
         git_cmd(dir, &["commit", "-qm", "init"]);
     }
+    #[tokio::test]
+    async fn snapshot_reports_the_checkout_head_but_not_an_unborn_head() {
+        let f = Fixture::new();
+        let base = f.0.join("project");
+        std::fs::create_dir(&base).unwrap();
+        assert!(observe(base.clone()).await.unwrap().head.is_none());
+        git_cmd(&base, &["init", "-q"]);
+        assert!(observe(base.clone()).await.unwrap().head.is_none());
+        git_cmd(&base, &["commit", "--allow-empty", "-qm", "initial"]);
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&base)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let expected = std::str::from_utf8(&output.stdout).unwrap().trim_end();
+        assert_eq!(
+            observe(base.clone()).await.unwrap().head.as_deref(),
+            Some(expected)
+        );
+        git_cmd(&base, &["checkout", "--quiet", "--detach", expected]);
+        assert_eq!(observe(base).await.unwrap().head.as_deref(), Some(expected));
+    }
+
+    /// A project whose ignored files list to far more than the general 1 MiB command
+    /// output bound is observed completely: a usable manifest and an ignored digest
+    /// that moves with ignored changes while the project digest stays.
+    #[tokio::test]
+    async fn a_large_ignored_listing_is_observed_completely() {
+        let f = Fixture::new();
+        let base = f.0.join("project");
+        init_repo(&base);
+        std::fs::write(base.join(".gitignore"), "out/\n").unwrap();
+        git_cmd(&base, &["add", ".gitignore"]);
+        git_cmd(&base, &["commit", "-qm", "ignore"]);
+        let long = "n".repeat(100);
+        for d in 0..12 {
+            let dir = base.join(format!("out/d{d}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            for i in 0..1000 {
+                std::fs::write(dir.join(format!("{long}{i}")), "x").unwrap();
+            }
+        }
+        let listing = git_listing(&base, true).await.unwrap();
+        assert!(
+            listing.ignored.as_ref().unwrap().len() > OUTPUT,
+            "the fixture must exceed the general output bound"
+        );
+        let (snapshot, manifest) = observe_manifest(base.clone()).await.unwrap();
+        assert!(!snapshot.incomplete && !snapshot.metadata_only && !snapshot.cap_reached);
+        let i0 = snapshot.ignored_digest.clone().expect("ignored digest");
+        let d0 = snapshot.project_digest.clone().unwrap();
+        let manifest = manifest.expect("a complete observation has a manifest");
+        assert!(manifest.keys().all(|k| !k.starts_with("out/")));
+        std::fs::write(base.join(format!("out/d3/{long}7")), "changed").unwrap();
+        let (after, again) = observe_manifest(base.clone()).await.unwrap();
+        assert!(!after.incomplete && again.is_some());
+        assert_eq!(after.project_digest.unwrap(), d0);
+        assert_ne!(after.ignored_digest.unwrap(), i0);
+
+        // Set the independent ignored listing limit below the fixture size to
+        // exercise actual output truncation without requiring a 256 MiB fixture.
+        let listing = git_listing_with_ignored_limit(&base, Some(OUTPUT))
+            .await
+            .unwrap();
+        assert!(listing.ignored.is_none());
+        let observed = observe_listed(base, 0, ManifestMode::Review, true, listing)
+            .await
+            .unwrap();
+        assert!(observed.ignored.is_none());
+        assert!(!observed.flags.incomplete);
+        assert!(!observed.flags.cap_reached);
+        assert!(!observed.flags.metadata_only);
+        assert_eq!(observed.digest, d0);
+        assert_eq!(observed.manifest, manifest);
+        assert_eq!(
+            observed.raw_manifest.keys().collect::<Vec<_>>(),
+            [".gitignore", "lib"]
+        );
+    }
+
+    #[tokio::test]
+    async fn deliverable_content_over_the_file_limit_has_no_usable_manifest() {
+        let f = Fixture::new();
+        let base = f.0.join("project");
+        init_repo(&base);
+        // Sparse, so this exercises the real production cap without allocating
+        // or hashing GiB of fixture data.
+        File::create(base.join("large"))
+            .unwrap()
+            .set_len(FILE_LIMIT + 1)
+            .unwrap();
+        let (snapshot, manifest) = observe_manifest(base).await.unwrap();
+        assert!(snapshot.cap_reached && snapshot.incomplete && snapshot.metadata_only);
+        assert!(manifest.is_none());
+    }
+
+    /// The ignored digest ignores listing order and private stores, but records a
+    /// listed entry that vanished before the metadata pass.
+    #[test]
+    fn ignored_digest_is_order_free_and_survives_vanished_entries() {
+        let f = Fixture::new();
+        std::fs::create_dir_all(f.0.join("out")).unwrap();
+        std::fs::write(f.0.join("out/a"), "a").unwrap();
+        std::fs::write(f.0.join("out/b"), "b").unwrap();
+        let sorted = ignored_tree(&f.0, b"out/a\0out/b\0").unwrap();
+        assert_eq!(
+            ignored_tree(&f.0, b"out/b\0out/a\0out/b\0").unwrap(),
+            sorted
+        );
+        assert_eq!(
+            ignored_tree(&f.0, b"out/a\0out/b\0sub/.cortex/x\0").unwrap(),
+            sorted
+        );
+        let vanished = ignored_tree(&f.0, b"out/a\0out/b\0out/gone\0").unwrap();
+        assert_ne!(vanished, sorted);
+        assert!(ignored_tree(&f.0, b"../escape\0").is_none());
+        assert!(ignored_tree_within(&f.0, b"out/a\0", Duration::ZERO).is_none());
+    }
+
+    #[test]
+    fn ignored_digest_is_unobserved_across_changes_to_an_unreadable_entry() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new();
+        let closed = f.0.join("out/closed");
+        std::fs::create_dir_all(&closed).unwrap();
+        let entry = File::create(closed.join("c")).unwrap();
+        let listing = b"out/closed/c\0";
+        let readable = ignored_tree(&f.0, listing).unwrap();
+
+        // Keep a descriptor so the entry can change without restoring traversal.
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let lookup_failed = lookup(&File::open(&f.0).unwrap(), "out/closed/c", false).is_err();
+        let before = ignored_tree(&f.0, listing);
+        entry.set_len(42).unwrap();
+        let after = ignored_tree(&f.0, listing);
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        // A privileged test process may bypass the mode bits. The next test
+        // exercises the error branch independently of permissions.
+        if lookup_failed {
+            assert!(before.is_none());
+            assert!(after.is_none());
+        }
+        assert_ne!(ignored_tree(&f.0, listing).unwrap(), readable);
+    }
+
+    #[test]
+    fn repeated_metadata_lookup_failure_never_yields_an_ignored_digest() {
+        let f = Fixture::new();
+        // Simulate a listing that cannot be resolved by a single metadata lookup.
+        // Unlike chmod, this still triggers a lookup error when tests run as root.
+        let name = "x".repeat(libc::PATH_MAX as usize);
+        assert!(lookup(&File::open(&f.0).unwrap(), &name, false).is_err());
+        assert!(ignored_tree(&f.0, name.as_bytes()).is_none());
+        let unsorted = format!("z\0{name}\0");
+        assert!(ignored_tree(&f.0, unsorted.as_bytes()).is_none());
+    }
+
     #[tokio::test]
     async fn empty_directories_inside_ignored_trees_are_not_walked() {
         let f = Fixture::new();
@@ -1589,7 +1820,6 @@ const FILE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 const TOTAL_LIMIT: u64 = 8 * 1024 * 1024 * 1024;
 const TIME_LIMIT: Duration = Duration::from_secs(300);
 const NAME_LIMIT: usize = 100_000;
-const IGNORED_LIMIT: usize = 200_000;
 fn unreadable() -> CoreError {
     CoreError::Refused("project_unobservable_unreadable_content")
 }
@@ -2152,32 +2382,73 @@ fn empty_directories_ordered(
     }
     (found, true)
 }
-/// Metadata-only digest of Git-ignored files (type, mode, size, mtime, link target).
-/// `None` when they cannot be observed completely; a review waiver then cannot be granted.
-fn ignored_tree(root: &Path, listing: &[u8]) -> Option<(String, Flags)> {
+/// Metadata-only digest of Git-ignored files (type, mode, size, mtime, link target),
+/// in byte order of their names. `None` when they cannot be observed (an invalid path,
+/// a metadata lookup error, or past `TIME_LIMIT`); a review waiver then cannot be granted.
+/// Ignored files are not deliverable content, so this never makes the deliverable
+/// observation incomplete.
+///
+/// Git lists them already sorted, so the digest is computed over its listing as it
+/// stands, without collecting the names; a listing in any other order (or with a
+/// repeat) is sorted once, so the same files always give the same digest. An entry
+/// that vanished since the listing is recorded as missing. Names inside the private
+/// stores or repository metadata are skipped, as everywhere else.
+fn ignored_tree(root: &Path, listing: &[u8]) -> Option<String> {
+    ignored_tree_within(root, listing, TIME_LIMIT)
+}
+fn ignored_tree_within(root: &Path, listing: &[u8], time_limit: Duration) -> Option<String> {
+    let names = || listing.split(|c| *c == 0).filter(|p| !p.is_empty());
+    let mut previous: Option<&[u8]> = None;
+    let sorted = names().all(|name| {
+        let ordered = previous.is_none_or(|p| p < name);
+        previous = Some(name);
+        ordered
+    });
+    let dir = File::open(root).ok()?;
+    let started = std::time::Instant::now();
+    let mut h = <sha2::Sha256 as sha2::Digest>::new();
+    if sorted {
+        for name in names() {
+            ignored_entry(&mut h, &dir, name, started, time_limit)?;
+        }
+    } else {
+        let mut all: Vec<&[u8]> = names().collect();
+        all.sort_unstable();
+        all.dedup();
+        for name in all {
+            ignored_entry(&mut h, &dir, name, started, time_limit)?;
+        }
+    }
+    Some(hex(h))
+}
+fn ignored_entry(
+    h: &mut sha2::Sha256,
+    dir: &File,
+    name: &[u8],
+    started: std::time::Instant,
+    time_limit: Duration,
+) -> Option<()> {
     use sha2::Digest;
-    let names = listing
-        .split(|c| *c == 0)
-        .filter(|p| !p.is_empty())
-        .collect::<BTreeSet<_>>();
-    if names.len() > IGNORED_LIMIT {
+    if started.elapsed() >= time_limit {
         return None;
     }
-    let dir = File::open(root).ok()?;
-    let mut h = sha2::Sha256::new();
-    // Ignored files are not deliverable content: recorded by metadata only, and a
-    // waiver is denied only when this digest differs from the baseline's.
-    let flags = Flags::default();
-    for name in names {
-        let name = checked_name(name).ok()?;
-        let seen = lookup(&dir, name, false).ok()?;
-        feed(&mut h, name.as_bytes());
-        h.update([seen.kind]);
-        h.update(seen.mode.to_be_bytes());
-        h.update(seen.size.to_be_bytes());
-        h.update(seen.mtime.0.to_be_bytes());
-        h.update(seen.mtime.1.to_be_bytes());
-        feed(&mut h, &seen.target);
+    let name = std::str::from_utf8(name).ok()?;
+    if name.starts_with('/') || name.split('/').any(|c| c == "..") {
+        return None;
     }
-    Some((hex(h), flags))
+    if name
+        .split('/')
+        .any(|c| [".cortex", ".cortex-dev", ".git"].contains(&c))
+    {
+        return Some(());
+    }
+    let seen = lookup(dir, name, false).ok()?;
+    feed(h, name.as_bytes());
+    h.update([seen.kind]);
+    h.update(seen.mode.to_be_bytes());
+    h.update(seen.size.to_be_bytes());
+    h.update(seen.mtime.0.to_be_bytes());
+    h.update(seen.mtime.1.to_be_bytes());
+    feed(h, &seen.target);
+    Some(())
 }

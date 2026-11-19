@@ -225,6 +225,30 @@ included, so a closed task can be deleted):
   `process_gone` only when neither its exact process (pid with the recorded
   start time) nor any member of its process group still exists. Deletion
   likewise ignores a record without an end time from an earlier boot.
+- **Command receipts whose call was lost.** Every `command_run` and
+  `outside_command` receipt ends settled. A brokered launch that fails, or
+  whose call ends (a refused or ended reviewer, a revoked channel, a stopped
+  session), before its supervisor receives the final launch grant is settled
+  at once as `command_not_started` (`launched: false`): the payload is released
+  only after the supervisor's handle commits. A receipt left unsettled any
+  other way is settled by startup recovery and by the sprint scheduler's live
+  passes (same 15-second to 10-minute backoff as the exit re-check), but only
+  on proof that nothing can still run it: the supervisor's `finished` status
+  (its recorded receipt, or `outcome_not_recorded` with the exit code when the
+  output cannot be verified), an earlier boot, a lost supervisor whose payload
+  process group (recorded in its status after launch) has no member, a lost
+  read-only supervisor (its bubblewrap runs with `--die-with-parent
+  --unshare-pid`, so the namespace ends with it), or, for an unsupervised
+  outside command, neither its exact process nor any member of its process
+  group. An outside command receipt changes only once its channel can no
+  longer act. Commands the service still runs or observes are never touched.
+  Such a receipt is `settled: true`, `complete: false` with `outcome:
+  "unknown"` and its `settlement_evidence`: it never counts as a passed check,
+  the request is never run again, and close-as-is, repair and resume no longer
+  refuse with `native_outside_outcome_unknown`. A live supervisor, or a lost
+  writing supervisor without a recorded process group, keeps the receipt
+  unknown; so does a Guarded or Development payload that outlives its lost
+  supervisor (it has no PID namespace), until its process group is empty.
 
 A dead service never removes its sessions' broker directories
 (`cortex-mcp-` and 24 hex digits, in the project's store directory). Recovery

@@ -220,6 +220,13 @@ export function overlayTask(task: Task, overlay: TaskOverlay | undefined, branch
     next.process = "stopped";
     next.issue = null;
   }
+  if (task.closedAs === "unconfirmed") {
+    // Older saved presentation must not replace the durable close or imply
+    // that an earlier result was accepted for the disputed execution.
+    return { ...next, status: "closed_unverified", process: "unknown", observedPhase: task.observedPhase,
+      closedAs: "unconfirmed", doneAt: task.doneAt, notVerifiedByCortex: true, archive: null,
+      acceptance: null, integration: null };
+  }
   if (automaticReady && next.result) next.result = { ...next.result, automaticReady: true };
   return next;
 }

@@ -12,6 +12,7 @@ mod coordinator;
 mod engine_connection;
 pub(crate) mod files;
 mod git;
+mod close_commit;
 mod integration;
 mod integration_squash;
 mod ledger;

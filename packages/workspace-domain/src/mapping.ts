@@ -167,16 +167,17 @@ export function mapTask(task: WireTask, context: { projectId: string }, result?:
   const phase = paused ? "paused" : interrupted || pending ? "recovery" : phaseOf(task), mapped = result ? mapResult(result) : null;
   const known = interrupted || pending || paused || (phase !== "unknown" && task.phase !== "recovery");
   const ownerResolved = phase === "stopped" && task.runtimeState === "CANCELLED" && task.warnings.includes("owner_resolved_without_certification") && !task.warnings.includes("contradictory_evidence");
-  const status = ownerResolved ? "done" : interrupted ? "needs_you" : STATUS_OF_PHASE[phase] ?? (task.executionId ? "working" : "draft");
+  const closedUnconfirmed = !consistent && task.executionId !== null && task.warnings.includes("owner_closed_unconfirmed");
+  const status = closedUnconfirmed ? "closed_unverified" : ownerResolved ? "done" : interrupted ? "needs_you" : STATUS_OF_PHASE[phase] ?? (task.executionId ? "working" : "draft");
   return {
     id: task.taskId, projectId: context.projectId, sprintId: null, description: task.description, sourceVersion: task.version,
     title: task.title ?? descriptionLabel(task.description), titleState: task.title === null ? "pending" : "generated",
     checkout: { kind: "main", branch: "" }, targetBranch: null, dependencies: [], status, resumeStatus: "working",
     ...(continuation ? { automaticContinuation: continuation } : {}),
     observedPhase:phase, coordinatorRoute: task.coordinatorRoute ?? null, warnings:task.warnings, issue: task.waitReason, executionId: task.executionId, result: mapped, workspaceDigest: mapped?.digest ?? null, acceptance: null,
-    conflict: "none", merge: null, resolvedBy: null, integration: null, closedAs: ownerResolved ? "as_is" : null, notVerifiedByCortex: ownerResolved, doneAt: ownerResolved ? lastConfirmed(task.lastConfirmedAt) : null,
+    conflict: "none", merge: null, resolvedBy: null, integration: null, closedAs: closedUnconfirmed ? "unconfirmed" : ownerResolved ? "as_is" : null, notVerifiedByCortex: ownerResolved || closedUnconfirmed, doneAt: ownerResolved || closedUnconfirmed ? lastConfirmed(task.lastConfirmedAt) : null,
     archive: null, work: "unmerged",
-    process: !known ? "unknown" : status === "working" || status === "needs_you" ? "live" : "stopped",
+    process: closedUnconfirmed || !known ? "unknown" : status === "working" || status === "needs_you" ? "live" : "stopped",
     unexpectedChanges: false, purgeBlocker: null, settings: { model: "", effort: "", mode: "guarded", language: "auto" }, lastConfirmedAt: lastConfirmed(task.lastConfirmedAt),
   };
 }

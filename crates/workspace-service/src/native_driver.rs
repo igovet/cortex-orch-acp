@@ -36,6 +36,31 @@ fn assignment_brief(
     }
     Ok(item)
 }
+/// Replace a review packet's predecessor list with the bounded split the result
+/// check enforces: `predecessor_reports` (required, each to its last page),
+/// `optional_reports` (with `optional_reports_more` when clipped) and
+/// `unavailable_reports`, plus the rule that tells the reviewer which is which.
+pub(crate) fn review_reading(
+    db: &rusqlite::Connection,
+    task: &str,
+    node: &str,
+    packet: &mut Value,
+) -> CoreResult<()> {
+    let split = cortex_core::assignment_brief::review_reports(db, task, node)?;
+    packet["predecessor_reports"] = split["required"].clone();
+    packet["optional_reports"] = split["optional"].clone();
+    if let Some(more) = split.get("optional_more") {
+        packet["optional_reports_more"] = more.clone();
+    }
+    if split["unavailable"]
+        .as_array()
+        .is_some_and(|a| !a.is_empty())
+    {
+        packet["unavailable_reports"] = split["unavailable"].clone();
+    }
+    packet["predecessor_reading"] = json!(cortex_core::assignment_brief::REVIEW_READING_RULE);
+    Ok(())
+}
 impl NativeHost {
     /// Claim only newly-ready execution nodes after one worker releases a slot.
     /// This deliberately avoids the full `advance_step` path, which observes the
@@ -124,6 +149,7 @@ impl NativeHost {
                     // baseline keeps it, and a review packet lists the files changed since.
                     let (e, baseline_manifest, raw_manifest) =
                         native_effects::observe_review_manifest(self.root.clone()).await?;
+                    let review_root = self.root.clone();
                     let t = task.clone();
                     let o = owner.clone();
                     let step=recv(self.executor.write(move|db|{
@@ -199,7 +225,12 @@ impl NativeHost {
                             // A reviewer is told exactly what the work changed and how much
                             // predecessor evidence there is to read.
                             if stage=="review"{
-                                let packet=lifecycle::reconciliation::review_packet_tx(db,&t,&node,baseline_manifest.as_ref(),e.ignored_digest.as_deref(),&raw_manifest)?;
+                                let mut packet=lifecycle::reconciliation::review_packet_tx(db,&t,&node,baseline_manifest.as_ref(),e.ignored_digest.as_deref(),&raw_manifest)?;
+                                // Required reading is bounded to this review's round
+                                // (`assignment_brief::review_reports`); older reports are optional.
+                                review_reading(db,&t,&node,&mut packet)?;
+                                let base=crate::native_project::review_base(db,&t,&packet)?;
+                                crate::native_project::add_review_lines(&review_root,base.as_deref(),&mut packet);
                                 item["review_packet"]=packet.clone();
                                 // Persist the exact authoritative packet used for this
                                 // reviewer.  Result submission must validate coverage
@@ -3933,7 +3964,7 @@ pub(crate) mod sprints {
             runtime.host.executor.write(move |db| {
                 db.execute("INSERT INTO trusted_channels(channel_id,secret_hash,task_id,principal_thread_id,role,owner_epoch,issued_at)
                     VALUES ('fixture-unknown','hash',?,'fixture-worker','worker',1,'now')", [&t])?;
-                db.execute("INSERT INTO runtime_requests VALUES (?,'fixture-unknown-key','fixture-unknown','command_run','digest',?)",
+                db.execute("INSERT INTO runtime_requests VALUES (?,'fixture-unknown-key','fixture-unknown','project_write','digest',?)",
                     (&t, json!({"complete":false}).to_string()))?;
                 Ok(())
             }).unwrap().await.unwrap().unwrap();
@@ -3950,10 +3981,154 @@ pub(crate) mod sprints {
             let held = sprint(&service, &project, &id).await;
             let hold = &held["automaticQueue"];
             assert_eq!(hold["code"], "task_failed", "{held}");
+            // A write whose outcome is unknown can never be settled: the owner decides,
+            // in plain words, with only the close the service accepts.
             assert_eq!(hold["nextActor"], "owner");
             assert_eq!(hold["ownerActions"], json!(["close_as_is"]), "{hold}");
-            assert_eq!(hold["asks"], json!([UNKNOWN_EFFECT_ASK]));
+            assert_eq!(hold["reason"], UNSETTLED_REASON);
+            assert_eq!(hold["asks"], json!([UNSETTLED_CLOSE_ASK]));
+            assert_eq!(
+                hold["settling"]["hold"]["asks"],
+                json!([UNKNOWN_EFFECT_ASK])
+            );
             assert_eq!(repairs_of(&runtime, &task).await, 0);
+            // A command whose process still runs, which the runtime settles by itself
+            // once it ends: the runtime acts next and the owner is asked nothing.
+            let t = task.clone();
+            runtime.host.executor.write(move |db| {
+                db.execute("DELETE FROM runtime_requests WHERE task_id=? AND request_key='fixture-unknown-key'", [&t])?;
+                Ok(())
+            }).unwrap().await.unwrap().unwrap();
+            let child = live_command(&runtime, &task, "fixture-unknown-key").await;
+            for _ in 0..2 {
+                service
+                    .sprint_pass(&project, &runtime, &mut jobs, false)
+                    .await
+                    .unwrap();
+                let waiting = sprint(&service, &project, &id).await["automaticQueue"].clone();
+                assert_eq!(waiting["nextActor"], "runtime", "{waiting}");
+                assert_eq!(waiting["reason"], SETTLING_REASON);
+                assert_eq!(waiting["ownerActions"], json!([]));
+                assert_eq!(waiting["settling"]["since"], hold["settling"]["since"]);
+            }
+            // Once it settles the queue derives the failed run again: the agent repairs it.
+            drop(child);
+            let t = task.clone();
+            runtime.host.executor.write(move |db| {
+                db.execute("UPDATE runtime_requests SET result_json=? WHERE task_id=? AND request_key='fixture-unknown-key'",
+                    (json!({"complete":false,"settled":true,"failure":"command_outcome_unknown"}).to_string(), &t))?;
+                Ok(())
+            }).unwrap().await.unwrap().unwrap();
+            for _ in 0..2 {
+                service
+                    .sprint_pass(&project, &runtime, &mut jobs, false)
+                    .await
+                    .unwrap();
+            }
+            let resumed = sprint(&service, &project, &id).await;
+            assert!(resumed["automaticQueue"]["settling"].is_null(), "{resumed}");
+            assert_eq!(repairs_of(&runtime, &task).await, 1, "{resumed}");
+            service.stop().await.unwrap();
+        }
+
+        /// The owner's incident: a stale automatic acceptance whose task has an unknown
+        /// effect. While the runtime can settle it nothing is offered; once it cannot,
+        /// Close as is is offered and accepted (preflight and close), recording the
+        /// effect as unknown, never as done.
+        #[tokio::test]
+        async fn an_unknown_effect_hold_offers_only_a_close_the_service_accepts() {
+            let (_scratch, _folder, service, runtime, project, id, tasks) =
+                automatic_fixture("dev", "main", "main").await;
+            let mut jobs = Jobs::default();
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            let task = settled_peer(&runtime, &tasks[0]).await;
+            let t = task.clone();
+            runtime
+                .host
+                .executor
+                .write(move |db| {
+                    db.execute(
+                        "UPDATE runtime_tasks SET state='COMPLETED',blocker=NULL WHERE task_id=?",
+                        [&t],
+                    )?;
+                    Ok(())
+                })
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap();
+            let child = live_command(&runtime, &task, "pending-check").await;
+            for _ in 0..2 {
+                service
+                    .sprint_pass(&project, &runtime, &mut jobs, false)
+                    .await
+                    .unwrap();
+            }
+            let waiting = sprint(&service, &project, &id).await["automaticQueue"].clone();
+            assert_eq!(waiting["code"], "automatic_acceptance_blocked", "{waiting}");
+            assert_eq!(waiting["nextActor"], "runtime", "{waiting}");
+            assert_eq!(waiting["ownerActions"], json!([]));
+            let close = |preflight: bool| {
+                json!({"op":"product.task","projectId":project,"params":{"action":"close","choice":"as_is",
+                    "confirmed":true,"taskId":tasks[0],"preflight":preflight}})
+            };
+            // Closing while the runtime can still settle the command is refused, by the
+            // preflight as by the close.
+            for preflight in [true, false] {
+                let refused = service
+                    .machine(serde_json::from_value(close(preflight)).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    refused["code"], "native_outside_outcome_unknown",
+                    "{refused}"
+                );
+            }
+            // An effect the runtime can never confirm goes to the owner.
+            let t = task.clone();
+            runtime.host.executor.write(move |db| {
+                db.execute("UPDATE runtime_requests SET operation='project_edit' WHERE task_id=? AND request_key='pending-check'", [&t])?;
+                Ok(())
+            }).unwrap().await.unwrap().unwrap();
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            let held = sprint(&service, &project, &id).await["automaticQueue"].clone();
+            assert_eq!(held["nextActor"], "owner", "{held}");
+            assert_eq!(held["ownerActions"], json!(["close_as_is"]), "{held}");
+            assert_eq!(held["reason"], UNSETTLED_REASON);
+            assert_eq!(held["settling"]["since"], waiting["settling"]["since"]);
+            let refused = allow(&service, &project, &id, &held).await;
+            assert_eq!(refused["code"], "automatic_hold_changed", "{refused}");
+            let checked = service
+                .machine(serde_json::from_value(close(true)).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(checked["result"]["preflight"], true, "{checked}");
+            let closed = service
+                .machine(serde_json::from_value(close(false)).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(closed["ok"], true, "{closed}");
+            let t = task.clone();
+            let (settled_by, acknowledged): (String, i64) = runtime.host.executor.read(move |db| {
+                Ok((db.query_row("SELECT json_extract(result_json,'$.settled_by') FROM runtime_requests WHERE task_id=? AND request_key='pending-check'", [&t], |r| r.get(0))?,
+                    db.query_row("SELECT count(*) FROM runtime_events WHERE task_id=? AND type='OWNER_ACKNOWLEDGED_UNKNOWN_EFFECTS'", [&t], |r| r.get(0))?))
+            }).unwrap().await.unwrap().unwrap();
+            assert_eq!(
+                (settled_by.as_str(), acknowledged),
+                ("owner_close_as_is", 1)
+            );
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            let resumed = sprint(&service, &project, &id).await;
+            assert!(resumed["automaticQueue"].is_null(), "{resumed}");
             service.stop().await.unwrap();
         }
 
@@ -4244,6 +4419,196 @@ pub(crate) mod sprints {
                 service.native_tasks(&project).await.unwrap()[&tasks[0]]["executionId"].is_null()
             );
             service.stop().await.unwrap();
+
+            // With an unknown effect present, every hold of a started task is decided
+            // again: a command the runtime can settle is the runtime's (asks nothing),
+            // any other effect is the owner's, and each action offered is accepted by its
+            // handler. Allow a repair is never offered; Close as is passes its handler's
+            // own preflight, including the settled-execution guard of an automatic close.
+            let (_scratch, _folder, service, runtime, project, id, tasks) =
+                automatic_fixture("dev", "main", "main").await;
+            service
+                .sprint_pass(&project, &runtime, &mut jobs, false)
+                .await
+                .unwrap();
+            let task = settled_peer(&runtime, &tasks[0]).await;
+            // A command whose process still runs (the runtime settles it once it ends),
+            // then a write the runtime can never confirm.
+            let child = live_command(&runtime, &task, "invariant-unknown").await;
+            for settles in [true, false] {
+                if !settles {
+                    let t = task.clone();
+                    runtime.host.executor.write(move |db| {
+                        db.execute("UPDATE runtime_requests SET operation='project_edit',result_json='{\"complete\":false}'
+                            WHERE task_id=? AND request_key='invariant-unknown'", [&t])?;
+                        Ok(())
+                    }).unwrap().await.unwrap().unwrap();
+                }
+                for &(kind, code) in HOLDS {
+                    for facts in &facts {
+                        let hold =
+                            automatic_hold(kind, Some(&tasks[0]), code, "A plain reason.", facts);
+                        let expected = sprint(&service, &project, &id).await;
+                        service
+                            .automatic_pause(&project, &expected, hold.clone())
+                            .await
+                            .unwrap();
+                        let saved = sprint(&service, &project, &id).await["automaticQueue"].clone();
+                        let actions: Vec<&str> = saved["ownerActions"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|a| a.as_str().unwrap())
+                            .collect();
+                        if kind == "start_refused" {
+                            assert_eq!(saved["ownerActions"], hold["ownerActions"], "{saved}");
+                        } else if settles {
+                            assert_eq!(saved["nextActor"], BY_RUNTIME, "{kind}/{code}: {saved}");
+                            assert_eq!(saved["needsOwner"], false);
+                            assert_eq!(saved["reason"], SETTLING_REASON);
+                            assert!(actions.is_empty() && saved["asks"] == json!([]), "{saved}");
+                            // Rechecked on every pass, and kept while it stays unknown.
+                            service
+                                .sprint_pass(&project, &runtime, &mut jobs, false)
+                                .await
+                                .unwrap();
+                            let kept =
+                                sprint(&service, &project, &id).await["automaticQueue"].clone();
+                            assert_eq!(kept["nextActor"], BY_RUNTIME, "{kind}/{code}: {kept}");
+                            assert_eq!(kept["settling"]["hold"]["code"], code);
+                        } else {
+                            assert_eq!(saved["nextActor"], BY_OWNER, "{kind}/{code}: {saved}");
+                            assert_eq!(saved["reason"], UNSETTLED_REASON);
+                            assert_eq!(actions.last(), Some(&"close_as_is"), "{saved}");
+                            for action in &actions {
+                                assert!(ACCEPTED_UNSETTLED.contains(action), "{action}: {saved}");
+                                assert!(routes.iter().any(|(a, _)| a == action), "{action}");
+                            }
+                            let refused = allow(&service, &project, &id, &saved).await;
+                            assert_eq!(refused["code"], "automatic_hold_changed", "{saved}");
+                            let checked = service
+                                .machine(
+                                    serde_json::from_value(json!({"op":"product.task","projectId":project,
+                                        "params":{"action":"close","choice":"as_is","confirmed":true,
+                                            "taskId":tasks[0],"preflight":true}}))
+                                    .unwrap(),
+                                )
+                                .await
+                                .unwrap();
+                            assert_eq!(checked["ok"], true, "{kind}/{code}: {checked}");
+                        }
+                        call(
+                            &service,
+                            "product.sprint",
+                            &project,
+                            json!({"action":"patch","sprintId":id,
+                            "patch":{"queueState":"running","pauseReason":null}}),
+                        )
+                        .await;
+                    }
+                }
+            }
+            drop(child);
+            service.stop().await.unwrap();
+        }
+
+        /// A command receipt the runtime cannot settle yet: the process group it
+        /// recorded still runs. Dropping the returned child ends it.
+        async fn live_command(runtime: &Runtime, task: &str, key: &str) -> tokio::process::Child {
+            let child = tokio::process::Command::new("/bin/sleep")
+                .arg("120")
+                .process_group(0)
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let pid = child.id().unwrap();
+            let (t, k) = (task.to_owned(), key.to_owned());
+            runtime.host.executor.write(move |db| {
+                let reference = format!("native-command:{k}");
+                db.execute("INSERT INTO runtime_requests VALUES (?,?,'fixture-live','command_run','digest',?)",
+                    (&t, &k, json!({"complete":false,"tool_call_ref":reference}).to_string()))?;
+                cortex_core::lifecycle::event_tx(db, &t, "NATIVE_COMMAND_PROCESS",
+                    json!({"ref":reference,"process_identity":{"pid":pid,"start_ticks":1}}))?;
+                Ok(())
+            }).unwrap().await.unwrap().unwrap();
+            child
+        }
+
+        /// The settling decision itself: the runtime waits a bounded time for commands,
+        /// any other unknown effect is the owner's at once, and a known one changes nothing.
+        #[test]
+        fn a_settling_hold_waits_a_bounded_time_and_keeps_the_replaced_decision() {
+            let facts = HoldFacts {
+                repair: true,
+                ..HoldFacts::default()
+            };
+            let hold = automatic_hold(
+                "settlement_blocked",
+                Some("t"),
+                "stale_result",
+                "Changed.",
+                &facts,
+            );
+            assert_eq!(hold["ownerActions"], json!(["allow_repair", "close_as_is"]));
+            assert_eq!(settling_hold(hold.clone(), &Value::Null, None, 5), hold);
+            let waiting = settling_hold(hold.clone(), &Value::Null, Some(Unsettled::Commands), 5);
+            assert_eq!(waiting["nextActor"], BY_RUNTIME);
+            assert_eq!(waiting["settling"]["since"], 5);
+            assert_eq!(waiting["settling"]["hold"], hold);
+            // The same hold decided again keeps its first wait and its replaced decision.
+            let again = settling_hold(waiting.clone(), &waiting, Some(Unsettled::Commands), 6);
+            assert_eq!(again, waiting);
+            let late = settling_hold(
+                hold.clone(),
+                &waiting,
+                Some(Unsettled::Commands),
+                5 + SETTLE_WAIT_MS,
+            );
+            assert_eq!(late["nextActor"], BY_OWNER);
+            assert_eq!(late["ownerActions"], json!(["close_as_is"]));
+            assert_eq!(late["asks"], json!([UNSETTLED_CLOSE_ASK]));
+            assert_eq!(late["settling"]["hold"], hold);
+            let never = settling_hold(hold.clone(), &Value::Null, Some(Unsettled::Effects), 5);
+            assert_eq!(never["ownerActions"], json!(["close_as_is"]));
+            // Settled again: the replaced decision comes back unchanged.
+            assert_eq!(settling_hold(never, &late, None, 9), hold);
+            // An action the service accepts with an unknown effect stays offered first.
+            let recovery = automatic_hold(
+                "settlement_blocked",
+                Some("t"),
+                "task_recovery",
+                "Stopped.",
+                &HoldFacts::default(),
+            );
+            let owner = settling_hold(recovery, &Value::Null, Some(Unsettled::Effects), 5);
+            assert_eq!(
+                owner["ownerActions"],
+                json!(["confirm_and_continue", "close_as_is"])
+            );
+            assert_eq!(owner["asks"].as_array().unwrap().len(), 2);
+            // A refused start and a hold without a task are never changed.
+            let start = automatic_hold(
+                "start_refused",
+                Some("t"),
+                "refused",
+                "No.",
+                &HoldFacts::default(),
+            );
+            assert_eq!(
+                settling_hold(start.clone(), &Value::Null, Some(Unsettled::Effects), 5),
+                start
+            );
+            let none = automatic_hold(
+                "settlement_blocked",
+                None,
+                "git_required",
+                "No.",
+                &HoldFacts::default(),
+            );
+            assert_eq!(
+                settling_hold(none.clone(), &Value::Null, Some(Unsettled::Effects), 5),
+                none
+            );
         }
     }
 
@@ -4266,6 +4631,9 @@ pub(crate) mod sprints {
         record: &Value,
         task: Option<&Value>,
     ) -> (String, Option<String>) {
+        if task.is_some_and(|t| warned(t, "owner_closed_unconfirmed")) {
+            return ("done".into(), Some("unconfirmed".into()));
+        }
         let status = record["status"].as_str().unwrap_or("").to_owned();
         let closed = record["closedAs"].as_str().map(str::to_owned);
         let resolved = task.is_some_and(|t| {
@@ -4288,6 +4656,33 @@ pub(crate) mod sprints {
     #[cfg(test)]
     mod settle_tests {
         use super::*;
+
+        #[test]
+        fn a_closed_unconfirmed_member_is_skipped_but_does_not_finish_its_dependency() {
+            let records = json!({"first":{"title":"First"},"second":{"dependencies":["first"]}});
+            let tasks = HashMap::from([
+                (
+                    "first".into(),
+                    json!({"phase":"unknown","warnings":["contradictory_evidence","owner_closed_unconfirmed"]}),
+                ),
+                ("second".into(), json!({"phase":"not_started"})),
+            ]);
+            let members = vec!["first".into(), "second".into()];
+            let disposition = members
+                .iter()
+                .map(|id: &String| (id.clone(), member_disposition(&records[id], tasks.get(id))))
+                .collect();
+            for hybrid in [false, true] {
+                assert!(matches!(
+                    automatic_queue_step(&members[..1], &tasks, &records, &disposition, hybrid),
+                    QueueStep::Complete
+                ));
+                assert!(matches!(
+                    automatic_queue_step(&members, &tasks, &records, &disposition, hybrid),
+                    QueueStep::Hold(_)
+                ));
+            }
+        }
         #[test]
         fn a_failed_settle_names_itself_and_other_pauses_keep_their_reason() {
             let why = "Build could not be accepted automatically: The result could not be read. Open the task to accept it yourself.";
@@ -4699,6 +5094,154 @@ pub(crate) mod sprints {
             "needsOwner":actor == BY_OWNER,"nextActor":actor,"ownerActions":actions,"asks":asks})
     }
 
+    /// Dispatched actions of a held task whose outcome is still unknown, the same
+    /// receipts `require_known_effects` refuses on: supervised commands only, which
+    /// the runtime settles by itself, or any other effect it can never confirm.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub(super) enum Unsettled {
+        Commands,
+        Effects,
+    }
+    /// How long a hold waits for unconfirmed commands before the owner is asked.
+    pub(super) const SETTLE_WAIT_MS: i64 = 30 * 60 * 1000;
+    pub(super) const SETTLING_REASON: &str = "Waiting for an unconfirmed command of this task to settle. Automatic continues by itself once it has.";
+    pub(super) const UNSETTLED_REASON: &str = "An action of this task never confirmed whether it finished, and Cortex cannot find out by itself.";
+    pub(super) const UNSETTLED_CLOSE_ASK: &str = "Check the project folder, then close the task as is. Nothing is repeated, and the unconfirmed action stays recorded as unknown, never as done.";
+    /// The owner actions whose handlers accept a task with an unknown effect. Allow a
+    /// repair, more attempts, and a finish or acceptance are refused or unsafe until
+    /// it is known; Close as is records the owner's acknowledgement (see `task_actions`).
+    pub(super) const ACCEPTED_UNSETTLED: &[&str] = &[
+        "confirm_and_continue",
+        "resume_task",
+        "retry",
+        "confirm_integration",
+        "resolve_conflict",
+        "change_run_mode",
+        "close_as_is",
+    ];
+
+    /// The hold persisted while a task has an unknown effect. While the runtime can
+    /// still settle it (supervised commands, bounded by `SETTLE_WAIT_MS`) the runtime
+    /// acts next and the owner is asked nothing; otherwise the owner is offered only
+    /// actions the service accepts. The decision it replaces is kept in `settling.hold`
+    /// and comes back once the effect is known. A hold without a task, a refused start,
+    /// and a task whose effects are known are unchanged.
+    pub(super) fn settling_hold(
+        hold: Value,
+        prior: &Value,
+        unsettled: Option<Unsettled>,
+        now: i64,
+    ) -> Value {
+        let original = if hold["settling"]["hold"].is_object() {
+            hold["settling"]["hold"].clone()
+        } else {
+            hold
+        };
+        let Some(unsettled) = unsettled else {
+            return original;
+        };
+        if original["taskId"].as_str().is_none() || original["kind"] == "start_refused" {
+            return original;
+        }
+        let since = prior["settling"]["since"]
+            .as_i64()
+            .filter(|_| prior["taskId"] == original["taskId"])
+            .unwrap_or(now);
+        let waiting =
+            unsettled == Unsettled::Commands && now.saturating_sub(since) < SETTLE_WAIT_MS;
+        let (actor, reason, actions, asks) = if waiting {
+            (BY_RUNTIME, SETTLING_REASON, vec![], vec![])
+        } else {
+            let mut actions: Vec<&str> = original["ownerActions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|a| *a != "close_as_is")
+                .filter_map(|a| ACCEPTED_UNSETTLED.iter().copied().find(|k| *k == a))
+                .collect();
+            let mut asks: Vec<String> = actions.iter().map(|a| default_ask(a).to_owned()).collect();
+            actions.push("close_as_is");
+            asks.push(UNSETTLED_CLOSE_ASK.to_owned());
+            (BY_OWNER, UNSETTLED_REASON, actions, asks)
+        };
+        json!({"kind":original["kind"],"taskId":original["taskId"],"code":original["code"],
+            "reason":reason,"needsOwner":actor == BY_OWNER,"nextActor":actor,
+            "ownerActions":actions,"asks":asks,
+            "settling":{"since":since,"owner":actor == BY_OWNER,"hold":original}})
+    }
+
+    /// Codes the running queue derives again from the task once its effects are
+    /// known, without repeating any effect. Any other settled hold is restored as it was.
+    fn rederived(kind: &str, code: &str) -> bool {
+        kind == "continuation"
+            || kind == "settlement_blocked"
+                && matches!(
+                    code,
+                    "task_failed"
+                        | "task_blocked"
+                        | "task_recovery"
+                        | "task_stopped"
+                        | "task_paused"
+                        | "task_state_unknown"
+                        | "dependencies_blocked"
+                        | "task_missing"
+                        | "conflict_resolving"
+                        | "task_conflict"
+                        | "queue_blocked"
+                        | "archived_task"
+                        | "stale_result"
+                        | "workspace_drift"
+                        | "task_files_changed"
+                        | "review_required"
+                        | "automatic_acceptance_blocked"
+                )
+    }
+
+    /// Which unknown effects a sprint task's runtime has, read from the same receipts
+    /// `require_known_effects` checks. The runtime re-settles every command receipt on its
+    /// own passes (`resettle_orphaned_commands`) once nothing can still run it; a payload
+    /// that outlives its supervisor keeps it open, bounded here by `SETTLE_WAIT_MS`. Any
+    /// other receipt (a write, an edit, a call) can never be settled by it.
+    pub(super) async fn unsettled_effects(
+        runtime: &Runtime,
+        project: &str,
+        task: &str,
+    ) -> Option<Unsettled> {
+        let (project, task) = (project.to_owned(), task.to_owned());
+        let read = runtime.host.executor.read(move |db| {
+            use rusqlite::OptionalExtension;
+            let runtime: Option<String> = db
+                .query_row(
+                    "SELECT e.runtime_task_id FROM workspace_tasks w JOIN workspace_executions e
+                     ON e.execution_id=w.execution_id AND e.task_id=w.task_id
+                     WHERE w.project_id=? AND w.task_id=?",
+                    (&project, &task),
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(runtime) = runtime else {
+                return Ok(None);
+            };
+            Ok(db.query_row(
+                "SELECT max(operation NOT IN ('command_run','outside_command'))
+                 FROM runtime_requests WHERE task_id=?
+                    AND operation IN ('outside_command','outside_write','command_run','project_write','project_edit',
+                        'project_mkdir','project_delete','project_skill_link','draft_write','external_call')
+                    AND json_extract(result_json,'$.complete') IS NOT 1
+                    AND json_extract(result_json,'$.status') IS NOT 'complete'
+                    AND json_extract(result_json,'$.settled') IS NOT 1",
+                [&runtime],
+                |row| row.get::<_, Option<bool>>(0),
+            )?)
+        });
+        match read.ok()?.await {
+            Ok(Ok(Some(true))) => Some(Unsettled::Effects),
+            Ok(Ok(Some(false))) => Some(Unsettled::Commands),
+            _ => None,
+        }
+    }
+
     /// The same hold with its decision recomputed. A saved hold from an earlier
     /// version (no `nextActor`) is rewritten on the next pass.
     fn hold_current(prior: &Value) -> bool {
@@ -4729,7 +5272,9 @@ pub(crate) mod sprints {
     fn automatic_skip(record: &Value, disposition: Option<&(String, Option<String>)>) -> bool {
         record["purged"] == true
             || !record["archive"].is_null()
-            || disposition.is_some_and(|(_, closed)| closed.as_deref() == Some("cancel"))
+            || disposition.is_some_and(|(_, closed)| {
+                matches!(closed.as_deref(), Some("cancel" | "unconfirmed"))
+            })
     }
 
     /// Whether the runtime's task projection carries this warning.
@@ -4851,7 +5396,7 @@ pub(crate) mod sprints {
         let done = |id: &str| {
             disposition.get(id).is_some_and(|(status, closed)| {
                 (status == "done" || hybrid && status == "ready_to_merge")
-                    && closed.as_deref() != Some("cancel")
+                    && !matches!(closed.as_deref(), Some("cancel" | "unconfirmed"))
                     && records[id]["purged"] != true
             })
         };
@@ -5990,6 +6535,22 @@ pub(crate) mod sprints {
             sprint: &Value,
             pause: Value,
         ) -> io::Result<()> {
+            // Every hold the scheduler persists is checked against the task's unknown
+            // effects here, so no hold offers an action its handler would refuse.
+            let pause = match pause["taskId"].as_str() {
+                Some(task) if pause.is_object() => {
+                    let runtime = self.state.lock().await.native.get(project).cloned();
+                    let unsettled = match runtime {
+                        Some(runtime) => unsettled_effects(&runtime, project, task).await,
+                        None => None,
+                    };
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_millis() as i64);
+                    settling_hold(pause, &sprint["automaticQueue"], unsettled, now)
+                }
+                _ => pause,
+            };
             let reply = self
                 .automatic_sprint_action(
                     project,
@@ -6055,6 +6616,24 @@ pub(crate) mod sprints {
                     );
                 if legacy {
                     self.automatic_pause(project, sprint, upgrade()).await?;
+                    return Ok(true);
+                }
+                // A hold waiting on an unknown effect is rechecked first: it stays while
+                // the effect is unknown (`automatic_pause` hands it to the owner once the
+                // runtime can no longer settle it), and once it is known the queue derives
+                // the condition again or the replaced decision comes back as it was.
+                if prior["settling"]["hold"].is_object() {
+                    let original = prior["settling"]["hold"].clone();
+                    let unsettled = match task {
+                        Some(id) => unsettled_effects(runtime, project, id).await,
+                        None => None,
+                    };
+                    let next = if unsettled.is_none() && rederived(kind, code) {
+                        Value::Null
+                    } else {
+                        original
+                    };
+                    self.automatic_pause(project, sprint, next).await?;
                     return Ok(true);
                 }
                 match (kind, code, task) {

@@ -31,13 +31,16 @@ fn state(s: &Store) -> String {
     .unwrap()
 }
 fn setup() -> (Project, Store, OwnerEpoch) {
+    setup_with_baseline(&evidence('a'))
+}
+fn setup_with_baseline(baseline: &EvidenceSnapshot) -> (Project, Store, OwnerEpoch) {
     let p = Project::new();
     let s = p.open();
     let o = TaskMachine::new(&s).create("t", "goal", "owner").unwrap();
     s.write(|db|{
         db.execute("UPDATE runtime_tasks SET state='PLAN_READY',revision=1,plan_json=? WHERE task_id='t'",
             [json!({"verification":[["true"]]}).to_string()])?;
-        execution_baseline_tx(db,"t",&evidence('a'))?;
+        execution_baseline_tx(db,"t",baseline)?;
         db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-backend-dev','Work','[]','[\"src\"]','execution','running','a',NULL)",[])?;
         bind(db,"n","a","xa","c")?;
         Ok(())
@@ -1133,13 +1136,30 @@ fn descriptive_check_command_never_blocks_a_verified_pass_at_completion() {
 // Ignored-file changes (or an unobservable ignored set) never take the no-change waiver.
 #[test]
 fn ignored_file_changes_or_unobserved_ignored_files_refuse_the_waiver() {
-    for changed in [Some("2".repeat(64)), None] {
-        let (_p, s, _) = setup();
+    for (before, after) in [
+        (Some("1"), Some("2")),
+        (Some("1"), None),
+        (None, Some("1")),
+        (None, None),
+    ] {
+        let mut baseline = evidence('a');
+        baseline.ignored_digest = before.map(|s| s.repeat(64));
+        let (_p, s, _) = setup_with_baseline(&baseline);
         let mut e = evidence('a');
+        e.ignored_digest = after.map(|s| s.repeat(64));
         finish_execution(&s, &mut e);
-        e.ignored_digest = changed;
         s.write(|db| add_review_tx(db, "t", &e)).unwrap();
-        assert_eq!(state(&s), "REVIEWING");
+        assert_eq!(state(&s), "REVIEWING", "{before:?} -> {after:?}");
+        s.read(|db| {
+            let waived: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id='t' AND type='REVIEW_NOT_REQUIRED')",
+                [],
+                |r| r.get(0),
+            )?;
+            assert!(!waived, "{before:?} -> {after:?}");
+            Ok(())
+        })
+        .unwrap();
     }
 }
 // The 128-step progress budget is persisted: reopening the store continues the count, and

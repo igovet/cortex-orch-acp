@@ -31,6 +31,108 @@ use tokio::{
 };
 pub(super) type Running =
     Arc<Mutex<std::collections::HashMap<String, crate::native_owner_controls::RunningCommand>>>;
+/// References of command calls still running in this process, from before their
+/// intent row until the call returns (or its future is dropped). The re-settle of
+/// orphaned receipts never touches them.
+static IN_FLIGHT: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+pub(super) struct Flight(String);
+impl Flight {
+    pub(super) fn new(reference: &str) -> Self {
+        IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(reference.to_owned());
+        Self(reference.to_owned())
+    }
+}
+impl Drop for Flight {
+    fn drop(&mut self) {
+        IN_FLIGHT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+pub(super) fn in_flight(reference: &str) -> bool {
+    IN_FLIGHT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(reference)
+}
+/// Settles a `command_run`/`outside_command` receipt whose outcome was never
+/// recorded: `settled:true` with `complete:false` and the failure, never a success.
+/// `command_not_started` means the payload provably never launched; any other
+/// failure leaves the outcome unknown (`outcome:"unknown"`). Only an unsettled,
+/// incomplete row bound to `reference` changes; returns whether it did. A finish
+/// event is added unless that command already has one.
+pub(super) fn settle_unrecorded_tx(
+    db: &rusqlite::Connection,
+    task: &str,
+    actor: &str,
+    key: &str,
+    reference: Option<&str>,
+    failure: &str,
+    exit_code: Option<i64>,
+    evidence: &str,
+) -> CoreResult<bool> {
+    let row: Option<(String, String)> = db.query_row("SELECT operation,result_json FROM runtime_requests
+        WHERE task_id=? AND actor=? AND request_key=? AND operation IN ('command_run','outside_command')",
+        (task, actor, key), |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+    let Some((operation, raw)) = row else {
+        return Ok(false);
+    };
+    let mut value: Value = serde_json::from_str(&raw)?;
+    if value["settled"] == true || value["complete"] == true {
+        return Ok(false);
+    }
+    if value["tool_call_ref"].as_str() != reference {
+        return Err(CoreError::Refused("command_handle_identity_mismatch"));
+    }
+    let started = failure != "command_not_started";
+    let object = value
+        .as_object_mut()
+        .ok_or(CoreError::Refused("invalid_command_receipt"))?;
+    for (field, entry) in [
+        ("settled", json!(true)),
+        ("complete", json!(false)),
+        ("failure", json!(failure)),
+        ("exit_code", json!(exit_code)),
+        (
+            "outcome",
+            json!(if started { "unknown" } else { "not_started" }),
+        ),
+        ("launched", if started { Value::Null } else { json!(false) }),
+        ("settlement_evidence", json!(evidence)),
+    ] {
+        object.insert(field.to_owned(), entry);
+    }
+    db.execute(
+        "UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=? AND result_json=?",
+        (value.to_string(), task, actor, key, &raw),
+    )?;
+    let finished: bool = match reference {
+        Some(reference) => db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='NATIVE_COMMAND_FINISHED'
+            AND json_extract(payload_json,'$.receipt.tool_call_ref')=?)", (task, reference), |r| r.get(0))?,
+        None => false,
+    };
+    if !finished {
+        let mut observation = value.clone();
+        if let Some(o) = observation.as_object_mut() {
+            o.remove("output");
+            o.remove("handle");
+        }
+        lifecycle::event_tx(
+            db,
+            task,
+            "NATIVE_COMMAND_FINISHED",
+            json!({"receipt":{
+            "tool_call_ref":reference,"argv":value["argv"],"request_key":key,"operation":operation,
+            "observation":observation}}),
+        )?;
+    }
+    Ok(true)
+}
 /// Retain value-free provenance when a launch or settlement fails. A store failure
 /// can also prevent recording the diagnostic; the original error still propagates.
 pub(super) async fn record_failure(
@@ -264,10 +366,16 @@ pub(super) async fn outside_capture(
         .as_str()
         .ok_or(CoreError::Refused("invalid_request"))?
         .to_owned();
+    let _flight = Flight::new(&reference);
     recv(executor.write(move |db| {
-        db.execute("UPDATE runtime_requests SET result_json=json_set(result_json,'$.tool_call_ref',?,'$.argv',json(?))
-            WHERE task_id=? AND actor=? AND request_key=? AND operation='outside_command' AND json_extract(result_json,'$.complete')=0",
+        // A receipt the runtime already settled (its call was lost) never launches.
+        let bound = db.execute("UPDATE runtime_requests SET result_json=json_set(result_json,'$.tool_call_ref',?,'$.argv',json(?))
+            WHERE task_id=? AND actor=? AND request_key=? AND operation='outside_command' AND json_extract(result_json,'$.complete')=0
+            AND json_extract(result_json,'$.settled') IS NOT 1",
             (&r,serde_json::to_string(&a)?,&t,&actor,&key))?;
+        if bound != 1 {
+            return Err(CoreError::Refused("command_outcome_unknown"));
+        }
         lifecycle::event_tx(db, &t, "NATIVE_COMMAND_STARTED", json!({"ref":r,"argv":a,"channel_id":actor}))?;
         Ok(())
     })?)
@@ -742,6 +850,7 @@ pub(super) async fn execute(
     let mode_copy = mode.clone();
     let denied_copy = denied.clone();
     let expected = i.clone();
+    let _flight = Flight::new(&reference);
     recv(executor.write(move |db| {
         let i = expected;
         let current = channels::authenticate(db, &c.channel_id, c.secret(), true)?;

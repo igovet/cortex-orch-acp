@@ -61,7 +61,7 @@ fn process_stat(pid: i64) -> Option<(i64, String)> {
 /// Whether a process recorded in this boot may still run: its exact process (pid with
 /// the recorded start time) or any member of its process group. Anything that cannot
 /// be observed counts as running.
-fn recorded_process_alive(pid: i64, pgid: i64, start: &str) -> bool {
+pub(crate) fn recorded_process_alive(pid: i64, pgid: i64, start: &str) -> bool {
     if pid <= 0 {
         return true;
     }
@@ -652,6 +652,92 @@ pub(crate) struct ExitRecheck {
 const RECHECK_FIRST: std::time::Duration = std::time::Duration::from_secs(15);
 const RECHECK_MAX: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// Backoff of the live re-settle of orphaned command receipts, with the same bounds
+/// as the exit re-check. A changed set of receipts is looked at at once.
+#[derive(Default, Debug)]
+pub(crate) struct CommandRecheck {
+    rows: Vec<String>,
+    next: Option<std::time::Instant>,
+    delay: std::time::Duration,
+}
+
+impl Runtime {
+    /// Live re-settle of `command_run`/`outside_command` receipts left unsettled
+    /// (a lost call, channel or supervisor), on the sprint scheduler's passes. Commands
+    /// this service still runs or observes are skipped; each other receipt is settled
+    /// only on proof that its process is gone ([`crate::native_command_handles::resettle_row`]),
+    /// never as a success. While some stay open the check backs off (15 s, doubling to
+    /// 10 min). Returns how many receipts were settled.
+    pub(crate) async fn resettle_orphaned_commands(self: &Arc<Self>) -> CoreResult<usize> {
+        if *self.stop.borrow() {
+            return Ok(0);
+        }
+        let busy: std::collections::BTreeSet<String> =
+            self.host.commands.lock().await.keys().cloned().collect();
+        let skip = busy.clone();
+        let rows: Vec<String> = self
+            .host
+            .executor
+            .read(move |db| {
+                Ok(crate::native_command_handles::orphans(db)?
+                    .into_iter()
+                    .filter(|(_, _, _, r)| {
+                        !r.as_deref().is_some_and(|r| {
+                            skip.contains(r) || crate::native_commands::in_flight(r)
+                        })
+                    })
+                    .map(|(t, a, k, _)| format!("{t}\u{0}{a}\u{0}{k}"))
+                    .collect())
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        {
+            let mut recheck = self
+                .command_recheck
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if rows.is_empty() {
+                *recheck = CommandRecheck::default();
+                return Ok(0);
+            }
+            if recheck.rows != rows {
+                *recheck = CommandRecheck {
+                    rows: rows.clone(),
+                    ..CommandRecheck::default()
+                };
+            }
+            if recheck
+                .next
+                .is_some_and(|at| std::time::Instant::now() < at)
+            {
+                return Ok(0);
+            }
+        }
+        let (settled, left) = self
+            .host
+            .executor
+            .publication(move |store| crate::native_command_handles::resettle(store, &busy, false))?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        let mut recheck = self
+            .command_recheck
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if left.is_empty() {
+            *recheck = CommandRecheck::default();
+        } else {
+            recheck.rows = left;
+            recheck.delay = if recheck.delay.is_zero() {
+                RECHECK_FIRST
+            } else {
+                (recheck.delay * 2).min(RECHECK_MAX)
+            };
+            recheck.next = Some(std::time::Instant::now() + recheck.delay);
+        }
+        Ok(settled)
+    }
+}
+
 /// A broker directory (`cortex-mcp-` and 24 hex digits) of a service that died is
 /// never removed by that service. One no socket of this system is bound in (as
 /// `/proc/net/unix` lists) and that has not changed for a minute belongs to no live
@@ -1074,6 +1160,22 @@ impl Runtime {
             .await
             .map_err(|_| CoreError::Refused("native_host_closed"))??;
         crate::native_command_handles::recover(self).await?;
+        // No call of an earlier service can still act: settle every orphaned command
+        // receipt whose process is provably gone, before the tasks' effects are judged.
+        let busy: std::collections::BTreeSet<String> =
+            self.host.commands.lock().await.keys().cloned().collect();
+        if let Ok(reply) = self
+            .host
+            .executor
+            .publication(move |store| crate::native_command_handles::resettle(store, &busy, true))
+        {
+            if let Ok(Err(error)) = reply.await {
+                eprintln!(
+                    "workspace-service: command receipts were not re-settled ({})",
+                    error.code()
+                );
+            }
+        }
         if let Ok(key) = crate::native_runtime::key(&self.host.root) {
             remove_stale_brokers(&key.directory());
         }
@@ -1267,6 +1369,8 @@ impl Runtime {
     /// Called on the sprint scheduler's passes (its safety tick and wake-ups). Returns
     /// whether unconfirmed attempts remain to be looked at again.
     pub(crate) async fn resettle_unconfirmed_exits(self: &Arc<Self>) -> CoreResult<bool> {
+        // Orphaned command receipts are re-settled on the same passes (own backoff).
+        let _ = self.resettle_orphaned_commands().await;
         self.resettle_unconfirmed_exits_from(std::path::Path::new(SYSTEM_PROC))
             .await
     }
@@ -1653,6 +1757,111 @@ mod tests {
             drop(stop);
         }
         drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn orphaned_command_receipts_settle_at_startup_and_on_live_passes() {
+        use cortex_core::{lifecycle::TaskMachine, OpenMode, Store};
+        let root =
+            std::env::temp_dir().join(format!("command-orphans-{}", crate::identity().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let project = root.join("project");
+        std::fs::create_dir(&project).unwrap();
+        crate::project_guard::reserve(&project).unwrap();
+        let key = crate::native_runtime::key(&project).unwrap();
+        let store = Store::open(key, OpenMode::Initialize).unwrap();
+        TaskMachine::new(&store)
+            .create("held", "Fixture", "owner")
+            .unwrap();
+        let orphan = |store: &Store, key: &str| {
+            store
+                .write(|db| {
+                    db.execute("INSERT INTO runtime_requests VALUES ('held',?,'ended-channel','command_run','d',?)",
+                        (key, json!({"complete":false,"tool_call_ref":format!("native-command:{key}"),
+                            "argv":["npm","run","typecheck"]}).to_string()))?;
+                    Ok(())
+                })
+                .unwrap()
+        };
+        let settled = |store: &Store, key: &str| {
+            store
+                .read(|db| {
+                    Ok(db.query_row("SELECT json_extract(result_json,'$.settled') IS 1 FROM runtime_requests WHERE request_key=?",
+                        [key], |r| r.get::<_, bool>(0))?)
+                })
+                .unwrap()
+        };
+        store
+            .write(|db| {
+                db.execute(
+                    "UPDATE runtime_tasks SET state='PAUSED' WHERE task_id='held'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        orphan(&store, "before-restart");
+        let service = Service::bind_native(
+            Config {
+                runtime_dir: root.join("runtime"),
+                state_dir: root.join("state"),
+                allowed_root: root.clone(),
+                launch: LaunchSpec::bare(),
+                request_timeout: Duration::from_secs(2),
+                shutdown_timeout: Duration::from_secs(1),
+                event_capacity: 32,
+            },
+            Arc::new(UnqualifiedRoutes),
+        )
+        .await
+        .unwrap();
+        let registered = service.register(&project, "Orphans").await.unwrap();
+        let id = registered["projectId"].as_str().unwrap();
+        service
+            .activate_inner(id, &fixture::engine_proc(&project))
+            .await
+            .unwrap();
+        // Startup settles the receipt before the task's effects are judged.
+        assert!(settled(&store, "before-restart"));
+        let blocker: Option<String> = store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT blocker FROM runtime_tasks WHERE task_id='held'",
+                    [],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_ne!(blocker.as_deref(), Some("native_outside_outcome_unknown"));
+        let runtime = service.state.lock().await.native.get(id).unwrap().clone();
+        // A receipt orphaned while the service runs (its call or channel ended).
+        orphan(&store, "while-running");
+        let flight = crate::native_commands::Flight::new("native-command:in-flight");
+        orphan(&store, "in-flight");
+        assert_eq!(runtime.resettle_orphaned_commands().await.unwrap(), 1);
+        assert!(settled(&store, "while-running"));
+        assert!(
+            !settled(&store, "in-flight"),
+            "a call still in flight is left alone"
+        );
+        drop(flight);
+        assert_eq!(runtime.resettle_orphaned_commands().await.unwrap(), 1);
+        assert!(settled(&store, "in-flight"));
+        store
+            .read(|db| {
+                cortex_core::lifecycle::automatic::require_settled_execution(db, "held")?;
+                assert_eq!(db.query_row("SELECT count(*) FROM runtime_requests WHERE json_extract(result_json,'$.failure')='command_not_started'
+                    AND json_extract(result_json,'$.complete') IS 0",[],|r|r.get::<_,i64>(0))?, 3);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(runtime.resettle_orphaned_commands().await.unwrap(), 0);
+        drop(runtime);
+        service.stop().await.unwrap();
+        drop(service);
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

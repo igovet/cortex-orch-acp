@@ -21,6 +21,8 @@
 
 Conversation waits explain when decision details are unavailable and point to Answer in the header. Open decisions also render before their timeline reference arrives. Sent attachment chips tolerate the whitespace normalization used by runtime history.
 
+In Workspace, Changes excludes target-only changes after **Update from target**, including when **Finish merge** confirms an update you committed in Git. See [IDE and Git](docs/cortex-workspace/ide-and-git.md).
+
 Workspace result checks list recorded skips with their reasons, including checks that required authorization and did not run.
 
 Workspace engine limits retain connected engines with an explicit Unavailable state when no provider usage is observed. Coordinator choices exclude switched-off engines. See [desktop engine controls](docs/cortex-workspace/maintenance-and-controls.md).
@@ -151,7 +153,10 @@ read-only metadata protection use mounts, not Landlock alone. Protected children
 remain overlaid after writable parent grants. Writing roles receive project-wide
 command grants independently of reservations; Development/Auto permit outside cwd.
 Verification can write existing Git-ignored directories and discard other project
-writes through a probed disk overlay. Whole-project writers can update Git data
+writes through a probed disk overlay. Review baselines record the current Git
+commit when one exists. Ignored build outputs have a separate metadata check;
+if it cannot finish, review still runs and can use a complete list of changed
+project files. Whole-project writers can update Git data
 while configuration/hooks/pointers stay guarded. Guarded HOME tool state,
 read-only relocated caches, SSH config/opt-in askpass, hardlink detachment and
 expanded owner denials use the Rust command backend. Main source/text reads
@@ -167,7 +172,9 @@ bytes after restart without replaying an edit. Unmatched or legacy intents remai
 unknown. Brokered commands now run under independent Rust supervisors with
 boot/PID/start identities and private output/status files. After a service restart,
 the same command can be observed or owner-stopped without relaunch; lost or
-mismatched supervisors stay unknown. Recovered output and exit status never
+mismatched supervisors stay unknown until their process is provably gone, when the
+receipt is settled with an unknown outcome (a launch whose payload was never released
+settles as not started), so no lost call blocks close or repair. Recovered output and exit status never
 invent a project-revision binding or certify a passed check.
 Worker results derive evidence strength and check retained output, project-digest
 bindings, duplicate references and non-shell trivial commands, including confirmed
@@ -230,7 +237,19 @@ Python before admission, never after a native error
 OpenCode metadata-only install rejections now return native failed refresh outcomes
 without probing or launching anything; every potentially usable OpenCode install
 still retains Python ([exact boundary](docs/configuration.md#opencode-pre-probe-rejection)).
-`config.save` now uses the native writer for routing, defaults and MCP. Engine limits refresh in the background with free, model-less reads (Claude Code `/usage`, Codex `account/rateLimits/read`, its App Server without plugins or marketplace sync); see [token and plan usage](docs/features/token-and-plan-usage/index.md#claude-plan-usage-the-local-usage-cli). Cortex-launched Codex sessions start none of the owner's own Codex MCP servers: their relays reach App Server as launcher config layers, not ACP `mcpServers`, and codex-acp gets the launcher's disabled features in `CODEX_CONFIG`, so a session thread does not turn the owner's plugins and their MCP servers back on ([Codex engine](docs/features/codex-engine/index.md)); the catalogue observation does not set it yet. A Claude or Codex session whose transport is lost while it is configured starts once more, and every session start failure keeps the engine's exit status, transport close reason and a private, redacted stderr tail ([session start failures](docs/features/recovery-and-replacement/index.md#native-session-start-failures)). A model list whose first refresh failed is fetched again within seconds and appears in the open app. The host-only
+`config.save` now uses the native writer for routing, defaults and MCP. Engine limits refresh in the
+background with free, model-less reads (Claude Code `/usage`, Codex `account/rateLimits/read`, its App
+Server without plugins or marketplace sync); see
+[token and plan usage](docs/features/token-and-plan-usage/index.md#claude-plan-usage-the-local-usage-cli).
+Cortex-launched Codex sessions start none of the owner's own Codex MCP servers: their relays reach App
+Server as launcher config layers, not ACP `mcpServers`, and codex-acp gets the launcher's disabled
+features in `CODEX_CONFIG`, so a session thread does not turn the owner's plugins and their MCP servers
+back on ([Codex engine](docs/features/codex-engine/index.md)); the catalogue observation does not set it
+yet. A Claude or Codex session whose transport is lost while it is configured starts once more, and every
+session start failure keeps the engine's exit status, transport close reason and a private, redacted
+stderr tail ([session start failures](docs/features/recovery-and-replacement/index.md#native-session-start-failures)).
+A model list whose first refresh failed is fetched again within seconds and appears in the open app. The
+host-only
 dispatch separates display from explicit filesystem refresh; selected keyrings
 refuse atomically, while stored keyring
 state is displayed with a not-observed diagnostic. No keyring backend is invoked. Native prompt-free adapter/setup discovery
@@ -363,13 +382,38 @@ the 0.14.0 SDK's derived message and reasoning IDs are supported by the replay g
 For local desktop Debian builds, run `./scripts/build-dev-deb.sh` or
 `./scripts/build-prod-deb.sh`; archives stay under git-ignored `.workspace-build/`.
 Run the prod wrapper explicitly for a non-official production-channel build in a disposable environment; its Debian version ends in `.local` and is rejected by the GitHub publisher. Dev remains the default, with a separate store.
-Workspace can also be reached from an Android phone. Remote access is off by default; when the owner turns it on in Settings, Remote access, the desktop service pairs a phone with a single-use link (QR code, 5 minutes, explicit Allow on the computer) and then serves it only through a closed allowlist of requests. The Android app (`apps/cortex-workspace-android`) is the same interface in a phone shell: it has no local machine, shows Code read-only and has no terminal. `./scripts/build-local.sh [desktop|apk|all]` builds the desktop package and the APK (`scripts/build-android-apk.sh`, which needs the Android SDK, an NDK and JDK 17); a self-hosted relay stack is in `deploy/relay/`. This is built and checked by no-paid automated tests only: nothing is verified on a physical Android device, through a relay or with a real phone paired to a real desktop, and no push notifications, Android Keystore key wrapping or app lock exist. See [remote access](docs/cortex-workspace/remote-access.md) and its [security](docs/cortex-workspace/security.md#remote-access-built-not-qualified).
+Workspace can also be reached from an Android phone. Remote access is off by default; when the owner turns
+it on in Settings, Remote access, the desktop service pairs a phone with a single-use link (QR code, 5
+minutes, explicit Allow on the computer) and then serves it only through a closed allowlist of requests.
+The Android app (`apps/cortex-workspace-android`) is the same interface in a phone shell: it has no local
+machine, shows Code read-only and has no terminal. `./scripts/build-local.sh [desktop|apk|all]` builds the
+desktop package and the APK (`scripts/build-android-apk.sh`, which needs the Android SDK, an NDK and JDK
+17); a self-hosted relay stack is in `deploy/relay/`. This is built and checked by no-paid automated tests
+only: nothing is verified on a physical Android device, through a relay or with a real phone paired to a
+real desktop, and no push notifications, Android Keystore key wrapping or app lock exist. See
+[remote access](docs/cortex-workspace/remote-access.md) and its
+[security](docs/cortex-workspace/security.md#remote-access-built-not-qualified).
 
 See [local build instructions](docs/project/packaging.md#local-desktop-debian-builds). An installed interaction pass does not qualify an archive that emits a native crash or allocator diagnostic; the installed gate must remain fail-closed. The Linux task window leaves GPU compositing available. Approved closure waits for outstanding service replies, then terminates only its WebKit web process through the public API before destroying the view, avoiding its EGL/Skia exit race without disabling compositing. Failed closure leaves a visible reason; the independent service stays alive. Disposable software-display checks are not real-GPU performance qualification.
 
 Workspace's Rust service starts without an interpreter or Python helper assets, and the `.deb` depends on no `python3` and ships no `src/` or `.py` files. Native Git/files, task/history reads, Settings and native-account setup stay available; requests that only the former Python helper could answer are refused natively. Bundled engine/voice assets use the trusted runtime root. See [native service startup](docs/cortex-workspace/local-task-execution.md#python-independent-native-service-startup).
 
-Workspace waits for its local service socket on cold start, separately from request deadlines. Reconnect invalidates presentation caches without waiting for each project controller. Registered projects remain listed while their stores load or fail; those issues stay on the affected project. Slow reads finish in the background and failed reads retry without replaying actions; a failed repository read retries on its own within seconds and names an owner-fixable cause such as an unsafe private settings folder. A normal pending read is silent; only repeated failures produce a project issue. The desktop renders its last confirmed, display-only board snapshot before service readiness, then reconciles it. Native batched task reads and saved sprint membership no longer wait for full conversation/worker history. Queue state is never inferred from UI loading. Sprint membership remains behind a successful complete first board even if that read rejects; facts reads request a coherent reread for new members instead of publishing unloaded IDs. A window reads only what a screen on view shows, never on a blind timer for what is not on screen (see [reads follow what is on screen](docs/cortex-workspace/consistency-and-recovery.md#reads-follow-what-is-on-screen)). Starting without a failure reason is silent, including on the sprint summary. The first screen waits only for the machine's settings (`config.read` and project overrides), never for the machine overview with its storage accounting: that is read when a screen that shows it opens (see [startup](docs/cortex-workspace/SCREENS.md)). See [connection and project recovery](docs/cortex-workspace/consistency-and-recovery.md#startup-and-project-read-isolation). The [installed dev gate](docs/project/verification.md#installed-desktop-real-input-gate) exercises fresh-profile launch, an observed ten-second service-start delay and three visible registered projects (one unreadable store), including registry preservation across plain apt upgrade. Release-channel upgrade remains outside that harness.
+Workspace waits for its local service socket on cold start, separately from request deadlines. Reconnect
+invalidates presentation caches without waiting for each project controller. Registered projects remain
+listed while their stores load or fail; those issues stay on the affected project. Slow reads finish in
+the background and failed reads retry without replaying actions; a failed repository read retries on its
+own within seconds and names an owner-fixable cause such as an unsafe private settings folder. A normal
+pending read is silent; only repeated failures produce a project issue. The desktop renders its last
+confirmed, display-only board snapshot before service readiness, then reconciles it. Native batched task
+reads and saved sprint membership no longer wait for full conversation/worker history. Queue state is
+never inferred from UI loading. Sprint membership remains behind a successful complete first board even if
+that read rejects; facts reads request a coherent reread for new members instead of publishing unloaded
+IDs. A window reads only what a screen on view shows, never on a blind timer for what is not on screen
+(see [reads follow what is on screen](docs/cortex-workspace/consistency-and-recovery.md#reads-follow-what-is-on-screen)).
+Starting without a failure reason is silent, including on the sprint summary. The first screen waits only
+for the machine's settings (`config.read` and project overrides), never for the machine overview with its
+storage accounting:
+that is read when a screen that shows it opens (see [startup](docs/cortex-workspace/SCREENS.md)). See [connection and project recovery](docs/cortex-workspace/consistency-and-recovery.md#startup-and-project-read-isolation). The [installed dev gate](docs/project/verification.md#installed-desktop-real-input-gate) exercises fresh-profile launch, an observed ten-second service-start delay and three visible registered projects (one unreadable store), including registry preservation across plain apt upgrade. Release-channel upgrade remains outside that harness.
 
 Workspace distinguishes a recorded interrupted turn from unconfirmed recovery: it shows **Interrupted**, keeps messaging available for an explicit continuation, and never restarts work during Re-check state. Unknown or contradictory recovery stays blocked. A worker exit the running service could not confirm is re-checked by the service itself, with restart recovery's process evidence and backoff; once no engine process works in the project it is settled without a restart, and an Automatic task that only that exit held continues by itself. See [task state confirmation](docs/cortex-workspace/local-task-execution.md#recorded-data-and-pending-questions).
 
@@ -377,23 +421,127 @@ Workspace supports editing a never-started task's saved request and adding draft
 
 Workspace animates a loader only while its work is pending (a sweeping bar on the pressed control, a stepped turning icon for loading and working states), using transform and opacity only, paused in hidden windows and tabs out of view, and never on an idle screen. Conversation history is reused by task/execution version, and slow Git completion publishes facts rather than starting another full refresh. See [CPU measurements and limits](docs/cortex-workspace/performance.md#recorded-on-the-reference-machine).
 
-Workspace action acknowledgements no longer wait for a full workspace refresh. Task and sprint actions reconcile their own project in the background, with a separate Updating confirmed state notice; only confirmed renames and queue controls update locally. If an acknowledgement interrupts a workspace refresh, reconciliation rereads every project before clearing the synchronization notice. Facts and task-detail updates delivered by the window's own follow-up reads during reconciliation are applied after it, ordered by when each read began (a facts read that began earlier never replaces one that began later), instead of starting another read, so a slow machine cannot keep reconciliation running; the notice stays until that reconciliation's late board and facts replies have arrived (at most 10 s). Facts that carry no read order still queue a fresh read of their project. Starting automatic title generation is not a reconciled action: a saved task keeps its description label as its temporary title, nothing shows as updating while the title is written, and the written title replaces the label in place when the background job saves it. Project facts combine product and worker reads into one helper call, while Git reads overlap. Writable store initialization adds activity/operation lookup indexes without changing format 12; inspection opens remain non-mutating. See [action latency measurements](docs/cortex-workspace/performance.md#action-latency-recorded).
+Workspace action acknowledgements no longer wait for a full workspace refresh. Task and sprint actions
+reconcile their own project in the background, with a separate Updating confirmed state notice; only
+confirmed renames and queue controls update locally. If an acknowledgement interrupts a workspace refresh,
+reconciliation rereads every project before clearing the synchronization notice. Facts and task-detail
+updates delivered by the window's own follow-up reads during reconciliation are applied after it, ordered
+by when each read began (a facts read that began earlier never replaces one that began later), instead of
+starting another read, so a slow machine cannot keep reconciliation running; the notice stays until that
+reconciliation's late board and facts replies have arrived (at most 10 s). Facts that carry no read order
+still queue a fresh read of their project. Starting automatic title generation is not a reconciled action:
+a saved task keeps its description label as its temporary title, nothing shows as updating while the title
+is written, and the written title replaces the label in place when the background job saves it. Project
+facts combine product and worker reads into one helper call, while Git reads overlap. Writable store
+initialization adds activity/operation lookup indexes without changing format 12; inspection opens remain
+non-mutating. See [action latency measurements](docs/cortex-workspace/performance.md#action-latency-recorded).
 
-Workspace now executes standalone Git inspection/actions, folder search, private machine settings/logs and conversation/sprint JSON operations in its Rust service, without a Python helper process for those operations. Core-owned repository baseline/checkout reads, saved attachment reads, linked-store disk accounting and runtime-writer-checked file operations now use Rust Core directly. Explicit workflow descriptions, maintenance jobs, retention cleanup and two-phase sprint deletion also run natively. Saved draft edit/settings/rename, target selection, reopening, archive restoration and sprint linking now run natively for materialized checkout options, retaining existing replies and Start arbitration. Owner close/archive, automatic-ready/merged presentation updates and conflict handoff now also run in Rust with offline Python-oracle reply/state comparisons. External closure rechecks execution/session/owner evidence and live workers under Start arbitration; these overlays never complete the runtime or certify checks. Integration admission now refuses unconfirmed/stale overlays, observed already-landed content and absent or non-result runtime bindings natively, with exact offline Python reply comparisons and no saved-state or Git mutations. Completed bound results now use the existing native result/source validator for a narrow local squash: a clean, already-committed project-folder source into an existing clean target worktree, with the target already an ancestor and no checkout cleanup. Reply/state/Git comparisons include real commit-hook failure and changed-HEAD uncertainty. Unsupported evidence, source staging, same-branch commit, target updates, temporary targets, PRs and cleanup still delegate before any effect. Remaining machine config.action variants, task/review actions and receipt-backed worker withdrawals still use the explicit migration provider; this is not the completed all-Rust product or an installed-app upgrade. See [the native machine boundary](docs/cortex-workspace/local-task-execution.md#native-machine-boundary).
+Workspace now executes standalone Git inspection/actions, folder search, private machine settings/logs and
+conversation/sprint JSON operations in its Rust service, without a Python helper process for those
+operations. Core-owned repository baseline/checkout reads, saved attachment reads, linked-store disk
+accounting and runtime-writer-checked file operations now use Rust Core directly. Explicit workflow
+descriptions, maintenance jobs, retention cleanup and two-phase sprint deletion also run natively. Saved
+draft edit/settings/rename, target selection, reopening, archive restoration and sprint linking now run
+natively for materialized checkout options, retaining existing replies and Start arbitration. Owner
+close/archive, automatic-ready/merged presentation updates and conflict handoff now also run in Rust with
+offline Python-oracle reply/state comparisons. External closure rechecks execution/session/owner evidence
+and live workers under Start arbitration; these overlays never complete the runtime or certify checks.
+Integration admission now refuses unconfirmed/stale overlays, observed already-landed content and absent
+or non-result runtime bindings natively, with exact offline Python reply comparisons and no saved-state or
+Git mutations. Completed bound results now use the existing native result/source validator for a narrow
+local squash: a clean, already-committed project-folder source into an existing clean target worktree,
+with the target already an ancestor and no
+checkout cleanup. Reply/state/Git comparisons include real commit-hook failure and changed-HEAD uncertainty. Unsupported evidence, source staging, same-branch commit, target updates, temporary targets, PRs and cleanup still delegate before any effect. Remaining machine config.action variants, task/review actions and receipt-backed worker withdrawals still use the explicit migration provider; this is not the completed all-Rust product or an installed-app upgrade. See [the native machine boundary](docs/cortex-workspace/local-task-execution.md#native-machine-boundary).
 
-Owner task deletion (`product.task` actions `purge` and `clear_old`) now uses Rust Core for materialized checkouts, with unchanged reply and saved-state shapes compared against 117 offline Python cases. Confirmation, cutoff, archive/unmerged-work checks, unknown Start and exclusive store-access fences remain enforced. Native Core additionally refuses a still-running worker node even when a legacy terminal task row would allow deletion. Reclamation failure reports committed deletion rather than inviting replay; dirty or unproven worktrees remain kept. Owner acceptance and archive-discard answers now also run natively within the existing evidence/materialized-checkout boundary: 110 offline Python comparisons cover replies and persisted state, including result-version, source, review, acknowledgement and unobservable-work refusals. Acceptance revalidates under Start arbitration through its private save; neither action completes the runtime, invents check evidence or deletes work. File-conflict choices (`resolve_block`) now also run in Rust for materialized checkouts, using literal Git paths, descriptor-relative saves and durable unknown-effect fences. Thirty-six offline real-Git captures compare replies, JSON/SQLite state and file/index outcomes; native Git failures retain sanitized messages instead of Python stderr. Merge finish/abort now also run in Rust on the materialized-checkout boundary, with 38 offline real-Git comparisons and durable no-replay protection for uncertain commits, aborts and overlay saves. Unsupported legacy projections/evidence still delegate only before effects. See [manual file resolution](docs/cortex-workspace/local-task-execution.md#native-manual-file-resolution) and [merge finish/abort](docs/cortex-workspace/local-task-execution.md#native-merge-finish-and-abort). See [the deletion boundary](docs/cortex-workspace/local-task-execution.md#native-owner-deletion).
+Owner task deletion (`product.task` actions `purge` and `clear_old`) now uses Rust Core for materialized
+checkouts, with unchanged reply and saved-state shapes compared against 117 offline Python cases.
+Confirmation, cutoff, archive/unmerged-work checks, unknown Start and exclusive store-access fences remain
+enforced. Native Core additionally refuses a still-running worker node even when a legacy terminal task
+row would allow deletion. Reclamation failure reports committed deletion rather than inviting replay;
+dirty or unproven worktrees remain kept. Owner acceptance and archive-discard answers now also run
+natively within the existing evidence/materialized-checkout boundary: 110 offline Python comparisons cover
+replies and persisted state, including result-version, source, review, acknowledgement and
+unobservable-work refusals. Acceptance revalidates under Start arbitration through its private save;
+neither action completes the runtime, invents check evidence or deletes work. File-conflict choices
+(`resolve_block`) now also run in Rust for materialized checkouts, using literal Git paths,
+descriptor-relative saves and durable unknown-effect fences. Thirty-six offline real-Git captures compare
+replies, JSON/SQLite state and file/index outcomes; native Git failures retain sanitized messages instead
+of Python stderr. Merge finish/abort now also run in Rust on the materialized-checkout boundary, with 38
+offline real-Git comparisons and durable no-replay protection for uncertain
+commits, aborts and overlay saves. Unsupported legacy projections/evidence still delegate only before effects. See [manual file resolution](docs/cortex-workspace/local-task-execution.md#native-manual-file-resolution) and [merge finish/abort](docs/cortex-workspace/local-task-execution.md#native-merge-finish-and-abort). See [the deletion boundary](docs/cortex-workspace/local-task-execution.md#native-owner-deletion).
 
-Engine connection `login_command` and `recheck` now run in Rust: lookup returns verified native login argv without executing it; recheck runs the fixed native status command with discarded output and an eight-second timeout, then creates/reuses the native-account reference under the shared registry lock. `add_key` now also runs in Rust, retaining canonical private secret storage, separate create/write/validate transactions and known-failure removal/opt-out effects. Uncertain commits or cleanup remain unknown and never replay. Offline complete reply/file/mode comparisons use disposable roots, synthetic keys and fake executable installs; additional captures compare private-write failures and exact fake-keyring lookup sequences. Valid keyring validation and install/onboarding requests outside their pre-effect refusals still use Python; stale-revision and installer pre-effect refusals are native. Catalog refresh retains its read-only empty/null/empty-argv/relative subset and observes qualified Codex/Claude native-account and secret-file launches in Rust, including qualified two-argument Codex/Claude installs and unresolved direct commands. Codex resolves nested/hoisted npm dependencies, creates Python-compatible private adapter/launcher artifacts and enriches per-model efforts through offline debug-model output. Unicode labels and scrubbed noisy-peer logs now have offline Python comparisons. A Codex package whose `@openai/codex` dependency or vendored binary Python cannot resolve is launched directly like Python's unverified launch, without private artifacts or extra variables. Sixty-seven Python captures (54 prior cases, eight OpenCode pre-probe failures and five unverified Codex direct launches) compare complete replies/files/modes and exact prompt-free requests without helper calls; new snapshots preserve existing files. The exact-hash Codex 2.3.0 bundle is now patched and observed natively too (its adapter is byte-identical to Python's; the digest and every call site are still checked). Potentially usable OpenCode installs, keyrings, verifier-dependent Codex candidates, unqualified Claude candidates, unsafe names/roots, missing locks and unqualified projections still use Python. Unqualified post-observation outcomes never replay through Python. The qualified catalog launcher now uses the compiled Rust service as a native Linux shebang interpreter, without Python or a shell. Safe existing Python artifacts migrate atomically without replay. 39 actual offline launcher comparisons cover argv/environment/cwd/stdio, checks, timeouts/reaping and final PID/status/signals; catalog comparisons explicitly validate the changed launcher content. Unsupported interpreter paths and separate engine/session launching still retain Python; this is not an overall Python-free execution claim. This does not complete Settings migration. See [the launch-capable producer boundary](docs/configuration.md#native-launch-capable-catalog-producer) and [retained engine setup](docs/configuration.md#retained-engine-connection-setup).
+Engine connection `login_command` and `recheck` now run in Rust: lookup returns verified native login argv
+without executing it; recheck runs the fixed native status command with discarded output and an
+eight-second timeout, then creates/reuses the native-account reference under the shared registry lock.
+`add_key` now also runs in Rust, retaining canonical private secret storage, separate
+create/write/validate transactions and known-failure removal/opt-out effects. Uncertain commits or cleanup
+remain unknown and never replay. Offline complete reply/file/mode comparisons use disposable roots,
+synthetic keys and fake executable installs; additional captures compare private-write failures and exact
+fake-keyring lookup sequences. Valid keyring validation and install/onboarding requests outside their
+pre-effect refusals still use Python; stale-revision and installer pre-effect refusals are native. Catalog
+refresh retains its read-only empty/null/empty-argv/relative subset and observes qualified Codex/Claude
+native-account and secret-file launches in Rust, including qualified two-argument Codex/Claude installs
+and unresolved direct commands. Codex resolves nested/hoisted npm dependencies, creates Python-compatible
+private adapter/launcher artifacts and enriches per-model efforts through offline debug-model output.
+Unicode labels and scrubbed noisy-peer logs now have offline Python comparisons. A Codex package whose
+`@openai/codex` dependency or vendored binary Python cannot resolve
+is launched directly like Python's unverified launch, without private artifacts or extra variables.
+Sixty-seven Python captures (54 prior cases, eight OpenCode pre-probe failures and five unverified Codex
+direct launches) compare complete replies/files/modes and exact prompt-free requests without helper calls;
+new snapshots preserve existing files. The exact-hash Codex 2.3.0 bundle is now patched and observed
+natively too (its adapter is byte-identical to Python's; the digest and every call site are still
+checked). Potentially usable OpenCode installs, keyrings, verifier-dependent Codex candidates, unqualified
+Claude candidates, unsafe names/roots, missing locks and unqualified projections still use Python.
+Unqualified post-observation outcomes never replay through Python. The qualified catalog launcher now uses
+the compiled Rust service as a native Linux shebang interpreter, without Python or a shell. Safe existing
+Python artifacts migrate atomically without replay. 39 actual offline launcher comparisons cover
+argv/environment/cwd/stdio, checks, timeouts/reaping and final PID/status/signals; catalog comparisons
+explicitly validate the changed launcher content. Unsupported interpreter paths and separate
+engine/session launching still retain Python; this is not an overall Python-free execution claim. This
+does not complete Settings migration. See
+[the launch-capable producer boundary](docs/configuration.md#native-launch-capable-catalog-producer) and
+[retained engine
+setup](docs/configuration.md#retained-engine-connection-setup).
 
 OS-keyring validation and launch-capable catalog refresh require an actual provider observation. An unavailable provider/helper refuses without changing credential state or creating catalog logs/snapshots; it is not treated as a keyring import failure. Stale-revision refusals remain native.
 
-Project settings reads (`project.config.read`) now also run in Rust: project-only routing, its exact byte revision and saved policy ceiling retain the Python editor shape. Offline Python fixtures compare replies without a helper or engine; reads do not initialize a missing store, update configuration or inspect credentials. Project saves (`project.config.save`) now validate and persist routing/ceilings in Rust, with revision locking, atomic file replacement and Core transactions. Offline comparisons cover replies and persisted bytes; uncertain writes never fall back. Machine-wide [config.save](docs/configuration.md#native-machine-saves) now selects Rust for routing, defaults and MCP with no Python fallback. Socket regressions compare 224 complete offline Python reply/file observations, including malformed-input error envelopes, and assert no helper invocation. Native storage and exact-number bounds fail closed; defaults files are individually atomic, not one transaction. Remaining machine config.action variants, legacy projection/evidence paths and explicit retained-runtime mode still need Python; native service startup and passive config.read do not. Pre-save MCP discovery (`config.mcp.discover`) now also runs natively: it only initializes a contained server and lists its tools, retaining the existing reply shapes, budgets and sanitized descriptions. Offline Python comparisons and disposable native containment/process-cleanup tests cover this boundary; no server definition is saved and no tool is called.
+Project settings reads (`project.config.read`) now also run in Rust: project-only routing, its exact byte
+revision and saved policy ceiling retain the Python editor shape. Offline Python fixtures compare replies
+without a helper or engine; reads do not initialize a missing store, update configuration or inspect
+credentials. Project saves (`project.config.save`) now validate and persist routing/ceilings in Rust, with
+revision locking, atomic file replacement and Core transactions. Offline comparisons cover replies and
+persisted bytes; uncertain writes never fall back. Machine-wide
+[config.save](docs/configuration.md#native-machine-saves) now selects Rust for routing, defaults and MCP
+with no Python fallback. Socket regressions compare 224 complete offline Python reply/file observations,
+including malformed-input error envelopes, and assert no helper invocation. Native storage and
+exact-number bounds fail closed; defaults files are individually atomic, not one transaction. Remaining
+machine config.action variants, legacy projection/evidence paths and explicit retained-runtime mode still
+need Python; native service startup and passive config.read do not. Pre-save MCP discovery
+(`config.mcp.discover`) now also runs natively: it only initializes a contained server and lists its
+tools, retaining the existing reply shapes, budgets and sanitized descriptions. Offline Python comparisons
+and disposable native containment/process-cleanup tests cover this boundary; no server definition is saved
+and no tool is called.
 
-Unactivated task facts read private overlays, saved task options, waiting controls and informational-answer controls through Rust Core. Completed-work controls also read report integrity, current-plan review verdicts/waivers and missing, stale or digest-less verification natively. Provisioned worker-check disclosures and obsolete-revision rerun records also read natively. Current rerun controls without a reviewed source digest now read pending, failed, ambiguous and same-owner technical outcomes natively; a recorded success alone never closes a check. Source-bound literal-gap reruns now revalidate current source, exact request/start/finish records, private complete output and the author's publication in Rust. Final-verification gap closures also validate unique exact runtime starts/outputs, reviewed current source and the recorded gap author's completion/publication; later pending or failed reruns supersede those closures. The 135 offline Python-oracle cases compare machine read/facts controls without a Python helper at test time. Matching missing-command/tool blockers can carry across owners only for the unchanged exact target and source; neither an absent source nor a recorded success alone proves a pass. Standalone worker history now reads attempt identities, status, selected tool/edit/command activity, guidance delivery and confirmed route chains in Rust, including bounded two-position continuation. Coordinator detail history also reads retained messages, plans and selected tool activity natively, with session-bound high-watermark cursors, original byte budgets and confirmed route labels. Current source-bound verification now also reads natively in plain folders and Git checkouts using the exact legacy manifest/digest format, including drift and unavailable-source refusals. Git file selection uses a fixed sandboxed read-only command, with the legacy whole-tree fallback when unavailable; listed-walk fixtures are separate from positive sandbox qualification. Receipt-derived failed/passed rerun targets, potentially authorized pass receipts, claimed failed-check withdrawals, alternate timestamp forms, unsupported coordinator display shapes, large or malformed evidence and unmaterialized legacy worktree options still use the retained Python provider. This remains a partial migration; native reads do not accept unverified work.
+Unactivated task facts read private overlays, saved task options, waiting controls and
+informational-answer controls through Rust Core. Completed-work controls also read report integrity,
+current-plan review verdicts/waivers and missing, stale or digest-less verification natively. Provisioned
+worker-check disclosures and obsolete-revision rerun records also read natively. Current rerun controls
+without a reviewed source digest now read pending, failed, ambiguous and same-owner technical outcomes
+natively; a recorded success alone never closes a check. Source-bound literal-gap reruns now revalidate
+current source, exact request/start/finish records, private complete output and the author's publication
+in Rust. Final-verification gap closures also validate unique exact runtime starts/outputs, reviewed
+current source and the recorded gap author's completion/publication; later pending or failed reruns
+supersede those closures. The 135 offline Python-oracle cases compare machine read/facts controls without
+a Python helper at test time. Matching missing-command/tool blockers can carry across owners only for the
+unchanged exact target and source; neither an absent source nor a recorded success alone proves a pass.
+Standalone worker history now reads attempt identities, status, selected tool/edit/command activity,
+guidance delivery and confirmed route chains in Rust, including bounded two-position continuation.
+Coordinator detail history also reads retained messages, plans and
+selected tool activity natively, with session-bound high-watermark cursors, original byte budgets and confirmed route labels. Current source-bound verification now also reads natively in plain folders and Git checkouts using the exact legacy manifest/digest format, including drift and unavailable-source refusals. Git file selection uses a fixed sandboxed read-only command, with the legacy whole-tree fallback when unavailable; listed-walk fixtures are separate from positive sandbox qualification. Receipt-derived failed/passed rerun targets, potentially authorized pass receipts, claimed failed-check withdrawals, alternate timestamp forms, unsupported coordinator display shapes, large or malformed evidence and unmaterialized legacy worktree options still use the retained Python provider. This remains a partial migration; native reads do not accept unverified work.
 
 Workspace Git keeps the last known checkout visible while refreshing repository details; a pending read never means the folder has no repository. Opening or returning to a Git tab and focusing the window request fresh facts automatically, with visible-window polling for external changes. Untracked dependency/cache files are shown when Git does not ignore them; only private helper state is excluded. Above 2,000 untracked files, wholly untracked directories collapse to one entry each, so an un-ignored dependency tree cannot make the Git tab unreadable. Commit sends one request, including when nothing is staged. Push resolves the confirmed display URL to a configured Git remote name before sending, and refuses stale or ambiguous destinations. Workspace Git status, diff and log inspect raw content without requiring installed clean/smudge filters. Write commands retain normal filter and hook requirements; repository configuration is not changed.
 
-In Hybrid and Automatic sprints every queue hold has one next actor. Anything the assigned agents can fix (a stale result, an unfinished check, a run that failed with every effect known) goes back to the coordinator by itself, bounded and deduplicated, and continues with fresh review and verification. Only a real owner decision pins a card above the task's message box: what you are asked to allow, a primary action after which the queue finishes by itself, and a separate **Close as is…** with confirmation.
+In Hybrid and Automatic sprints every queue hold has one next actor. Anything the assigned agents can fix (a stale result, an unfinished check, a run that failed with every effect known) goes back to the coordinator by itself, bounded and deduplicated, and continues with fresh review and verification. Only a real owner decision pins a card above the task's message box: what you are asked to allow, a primary action after which the queue finishes by itself, and a separate **Close as is…** with confirmation. A held task whose command outcome is not yet confirmed waits for the runtime to settle it; an effect the runtime can never confirm is offered only the actions the service accepts, and its **Close as is…** records that effect as unknown, never as done. A refused card action stays on the card in plain words and is not offered again for the same hold.
 
 Ready desktop results that are not yet accepted retain an explicit Accept control in Conversation and the diff review, separate from committing or merging; an Automatic-sprint result that the queue accepted shows its automatic acceptance instead. Same-branch tasks use Finish and Commit wording in review, the sidebar and inspector as well as their action controls; completed inspector outcomes appear once. Finished worker summaries unescape prose consistently, and worker notes use the full activity column rather than the icon column.
 
@@ -405,7 +553,10 @@ Unknown routes remain absent rather than inheriting machine defaults.
 Each worker shows its own engine and model, the ones its engine session confirmed
 at start (for example `Codex · Sol, Medium`). The coordinator's model appears only
 for the coordinator; a worker without a confirmed route reads Not confirmed.
-A connected machine can still have an unconfirmed task. Its notice explains the difference and offers Re-check state and Diagnostics; sending stays off until confirmed facts arrive.
+A connected machine can still have an unconfirmed task. Its notice offers **Re-check state** and **Open
+Diagnostics**. If the saved records disagree, you can confirm **Close as is…** to close the task without
+verifying it, changing its execution or repeating anything. The disagreement remains visible after
+restart. The Board and List group it under **Closed, not verified**, separate from **Done**.
 See [recorded activity and routes](docs/cortex-workspace/local-task-execution.md#recorded-data-and-pending-questions).
 
 Workspace settings include release updates, native/API-key engine connections and
@@ -421,9 +572,45 @@ for merge confirmation keeps its owner-action highlight. Result cards separate h
 paragraphs, quotes and code, and omit empty outcome counters.
 Plain project folders support tasks and result acceptance without Git: a folder in no repository is observed by walking it (same hashing, exclusions and bounds as a repository; nothing is ignored), so baseline, review change lists, verification and completion work there, while a repository Git cannot read still stops the task with a stop question naming that cause. Git initialization is explicit;
 local Commit, squash merge and task closure need no remote. Local-only repositories omit network controls and push/PR wording; generated commit messages are English independently of conversation language. Task actions open the actual checkout in the detected editor, with a visible reason when unavailable. Worktree settings allow writable external `.cortex/worktrees` folders, retain refused drafts with a persistent reason, and never move existing checkouts. Diagnostics list each failing check and its recovery steps, including in Copy report. Accept binds the reviewed runtime-evidence version while displaying its result number; late progress/transcript updates do not invalidate unchanged work. Refused or unconfirmed acceptance stays beside the result with a Refresh action, even after its toast closes;
-withdrawn probes do not count as failed worker checks. Check programs are probed in the real verification environment before accepting a plan, a bare name on the same search path worker commands use (project tool folders, then the owner's tool search path: the `PATH` read once from the owner's login shell plus folders added under Diagnostics, Tool search path, so nvm's `node`/`npm` and `~/.local/bin` tools resolve as in the owner's terminal); workers can declare checks early through the same preflight. Probe launch failures remain unavailable observations, not false missing-program diagnoses. Missing tools require project-private installation or an executable alternative, with an immediate owner question when neither is possible. Review separates human-only items as **Check manually**, outside outcome counts and acceptance blockers. Rerun is available only for recorded commands, with fresh output and a bounded deadline. Accept and Finish list each skipped check as **Not run** with its reason, including a policy refusal. Legacy technical check blockers remain honest evidence and allow explicit acknowledged acceptance; an informational answer needs no invented tests. Once the runtime's own verification of a native result's current version passed on the unchanged folder, the workers' and reviewer's unconfirmed or not-run self-reported checks are listed as notes on the result and do not block Accept; a self-reported failure, a policy-blocked check or failed runtime verification still does. Sprint creation offers Project folder or Separate worktree, just like a single task. All tasks created from its plan inherit that choice; worktree mode prepares a separate worktree per task on explicit start. Sprint planning produces a description-only plan without starting implementation. The planning chat explains unusable output or engine setup failure, and the cancelled banner offers Resume planning; Create tasks saves drafts, and only an explicit task/queue start executes them. Planned tasks carry only their own item's scope and relevant plain-text owner answers, not sibling work or internal conversation records. Explicit unanswered owner questions belong to the relevant item. Review previews new text files as additions, preserves the implementation summary on no-file follow-ups, and retains unchanged missing-tool recovery. Local integration stages only non-helper user paths and restores prior staging if saving fails. See [local review and Git behavior](docs/cortex-workspace/local-task-execution.md).
+withdrawn probes do not count as failed worker checks. Check programs are probed in the real verification
+environment before accepting a plan, a bare name on the same search path worker commands use (project tool
+folders, then the owner's tool search path: the `PATH` read once from the owner's login shell plus folders
+added under Diagnostics, Tool search path, so nvm's `node`/`npm` and `~/.local/bin` tools resolve as in
+the owner's terminal); workers can declare checks early through the same preflight. Probe launch failures
+remain unavailable observations, not false missing-program diagnoses. Missing tools require
+project-private installation or an executable alternative, with an immediate owner question when neither
+is possible. Review separates human-only items as **Check manually**, outside outcome counts and
+acceptance blockers. Rerun is available only for recorded commands, with fresh output and a bounded
+deadline. Accept and Finish list each skipped check as **Not run** with its reason, including a policy
+refusal. Legacy technical check blockers remain honest evidence and allow explicit acknowledged
+acceptance; an informational answer needs no invented tests. Once the runtime's own verification of a
+native result's current version passed on the unchanged folder, the workers' and reviewer's unconfirmed or
+not-run self-reported checks are listed as notes on the result and do not block Accept; a self-reported
+failure, a policy-blocked check or failed runtime verification
+still does. Sprint creation offers Project folder or Separate worktree, just like a single task. All tasks
+created from its plan inherit that choice; worktree mode prepares a separate worktree per task on explicit
+start. Sprint planning produces a description-only plan without starting implementation. The planning chat
+explains unusable output or engine setup failure, and the cancelled banner offers Resume planning; Create
+tasks saves drafts, and only an explicit task/queue start executes them. Planned tasks carry only their
+own item's scope and relevant plain-text owner answers, not sibling work or internal conversation records.
+Explicit unanswered owner questions belong to the relevant item. Review previews new text files as
+additions, preserves the implementation summary on no-file follow-ups, and retains unchanged missing-tool
+recovery. Local integration stages only non-helper user paths and restores prior staging if saving fails.
+See [local review and Git behavior](docs/cortex-workspace/local-task-execution.md).
 Clickable controls use a pointer; disabled controls use the default cursor and text fields keep the text cursor.
-Ready to merge distinguishes local content already in the target branch from its last-fetched push status. Already-contained work offers owner-confirmed closure, not another merge. Shared-checkout tasks on their target branch use recorded task-file evidence: committed content offers closure even after later sibling edits; known pending files offer Commit to that branch without sweeping other files into the commit. Unknown attribution offers Close as is or Done outside the app, never a same-branch merge. Board cards can be moved manually only to Done, with “Done outside the app” confirmation after the task stops. This durable owner decision is not acceptance, merging or passing checks; sprint dependencies can continue. Every way a task ends without acceptance has a closing step: a failed or cancelled run offers Close task… in its title band, a runtime result that can never be accepted offers Close as is…, and Finish on the runtime's stop question counts as the owner's close as is (not verified), so it archives and settles its sprint like any closed task. A closed task's title band offers Archive, which never asks. See [local review and Git behavior](docs/cortex-workspace/local-task-execution.md).
+Ready to merge distinguishes local content already in the target branch from its last-fetched push status.
+Already-contained work offers owner-confirmed closure, not another merge. Shared-checkout tasks on their
+target branch use recorded task-file evidence: committed content offers closure even after later sibling
+edits; known pending files offer Commit to that branch without sweeping other files into the commit.
+Unknown attribution offers Close as is or Done outside the app, never a same-branch merge. Board cards can
+be moved manually only to Done, with “Done outside the app” confirmation after the task stops. This
+durable owner decision is not acceptance, merging or passing checks; sprint dependencies can continue.
+Ordinary run closures without acceptance have a closing step: a failed or cancelled run offers
+Close task… in its title band, a runtime result that can never be accepted offers Close as is…, and
+Finish on the runtime's stop question counts as the owner's close as is (not verified), so it archives
+and settles its sprint. Ordinary closed tasks offer Archive without another confirmation. The separate
+close for conflicting records does not enable Archive or satisfy a dependency. See
+[local review and Git behavior](docs/cortex-workspace/local-task-execution.md).
 Pointer and keyboard focus keep their behavior without adding decorative outlines or shifting controls.
 
 A sprint is planned by its own read-only planning task in the project folder,
@@ -441,7 +628,18 @@ Workspace saves a task from its description, then names it asynchronously throug
 its configured model route. Owner renames always win; unavailable naming
 keeps the description fallback and marks title generation as failed. See [local task execution](docs/cortex-workspace/local-task-execution.md#automatic-task-titles).
 
-Workspace reads as a conversation on every page, and every message box is one shared composer: Attach and Voice in the same places, model and effort where an engine is called (never in an answer, which continues its session), and a paper-plane button named for what it does (Send message, Send answer, Save draft, Create the task). Typing `@` suggests the project's files and `/` at the start of a line suggests the screen's commands and the project's skills; what is picked is plain text in the message (a command runs instead), see [what a message sends](docs/cortex-workspace/local-task-execution.md#file-mentions-commands-and-skills-in-a-message). Questions are answered inside the conversation (an answer may combine a chosen option, the owner's own words and attached files, and the answered question shows its files), questions asked together in one form with one Send answers button, Home shows one Needs you list and the Inbox the same list for every machine, a board card shows one fact and one next action, controls side by side share one height and centre their labels, and the interface no longer names the program. Pages reflow down to phone width without scrolling sideways. See [Conversation adoption](docs/cortex-workspace/SCREENS.md#conversation-adoption).
+Workspace reads as a conversation on every page, and every message box is one shared composer: Attach and
+Voice in the same places, model and effort where an engine is called (never in an answer, which continues
+its session), and a paper-plane button named for what it does (Send message, Send answer, Save draft,
+Create the task). Typing `@` suggests the project's files and `/` at the start of a line suggests the
+screen's commands and the project's skills; what is picked is plain text in the message (a command runs
+instead), see [what a message sends](docs/cortex-workspace/local-task-execution.md#file-mentions-commands-and-skills-in-a-message).
+Questions are answered inside the conversation (an answer may combine a chosen option, the owner's own
+words and attached files, and the answered question shows its files), questions asked together in one form
+with one Send answers button, Home shows one Needs you list and the Inbox the same list for every machine,
+a board card shows one fact and one next action, controls side by side share one height and centre their
+labels, and the interface no longer names the program. Pages reflow down to phone width without scrolling
+sideways. See [Conversation adoption](docs/cortex-workspace/SCREENS.md#conversation-adoption).
 
 Every Workspace form for a message or new work (task and sprint creation, conversations, direct-worker messages, answers inside a question, planning messages, Request changes, diff comments and conflict-resolution guidance) accepts dropped files,
 clipboard images and picked files (eight files, 4 MiB combined), shown as removable chips with image thumbnails. Queue Edit
@@ -457,7 +655,19 @@ project, not a task worktree; the worktree-local terminal action is disabled wit
 jobs; it is full owner shell access, not a sandbox. The desktop notifies when something needs the owner outside the task or sprint on view, subject to the desktop notification service and the Appearance settings. Notifications name the work, not question bodies; failed delivery stays explicit in the app. The machine service raises them, also while no window is open, for questions, stopped tasks, results to review, failed tasks, planning questions and paused sprints, each kind with its own setting; clicking one raises the window, or starts the app, on that place ([notifications](docs/cortex-workspace/SCREENS.md#notifications-desktop)).
 See [terminal limits](docs/cortex-workspace/security.md#owner-terminal-built-local-linux).
 
-Workspace resumes queued work after answered questions but does not override an owner pause. In Hybrid and Automatic, a result that passes the manual Accept rules is marked as automatically accepted in its review, result card and conversation. Automatic also finishes it on the current branch before releasing dependents. Accept stays a manual owner action in manual sprints. The sprint's current run mode decides: switching to Manual stops automatic acceptance of results not yet accepted, and switching to Automatic accepts waiting results that pass. Automatic acceptance also needs the runtime's passed verification and no owner resolution of the task. After upgrading to 1.0.6, a result checked by an earlier build whose project folder holds empty directories inside Git-ignored folders reads as changed once (it loses Accept, an accepted but unmerged result is refused as stale, and an automatic sprint pauses on it); run its checks again before accepting or merging it. A result with an open check, a stale or missing result, or an evidence warning is not accepted; the queue sends it back to the agent when it can be repaired and otherwise pauses with a pinned owner decision. Merge and PR creation always need owner confirmation. Skipped executable worker checks run automatically; check
+Workspace resumes queued work after answered questions but does not override an owner pause. In Hybrid and
+Automatic, a result that passes the manual Accept rules is marked as automatically accepted in its review,
+result card and conversation. Automatic also finishes it on the current branch before releasing
+dependents. Accept stays a manual owner action in manual sprints. The sprint's current run mode decides:
+switching to Manual stops automatic acceptance of results not yet accepted, and switching to Automatic
+accepts waiting results that pass. Automatic acceptance also needs the runtime's passed verification and
+no owner resolution of the task. After upgrading to 1.0.6, a result checked by an earlier build whose
+project folder holds empty directories inside Git-ignored folders reads as changed once (it loses Accept,
+an accepted but unmerged result is refused as stale, and an automatic sprint pauses on it); run its checks
+again before accepting or merging it. A result with an open check, a stale or missing result, or an
+evidence warning is not accepted; the queue sends it back to the agent when it can be repaired and
+otherwise pauses with a pinned owner decision. Merge and PR creation always need owner confirmation.
+Skipped executable worker checks run automatically; check
 reruns, including the native desktop button, use retained commands and real verification receipts, not model promises.
 See [service-owned work](docs/cortex-workspace/local-task-execution.md#archive-and-service-owned-work).
 
@@ -465,7 +675,7 @@ See [service-owned work](docs/cortex-workspace/local-task-execution.md#archive-a
 
 Routing marks stored references to disabled models as inactive without deleting them; its enabled-model picker excludes denied models. Routing settings use each exact model's observed effort levels, including ordered effort ladders. Unknown levels are marked; saved unsupported values remain visible and unchanged. See [configuration](docs/configuration.md#manage-settings-in-paseo).
 
-Workspace queues writers during independent review and verification of the same checkout. If an external edit changes the reviewed files, Cortex schedules fresh review within its review-cycle limit. A worker that ends its turn with a pending command can receive the final receipt in the same session. Reopened reviews include the task’s recorded writes from earlier plans and identify paths whose contents have since changed. Local desktop builds reuse Cargo artifacts and npm downloads across invocations. See [desktop packaging](docs/project/packaging.md).
+Workspace queues writers during independent review and verification of the same checkout. If an external edit changes the reviewed files, Cortex schedules fresh review within its review-cycle limit. A worker that ends its turn with a pending command can receive the final receipt in the same session. Reopened reviews include the task’s recorded writes from earlier plans and identify paths whose contents have since changed. Changes to git-ignored files (build outputs, dependencies, caches) do not make a review's change list incomplete; when the list still cannot be enumerated, the reviewer approves what it read and the result carries a "Check manually" limitation instead of a refusal. Local desktop builds reuse Cargo artifacts and npm downloads across invocations. See [desktop packaging](docs/project/packaging.md).
 
 ## Table of contents
 
@@ -797,21 +1007,85 @@ Cortex-owned roots, your project files, or Git history. See
 
 Starting a task is independent of other tasks in the same project, including retained waiting or recovering ACP tasks. Pending, unknown or running Workspace starts also do not block new ordinary ACP tasks. A duplicate start is refused only for that already-started task; a crashed start remains unknown without replay. Sprint queues still select tasks by dependency order and pause for attention. Manual Start does not enforce that order on the server. See [local task execution](docs/cortex-workspace/local-task-execution.md#choices-and-checkout).
 
-Cortex Workspace is a desktop application being built alongside Cortex. Its local slice is built and checked, but it is not released. A user-level service owns the Cortex agent process and talks to Cortex through the `_cortex/workspace` extension method, in addition to the standard ACP methods. The service listens only on a private Unix socket and opens no network port. The Ubuntu package is built in a Docker container with `scripts/cortex-xtask.sh build-deb` (wrapped by `./scripts/build-dev-deb.sh` and `./scripts/build-prod-deb.sh`); a local build is the dev channel. Releases start manually through GitHub Actions: choose `main` for production (`v<debian-version>`, Latest), or `dev` for a separate dev prerelease (`dev-v<debian-version>`, never Latest). Both appear in one release list. Dev and production can coexist, including in the same project folder: Dev uses `.cortex-dev` beside release `.cortex` without reading or migrating release data. There is one store per logical project per channel, shared by its linked worktrees. Project metadata stays inside the channel store; Dev reserves `.cortex-dev/owner.json`, not a root JSON file. Saved sprint plans can restore missing member drafts after an upgrade, without reading release history; the queue pauses for review before any new start. Dev installs manually and has no in-app updates. See the [release steps](docs/project/packaging.md#manual-workspace-releases). See [Cortex Workspace](docs/cortex-workspace/index.md) for the design, the contract and the current status, and [SECURITY.md](SECURITY.md) for its trust boundary.
+Cortex Workspace is a desktop application being built alongside Cortex. Its local slice is built and
+checked, but it is not released. A user-level service owns the Cortex agent process and talks to Cortex
+through the `_cortex/workspace` extension method, in addition to the standard ACP methods. The service
+listens only on a private Unix socket and opens no network port. The Ubuntu package is built in a Docker
+container with `scripts/cortex-xtask.sh build-deb` (wrapped by `./scripts/build-dev-deb.sh` and
+`./scripts/build-prod-deb.sh`); a local build is the dev channel. Releases start manually through GitHub
+Actions: choose `main` for production (`v<debian-version>`, Latest), or `dev` for a separate dev
+prerelease (`dev-v<debian-version>`, never Latest). Both appear in one release list. Dev and production
+can coexist, including in the same project folder: Dev uses `.cortex-dev` beside release `.cortex` without
+reading or migrating release data. There is one store per logical project per channel, shared by its
+linked worktrees. Project metadata stays inside the channel store; Dev reserves `.cortex-dev/owner.json`,
+not a root JSON file. Saved sprint plans can restore missing member drafts after an upgrade, without
+reading release history; the queue pauses for review before any new start. Dev installs manually and has
+no in-app updates. See the [release steps](docs/project/packaging.md#manual-workspace-releases). See
+[Cortex Workspace](docs/cortex-workspace/index.md) for the design, the contract and the current status,
+and [SECURITY.md](SECURITY.md) for its trust boundary.
 
 The merge card shows the recorded pull request address, and **View PR** (on the card and in the Git menu) opens it in your browser where `/usr/bin/xdg-open` or `/usr/bin/gio` is installed. When a branch and its upstream have diverged, **Pull…** asks whether to merge or rebase the remote commits. **Update from <target>…** merges the target's new commits into a task's own branch when that task has a worktree of its own on another branch and the machine offers the update; the native host runs every task in the project folder, so its tasks have no such item. See [IDE and Git](docs/cortex-workspace/ide-and-git.md).
 
 Desktop container builds derive their Rust source inputs from the root Cargo workspace membership and preserve `Cargo.lock`; new crates do not require a separate staging allowlist entry. See [local desktop builds](docs/project/packaging.md#local-desktop-debian-builds).
 
-Both dev and release `.deb` packages include the complete Cortex runtime. Debian versions now put an increasing UTC build stamp before the content hash, with a `z` prefix that sorts above all older hash-only versions. The embedded runtime identity is unchanged; see [build ordering and reproducibility](docs/cortex-workspace/platforms.md#debian-build-ordering-and-reproducibility). Install with `sudo apt install ./cortex-workspace-dev_*.deb` (or the release package), then launch the application: no checkout, settings clone or `service.env` is required. The package arranges service startup at login; the desktop starts its own unit in an existing session. Upgrade restarts active user units best effort, and removal leaves user data intact. Both channels include qualified Codex/Claude adapters, their locked dependencies and checksum-verified Node 24.14.1 under `/usr/lib/<package>/engines`; first activation needs neither npm nor an adapter download. Native logins stay in `~/.codex` and `~/.claude`, never copied. Models still require account access and network; missing login or failed discovery is shown separately from service connectivity. Installer, systemd and sandbox qualification limits are in [platforms](docs/cortex-workspace/platforms.md).
+Both dev and release `.deb` packages include the complete Cortex runtime. Debian versions now put an
+increasing UTC build stamp before the content hash, with a `z` prefix that sorts above all older hash-only
+versions. The embedded runtime identity is unchanged; see
+[build ordering and reproducibility](docs/cortex-workspace/platforms.md#debian-build-ordering-and-reproducibility).
+Install with `sudo apt install ./cortex-workspace-dev_*.deb` (or the release package), then launch the
+application: no checkout, settings clone or `service.env` is required. The package arranges service
+startup at login; the desktop starts its own unit in an existing session. Upgrade restarts active user
+units best effort, and removal leaves user data intact. Both channels include qualified Codex/Claude
+adapters, their locked dependencies and checksum-verified Node 24.14.1 under `/usr/lib/<package>/engines`;
+first activation needs neither npm nor an adapter download. Native logins stay in `~/.codex` and
+`~/.claude`, never copied. Models still require account access and network; missing login or failed
+discovery is shown separately from service connectivity. Installer, systemd and sandbox qualification
+limits are in [platforms](docs/cortex-workspace/platforms.md).
 
-The real task conversation reads durable Cortex messages, plans, tool activity, questions and results. A long conversation opens on its latest part: the window reads it from its end (`history.earlier`, at most four 100-row pages) and reads earlier parts only when the reader scrolls near the top or presses Show earlier; until the beginning is read the top says that earlier conversation is not shown (see [consistency and recovery](docs/cortex-workspace/consistency-and-recovery.md)). Owner messages and the unsent queue survive reopening. Workers show retained activity and accept owner guidance at their next successful Cortex tool call; this is not an immediate interrupt. Task Stop records a resumable pause, distinct from cancelling an engine turn or an individual worker. Task-level and pending worker questions remain visible but cannot be answered until Resume, including after service restart. Worker waits continue through a recorded replacement attempt, not a claim of reviving the old engine; access is revalidated on the new channel. Stopping one worker still cancels its own wait. An opened worker report is shown whole, retrieved internally in bounded public pages; one byte-budgeted continuation loads older task activity, command-control and guidance together, including attachment and delivery details. Check-rerun and review-comment controls return requests to Cortex, not synthetic passing evidence. See the [local conversation contract](docs/cortex-workspace/protocol.md).
+The real task conversation reads durable Cortex messages, plans, tool activity, questions and results. A
+long conversation opens on its latest part: the window reads it from its end (`history.earlier`, at most
+four 100-row pages) and reads earlier parts only when the reader scrolls near the top or presses Show
+earlier; until the beginning is read the top says that earlier conversation is not shown (see
+[consistency and recovery](docs/cortex-workspace/consistency-and-recovery.md)). Owner messages and the
+unsent queue survive reopening. Workers show retained activity and accept owner guidance at their next
+successful Cortex tool call; this is not an immediate interrupt. Task Stop records a resumable pause,
+distinct from cancelling an engine turn or an individual worker. Task-level and pending worker questions
+remain visible but cannot be answered until Resume, including after service restart. Worker waits continue
+through a recorded replacement attempt, not a claim of reviving the old engine; access is revalidated on
+the new channel. Stopping one worker still cancels its own wait. An opened worker report is shown whole,
+retrieved internally in bounded public pages; one byte-budgeted continuation loads older task activity,
+command-control and guidance together, including attachment and delivery details. Check-rerun and
+review-comment controls return requests to Cortex, not synthetic passing evidence. See the
+[local conversation contract](docs/cortex-workspace/protocol.md).
 
 The task execution slice adds per-task route/access/language choices, linked task worktrees sharing one project store, task-owned diffs, guarded squash/PR actions, real runtime-row purge with space reclamation, project overrides and window-independent automatic queues. Automatic LLM titles remain unavailable. Pre-save MCP listing now uses the existing sandbox with a bounded deadline, and Open logs opens private rotating status events (never raw stderr). Sprint-created tasks inherit their route and target; partial composer-setting failures name what was acknowledged. These additions still require fresh installed-package and native-rendered qualification. See [local task execution](docs/cortex-workspace/local-task-execution.md) for safety refusals, evidence limits and focused checks.
 
-Sprints have three run modes. **Manual** starts each ready task yourself. **Hybrid** runs the queue one task at a time and stops each passing result at Ready to merge, so you confirm each merge. **Automatic** runs the queue in the project folder's current branch (separate worktrees are refused), accepts passing results under the same rules, commits them locally on that branch and reaches Done without per-task owner action. Hybrid and Automatic send repairable results and failed runs with known effects back to the coordinator by themselves. When the queue needs an owner decision, **Open task** opens the conversation with a pinned card that lists what is asked: you can let the agent fix it once more, authorize Automatic to finish an eligible version on the named branch (Hybrid: accept it with its recorded checks), or close the task as is. Closing as is keeps pending files in the project folder and lets the queue proceed once the execution has settled. Ordinary manual acceptance and integration into another branch keep their separate finish confirmation. The queue rechecks holds and runs independent work after a cancellation or archive. Holds that need your action offer a task link or Continue queue and can notify you; they are not work questions. Sprints saved with the former automatic value open as Hybrid. The blocked-review screens have fixture-based WebKitGTK coverage. Full live desktop qualification of Automatic remains outstanding. See [sprint run modes](docs/cortex-workspace/local-task-execution.md#sprint-run-modes).
+Sprints have three run modes. **Manual** starts each ready task yourself. **Hybrid** runs the queue one
+task at a time and stops each passing result at Ready to merge, so you confirm each merge. **Automatic**
+runs the queue in the project folder's current branch (separate worktrees are refused), accepts passing
+results under the same rules, commits them locally on that branch and reaches Done without per-task owner
+action. Hybrid and Automatic send repairable results and failed runs with known effects back to the
+coordinator by themselves. When the queue needs an owner decision, **Open task** opens the conversation
+with a pinned card that lists what is asked: you can let the agent fix it once more, authorize Automatic
+to finish an eligible version on the named branch (Hybrid: accept it with its recorded checks), or close
+the task as is. Closing as is keeps pending files in the project folder and lets the queue proceed once
+the execution has settled. Ordinary manual acceptance and integration into another branch keep their
+separate finish confirmation. The queue rechecks holds and runs independent work after a cancellation or
+archive. Holds that need your action offer a task link or Continue queue and can notify you; they are not
+work questions. Sprints saved with the former automatic value open as Hybrid. The blocked-review screens
+have fixture-based WebKitGTK coverage. Full live desktop qualification of Automatic remains outstanding.
+See [sprint run modes](docs/cortex-workspace/local-task-execution.md#sprint-run-modes).
 
-Task and project ages use recorded timestamps, not refresh time, and elapsed times use whole seconds/minutes/hours. All work shows unmaterialized sprint planning explicitly. Pending worker questions reach the task, Inbox and sidebar even while other workers continue. Weekly Claude/Codex limits use the runtime quota reader, refreshed in the background every five minutes while the app is open by the verified bundled Claude Code and Codex CLIs (free reads, no model turn); while the window is visible the app reads each new snapshot shortly after it is due, so a shown value is at most about six minutes old. Claude shows its general weekly window and its Fable window separately, each Not reported when absent, and every value shows when it was observed, marked stale after 15 minutes; no five-hour or OpenCode usage is displayed. Codex weekly display follows the reported 10080-minute duration, whether the provider calls that slot primary or secondary. Missing duration or expired quota remains unavailable.
+Task and project ages use recorded timestamps, not refresh time, and elapsed times use whole
+seconds/minutes/hours. All work shows unmaterialized sprint planning explicitly. Pending worker questions
+reach the task, Inbox and sidebar even while other workers continue. Weekly Claude/Codex limits use the
+runtime quota reader, refreshed in the background every five minutes while the app is open by the verified
+bundled Claude Code and Codex CLIs (free reads, no model turn); while the window is visible the app reads
+each new snapshot shortly after it is due, so a shown value is at most about six minutes old. Claude shows
+its general weekly window and its Fable window separately, each Not reported when absent, and every value
+shows when it was observed, marked stale after 15 minutes; no five-hour or OpenCode usage is displayed.
+Codex weekly display follows the reported 10080-minute duration, whether the provider calls that slot
+primary or secondary. Missing duration or expired quota remains unavailable.
 
 Accept and check-rerun commands use the result identity the screen displays, from the delivered machine facts; the raw wire result is used only when no result fact is supplied. Server acceptance still revalidates current evidence. See [local task execution](docs/cortex-workspace/local-task-execution.md).
 

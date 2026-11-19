@@ -47,7 +47,7 @@ export type OwnerHold = {
   holdId?: string;
 };
 export function ownerHold(view: ReviewHoldView): OwnerHold | null {
-  if (view.unknown || view.task.status === "done" || view.task.archive) return null;
+  if (view.unknown || view.task.status === "done" || view.task.status === "closed_unverified" || view.task.archive) return null;
   const sprint = view.sprint, hold = automaticQueueOf(sprint);
   if (sprint && hold?.nextActor && hold.taskId === view.id && sprint.queueState === "paused")
     return { source: "queue", mode: sprint.runMode, sprintId: sprint.id, code: hold.code, nextActor: hold.nextActor, reason: hold.reason,
@@ -82,18 +82,19 @@ export const COLUMNS = [
   { id: "review", label: "Review", icon: "eye", tone: "st-warn" },
   { id: "merge", label: "Ready to merge", icon: "merge", tone: "st-ok" },
   { id: "done", label: "Done", icon: "check-circle", tone: "" },
+  { id: "closed_unverified", label: "Closed, not verified", icon: "alert", tone: "" },
 ] as const;
 export type ColumnId = typeof COLUMNS[number]["id"];
 const STATUS_COLUMN: Record<TaskStatus, ColumnId> = {
   draft: "todo", working: "work", stopping: "work",
-  needs_you: "needs", review: "review", ready_to_merge: "merge", done: "done",
+  needs_you: "needs", review: "review", ready_to_merge: "merge", done: "done", closed_unverified: "closed_unverified",
   // A run that ended on its own is the owner's to look at. It is never Done. A paused task runs nothing and waits for the
   // owner's Resume or Close, so it is never counted as Working either.
   failed: "needs", cancelled: "needs", paused: "needs",
 };
 const STATUS_WORD: Record<TaskStatus, string> = {
   draft: "Not started", working: "Working", stopping: "Stopping", paused: "Paused",
-  needs_you: "Needs you", review: "Review", ready_to_merge: "Ready to merge", done: "Done", failed: "Run failed", cancelled: "Run cancelled",
+  needs_you: "Needs you", review: "Review", ready_to_merge: "Ready to merge", done: "Done", closed_unverified: "Closed, not verified", failed: "Run failed", cancelled: "Run cancelled",
 };
 
 export const sameBranch = (task: Pick<Task, "checkout">, target: string) => !!task.checkout.branch && task.checkout.branch === target;
@@ -191,7 +192,7 @@ export const checkCounts = (checks: Check[]) => {
 };
 
 function automaticStatusFact(task: Task, sprint: Sprint | null): Fact | undefined {
-  if (task.status === "done" || task.status === "stopping") return;
+  if (task.status === "done" || task.status === "closed_unverified" || task.status === "stopping") return;
   const hold = automaticQueueOf(sprint);
   if (hold?.taskId === task.id && hold.kind !== "owner_integration")
     return { text: hold.kind === "continuation" ? stopReason(hold.reason) : humanStatus(hold.reason), tone: "st-warn", icon: hold.kind === "continuation" ? "pause" : "alert" };
@@ -214,6 +215,7 @@ function automaticStatusFact(task: Task, sprint: Sprint | null): Fact | undefine
 }
 
 function statusFact(task: Task, ctx: { target: string; running: number; title: (id: string) => string; sprint: Sprint | null; ready: (id: string) => boolean; next: boolean }): Fact {
+  if (task.status === "closed_unverified") return { text: "Closed by you · Not verified", tone: "st-idle", icon: "alert" };
   // The runtime's own notice while the coordinator's engine has not opened: a retry, or giving up.
   if (task.warnings?.includes("engine_launch_failed")) return { text: humanStatus(task.issue, "The engine could not start"), tone: "st-bad", icon: "alert" };
   if (task.warnings?.includes("engine_launch_retrying")) return { text: humanStatus(task.issue, "Starting the engine again"), tone: "st-warn", icon: "hourglass" };
@@ -303,7 +305,7 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
       ?? (task.sprintId ? sprints.get(task.sprintId) ?? null : null);
     // The task's own state and its workers come from separate reads. When the workers' read could not be refreshed, a worker
     // last seen running under a task that has since ended is not confirmed: it never shows as working or counts as running.
-    const ended = ["review", "ready_to_merge", "done", "failed", "cancelled", "paused"].includes(task.status);
+    const ended = ["review", "ready_to_merge", "done", "closed_unverified", "failed", "cancelled", "paused"].includes(task.status);
     const phase = boardPhase(state, task.id), own = (workers.get(task.id) ?? []).map((w): Worker => ended && (w.status === "working" || w.status === "waiting_you") ? { ...w, status: "unknown", now: null, runningSince: null, stale: true } : w).reverse();
     // The machine lists workers oldest first; every screen shows the newest one on top, so the order is turned once, here.
     const running = own.filter(w => w.status === "working").length, target = targetBranch(state, task);
@@ -315,7 +317,7 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
       ? sessions.get(task.id)?.decisions.find(d => isOpen(d) && !d.suspended && !d.unavailable) : undefined;
     const automaticFact = !unknown && !ownerIntegration && !ownerDecision ? automaticStatusFact(task, sprint) : undefined;
     const acceptanceHold = automaticAcceptanceHold({ id: task.id, sprint, task, unknown });
-    const column = phase === "archive" ? "archive" : ownerIntegration ? "merge" : ownerDecision || acceptanceHold ? "needs"
+    const column = phase === "archive" || phase === "closed_unverified" ? phase : ownerIntegration ? "merge" : ownerDecision || acceptanceHold ? "needs"
       : automaticFact || (unknown && sprint?.runMode === "automatic" && task.status !== "done" && task.status !== "draft") ? "work"
       : STATUS_COLUMN[phase === "unknown" ? task.status : phase];
     const fact: Fact = !unknown ? ownerDecision ? { text: ownerDecision.text, tone: "st-warn", icon: ownerDecision.kind === "permission" ? "shield" : "question" }
@@ -529,7 +531,9 @@ export type SideRow = { kind: "task"; view: TaskView } | { kind: "sprint"; sprin
  *  closed into the Archive: its tasks may still wait for the owner to finish them, and nothing closes by itself. */
 export function sideRows(index: WorkspaceIndex, summary: ProjectSummary): SideRow[] {
   const of = (column: ColumnId): SideRow[] => summary.views.filter(v => v.column === column).map(view => ({ kind: "task", view }));
-  const open = summary.sprints.filter(s => s.planning !== "cancelled");
+  // A sprint whose planning was cancelled is still open (draft, answers and plan are
+  // kept; Resume planning continues it): only Close sprint removes it from here.
+  const open = summary.sprints;
   const sprints = [...open.filter(s => s.queueState !== "complete"), ...open.filter(s => s.queueState === "complete")].map((sprint): SideRow => {
     const view = sprintView(index, sprint);
     return { kind: "sprint", sprint, started: view.started, total: sprint.taskIds.length };

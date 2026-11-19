@@ -95,7 +95,7 @@ export type CheckOutcome = "passed" | "failed" | "not_run" | "unverified";
 export type Check = { name: string; outcome: CheckOutcome; detail: string; source?: "runtime" | "worker"; technicalReason?: string; kind?: "automated" | "manual" | "policy"; command?: string[]; cwd?: string; rerunnable?: boolean; output?: string; exitCode?: number; running?: boolean };
 export type Result = { kind?: "answer" | "work" | "unknown"; acceptanceAvailable?: boolean; sourceVersion?: string; evidence?: {reference: string; digest: string}[]; warnings?: string[]; version: number; digest: string; checks: Check[]; summary: string; at?: number | null; automaticReady?: boolean; mock?: true };
 /** `failed` and `cancelled` are runtime ends. Neither is Done: Done is an owner decision. */
-export type TaskStatus = "draft" | "working" | "needs_you" | "stopping" | "paused" | "review" | "ready_to_merge" | "done" | "failed" | "cancelled";
+export type TaskStatus = "draft" | "working" | "needs_you" | "stopping" | "paused" | "review" | "ready_to_merge" | "done" | "closed_unverified" | "failed" | "cancelled";
 /** Exactly what the owner accepted. `open` keeps the checks that had not passed, so an override can never read as a clean pass. */
 export type Acceptance = { automatic?: boolean; version: number; digest: string; at?: number | null; open?: { failed: number; not_run: number; unverified: number } | null };
 /** `url`: the address GitHub CLI reported for a pull request, recorded only when it is https on the repository's remote host. */
@@ -138,7 +138,7 @@ export type Task = {
   integration: Integration | null;
   /** `noChanges`: the machine found an answer-only result that changed no files, so there is nothing to commit. `pending`: its files are still being checked (no facts yet); `refreshing`: these are the last facts, being checked again. */
   integrationFacts?: { targetBranch: string; alreadyInTarget: boolean; sameBranch?: boolean; commitAvailable?: boolean; noChanges?: boolean; pendingPaths?: string[]; otherUncommitted?: boolean; reason?: string | null; pushStatus: "pushed" | "not_pushed" | "unknown" | null; pending?: boolean; refreshing?: boolean };
-  closedAs: "as_is" | "cancel" | "external" | null; notVerifiedByCortex: boolean;
+  closedAs: "as_is" | "cancel" | "external" | "unconfirmed" | null; notVerifiedByCortex: boolean;
   doneAt: number | null; archive: { at: number; previousStatus: "done"; sizeMb?: number | null } | null;
   /** What unmerged work there is, when the worktree was read. Absent facts stay absent. */
   workFacts?: { commits: number; files: number; sizeMb: number } | null;
@@ -411,7 +411,10 @@ export type WorkspaceCommand =
   | { type: "resolve_block"; taskId: string; path: string; blockId: string; choice: Exclude<BlockChoice, "cortex"> }
   | { type: "stop_task"; taskId: string; confirmed: boolean; now?: number }
   | { type: "set_task_settings"; taskId: string; settings: Partial<TaskSettings> }
-  | { type: "close_task"; taskId: string; choice: "as_is" | "cancel" | "external" | "already_in_target"; confirmed: boolean; now: number }
+  | { type: "close_task"; taskId: string; confirmed: boolean; now: number } & (
+      { choice: "as_is" | "cancel" | "external" | "already_in_target" }
+      | { choice: "unconfirmed"; executionId: string; expectedVersion: string }
+    )
   | { type: "rerun_check"; taskId: string; digest: string; checkIndex: number }
   | { type: "accept_result"; taskId: string; digest: string; sourceVersion?: string; openChecks?: boolean; automaticFinish?: { sprintId: string; targetBranch: string }; now?: number }
   | { type: "integrate"; taskId: string; method: "squash" | "pr" | "commit"; confirmed: boolean; digest: string; targetBranch: string; now: number; message?: string; title?: string; draft?: boolean; deleteWorktree?: boolean }

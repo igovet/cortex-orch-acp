@@ -43,8 +43,20 @@ write denials in force and the access mode; `predecessor_reports`, every report
 of the node's dependencies (for the consultation, every report of its packet)
 with its id, node, role, title, size and page count; `report`, the
 runtime-selected report skeleton (see [Markdown reports](../markdown-reports/index.md#report-structure));
-and `user_question_language`. A review gets its `review_packet` instead of
-`predecessor_reports`.
+and `user_question_language`. A review gets its `review_packet` instead, whose
+`predecessor_reports` lists only the reports that review must read to the last
+page: the work of its round (after an earlier completed review of the same plan
+revision, the fixes scheduled since and that review's own report, so its findings
+are neither re-raised nor lost; for the first review of a revision, the work that
+recorded project writes or changes, or all of it when none did). Earlier fix
+rounds and reviews, work without recorded writes and earlier plans are listed in
+`optional_reports` (newest first, at most 24, the rest counted in
+`optional_reports_more`), and `predecessor_reading` states the rule. The required
+set does not grow with replans or fix rounds. A required report with no published
+edition, or one the runtime itself cannot read (anything but a busy lock), is
+not required: the packet lists it in `unavailable_reports`, and the accepted
+review result keeps it in `predecessor_reports_unreadable` with its reason, so
+the refusal can always be cleared.
 
 Language: everything another worker or the coordinator reads is English (worker
 reports and their headings, summaries, briefs, worker messages and the

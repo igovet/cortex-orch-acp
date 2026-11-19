@@ -83,6 +83,7 @@ const OWNED: &[&str] = &[
     "doneAt",
     "integration",
     "requiresFreshResult",
+    "changesBaseRevision",
     "conflict",
     "merge",
     "acceptance",
@@ -202,7 +203,7 @@ pub(super) async fn apply(plan: &Plan<'_>, product: &mut Value, git: &mut Git) -
             )
             .await?
     {
-        return update_from_target(plan, product, git).await;
+        return update_from_target(plan, product, &source_head, git).await;
     }
     if plan.method == "pr" {
         return pull_request(plan, product, git).await;
@@ -210,8 +211,14 @@ pub(super) async fn apply(plan: &Plan<'_>, product: &mut Value, git: &mut Git) -
     squash(plan, product, &source_head, git).await
 }
 /// The target moved on: bring it into the task branch first. The target is untouched.
-async fn update_from_target(plan: &Plan<'_>, product: &mut Value, git: &mut Git) -> Result<Value> {
+async fn update_from_target(
+    plan: &Plan<'_>,
+    product: &mut Value,
+    source_head: &str,
+    git: &mut Git,
+) -> Result<Value> {
     let path = plan.path;
+    let target_revision = super::update::target_revision(path, plan.target, git).await?;
     let merged = git
         .success(
             path,
@@ -220,7 +227,7 @@ async fn update_from_target(plan: &Plan<'_>, product: &mut Value, git: &mut Git)
                 "-m",
                 "Update task branch from target",
                 "--",
-                plan.target,
+                &target_revision,
             ],
         )
         .await?;
@@ -237,7 +244,9 @@ async fn update_from_target(plan: &Plan<'_>, product: &mut Value, git: &mut Git)
             ));
         }
         let record = product["tasks"][plan.task].clone();
-        let merge = conflicts::build(path, plan.source, plan.target, &record, git).await?;
+        let mut merge = conflicts::build(path, plan.source, plan.target, &record, git).await?;
+        merge["targetRevision"] = json!(target_revision);
+        merge["sourceRevision"] = json!(source_head);
         let record = &mut product["tasks"][plan.task];
         record["requiresFreshResult"] = fresh(plan);
         record["conflict"] = json!("conflict");
@@ -249,7 +258,9 @@ async fn update_from_target(plan: &Plan<'_>, product: &mut Value, git: &mut Git)
             "The conflict is in the task worktree. The target was not changed.",
         ));
     }
+    super::update::verify_merged(path, &target_revision, git).await?;
     let record = &mut product["tasks"][plan.task];
+    record["changesBaseRevision"] = json!(target_revision);
     record["requiresFreshResult"] = fresh(plan);
     record["acceptance"] = Value::Null;
     record["automaticReady"] = json!(false);

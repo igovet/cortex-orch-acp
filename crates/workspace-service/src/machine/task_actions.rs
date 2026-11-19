@@ -35,6 +35,29 @@ fn store(root: &Path) -> Result<Store> {
         None => Store::open(context::key(root)?, OpenMode::Initialize).map_err(context::core),
     }
 }
+pub(super) fn require_consistent_records(root: &Path, project: &str, task: &str) -> Result<()> {
+    if let Some(store) = context::open(root, OpenMode::LiveReadOnly)? {
+        let records = store
+            .read(|db| {
+                cortex_core::projections::task_records(db, project, &root.to_string_lossy(), task)
+            })
+            .map_err(context::core)?;
+        if records.is_some_and(|t| {
+            t.warnings.iter().any(|w| {
+                matches!(
+                    w.as_str(),
+                    "contradictory_evidence" | "owner_closed_unconfirmed"
+                )
+            })
+        }) {
+            return Err(refuse(
+                "contradictory_evidence",
+                "The task's records disagree. Only the explicit close without verification is available.",
+            ));
+        }
+    }
+    Ok(())
+}
 pub async fn run(
     root: &Path,
     project: &str,
@@ -119,6 +142,50 @@ pub async fn run(
         }
         Err(error)
     })?;
+    if p["action"] == "close_unconfirmed" {
+        if p.as_object().is_none_or(|object| {
+            object.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "action" | "taskId" | "executionId" | "expectedVersion" | "confirmed"
+                )
+            })
+        }) {
+            return Err(refuse(
+                "invalid_request",
+                "Refresh the task and confirm closing again.",
+            ));
+        }
+        if p["confirmed"] != true {
+            return Err(refuse(
+                "confirmation_required",
+                "Confirm closing the task as is.",
+            ));
+        }
+        let version = serde_json::from_value(p["expectedVersion"].clone())
+            .map_err(|_| refuse("stale_version", "Refresh the task and confirm again."))?;
+        let execution = string(p, "executionId")?;
+        let store = context::open(root, OpenMode::RuntimeValidate)?
+            .ok_or_else(|| refuse("invalid_task", "Unknown task."))?;
+        cortex_core::workspace::control::close_unconfirmed(
+            &store,
+            project,
+            &crate::actor(),
+            task,
+            execution,
+            version,
+        )
+        .map_err(|error| match error.code() {
+            "stale_version" | "records_not_conflicting" => {
+                refuse(error.code(), "The task changed. Refresh it before closing.")
+            }
+            _ => context::core(error),
+        })?;
+        return Ok(json!({"done":true}));
+    }
+    // Saved presentation is not authority to change a disputed task. Check
+    // before reading the mutable overlay or dispatching any ordinary action.
+    require_consistent_records(root, project, task)?;
     let mut product = context::product(root, state, project, git).await?;
     if product["tasks"].get(task).is_none() {
         product["tasks"][task] = json!({});
@@ -136,7 +203,9 @@ pub async fn run(
                 && sprint["queueState"] == "paused"
                 && sprint["automaticQueue"]["kind"] == "settlement_blocked"
                 && sprint["automaticQueue"]["taskId"] == task
-                && sprint["automaticQueue"]["needsOwner"] == true
+                // A hold waiting on an unknown effect keeps its code's guards.
+                && (sprint["automaticQueue"]["needsOwner"] == true
+                    || sprint["automaticQueue"]["settling"].is_object())
         })
         .and_then(|sprint| sprint["automaticQueue"]["code"].as_str());
     let result_is_stale = matches!(
@@ -153,6 +222,33 @@ pub async fn run(
         close_as_is && record["acceptance"]["automatic"] == true && result_is_stale;
     let automatic_acceptance_close = stale_automatic_acceptance
         || close_as_is && review_hold == Some("automatic_acceptance_blocked");
+    // The scheduler handed this task to the owner because the runtime cannot settle
+    // an effect whose outcome is unknown (see `settling_hold` in the native driver).
+    let owner_unsettled = product["sprints"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|sprint| {
+            sprint["id"] == record["sprintId"]
+                && sprint["automaticQueue"]["taskId"] == task
+                && sprint["automaticQueue"]["settling"]["owner"] == true
+        });
+    if action == "close" && p["preflight"] == true {
+        // The owner's close is checked before the runtime records its resolution, so
+        // a refusal never leaves the run closed and the task open. Nothing is written.
+        super::task_lifecycle::close_precondition(&record, p)?;
+        if automatic_acceptance_close {
+            if let Some(store) = context::open(root, OpenMode::LiveReadOnly)? {
+                store
+                    .read(|db| match runtime_of(db, project, task)? {
+                        Some(runtime) => close_settled(db, &runtime, owner_unsettled, false),
+                        None => Ok(()),
+                    })
+                    .map_err(super::task_lifecycle::settle_error)?;
+            }
+        }
+        return Ok(json!({"done":false,"preflight":true}));
+    }
     let mut version = None;
     match action {
         "edit" => {
@@ -501,7 +597,7 @@ pub async fn run(
                              ON e.execution_id=w.execution_id AND e.task_id=w.task_id WHERE w.project_id=? AND w.task_id=?",
                             (project, task), |row| row.get(0),
                         )?;
-                        cortex_core::lifecycle::automatic::require_settled_execution(db, &runtime)?;
+                        close_settled(db, &runtime, owner_unsettled, true)?;
                     }
                     settings::write_json(
                         &product_path(state, project)
@@ -531,6 +627,56 @@ pub async fn run(
         reply["version"] = json!(version);
     }
     Ok(reply)
+}
+fn runtime_of(
+    db: &rusqlite::Connection,
+    project: &str,
+    task: &str,
+) -> cortex_core::CoreResult<Option<String>> {
+    Ok(db
+        .query_row(
+            "SELECT e.runtime_task_id FROM workspace_tasks w JOIN workspace_executions e
+             ON e.execution_id=w.execution_id AND e.task_id=w.task_id WHERE w.project_id=? AND w.task_id=?",
+            (project, task),
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+/// The settled-execution check of a Close as is that hands the folder to the next
+/// task. When the runtime cannot settle an unknown effect and the owner was asked
+/// (`acknowledge`), the owner's confirmed close is the same explicit acknowledgement
+/// as the runtime's Retry: each receipt is recorded as settled with an unknown
+/// outcome, never as success. A worker still being stopped is always refused.
+fn close_settled(
+    db: &rusqlite::Connection,
+    runtime: &str,
+    acknowledge: bool,
+    write: bool,
+) -> cortex_core::CoreResult<()> {
+    match cortex_core::lifecycle::automatic::require_settled_execution(db, runtime) {
+        Err(e) if acknowledge && e.code() == "native_outside_outcome_unknown" => {
+            if write {
+                let count = db.execute(
+                    "UPDATE runtime_requests SET result_json=json_set(CASE WHEN json_valid(result_json) THEN result_json ELSE '{}' END,
+                        '$.settled',1,'$.outcome_unknown',1,'$.settled_by','owner_close_as_is','$.settled_at',?)
+                     WHERE task_id=? AND operation IN ('outside_command','outside_write','command_run','project_write','project_edit',
+                        'project_mkdir','project_delete','project_skill_link','draft_write','external_call')
+                        AND json_extract(result_json,'$.complete') IS NOT 1 AND json_extract(result_json,'$.status') IS NOT 'complete'
+                        AND json_extract(result_json,'$.settled') IS NOT 1",
+                    (cortex_core::now(), runtime),
+                )?;
+                cortex_core::lifecycle::event_tx(
+                    db,
+                    runtime,
+                    "OWNER_ACKNOWLEDGED_UNKNOWN_EFFECTS",
+                    json!({"count":count,"request":"close_as_is"}),
+                )?;
+                cortex_core::lifecycle::automatic::require_settled_execution(db, runtime)?;
+            }
+            Ok(())
+        }
+        other => other,
+    }
 }
 fn truth(v: &Value) -> bool {
     match v {

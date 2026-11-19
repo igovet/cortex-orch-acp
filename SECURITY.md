@@ -1,6 +1,10 @@
 # Security policy
 
-Workspace reserves a shared checkout for independent review and final verification. External edits invalidate the reviewed digest. A worker continuation after a pending command reply or premature result submission requires a settled receipt for each named command on its own channel. Review packets identify earlier writes by task, revision and recorded event. Where available, the last write hash is compared with a fresh full-file content hash. Missing receipts preserve the unknown-outcome barrier.
+Workspace reserves a shared checkout for independent review and final verification. External edits invalidate the reviewed digest. A worker continuation after a pending command reply or premature result submission requires a settled receipt for each named command on its own channel. Review packets identify earlier writes by task, revision and recorded event. Where available, the last write hash is compared with a fresh full-file content hash. Git-ignored files are not deliverable: their changes never make a review packet's change set incomplete. When the host cannot enumerate the change set, an approval still requires complete current reads of every listed changed file and carries a disclosed `unverified` runtime check for the unlisted part; it is never recorded as reviewed. Missing receipts preserve the unknown-outcome barrier.
+
+Execution baselines record the project checkout’s resolved Git HEAD, or null for an unborn branch or a plain folder. Ignored-file evidence is a separate metadata comparison, not a content check. If its bounded listing or metadata pass cannot finish, the ignored digest is absent and cannot support a review waiver; a complete deliverable manifest is still usable. An incomplete deliverable observation does not become complete as a result.
+
+Updating a task from its target advances only the Changes comparison baseline, not the task’s original integration base. If a retained update is committed outside Workspace, Finish merge verifies that HEAD has the saved task and target commits as its two parents before advancing the comparison base. This check does not modify Git. The updated tree still needs a fresh result and review before integration.
 
 A skipped check in Workspace result facts records its reason in `detail`, including when paid qualification was not requested. The row is not execution evidence and grants no permission to rerun a prohibited command.
 
@@ -151,7 +155,10 @@ files and can request an owner stop through a launch-specific marker, never by
 signalling a recovered PID. Output hashes, sizes and exit status settle together
 in the existing receipt transaction; recovery supplies no project-revision binding.
 Missing/mismatched supervisors, incomplete artifacts and legacy lost handles stay
-unknown and non-replayable. Engine sessions left open by a service that died are
+unknown and non-replayable; once their process is provably gone (an earlier boot,
+an empty recorded payload process group, an ended read-only PID namespace, or a
+payload never released) the receipt is settled with an unknown or not-started
+outcome, never a success, and is still never rerun. Engine sessions left open by a service that died are
 settled at the next start only when the process table shows no engine adapter,
 Codex App Server or session relay of this user working in the project (an
 unreadable entry counts as one); the task is then held for the owner, never
@@ -544,6 +551,29 @@ permission, and never applies to an unknown effect or to a result whose only ope
 items are restricted checks. An owner hold always offers Close as is behind its
 own confirmation.
 
+Before a queue hold is saved, the service checks the task's dispatched actions
+whose outcome is still unknown. While only command receipts are unsettled the
+runtime acts next and the owner is offered nothing; a command still unsettled
+after 30 minutes, or any other unknown effect, is the owner's, and the hold
+offers only actions the service accepts in that state (never an agent repair,
+renewed attempts or an automatic finish). Close as is is checked without effect
+(`product.task` `close` with `preflight: true`) before the run records its
+resolution. Confirming Close as is on such an owner hold is an explicit owner
+acknowledgement, like Retry: each unknown receipt is recorded as settled with an
+unknown outcome (`settled_by: owner_close_as_is`) and an
+`OWNER_ACKNOWLEDGED_UNKNOWN_EFFECTS` event, never as success, and nothing is
+repeated. A worker that is still being stopped refuses the close, and while the
+runtime can still settle a command the automatic-acceptance close stays refused.
+
+A Workspace task whose retained execution records disagree has a separate,
+confirmed **Close as is** action. Core checks the project owner, task version,
+execution pointer and current contradiction in the transaction that records the
+owner's disposition. The close does not use the disputed execution binding,
+modify evidence, signal a process, release dependent tasks, or certify a
+result. It does not bypass store-identity checks or make execution controls
+available again. Ordinary task changes, including changing the target branch
+and archiving, are refused while the records disagree.
+
 The separately composed native session-host API acquires the same Core owner
 fence before initialization. Its production channel provider verifies the stored
 secret hash, expiry, owner epoch, principal, attempt, current assignment/profile,
@@ -658,7 +688,9 @@ replace the active Python verifier's discarded-project-write overlay or claim
 hostile-code isolation.
 An intent precedes command launch; an unsettled intent is never an automatic
 rerun. Brokered worker-command supervisors can restore output/exit observations;
-lost supervisors, outside-command and verification handles remain unknown.
+lost supervisors, outside-command and verification handles remain unknown (a
+command receipt is settled `outcome_not_recorded` only once its process is
+provably gone).
 Receipt/output, revision/digest binding and pass/fail
 are retained transactionally. Final completion rechecks reports, project digest,
 open inputs/checks and confirmed worker exits. Unknown process capacity remains
@@ -678,7 +710,22 @@ older installed runtimes, direct test adapters or arbitrary same-user writers.
 No task adoption, effect-settlement inference or native desktop activation is
 authorized by acquiring a lock.
 
-Project settings reads now use the native machine lane and Core live read-only access. They return only project routing and saved ceiling fields with existing revision tokens; invalid routing retains its byte token and a resettable empty editor. Configuration files are bounded, regular and opened without following the leaf link; owner files additionally require private same-user single-link metadata, with symlinked configuration directories refused. Registry metadata is validated for compatibility, but credential references, engine processes and catalog bodies are never opened by this reader. Missing stores are not initialized. This path neither writes settings nor claims scheduler ownership, settles an unknown effect or creates acceptance/check evidence; machine-wide setup still uses the retained provider. Project saves now use native validation, the retained `connections.lock` arbitration and a Core immediate transaction for ceilings, or an owner-only fsynced atomic replacement for routing. Ceiling changes may only narrow the locked user ceiling and preserve project defaults; removal refuses defaults-bearing rows. Replies are budgeted before effects. A post-replacement sync or uncertain database failure stays unknown and never invokes Python. Cached catalog efforts in save replies are bounded display observations, never route authorization. These cooperative locks do not isolate hostile same-user code. The native machine user-routing transaction reuses this lock and atomic replacement, holds admission through commit, and rechecks an observed revision change before writing. Dropping its prepared candidate saves nothing; uncertain post-rename sync remains unknown. Machine config.save now selects the native routing/defaults/MCP provider before effects; no save remains classified or admitted for Python delegation.
+Project settings reads now use the native machine lane and Core live read-only access. They return only
+project routing and saved ceiling fields with existing revision tokens; invalid routing retains its byte
+token and a resettable empty editor. Configuration files are bounded, regular and opened without following
+the leaf link; owner files additionally require private same-user single-link metadata, with symlinked
+configuration directories refused. Registry metadata is validated for compatibility, but credential
+references, engine processes and catalog bodies are never opened by this reader. Missing stores are not
+initialized. This path neither writes settings nor claims scheduler ownership, settles an unknown effect
+or creates acceptance/check evidence; machine-wide setup still uses the retained provider. Project saves
+now use native validation, the retained `connections.lock` arbitration and a Core immediate transaction
+for ceilings, or an owner-only fsynced atomic replacement for routing. Ceiling changes may only narrow the
+locked user ceiling and preserve project defaults; removal refuses defaults-bearing rows. Replies are
+budgeted before effects. A post-replacement sync or uncertain database failure stays unknown and never
+invokes Python. Cached catalog efforts in save replies are bounded display observations, never route
+authorization. These cooperative locks do not isolate hostile same-user code. The native machine
+user-routing transaction reuses this lock and atomic
+replacement, holds admission through commit, and rechecks an observed revision change before writing. Dropping its prepared candidate saves nothing; uncertain post-rename sync remains unknown. Machine config.save now selects the native routing/defaults/MCP provider before effects; no save remains classified or admitted for Python delegation.
 
 The native machine-defaults section also takes the shared owner lock plus
 Workspace machine.lock, prepares both file candidates and its complete reply
@@ -707,13 +754,79 @@ their refusal paths; remaining config.action variants, legacy projection/evidenc
 paths and explicitly selected retained startup remain separate. Socket tests do not qualify an account,
 an installed app or the complete zero-Python product.
 
-Engine connection setup (`engine.connection`) selects native Rust for `login_command` install verification/argv lookup and `recheck` status/reference registration. Recheck executes only the host-selected native program and fixed status argv in the original HOME with the retained filtered child environment, discarded stdin/stdout/stderr and an eight-second timeout. Timeout/cancellation kills the direct child. Successful status precedes revision-checked create/reuse under the shared owner lock; account directories and credential contents are never copied, opened or modified. `add_key` now uses native create/write/validate transactions under the same shared registry lock, writing only the id-derived private secret file (0600, private 0700 parent, no-follow/single-link/owner checks). Secret bytes never enter registry metadata, replies, logs or argv, and no existing credential contents are read. Known post-creation failures remove the new record/secret and record the engine opt-out; failed cleanup and uncertain replacements return an unknown outcome without automatic rollback or replay. The steps are individually atomic, not one transaction, and do not isolate hostile same-user races. OS-keyring-backed validation is refused (the Python-selected backend was removed) and is not replaced with a native Secret Service assumption. Native failures never retry through Python. Passive Rust setup observations are not substituted for verified install resolution, native status or canonical secret writes. Offline service coverage uses fake executable installs and disposable HOME/XDG directories; the provider fixtures reject network, real-keyring access and native-marker content reads. Only fixture-native status commands may execute. Complete replies/configuration effects and recorded fake-keyring lookup sequences are compared; native units inject private-write, validation, cleanup and unknown-commit failures. Two old provider-only post-effect exception cases retain their captured files but compare the native successful-action reply, not a fabricated native exception. No owner/account authority changed; native lookup does not execute the returned command. See [the retained setup boundary](docs/configuration.md#retained-engine-connection-setup).
+Engine connection setup (`engine.connection`) selects native Rust for `login_command` install
+verification/argv lookup and `recheck` status/reference registration. Recheck executes only the
+host-selected native program and fixed status argv in the original HOME with the retained filtered child
+environment, discarded stdin/stdout/stderr and an eight-second timeout. Timeout/cancellation kills the
+direct child. Successful status precedes revision-checked create/reuse under the shared owner lock;
+account directories and credential contents are never copied, opened or modified. `add_key` now uses
+native create/write/validate transactions under the same shared registry lock, writing only the id-derived
+private secret file (0600, private 0700 parent, no-follow/single-link/owner checks). Secret bytes never
+enter registry metadata, replies, logs or argv, and no existing credential contents are read. Known
+post-creation failures remove the new record/secret and record the engine opt-out; failed cleanup and
+uncertain replacements return an unknown outcome without automatic rollback or replay. The steps are
+individually atomic, not one transaction, and do not isolate hostile same-user races. OS-keyring-backed
+validation is refused (the Python-selected backend was removed) and is not replaced with a native Secret
+Service assumption. Native failures never retry through Python. Passive Rust setup observations are not
+substituted for verified install resolution, native status or canonical
+secret writes. Offline service coverage uses fake executable installs and disposable HOME/XDG directories; the provider fixtures reject network, real-keyring access and native-marker content reads. Only fixture-native status commands may execute. Complete replies/configuration effects and recorded fake-keyring lookup sequences are compared; native units inject private-write, validation, cleanup and unknown-commit failures. Two old provider-only post-effect exception cases retain their captured files but compare the native successful-action reply, not a fabricated native exception. No owner/account authority changed; native lookup does not execute the returned command. See [the retained setup boundary](docs/configuration.md#retained-engine-connection-setup).
 
-Pre-save MCP discovery now executes in Rust, never through the Python migration port. It reads only the channel's private MCP registry for explicit keep-env values, starts a process group under the existing native Landlock/seccomp boundary (or, for a server the owner opted out with `"containment": "none"` on the edited entry, the saved entry or the saved registry default, without that boundary and without grant checks, as at session start), and sends only initialize, initialized and paged tools/list. No tool call, registry write, task transition or acceptance is performed. Private/linked/missing grants and protected descendants are refused before launch; grant trees are bounded to 50,000 entries. The 15-second protocol deadline, 256-KiB buffered-frame limit, 32-message receive limit, 20-page limit and 1,000-tool limit fail closed. Descriptions and configured environment values are scrubbed; stderr and raw protocol output are never returned or logged. Success, timeout and cancelled futures kill the whole process group; a missing containment capability refuses launch. This reuses the cooperative native external-MCP boundary, not the Python mount-namespace implementation, and makes no hostile-code-isolation claim. Explicit retained startup and unported configuration/setup operations still require Python; default native startup does not.
+Pre-save MCP discovery now executes in Rust, never through the Python migration port. It reads only the
+channel's private MCP registry for explicit keep-env values, starts a process group under the existing
+native Landlock/seccomp boundary (or, for a server the owner opted out with `"containment": "none"` on the
+edited entry, the saved entry or the saved registry default, without that boundary and without grant
+checks, as at session start), and sends only initialize, initialized and paged tools/list. No tool call,
+registry write, task transition or acceptance is performed. Private/linked/missing grants and protected
+descendants are refused before launch; grant trees are bounded to 50,000 entries. The 15-second protocol
+deadline, 256-KiB buffered-frame limit, 32-message receive limit, 20-page limit and 1,000-tool limit fail
+closed. Descriptions and configured environment values are scrubbed; stderr and raw protocol output are
+never returned or logged. Success, timeout and cancelled futures kill the whole process group; a missing
+containment capability refuses launch. This reuses the cooperative native external-MCP boundary, not the
+Python mount-namespace implementation, and makes no hostile-code-isolation claim. Explicit retained
+startup and unported configuration/setup operations still require Python; default native startup does not.
 
-Owner `product.task` deletion actions `purge` and `clear_old` now use the native machine action lane and shared Rust Core retention boundary. Explicit confirmation, finite numeric cutoff and finished/unarchived preview checks precede deletion. Archive and unmerged-work checks retain their refusal order; discard consent uses the exact legacy manifest digest, not the distinct native verification digest. No unavailable observation establishes consent. Core holds its exclusive cooperative store-access fence across committed deletion intent and teardown, rejects unknown starts, active/process-protected work and running worker nodes, and emits the public removal in the deletion transaction. The running-node refusal is deliberately stricter than the legacy Python purge. Worktrees without Cortex ownership evidence or with dirty contents remain retained; removal is never forced. Adapter-only deletion also attempts space reclamation; its failure is an explicit outcome of an already-committed deletion. Overlay-save failure never invokes Python or recreates the deleted task on retry. These actions do not certify results, acquire scheduler ownership or settle unknown effects. Legacy unmaterialized projections still delegate only before effects; explicit retained startup and other retained operations still require Python.
+Owner `product.task` deletion actions `purge` and `clear_old` now use the native machine action lane and
+shared Rust Core retention boundary. Explicit confirmation, finite numeric cutoff and finished/unarchived
+preview checks precede deletion. Archive and unmerged-work checks retain their refusal order; discard
+consent uses the exact legacy manifest digest, not the distinct native verification digest. No unavailable
+observation establishes consent. Core holds its exclusive cooperative store-access fence across committed
+deletion intent and teardown, rejects unknown starts, active/process-protected work and running worker
+nodes, and emits the public removal in the deletion transaction. The running-node refusal is deliberately
+stricter than the legacy Python purge. Worktrees without Cortex ownership evidence or with dirty contents
+remain retained; removal is never forced. Adapter-only deletion also attempts space reclamation; its
+failure is an explicit outcome of an already-committed deletion. Overlay-save failure never invokes Python
+or recreates the deleted task on retry. These actions do not certify results, acquire scheduler ownership
+or settle unknown effects. Legacy unmaterialized projections still delegate only before effects; explicit
+retained startup and other retained operations still require Python.
 
-Owner `product.task / accept` now shares Rust's native result-evidence validator and rechecks the current completed execution, root/session/owner binding, unknown Start, digest, fresh-result marker, evidence version and required literal acknowledgement. Its immediate Core writer transaction stays held through the private overlay replacement; it does not complete the scheduler, authorize a different owner or manufacture receipts. Acceptance captures the exact legacy checkout digest. Archiving (manual or automatic) never asks and never discards; a task with no saved disposition whose bound, consistent runtime record is the owner's force-finish (`CANCELLED` with `owner_resolved_without_certification`) is presented as closed as is with `notVerifiedByCortex`, never as accepted or verified, and a saved disposition always wins; `confirm_discard` on an archived task records digest-bound consent to delete its work at cleanup and deletes nothing. Unobservable work establishes no consent, and purge independently rechecks source and deletion fences. Both handlers preserve the existing reply/state shapes in offline Python comparisons and refuse real overlay-write/store-exclusion failures without helper replay. Unsupported legacy projection/evidence still delegates only before effects. Manual file-conflict choices (`resolve_block`) now use the native machine lock, literal pathspecs and the descriptor-relative revision-checked writer; private paths and linked file/parent writes refuse. A durable intent precedes file/index effects; any later failure remains unknown, including overlay-save failure, and never invokes Python. Supplied request identities replay the saved reply or unknown outcome before legacy projection fallback; changed payloads conflict. No force, automatic restoration, result certification or scheduler transition is performed. The native Git error envelope intentionally excludes stderr. Merge finish/abort now also use the native machine lock and durable intent on the materialized-checkout boundary. Finish validates unmerged entries and staged whitespace/markers before a normal hook-enabled commit; abort invokes only Git's non-forcing merge abort. Success checks the observed commit parents or unchanged abort HEAD and absence of MERGE_HEAD. Any failure after attempting Git or overlay replacement stays unknown, never claims rollback, and cannot select Python or replay by key. These are private task presentation updates, not runtime completion or new acceptance. The machine lock is cooperative, not atomicity between Git and SQLite or protection against external same-user writers. Unported configuration is refused natively; the explicit retained startup was removed. See [native owner review decisions](docs/cortex-workspace/local-task-execution.md#native-owner-review-decisions).
+Owner `product.task / accept` now shares Rust's native result-evidence validator and rechecks the current
+completed execution, root/session/owner binding, unknown Start, digest, fresh-result marker, evidence
+version and required literal acknowledgement. Its immediate Core writer transaction stays held through the
+private overlay replacement; it does not complete the scheduler, authorize a different owner or
+manufacture receipts. Acceptance captures the exact legacy checkout digest. Archiving (manual or
+automatic) never asks and never discards; a task with no saved disposition whose bound, consistent runtime
+record is the owner's force-finish (`CANCELLED` with `owner_resolved_without_certification`) is presented
+as closed as is with `notVerifiedByCortex`, never as accepted or verified, and a saved disposition always
+wins; `confirm_discard` on an archived task records digest-bound consent to delete its work at cleanup and
+deletes nothing. Unobservable work establishes no consent, and purge independently rechecks source and
+deletion fences. Both handlers preserve the existing reply/state shapes in offline Python comparisons and
+refuse real overlay-write/store-exclusion failures without helper replay. Unsupported legacy
+projection/evidence still delegates only before effects. Manual file-conflict choices (`resolve_block`)
+now use the native machine lock, literal pathspecs and the descriptor-relative revision-checked writer;
+private paths and linked file/parent writes refuse. A
+durable intent precedes file/index effects; any later failure remains unknown, including overlay-save
+failure, and never invokes Python. Supplied request identities replay the saved reply or unknown outcome
+before legacy projection fallback; changed payloads conflict. No force, automatic restoration, result
+certification or scheduler transition is performed. The native Git error envelope intentionally excludes
+stderr. Merge finish/abort now also use the native machine lock and durable intent on the
+materialized-checkout boundary. Finish validates unmerged entries and staged whitespace/markers before a
+normal hook-enabled commit; abort invokes only Git's non-forcing merge abort. Success checks the observed
+commit parents or unchanged abort HEAD and absence of MERGE_HEAD. Any failure after attempting Git or
+overlay replacement stays unknown, never claims rollback, and cannot select Python or replay by key. These
+are private task presentation updates, not runtime completion or new acceptance. The machine lock is
+cooperative, not atomicity between Git and SQLite or protection against external same-user writers.
+Unported configuration is refused natively; the explicit retained startup was removed. See
+[native owner review decisions](docs/cortex-workspace/local-task-execution.md#native-owner-review-decisions).
 
 Integration admission reads the private overlay, checks it again under the machine lock, and uses
 Core live read-only state and private-index containment inspection. Unconfirmed or
@@ -775,15 +888,86 @@ supersedes a final closure. No derived closed_by field authorizes a pass. Accept
 mutations still require the retained validator. These are cooperative same-user
 observations, not a transactionally frozen filesystem or hostile-code isolation.
 
-Workspace standalone machine operations now execute in-process Rust with bounded, separate read/inspection/action lanes. Git uses fixed installed-Git argv, a narrowed environment and per-command filter suppression for inspection; mutations retain hooks/filters and never force or auto-retry. Git owner operations persist private fsync'd intent/receipt records containing identities, payload digests and sanitized replies, not URLs, argv or stderr. Repeating a supplied request identity returns the retained reply or an explicit unknown outcome; a changed payload conflicts. Legacy callers without a key receive a new operation identity, not inferred retry safety. Native editor writes use descriptor-relative no-follow opens, content-digest preconditions, atomic replacement and a second base check. Repository context and saved attachment reads validate Core's live read-only store without initialization. Runtime-writer-checked file saves hold a Core immediate transaction across the writer check and descriptor-relative replacement; unavailable writer/store evidence refuses. Linked-store accounting uses Core's channel-specific logical locator. Explicit workflow descriptions, maintenance and retention cleanup/sprint deletion now use native Rust. Owner close/archive, automatic-ready/merged presentation updates and conflict handoff also run natively; external closure validates session/root/epoch, launch uncertainty and live workers, then rechecks settlement under an immediate transaction through private overlay replacement. These updates never transition the runtime, certify checks, write user files or perform a Git mutation; archive retains the unmerged-work question. Maintenance keeps durable private identities, refuses effect replay and unknown installation outcomes, and fences native desktop Start/resume/retry/check reruns while an installer is pending or unconfirmed. Downloads require installed curl and fixed HTTPS release URLs; Git clones use explicit sanitized argv and retain partial destinations. Core retention holds the exclusive cooperative store-access lock across committed deletion intent, descriptor-checked draft removal, owned task-directory teardown and child-first row deletion. Active, ambiguous or process-protected task evidence refuses deletion; space reclamation failure does not undo committed deletion. Native saved draft edit/settings/rename serialize the execution-identity check, option/description update, version increments and public outbox in one Core transaction. Sprint linking holds the same immediate transaction across its quiet-task check and private JSON replacement. Target/reopen/restore actions change private presentation only and certify no result. Unmaterialized legacy checkout projections delegate before any effect; failed or uncertain native writes never retry through Python. Other task state, review/integration, configuration and receipt-backed worker withdrawals retain their existing provider; only explicit retained startup requires the retained payload. Native traversal cancellation is cooperative: a thread blocked by a kernel filesystem call cannot be killed, retains its bounded lane permit and cannot hold the async reactor or shutdown join. This is trusted same-user development, not hostile-code isolation or completed zero-Python cutover.
+Workspace standalone machine operations now execute in-process Rust with bounded, separate
+read/inspection/action lanes. Git uses fixed installed-Git argv, a narrowed environment and per-command
+filter suppression for inspection; mutations retain hooks/filters and never force or auto-retry. Git owner
+operations persist private fsync'd intent/receipt records containing identities, payload digests and
+sanitized replies, not URLs, argv or stderr. Repeating a supplied request identity returns the retained
+reply or an explicit unknown outcome; a changed payload conflicts. Legacy callers without a key receive a
+new operation identity, not inferred retry safety. Native editor writes use descriptor-relative no-follow
+opens, content-digest preconditions, atomic replacement and a second base check. Repository context and
+saved attachment reads validate Core's live read-only store without initialization. Runtime-writer-checked
+file saves hold a Core immediate transaction across the writer check and descriptor-relative replacement;
+unavailable writer/store evidence refuses. Linked-store accounting uses Core's channel-specific logical
+locator. Explicit workflow descriptions, maintenance and retention cleanup/sprint deletion now use native
+Rust. Owner close/archive, automatic-ready/merged presentation updates and conflict handoff also run
+natively; external closure validates session/root/epoch, launch uncertainty and live workers, then
+rechecks settlement under an immediate transaction
+through private overlay replacement. These updates never transition the runtime, certify checks, write
+user files or perform a Git mutation; archive retains the unmerged-work question. Maintenance keeps
+durable private identities, refuses effect replay and unknown installation outcomes, and fences native
+desktop Start/resume/retry/check reruns while an installer is pending or unconfirmed. Downloads require
+installed curl and fixed HTTPS release URLs; Git clones use explicit sanitized argv and retain partial
+destinations. Core retention holds the exclusive cooperative store-access lock across committed deletion
+intent, descriptor-checked draft removal, owned task-directory teardown and child-first row deletion.
+Active, ambiguous or process-protected task evidence refuses deletion; space reclamation failure does not
+undo committed deletion. Native saved draft edit/settings/rename serialize the execution-identity check,
+option/description update, version increments and public outbox in one Core transaction. Sprint linking
+holds the same immediate transaction across its quiet-task check and private JSON replacement.
+Target/reopen/restore actions change private presentation only and certify no result. Unmaterialized
+legacy checkout projections delegate before any effect; failed or uncertain native writes never retry
+through Python. Other task state, review/integration, configuration and receipt-backed worker withdrawals
+retain their existing provider; only explicit retained
+startup requires the retained payload. Native traversal cancellation is cooperative: a thread blocked by a kernel filesystem call cannot be killed, retains its bounded lane permit and cannot hold the async reactor or shutdown join. This is trusted same-user development, not hostile-code isolation or completed zero-Python cutover.
 
-Standalone task facts use validated live read-only Core access and the existing bounded native lane; missing stores are not initialized. Result controls require matching project/session/owner bindings. Completed-work controls validate report bytes through bounded no-follow reads and current-plan review evidence; missing, stale or digest-less verification cannot authorize acceptance. Provisioning alone no longer delegates a check disclosure; failed-check withdrawal claims and potentially authorized passes still require the retained receipt interpreter. Obsolete-revision and non-runtime rerun records cannot close current checks. Without a reviewed source digest, current reruns use the latest runtime event per assignment/check index: pending, ambiguous, stale-owner and unbound successes remain unverified, complete failures and timeouts remain failures, and same-owner technical blockers remain non-passes. Runtime-verification presentation only applies attempts newer than its verification event. Source-bound literal-gap reruns now use the same native interpretation plus exact source, command/output and publication validation; missing-command/tool blockers carry across owners only when the exact literal target and current source remain unchanged. Permission blockers, stale runs, passes and arbitrary execution errors do not carry. Standalone worker history uses Core live read-only snapshots, exact attempt/provisioning references and independent task/runtime cursor positions. It selects display fields only, hides thoughts/read/report bodies and uses confirmed route predecessor chains rather than current defaults. Worker-result display claims never certify checks or grant acceptance. Coordinator detail history now reads only the registered task's retained session through Core, with session-bound high-watermark cursors, bounded selected display fields and confirmed route bindings; hidden updates are consumed without exposing their bodies. Neither history reader starts an engine, writes a task or claims scheduler ownership. Receipt-derived failed/passed rerun targets, receipt-backed worker withdrawals, alternate timestamp forms, unsupported coordinator display shapes and evidence beyond native bounds retain the existing provider rather than substituting weaker acceptance checks. Local containment uses a disposable index/object directory; no real index, branch, remote or task status is mutated by the read.
+Standalone task facts use validated live read-only Core access and the existing bounded native lane;
+missing stores are not initialized. Result controls require matching project/session/owner bindings.
+Completed-work controls validate report bytes through bounded no-follow reads and current-plan review
+evidence; missing, stale or digest-less verification cannot authorize acceptance. Provisioning alone no
+longer delegates a check disclosure; failed-check withdrawal claims and potentially authorized passes
+still require the retained receipt interpreter. Obsolete-revision and non-runtime rerun records cannot
+close current checks. Without a reviewed source digest, current reruns use the latest runtime event per
+assignment/check index: pending, ambiguous, stale-owner and unbound successes remain unverified, complete
+failures and timeouts remain failures, and same-owner technical blockers remain non-passes.
+Runtime-verification presentation only applies attempts newer than its verification event. Source-bound
+literal-gap reruns now use the same native interpretation plus exact source, command/output and
+publication validation; missing-command/tool blockers carry across owners only when the exact literal
+target and current source remain unchanged. Permission blockers, stale runs, passes and arbitrary
+execution errors do not carry. Standalone worker history uses Core live read-only snapshots, exact
+attempt/provisioning references and independent task/runtime cursor positions. It
+selects display fields only, hides thoughts/read/report bodies and uses confirmed route predecessor chains rather than current defaults. Worker-result display claims never certify checks or grant acceptance. Coordinator detail history now reads only the registered task's retained session through Core, with session-bound high-watermark cursors, bounded selected display fields and confirmed route bindings; hidden updates are consumed without exposing their bodies. Neither history reader starts an engine, writes a task or claims scheduler ownership. Receipt-derived failed/passed rerun targets, receipt-backed worker withdrawals, alternate timestamp forms, unsupported coordinator display shapes and evidence beyond native bounds retain the existing provider rather than substituting weaker acceptance checks. Local containment uses a disposable index/object directory; no real index, branch, remote or task status is mutated by the read.
 
 Native Workspace startup validates only its trusted runtime asset directory; there are no Python or helper files. Socket clients cannot select that root, an interpreter or another host. Requests that only the former one-shot Python helper could answer are refused natively without replay, fallback or service shutdown. Channel bundle discovery and voice use the trusted asset root. The package ships no Python. This is a same-user host boundary, not hostile-code isolation.
 
-Workspace startup readiness and project reads are separate from action delivery. Socket readiness is awaited before request bytes are sent; reconnect invalidates caches without serial child resynchronization calls. Registry identities remain visible independently of store reads. Slow or failed reads retain confirmed records and report project-local issues; malformed data still fails validation. Bounded presentation waiting is not cancellation of SQLite work or proof of project readiness. Read retries never initialize, repair or migrate stores or replay actions; same-user socket and mutation authority checks are unchanged. Pending reads stay silent and repeated failures remain visible. A rejected first board cannot release independent sprint facts or polls; a successful complete board is required. Native read retries are limited to three concurrent snapshot-expiration attempts, not policy failures or mutations. The bounded channel-profile board cache is display-only: validated task DTOs and selected sprint/owner fields never supply capabilities, mutation versions, native stream generations or acceptance evidence. It omits credentials, Git content and conversation bodies. Registry reconciliation discards removed/root-changed identities. Native batched boards keep the same project/actor binding and explicit size bounds; background enrichment is fenced by watermark and owner-command epoch. Installed dev startup checks use only disposable container homes, a test-only delayed-start unit override and synthetic registered stores; no owner service, package or project store is modified. These checks do not qualify the release-channel upgrade or establish physical-GPU behavior.
+Workspace startup readiness and project reads are separate from action delivery. Socket readiness is
+awaited before request bytes are sent; reconnect invalidates caches without serial child resynchronization
+calls. Registry identities remain visible independently of store reads. Slow or failed reads retain
+confirmed records and report project-local issues; malformed data still fails validation. Bounded
+presentation waiting is not cancellation of SQLite work or proof of project readiness. Read retries never
+initialize, repair or migrate stores or replay actions; same-user socket and mutation authority checks are
+unchanged. Pending reads stay silent and repeated failures remain visible. A rejected first board cannot
+release independent sprint facts or polls; a successful complete board is required. Native read retries
+are limited to three concurrent snapshot-expiration attempts, not policy failures or mutations. The
+bounded channel-profile board cache is display-only: validated task DTOs and selected sprint/owner fields
+never supply capabilities, mutation versions, native stream generations or acceptance evidence. It omits
+credentials, Git content and conversation bodies. Registry reconciliation discards removed/root-changed
+identities. Native batched boards keep the same project/actor binding and explicit size bounds; background
+enrichment is fenced by watermark and owner-command epoch. Installed dev startup checks use only
+disposable container homes, a test-only delayed-start unit override and synthetic registered stores; no
+owner service, package or project store is modified. These checks do not qualify the release-channel
+upgrade or establish physical-GPU behavior.
 
-Workspace action acknowledgement and projection synchronization are separate. Background reads never turn a refusal or unknown outcome into success; no action is replayed automatically. Only acknowledged rename/queue fields update locally, and reads begun before a newer reply are discarded and their scope is requeued. Interrupted unscoped reads force a full project snapshot and matching facts, so consumed event invalidations cannot silently drop another project's update. Facts notifications suppressed during a coherent read retain their project scope for a fresh read, rather than replaying potentially stale notification contents. Coalescing these scopes with an event refresh forces a full read so event narrowing cannot omit them. The bundled `product.facts` helper uses the same project resolution, private-store checks, frame limits and read lane as its component readers. Activity/operation indexes install only through writable initialization, without a format change; inspection opens remain non-mutating. Validation and mutation authorization are unchanged.
+Workspace action acknowledgement and projection synchronization are separate. Background reads never turn
+a refusal or unknown outcome into success; no action is replayed automatically. Only acknowledged
+rename/queue fields update locally, and reads begun before a newer reply are discarded and their scope is
+requeued. Interrupted unscoped reads force a full project snapshot and matching facts, so consumed event
+invalidations cannot silently drop another project's update. Facts notifications suppressed during a
+coherent read retain their project scope for a fresh read, rather than replaying potentially stale
+notification contents. Coalescing these scopes with an event refresh forces a full read so event narrowing
+cannot omit them. The bundled `product.facts` helper uses the same project resolution, private-store
+checks, frame limits and read lane as its component readers. Activity/operation indexes install only
+through writable initialization, without a format change; inspection opens remain non-mutating. Validation
+and mutation authorization are unchanged.
 
 Workspace Delete sprint is an explicit confirmed destructive owner action, separate from archival Close sprint. It fences new member starts and continuation controls, invokes task-wide cancellation, and refuses to purge active, unknown or process-protected tasks. A bounded wait is not evidence of quiescence: incomplete deletion remains retryable. Worktree cleanup requires recorded app-creation provenance, matching Git checkout and a clean tree, and never uses force or deletes branches. Unproven or dirty worktrees are kept and their paths shown; the project folder is never removed. Bulk deletion does not run a VACUUM per task.
 
@@ -795,7 +979,19 @@ Workspace CPU reduction does not bypass history validation or weaken the public 
 
 Workspace start admission is task-local, not a project-wide writer lock or filesystem isolation boundary. Other active, waiting, recovering or unknown tasks do not refuse a new task's start. Pending, unknown or running Workspace starts likewise do not reserve the project against ordinary ACP first prompts. Each execution has its own ACP session and cancellation target; duplicate prevention, claim-before-dispatch and crash non-replay remain task-bound. Shared-checkout file/scope and owner-action safeguards are unchanged. Sprint queues check dependency order, but manual `tasks.start` has no server-side dependency check. See [the start contract](docs/cortex-workspace/protocol.md).
 
-Workspace Git cache invalidation retains the last confirmed checkout for display; only helper-reported repository absence enables the no-repository panel. Cached facts do not bypass service mutation checks. Automatic Git-tab/focus refreshes are inspection-only and share in-flight repository reads. Untracked dependency/cache files follow Git ignore rules rather than a built-in directory-name exclusion; reserved private helper state remains excluded. Above 2,000 untracked files per checkout, wholly untracked directories collapse to single entries that are never read for preview. Preview size and symlink restrictions are unchanged. Push resolves the confirmed display URL against current Git remote configuration and invokes Git with the configured name, never an arbitrary client URL; unknown or ambiguous URLs are refused. Push remains non-forcing and is never retried automatically. Commit keeps the helper’s existing staged-selection, non-helper-file and hook policy, without per-file UI staging. Workspace Git inspection disables filters per command, including required filters, and never rewrites repository configuration. Real writes retain normal hook and filter policy; task containment inspection uses the same read-only options even with its temporary index.
+Workspace Git cache invalidation retains the last confirmed checkout for display; only helper-reported
+repository absence enables the no-repository panel. Cached facts do not bypass service mutation checks.
+Automatic Git-tab/focus refreshes are inspection-only and share in-flight repository reads. Untracked
+dependency/cache files follow Git ignore rules rather than a built-in directory-name exclusion; reserved
+private helper state remains excluded. Above 2,000 untracked files per checkout, wholly untracked
+directories collapse to single entries that are never read for preview. Preview size and symlink
+restrictions are unchanged. Push resolves the confirmed display URL against current Git remote
+configuration and invokes Git with the configured name, never an arbitrary client URL; unknown or
+ambiguous URLs are refused. Push remains non-forcing and is never retried automatically. Commit keeps the
+helper’s existing staged-selection, non-helper-file and hook policy, without per-file UI staging.
+Workspace Git inspection disables filters per command, including required filters, and never rewrites
+repository configuration. Real writes retain normal hook and filter policy; task containment inspection
+uses the same read-only options even with its temporary index.
 
 Coordinator activity reads use the same project/task/session-bound display-history
 projection through the public API and fixed machine helper. They do not restore
@@ -843,9 +1039,35 @@ session requests read-only/plan mode, refuses unavailable configuration, and clo
 at its 30-second deadline or output limit. This is not hostile-code isolation.
 Owner renames and purge tombstones are checked under the same durable product lock
 before applying a title. No task execution or owner-default update is implied.
-Sprint planning runs as a read-only runtime task in the project folder, bound at Start to the sprint planning policy, a trusted host option no command, plan or model tool can set. Its coordinator, reviewers and read-only specialists run read-only as in every task; the runtime additionally refuses any plan with a writing role and every project write of the task. Like any read-only role it can read what the project and the sandbox allow, so this is the ordinary read-only channel boundary, not hostile-code containment. The plan reaches the sprint only through the channel-verified `sprint_plan_submit` tool: the runtime assembles its ordered parts (at most 50 items and 128 KiB per call) and validates the whole plan (keys, dependencies, cycles, at most 512 KiB, no item count limit), sends it to a mandatory independent review against the studied evidence, and accepts only the newest reviewed plan of a completed task; prose is never parsed into tasks. Failure notices use service-owned explanations, not raw engine errors, prompts or credentials. Only explicit materialization saves user-task drafts; planning never starts their executions. Materialization is one service operation under the machine lock: every draft, its sprint membership and dependencies, and the sprint's created state commit in one project-store transaction that also replaces the saved sprint record, or none of them does; task identities derive from the sprint, plan version and plan key, so a repeat never creates a second set, and tasks an interrupted earlier client-side creation left are reported, never adopted. The owner selects Project folder or Separate worktree for the sprint; materialization copies that checkout kind to every task's saved create options, used by the existing start route. Worktree mode remains per-task Git checkout separation, not hostile-code containment. Project-folder tasks share the owner’s files, and a non-Git folder still falls back to the project folder. Existing saved sprints and running checkouts are not moved.
+Sprint planning runs as a read-only runtime task in the project folder, bound at Start to the sprint
+planning policy, a trusted host option no command, plan or model tool can set. Its coordinator, reviewers
+and read-only specialists run read-only as in every task; the runtime additionally refuses any plan with a
+writing role and every project write of the task. Like any read-only role it can read what the project and
+the sandbox allow, so this is the ordinary read-only channel boundary, not hostile-code containment. The
+plan reaches the sprint only through the channel-verified `sprint_plan_submit` tool: the runtime assembles
+its ordered parts (at most 50 items and 128 KiB per call) and validates the whole plan (keys,
+dependencies, cycles, at most 512 KiB, no item count limit), sends it to a mandatory independent review
+against the studied evidence, and accepts only the newest reviewed plan of a completed task; prose is
+never parsed into tasks. Failure notices use service-owned explanations, not raw engine errors, prompts or
+credentials. Only explicit materialization saves user-task drafts; planning never starts their executions.
+Materialization is one service operation under the machine lock: every draft, its sprint membership and
+dependencies, and the sprint's created state commit in one project-store transaction that also replaces
+the saved sprint record, or none of them does; task identities derive from the sprint, plan version and
+plan key, so a repeat never creates a
+second set, and tasks an interrupted earlier client-side creation left are reported, never adopted. The owner selects Project folder or Separate worktree for the sprint; materialization copies that checkout kind to every task's saved create options, used by the existing start route. Worktree mode remains per-task Git checkout separation, not hostile-code containment. Project-folder tasks share the owner’s files, and a non-Git folder still falls back to the project folder. Existing saved sprints and running checkouts are not moved.
 The service may restore the exact durable, settled COMPLETED session for owner actions. It does not adopt a database owner for a live task or alter generic ACP ownership checks. Retained technical blockers remain unpassed evidence, not fabricated passes; acknowledging them still requires explicit owner consent and current result binding. A real failed executable check is not an acknowledgement waiver.
-Review follow-ups retain implementation content only while the observed source digest is unchanged; new checks and runtime evidence still govern acceptance. Missing-command/tool blockers survive session-owner renewal only for the exact unchanged check and source; permissions, stale attempts and passing evidence are not carried forward by this rule. Git integration enumerates literal user paths, never helper-directory pathspecs, and restores the previous index selection on failed staging/commit without discarding user file contents. Held question-batch drafts rebind only across display-version changes with identical question, option, owner, requirement and permission identities; all members still undergo the normal server version checks. Multi-item sprint descriptions use the planner's per-item scope and relevant plain-text owner answers, without service-appended sibling work or serialized conversation records. Unanswered explicit owner decisions belong to the relevant item, never the implementing model. A sole item additionally retains original requirements and plain-text follow-ups. Model-generated decomposition is not filesystem access enforcement.
+Review follow-ups retain implementation content only while the observed source digest is unchanged; new
+checks and runtime evidence still govern acceptance. Missing-command/tool blockers survive session-owner
+renewal only for the exact unchanged check and source; permissions, stale attempts and passing evidence
+are not carried forward by this rule. Git integration enumerates literal user paths, never
+helper-directory pathspecs, and restores the previous index selection on failed staging/commit without
+discarding user file contents. Held question-batch drafts rebind only across display-version changes with
+identical question, option, owner, requirement and permission identities; all members still undergo the
+normal server version checks. Multi-item sprint descriptions use the planner's per-item scope and relevant
+plain-text owner answers, without service-appended sibling work or serialized conversation records.
+Unanswered explicit owner decisions belong to the relevant item, never the implementing model. A sole item
+additionally retains original requirements and plain-text follow-ups. Model-generated decomposition is not
+filesystem access enforcement.
 New managed checkout names use a bounded ASCII description slug and a stable suffix,
 not a transport id. Names do not grant authority: Git common-directory and branch
 validation still bind the saved checkout. Existing paths and branches are not moved
@@ -854,7 +1076,22 @@ Result cards and whole opened reports render Markdown as text nodes and known el
 Workspace review and worker overviews exclude withdrawn checks only when the runtime can rederive their
 withdrawal from retained receipts and provisioning; presentation fields alone do not
 suppress failures. Ready results that are not yet accepted retain explicit Accept controls in Conversation and diff review; those controls record acceptance only and never commit, merge or close the task. A result accepted by an Automatic sprint's queue shows no Accept control; that automatic acceptance uses the same validator, applies only while the sprint's current run mode is Automatic and likewise never commits, merges or closes the task (see [local task execution](docs/cortex-workspace/local-task-execution.md)). Accept sends the reviewed source version and digest, not its display sequence;
-the service still revalidates both before recording acceptance. Accept and check reruns take that identity from the result the screen displays (the delivered machine facts), using the raw wire result only when no result fact is supplied; this changes no server authority, and server acceptance still revalidates current evidence. Result versions follow runtime evidence events, not unrelated progress/transcript invalidations. The UI respects service review blockers and source-drift warnings; a failed or unknown acceptance retains a task-local reason and refresh action. Unverified reviewer claims with recorded commands receive real automatic check attempts, never invented passes; commandless legacy gaps are separate manual items, not acceptance blockers. Availability probes use the same read-only launch preparation and final argument compaction as verification, never execute proposed programs, and distinguish sandbox/launch failure from an observed missing executable. Policy/consent refusals are not technical acknowledgement authority. External completion is an explicit owner-confirmed machine record, not runtime acceptance or integration. The service refuses a live or unobservable execution; it never fabricates checks or performs Git operations to close it. Content containment uses a disposable index/object directory and reverse-patch checking against the local target, not commit ancestry. Unknown or oversized comparisons never assert containment. Target push status is separate, last-fetched information and never close authority; no fetch or push runs implicitly.
+the service still revalidates both before recording acceptance. Accept and check reruns take that identity
+from the result the screen displays (the delivered machine facts), using the raw wire result only when no
+result fact is supplied; this changes no server authority, and server acceptance still revalidates current
+evidence. Result versions follow runtime evidence events, not unrelated progress/transcript invalidations.
+The UI respects service review blockers and source-drift warnings; a failed or unknown acceptance retains
+a task-local reason and refresh action. Unverified reviewer claims with recorded commands receive real
+automatic check attempts, never invented passes; commandless legacy gaps are separate manual items, not
+acceptance blockers. Availability probes use the same read-only launch preparation and final argument
+compaction as verification, never execute proposed programs, and distinguish sandbox/launch failure from
+an observed missing executable. Policy/consent refusals are not technical acknowledgement authority.
+External completion is an explicit owner-confirmed machine record, not runtime acceptance or integration.
+The service refuses a live or unobservable execution; it never fabricates checks or performs Git
+operations to close it. Content containment uses a disposable index/object directory and reverse-patch
+checking against the local target, not commit ancestry. Unknown or oversized comparisons never assert
+containment. Target push status is separate, last-fetched information and never close authority; no fetch
+or push runs implicitly.
 Accepting a result in a non-Git folder never initializes Git,
 commits or pushes. Explicit Git initialization runs only `git init` in the registered
 project, refuses an existing repository, and does not configure identity or remotes.
@@ -1180,7 +1417,17 @@ Workspace task pause/resume is an authenticated owner control, not a model tool.
 The hold, recorded resume state, request identity and public invalidations commit
 transactionally. Paused tasks reject model mutations; Resume checks the displayed
 version and current owner epoch. Cancellation of an engine turn is separate from
-this durable hold. Pending worker question/access waits survive it, but old worker channels are fenced. A recorded replacement receives the saved decision only after Resume; it must revalidate access, and unknown action outcomes still block replacement. Resume is runtime continuation, never an invented user message or answer. Worker history combines task and command/guidance namespaces under one attempt-bound continuation and byte budget, with explicit clipping/refusal rather than silently omitted rows. Client page retention is keyed to worker and attempt identity, not changing display facts; automatic reads of all available worker-history pages do not bypass server cursor validation or page budgets. Failed continuation reads keep loaded activity and offer Retry. Live review-action reads use validation-only shared Store access, including normal SQLite WAL/SHM housekeeping, not immutable offline inspection. They neither initialize nor migrate storage, and Accept still revalidates retained evidence and the current workspace. Public worker report reads require a retained result reference
+this durable hold. Pending worker question/access waits survive it, but old worker channels are fenced. A
+recorded replacement receives the saved decision only after Resume; it must revalidate access, and unknown
+action outcomes still block replacement. Resume is runtime continuation, never an invented user message or
+answer. Worker history combines task and command/guidance namespaces under one attempt-bound continuation
+and byte budget, with explicit clipping/refusal rather than silently omitted rows. Client page retention
+is keyed to worker and attempt identity, not changing display facts; automatic reads of all available
+worker-history pages do not bypass server cursor validation or page budgets. Failed continuation reads
+keep loaded activity and offer Retry. Live review-action reads use validation-only shared Store access,
+including normal SQLite WAL/SHM housekeeping, not immutable offline inspection. They neither initialize
+nor migrate storage, and Accept still revalidates retained evidence and the current workspace. Public
+worker report reads require a retained result reference
 in the selected project, verify the published digest and use identity-bound cursors
 with at most 4,000 characters per page. The webview receives neither private paths
 nor arbitrary runtime files; report text is displayed without executing HTML.
@@ -1730,14 +1977,40 @@ task-closure question is required. The runtime records the source and unfinished
 work, fences assignments and owned sessions, and uses terminal `CANCELLED`, not
 verified `COMPLETED`. A model claim that the user wants to finish is not an
 authorization or a passing review/verification receipt.
-Paseo's structured question path is role-neutral across coordinator, worker and runtime fallback requests. For grouped questions it uses one paginated form and submits the complete set together; incomplete submissions are rejected. Unique, bounded topic headers are presentation keys mapped back to exact member identities; a complete legacy id-keyed answer map is also accepted, but mixed or foreign key sets fail closed. Numeric text-fallback selection uses the same current-open creation/batch order as the displayed numbers, not random ids. None of these mappings grants access. The "Other..." field and a chat reply are valid free-text answers. Dismissing or cancelling the form does not create an answer, and a declined or timed-out host elicitation leaves the durable question pending. Where an ACP host lacks the structured UI, Cortex can only fall back to a text prompt; it does not enforce that a model asks every question or that every host renders options. A free-text legacy card's instructional action is not an answer. The live chat echo after an acknowledged answer shows the question with the answer (`Question: … → Answer: …`); it is a presentation of the already recorded answer and grants nothing.
+Paseo's structured question path is role-neutral across coordinator, worker and runtime fallback requests.
+For grouped questions it uses one paginated form and submits the complete set together; incomplete
+submissions are rejected. Unique, bounded topic headers are presentation keys mapped back to exact member
+identities; a complete legacy id-keyed answer map is also accepted, but mixed or foreign key sets fail
+closed. Numeric text-fallback selection uses the same current-open creation/batch order as the displayed
+numbers, not random ids. None of these mappings grants access. The "Other..." field and a chat reply are
+valid free-text answers. Dismissing or cancelling the form does not create an answer, and a declined or
+timed-out host elicitation leaves the durable question pending. Where an ACP host lacks the structured UI,
+Cortex can only fall back to a text prompt; it does not enforce that a model asks every question or that
+every host renders options. A free-text legacy card's instructional action is not an answer. The live chat
+echo after an acknowledged answer shows the question with the answer (`Question: … → Answer: …`); it is a
+presentation of the already recorded answer and grants nothing.
 Plan-node `work_kind` is a validated routing classification, not a permission grant. It may override role-derived affinity, preferences and stretch eligibility, but never changes role access, scope, tier or owner route authorization. Explicit classifications survive retries and review fixes. Legacy implementation settings expand only in memory on effective reads; editable source rules remain unexpanded, so an unrelated Settings save does not migrate their spelling. Reads do not write configuration; explicit saves still use the existing target authorization and revision checks.
 
 Plan verification commands execute as literal argv without a shell. Submission rejects command substitution, backticks, redirection, pipes, shell operators and standalone parentheses, so a plan cannot defer that syntax error until verification. Structural validation does not prove semantic correctness of a plan, review or implementation.
 
 Worker briefs preserve the assignment objective, scope and dependency report references. The original task goal and review git evidence are shortened only when needed to fit the provisioning limit, and every shortened field identifies the worker-readable capsule or git-output source. These references use tools already available to the worker and do not change its assignment authority. A recovery capsule whose critical sections exceed their byte budget is compacted deterministically, never refused: each truncated field carries its sha256, size, a fenced preview with its original trust label and the tool that returns the full text (`read_source` for user messages and answers). Each trimmed list names its omitted entries, so recovery never silently loses required context.
 
-A worker `passed` check is accepted only with an exact same-attempt `command_run` or user-confirmed `outside_command` receipt for one completed, nontrivial operation, complete untruncated output and exit code 0. Engine-native shell calls and file reads do not verify checks. Insufficient evidence stays `unverified`; observed nonzero exits stay `failed`. Earlier reports are not rewritten, and older evidence is marked weak when projected under the current rule. Check run history is retained; a failure closes only on a later exact verified rerun that remains the latest result for that command. Identical argv/cwd reruns may cross between `command_run` and `outside_command` in either direction, preserving both receipts and their operation/profile provenance. Same-operation profile changes do not match; this comparison never grants execution permission. A supported syntax, regex or statically proven literal-expectation error in the worker's own standalone Python probe can instead be retracted by a later verified passing correction; the failed receipt stays as `retracted` history, never as a pass. Literal-data probes permit only single-assignment literal bindings, equality assertions and a small pure-builtin allowlist, bounded to 8,192 source characters and 256 AST nodes, with no imports, IO, product calls or dynamic execution. Only one expected literal changes; the original false comparison and all corrected true comparisons are established without executing submitted source. Both complete outputs, same operation/cwd/profile, unique correction binding and later-run checks remain mandatory. Project test/lint/build and runtime-verification failures are never retracted.\n\nTransport state is distinct from task outcome. A plugin disconnect records available session/task/attempt identities and history completeness; restart recovery reads persisted state and leaves actions with unknown outcomes unresolved. Until reload recovery is qualified for the deployed version, update the plugin between active tasks. A host SIGKILL without SIGTERM cannot be recorded, and native engine actions cannot be represented by the retained command receipt mechanism.
+A worker `passed` check is accepted only with an exact same-attempt `command_run` or user-confirmed
+`outside_command` receipt for one completed, nontrivial operation, complete untruncated output and exit
+code 0. Engine-native shell calls and file reads do not verify checks. Insufficient evidence stays
+`unverified`; observed nonzero exits stay `failed`. Earlier reports are not rewritten, and older evidence
+is marked weak when projected under the current rule. Check run history is retained; a failure closes only
+on a later exact verified rerun that remains the latest result for that command. Identical argv/cwd reruns
+may cross between `command_run` and `outside_command` in either direction, preserving both receipts and
+their operation/profile provenance. Same-operation profile changes do not match; this comparison never
+grants execution permission. A supported syntax, regex or statically proven literal-expectation error in
+the worker's own standalone Python probe can instead be retracted by a later verified passing correction;
+the failed receipt stays as `retracted` history, never as a pass. Literal-data probes permit only
+single-assignment literal bindings, equality assertions and a small pure-builtin allowlist, bounded to
+8,192 source characters and 256 AST nodes, with no imports, IO, product calls or dynamic execution. Only
+one expected literal changes; the original false comparison and all corrected true comparisons are
+established without executing submitted source. Both
+complete outputs, same operation/cwd/profile, unique correction binding and later-run checks remain mandatory. Project test/lint/build and runtime-verification failures are never retracted.\n\nTransport state is distinct from task outcome. A plugin disconnect records available session/task/attempt identities and history completeness; restart recovery reads persisted state and leaves actions with unknown outcomes unresolved. Until reload recovery is qualified for the deployed version, update the plugin between active tasks. A host SIGKILL without SIGTERM cannot be recorded, and native engine actions cannot be represented by the retained command receipt mechanism.
 
 On stdin EOF, the ACP process joins its reader after EOF is observed and before
 runtime teardown, so disconnect recording and cancellation are not abandoned
@@ -1764,7 +2037,8 @@ publication, request recording or channel revocation. Only an explicit
 concrete detail) intentionally submits that failed assignment; without the
 blocker it is refused with `assignment_blocker_required`. A review that leaves
 something it can still do (an INCOMPLETE part without a dead-end blocker, an
-unread changed file or predecessor report, a BLOCK without findings) is refused
+unread changed file or required predecessor report of the review's round, a
+BLOCK without findings) is refused
 before publication with the outstanding items; the channel stays open, the
 refusal is retained with its code and named items, and no second reviewer is
 scheduled for the same revision. Fix and review rounds without progress
@@ -1931,7 +2205,21 @@ private-path, write-grant and user deny-write checks passed for the full path;
 each component is created and reopened no-follow, and a file or symlink component
 is refused (`gateway_parent_not_directory`) without following it.
 
-Project file writes never accept a partial read as overwrite authority. `project_read` returns line pages whose `sha256` identifies the bytes read; only a channel's complete, non-truncated coverage of the current bytes yields `full_content_sha256`, and `project_write` of an existing file requires that value (`gateway_complete_read_required` otherwise). A stale read, a hand-supplied hash and `absent` for an existing file are refused before anything changes. A large shrink is flagged in the receipt (`drastic_shrink`) rather than refused, but it still needs complete coverage. `project_edit` applies ordered exact replacements atomically after any prior text read of the current bytes; a missing or ambiguous match refuses the whole edit. Coverage is per channel and per digest and stores no file bodies. A successful `project_write` or `project_edit` replaces the path's coverage with the digest of the bytes that channel just produced: complete after a full write or an edit of a completely read file (never for `.gitignore`, where the runtime adds protected lines), otherwise partial. A later change by anyone else therefore still fails as a stale read, and partial coverage never becomes overwrite authority. Coverage is a runtime ledger, not a permission grant: private, link and deny-write checks still apply before any read or write. A line longer than 2000 characters is never counted as read, so such a file can be changed only with `project_edit`.
+Project file writes never accept a partial read as overwrite authority. `project_read` returns line pages
+whose `sha256` identifies the bytes read; only a channel's complete, non-truncated coverage of the current
+bytes yields `full_content_sha256`, and `project_write` of an existing file requires that value
+(`gateway_complete_read_required` otherwise). A stale read, a hand-supplied hash and `absent` for an
+existing file are refused before anything changes. A large shrink is flagged in the receipt
+(`drastic_shrink`) rather than refused, but it still needs complete coverage. `project_edit` applies
+ordered exact replacements atomically after any prior text read of the current bytes; a missing or
+ambiguous match refuses the whole edit. Coverage is per channel and per digest and stores no file bodies.
+A successful `project_write` or `project_edit` replaces the path's coverage with the digest of the bytes
+that channel just produced: complete after a full write or an edit of a completely read file (never for
+`.gitignore`, where the runtime adds protected lines), otherwise partial. A later change by anyone else
+therefore still fails as a stale read, and partial coverage never becomes overwrite authority. Coverage is
+a runtime ledger, not a permission grant: private, link and deny-write checks still apply before any read
+or write. A line longer than 2000 characters is never counted as read, so such a file can be changed only
+with `project_edit`.
 
 Internal `.gitignore` reconciliation uses an exact, unnumbered, non-truncated snapshot through the same no-follow, single-link and 16 MB reader; public read pages are never repair input. Edit presentation uses the protected bytes committed by the writer. Diff matching is skipped before computation when combined input exceeds 32,000 characters or the before/after line-count product exceeds 250,000; the receipt marks `diff_omitted: "input_budget"` and `diff_truncated: true`. Hash and size evidence remain available.
 
@@ -1941,8 +2229,35 @@ The Cortex Workspace desktop slice has a user-level machine service that owns th
 
 - The service listens only on a Unix domain socket in a private per-user runtime directory (directory mode 0700, socket mode 0600). Both ends compare the peer's effective user with their own. It opens no TCP, loopback HTTP or WebSocket listener. The one network listener it can open is the iroh UDP endpoint of remote access, described below, bound only while the owner has turned remote access on (off by default).
 - The service's own private folders (runtime directory and, in the dev channel, the config, state, cache and data folders it gives started processes) must be real directories owned by the current user. One that is merely too permissive (for example 0775 under the user's own primary group from a 002 umask, or 0755) is made 0700 in place through the opened directory; a world-writable folder, a folder group-writable by another group or a foreign-owned folder stays refused, and the owner sees a refusal naming the folder and the problem instead of a generic filesystem failure.
-- **Opening a pull request in the browser.** **View PR** (on the merge card and in the Git menu) is the only action that opens a pull request address. The UI displays the recorded address as text and sends only the project and task identifiers; it never passes the displayed URL to the opener. The service returns the recorded address only if it is an `https` address on the host of the repository's `origin` remote, shaped `https://<host>/<owner>/<repo>/pull/<number>`, and checks it against the remote again at the press. The desktop checks it once more (an `https://` prefix, host characters limited to letters, digits, `.` and `-`, no whitespace or control characters, at most 2048 bytes) and then starts the first of two fixed programs that is an existing regular file with an execute bit: `/usr/bin/xdg-open <address>`, or `/usr/bin/gio open <address>` when `/usr/bin/xdg-open` is not runnable. The address is the last argument, no shell is used, and the program's standard streams are discarded. A launcher that exits with a failure is reported as "The browser could not open this pull request."; one still running after 8 seconds counts as handed over. The item is offered only when the same search finds one of those two programs.
-- **GitHub CLI (`gh`).** The service runs `gh` in one place only: **Create PR…** in the Finish task dialog. It runs `gh pr create --base <target> --head <task branch> --title <first line of the title> --body <description>`, with `--draft` when the owner chooses a draft, in the task's checkout, with `GIT_TERMINAL_PROMPT=0`, `LC_ALL=C`, an empty standard input, standard error discarded and a 25-second limit. It runs only after the service has checked, from local Git state alone, that the branch has a resolvable upstream tracking ref (`@{u}`) and no commits in `@{u}..HEAD`; otherwise the action is refused with "Push this task branch from Git first, then create the pull request." That is local evidence only: the service does not query the remote, so a remote branch deleted since the last fetch can still pass it. The service never pushes for it. Only the standard output of a successful run is considered. All of it is collected, but only its first 64 KiB is inspected: the last non-empty line of that part is the candidate, and it is recorded as the pull request address only if it passes the https and remote-host check above. The output of a failed or timed-out run is never read for an address. Any other output records the pull request without an address, and the pull request is still recorded as created. If `gh` cannot be started or exits with an error, the action is refused with "GitHub CLI could not create the pull request. Check gh login and repository access." If it does not finish within 25 seconds, it is refused with "GitHub did not answer. Check your pull requests before retrying." A recorded attempt is not repeated by the service, and a later Create PR… for the same task is refused with "A pull request was already attempted. Check GitHub before creating another." Before it starts, the service only looks for `gh` on its own search path (`ghAvailable`); when `gh` is not found, the action is refused with "Install and sign in to GitHub CLI (gh) to create a pull request." The service never runs `gh` to read a pull request, a login or a status.
+- **Opening a pull request in the browser.** **View PR** (on the merge card and in the Git menu) is the
+  only action that opens a pull request address. The UI displays the recorded address as text and sends
+  only the project and task identifiers; it never passes the displayed URL to the opener. The service
+  returns the recorded address only if it is an `https` address on the host of the repository's `origin`
+  remote, shaped `https://<host>/<owner>/<repo>/pull/<number>`, and checks it against the remote again at
+  the press. The desktop checks it once more (an `https://` prefix, host characters limited to letters,
+  digits, `.` and `-`, no whitespace or control characters, at most 2048 bytes) and then starts the first
+  of two fixed programs that is an existing regular file with an execute bit:
+  `/usr/bin/xdg-open <address>`, or `/usr/bin/gio open <address>` when `/usr/bin/xdg-open` is not
+  runnable. The address is the last argument, no shell is used, and the program's standard streams are
+  discarded. A launcher that exits with a failure is reported as "The browser could not open this pull
+  request."; one still running after 8 seconds counts as handed over. The item is offered only when the
+  same search finds one of those two programs.
+- **GitHub CLI (`gh`).** The service runs `gh` in one place only: **Create PR…** in the Finish task
+  dialog. It runs `gh pr create --base <target> --head <task branch> --title <first line of the title> --body <description>`,
+  with `--draft` when the owner chooses a draft, in the task's checkout, with `GIT_TERMINAL_PROMPT=0`,
+  `LC_ALL=C`, an empty standard input, standard error discarded and a 25-second limit. It runs only after
+  the service has checked, from local Git state alone, that the branch has a resolvable upstream tracking
+  ref (`@{u}`) and no commits in `@{u}..HEAD`; otherwise the action is refused with "Push this task branch
+  from Git first, then create the pull request." That is local evidence only: the service does not query
+  the remote, so a remote branch deleted since the last fetch can still pass it. The service never pushes
+  for it. Only the standard output of a successful run is considered. All of it is collected, but only its
+  first 64 KiB is inspected: the last non-empty line of that part is the candidate, and it is recorded as
+  the pull request address only if it passes the https and remote-host check above. The output of a failed
+  or timed-out run is never read for an address. Any other output records the pull request without an
+  address, and the pull request is still recorded as created. If `gh` cannot be started or exits with an
+  error, the action is refused with "GitHub CLI could not create the pull request. Check gh login and
+  repository access." If it does not
+  finish within 25 seconds, it is refused with "GitHub did not answer. Check your pull requests before retrying." A recorded attempt is not repeated by the service, and a later Create PR… for the same task is refused with "A pull request was already attempted. Check GitHub before creating another." Before it starts, the service only looks for `gh` on its own search path (`ghAvailable`); when `gh` is not found, the action is refused with "Install and sign in to GitHub CLI (gh) to create a pull request." The service never runs `gh` to read a pull request, a login or a status.
 - The actor of a Workspace request is the authenticated peer. Client-supplied actor values are replaced, and the ACP child receives a cleared environment.
 - Cortex exposes the `_cortex/workspace` extension method alongside the unchanged standard ACP methods. Its operations are a closed set; the desktop shell has a closed bridge command forwarding that set and a separate bounded native notification command.
 - Owner file saves run through that same fixed helper. A save names the revision the owner read and writes only over it, through a temporary file and a rename. It reaches the file without following any link, refuses `.git`, `.cortex` and `.cortex-dev` at any depth, is bounded to 512 KiB of UTF-8 text, and is refused while the project store does not show every task on that checkout stopped. See [editing files](docs/cortex-workspace/local-task-execution.md#editing-files). This is a check of recorded runtime state, not a lease: a model writer is not held back by it, and one running without that record could still race a save.
@@ -1950,11 +2265,58 @@ The Cortex Workspace desktop slice has a user-level machine service that owns th
 - Code's file tree shows the owner every file and folder in the project folder, including dot-files, secret-named files such as `.env` and everything Git ignores (marked as ignored), and opens and saves them under the same rules as any other file. This is the owner's own window, not a disclosure to a model: it sends nothing to an engine or provider, and the commit message and pull request texts still leave out secret-named files and read only what Git reports, which never includes ignored files. Still never listed or opened: `.git` at any depth, `.cortex`, `.cortex-dev` and the other Cortex private names (`.cortex-dev-owner.json`, `.cortex-workspace-dev.json`, `.cortex-workspace.json`), anything outside the checkout, and any folder reached through a link (a link is listed, never followed). Folders are read one level at a time on demand (`repo.list`), at most 500 entries each, by descriptor and without following links.
 - A composer's `/` list reads the project's own skills with `repo.skills`: the same read-only index the coordinator's instructions list and `read_skill` reads (`.agents/skills`, `.claude/skills`, `.codex/skills`, one level each, at most 64 skills, by descriptor and without following links, each SKILL.md a regular single-link file of at most 64 KiB, outside `.git` and the Cortex private names). It returns only each skill's folder name, project-relative path and front-matter description cut to 300 characters, never a skill body, and activates nothing. The composer's `@` list filters the file names the repository snapshot already returned (`git ls-files --cached` and `--others --exclude-standard`, at most 20,000), in the window; it adds no file read. Picking a file or a skill writes plain text into the owner's message; nothing is sent until the owner sends it.
 - Folder search for adding a project takes only the text the owner typed, through closed Rust request types in both bridge and service. The service chooses the roots and limits and runs a fixed helper with a cleared environment. It reveals folder names and whether `.git` exists, never file contents, and it never offers `.cortex`, `.cortex-dev` or the service's private directories.
-- The owner terminal is a separate, intentional same-user execution grant. Only terminal.open/read/write/resize/close are exposed, validated by shared closed Rust request types in both bridge and service. Initial cwd comes from the registered project, never the webview; the service selects the user's interactive shell. There is no one-shot exec, executable, argv, cwd or environment override API. Input is still full shell authority, including the user's files, accounts and network: compromised trusted webview content can exercise that authority. This is not model-gateway containment or protection from same-user code. At most eight PTYs retain 64 KiB each; read pages, writes, dimensions, UI scrollback and input queues are bounded. Output/input are not journaled or logged. Hide/window close detaches; Close shell, project removal and service stop send TERM then KILL to the dedicated session's job groups and reap the shell. Lost sessions and uncertain input are never replayed. Daemonized jobs that escape the session, abrupt service death and shell CPU/memory use remain outside cleanup guarantees. See [owner terminal reasoning](docs/cortex-workspace/security.md#owner-terminal-built-local-linux).
+- The owner terminal is a separate, intentional same-user execution grant. Only
+  terminal.open/read/write/resize/close are exposed, validated by shared closed Rust request types in both
+  bridge and service. Initial cwd comes from the registered project, never the webview; the service
+  selects the user's interactive shell. There is no one-shot exec, executable, argv, cwd or environment
+  override API. Input is still full shell authority, including the user's files, accounts and network:
+  compromised trusted webview content can exercise that authority. This is not model-gateway containment
+  or protection from same-user code. At most eight PTYs retain 64 KiB each; read pages, writes,
+  dimensions, UI scrollback and input queues are bounded. Output/input are not journaled or logged.
+  Hide/window close detaches; Close shell, project removal and service stop send TERM then KILL to the
+  dedicated session's job groups and reap the shell. Lost sessions and uncertain input are never replayed.
+  Daemonized jobs that escape the session, abrupt service death and shell CPU/memory use remain outside
+  cleanup guarantees. See [owner terminal reasoning](docs/cortex-workspace/security.md#owner-terminal-built-local-linux).
 - The desktop window loads bundled local content only, under a content security policy that allows Tauri IPC connections alone. It has no shell, filesystem or process capability, and external navigation and new windows are refused.
-- Code previews checkout files inside that policy. Pictures, video and sound play from in-memory `blob:` URLs (`media-src 'self' blob:`, the only media source); their bytes come through the guarded file read, chosen by file name from a fixed list of picture, video and sound types, at most 4 MiB, never through a link and never for saving. SVG is shown only through an image element, which runs no script and loads nothing. HTML is parsed into an inert document and rebuilt from structural tags alone, dropping scripts, styles, forms, frames, links, event and style attributes and every non-inline image; links in a preview are never followed. Markdown uses the conversation renderer, which does not interpret HTML. PDF and other binary files are not rendered; frames and objects stay blocked. See [viewing files](docs/cortex-workspace/local-task-execution.md#viewing-files). It draws its own frame, so the main window may minimize, maximize, close and drag itself and read its maximized state, and nothing else.
+- Code previews checkout files inside that policy. Pictures, video and sound play from in-memory `blob:`
+  URLs (`media-src 'self' blob:`, the only media source); their bytes come through the guarded file read,
+  chosen by file name from a fixed list of picture, video and sound types, at most 4 MiB, never through a
+  link and never for saving. SVG is shown only through an image element, which runs no script and loads
+  nothing. HTML is parsed into an inert document and rebuilt from structural tags alone, dropping scripts,
+  styles, forms, frames, links, event and style attributes and every non-inline image; links in a preview
+  are never followed. Markdown uses the conversation renderer, which does not interpret HTML. PDF and
+  other binary files are not rendered; frames and objects stay blocked. See
+  [viewing files](docs/cortex-workspace/local-task-execution.md#viewing-files). It draws its own frame, so
+  the main window may minimize, maximize, close and drag itself and read its maximized state, and nothing
+  else.
 - Default/release ACP uses `.cortex`; Workspace Dev uses `.cortex-dev` in the same project folder. Release data never prevents Dev registration and is never opened or migrated by Dev. The `.cortex-dev/owner.json` reservation binds the dev directory by device/inode at registration; an unowned, linked or replaced dev store is refused. A validated old `.cortex-dev-owner.json` is moved inside the dev store; a matching private `.cortex-workspace-dev.json` is retained there as `legacy-workspace.json`. Unknown or foreign legacy workspace files are not removed, and no old database is read. Missing sprint members can be restored as drafts only from an exactly matched saved plan and dependency mapping; the queue pauses, and no old execution, verification or acceptance is inferred. Private-path, Git and snapshot rules exclude both stores. This is accidental cross-channel protection, not isolation from a same-user shell. See [CW-S12](docs/cortex-workspace/backlog/CW-S12.md).
-- Desktop notifications come from the machine service, which opens the owner's own session bus (the per-user `DBUS_SESSION_BUS_ADDRESS` `unix:path=` socket, else `$XDG_RUNTIME_DIR/bus`) with EXTERNAL authentication and makes only `Hello`, one `AddMatch` for the notification server's signals, `Notify` and `CloseNotification`, every call with NO_AUTO_START; it answers no method call and needs no display. A notification carries a bounded, markup-escaped work label and, for a stopped task or a paused sprint, the runtime's one-line reason, never question text, paths, commands or credentials. Notifications confer no execution or answering authority. Each raised notification keeps one target of a closed shape (`question`, `planning`, `result`, `task` or `sprint` with bounded project, task or sprint and decision ids, no other field) against the id the server returned. Only `ActionInvoked(id, "default")` for an id the service raised, from the server that returned that id, once, acts: the service sends the kept target to subscribed windows as `notification_open` with a random nonce (never the token), and the desktop shell checks the exact shape (`policy::notification_target`), claims the click with `notifications.opened` and only then receives the activation token, which it passes to GTK solely to raise its window. A click carries no data of its own, so another session-bus client can at most reopen a place the service itself named. If no window claims the click within two seconds, the service starts the app with `systemd-run --user` running the desktop entry's fixed binary path, with the token (ASCII graphic characters only, at most 512) as `DESKTOP_STARTUP_ID` and `XDG_ACTIVATION_TOKEN` and no other input; the target waits in memory for that window's `notifications.take`, once, for one minute. The window's `notifications.report` carries only the focused task or sprint ids and the enabled kinds (closed shapes in the desktop request allowlist and again in the service); the service keeps the kinds and the newest 1000 announced item states in `notifications.json` (0600) in its state folder. `notifications.*` is outside the remote allowlist and the phone's request policy, and the phone bridge drops `notification_open`. The window's capability is still the same three commands; no URI scheme, MIME handler, D-Bus service or desktop-entry change is added. The service withdraws its notifications when it stops. A service that does not raise notifications leaves the window's own question notifications: only the bundled main window can submit them, through the same closed target shape, with clicks handled by the window's process alone, and the window withdraws them when it closes.
+- Desktop notifications come from the machine service, which opens the owner's own session bus (the
+  per-user `DBUS_SESSION_BUS_ADDRESS` `unix:path=` socket, else `$XDG_RUNTIME_DIR/bus`) with EXTERNAL
+  authentication and makes only `Hello`, one `AddMatch` for the notification server's signals, `Notify`
+  and `CloseNotification`, every call with NO_AUTO_START; it answers no method call and needs no display.
+  A notification carries a bounded, markup-escaped work label and, for a stopped task or a paused sprint,
+  the runtime's one-line reason, never question text, paths, commands or credentials. Notifications confer
+  no execution or answering authority. Each raised notification keeps one target of a closed shape
+  (`question`, `planning`, `result`, `task` or `sprint` with bounded project, task or sprint and decision
+  ids, no other field) against the id the server returned. Only `ActionInvoked(id, "default")` for an id
+  the service raised, from the server that returned that id, once, acts: the service sends the kept target
+  to subscribed windows as `notification_open` with a random nonce (never the token), and the desktop
+  shell checks the exact shape (`policy::notification_target`), claims the click with
+  `notifications.opened` and only then receives the activation token, which it passes to GTK solely to
+  raise its window. A click carries no data of its own, so another session-bus client can at most reopen a
+  place the service itself named. If no window claims the click within two seconds, the
+  service starts the app with `systemd-run --user` running the desktop entry's fixed binary path, with the
+  token (ASCII graphic characters only, at most 512) as `DESKTOP_STARTUP_ID` and `XDG_ACTIVATION_TOKEN`
+  and no other input; the target waits in memory for that window's `notifications.take`, once, for one
+  minute. The window's `notifications.report` carries only the focused task or sprint ids and the enabled
+  kinds (closed shapes in the desktop request allowlist and again in the service); the service keeps the
+  kinds and the newest 1000 announced item states in `notifications.json` (0600) in its state folder.
+  `notifications.*` is outside the remote allowlist and the phone's request policy, and the phone bridge
+  drops `notification_open`. The window's capability is still the same three commands; no URI scheme, MIME
+  handler, D-Bus service or desktop-entry change is added. The service withdraws its notifications when it
+  stops. A service that does not raise notifications leaves the window's own question notifications: only
+  the bundled main window can submit them, through the same closed target shape, with clicks handled by
+  the window's process alone, and the window withdraws them when it closes.
 - Workspace invalidation hooks are connection-local to supported Store writers, not a security boundary on arbitrary SQLite clients. Independent/older writers do not need Workspace tables or callbacks; their writes are not guaranteed to publish notifications. Normal writable initialization retires legacy persistent outbox hooks; inspection leaves the durable schema untouched.
 - Both channels ship a root-owned runtime under `/usr/lib/<package>/runtime`. Units ignore legacy `service.env` files and use fixed absolute launch paths. Login-start symlinks and minimal best-effort maintainer scripts start/restart/stop only the matching user unit; they never access Paseo or delete user data. The native service-start path runs absolute `/usr/bin/systemctl --user` with fixed reload/start arguments, not webview-supplied commands. The separate editor action accepts only a registered project identity and fixed VS Code arguments. Dev XDG isolation and unchanged native account references remain in force.
 - The package depends on bubblewrap but does not weaken AppArmor or kernel policy. A namespace refusal blocks sandboxed engine execution and remains an explicit qualification limit; see [platforms](docs/cortex-workspace/platforms.md).
@@ -1964,13 +2326,80 @@ The Cortex Workspace desktop slice has a user-level machine service that owns th
 - Settings drafts retain their original file revision across background refreshes. A structured revision conflict requires explicit review and reapplication, never automatic retry or replacement with the newest write token. Refused defaults saves do not write Workspace-only access/checkout choices. Worktree reset uses the service-resolved channel default without moving existing worktrees. Sprint model preflight is a usability prerequisite, not a replacement for runtime routing and authorization.
 - Retention uses the machine wall clock. Deterministic tests inject a callable into maintenance only; there is no wire field, environment override or packaged fixture for advancing it. The host clock and product timestamps are not rewritten.
 - Pre-save MCP discovery is an explicit owner action, not a model tool. It uses the existing gateway sandbox with an empty project and the owner's draft read/write/network grants. It sends initialize and paginated tools/list only, never tools/call; a failed sandbox is not retried outside containment. The listing deadline is 15 seconds, with bounded frames/pages/tools, process-group termination and private runtime-directory cleanup. Stored environment secrets are resolved internally and never returned; stderr and exception messages are discarded. Tool descriptions are untrusted, bounded and redacted. Discovery neither saves nor widens tool access; the editable matrix retains configured grants.
-- An engine session that fails to start keeps secret-free start diagnostics. The engine host retains the last 8 KiB of the engine process's stderr in memory (every byte is counted), its exit status and why the ACP transport closed (for example `eof`, `update_for_unknown_session`, `invalid_frame`, `authority_refused`). The failure event (`NATIVE_SESSION_START_RETRIED` or `NATIVE_SESSION_START_FAILED`) records the exit status, close reason and stderr size; the tail is redacted (values after credential-like keys such as `token=` or `Authorization: Bearer`, known secret prefixes such as `sk-`, `ghp_` or JWTs, long mixed letter/digit runs other than UUIDs, and control characters) and written only to `<store>/<task>/.native-diagnostics/<channel>-start-<attempt>.log` (directory 0700, file 0600, never replaced), which the event names with its SHA-256. Redaction is pattern-based and can miss a secret in an unusual format, so the file stays private and is never sent to a model, the timeline or a log. A file that cannot be written is reported in the event as `file_error`.
+- An engine session that fails to start keeps secret-free start diagnostics. The engine host retains the
+  last 8 KiB of the engine process's stderr in memory (every byte is counted), its exit status and why the
+  ACP transport closed (for example `eof`, `update_for_unknown_session`, `invalid_frame`,
+  `authority_refused`). The failure event (`NATIVE_SESSION_START_RETRIED` or
+  `NATIVE_SESSION_START_FAILED`) records the exit status, close reason and stderr size; the tail is
+  redacted (values after credential-like keys such as `token=` or `Authorization: Bearer`, known secret
+  prefixes such as `sk-`, `ghp_` or JWTs, long mixed letter/digit runs other than UUIDs, and control
+  characters) and written only to `<store>/<task>/.native-diagnostics/<channel>-start-<attempt>.log`
+  (directory 0700, file 0600, never replaced), which the event names with its SHA-256. Redaction is
+  pattern-based and can miss a secret in an unusual format, so the file stays private and is never sent to
+  a model, the timeline or a log. A file that cannot be written is reported in the event as `file_error`.
 - Service status events are retained in the channel's private state directory under logs: directory 0700, files 0600, service.log and one rotated backup, about 64 KiB each. Records contain only a timestamp and a fixed category (helper success/refusal/failure, agent start/stop or scheduler failure), never prompt bodies, environment, command lines, credentials, stdout or stderr. Logging failure does not undo a committed action. Open logs asks the trusted service for that directory and invokes the fixed native folder opener; the webview cannot provide an arbitrary path.
 - Shared-checkout tasks whose checkout and target branches match never use a merge or PR. Successful channel-bound write hashes are compared with bounded local branch content/history; unknown evidence never claims containment. A confirmed same-branch commit stages only matching task-recorded pending files, refuses ambiguous same-file staging/modes/links, and preserves unrelated staged files. Native/command-only changes without attributable file receipts require explicit external/as-is closure or manual Git work, never silent staging of the shared checkout. This is content evidence, not hostile-same-user isolation.
-- **Automatic sprint policy.** The Automatic continuation policy is a trusted Rust option that the scheduler binds when it starts a task of an Automatic sprint. Commands, plans, model tool calls and the wire protocol cannot set, change or remove it, and the `automatic.finish` and `automatic.queue` operations are reachable only from the scheduler, never from ordinary RPC. The automatic finish admits only the project folder checkout, with saved automatic acceptance or explicit owner consent for that result version, digest, sprint and target, on the task's own branch. It makes a local commit of the task's recorded files under the repository lock and never pushes, fetches, creates a pull request or merges. A different target branch waits for owner confirmation through the existing integration path. The runtime verifies the approved plan before automatic acceptance. A worker’s skipped, unrequested paid qualification can be retained as a report note after verification of the current work. The note grants no permission and supplies no passing receipt. Required plan commands, attempted checks and other policy refusals retain their evidence requirements. Closing an unaccepted result as is records an owner disposition with a verification warning and creates no commit. A stop is recorded as a continuation or a pause with its reason, not as a question to the owner. The scheduler can recheck a known finish refusal only against the same saved hold under the existing Git and machine admission checks; no dispatched or unknown effect is replayed. Cancellation and archival never certify unfinished prerequisites or authorize discarding existing changes. At the retry limit, explicit task Resume requires the exact current version, settled processes and no unresolved effects before a fresh planning turn renews the retry budget. Neither the policy nor a continuation grants permission or changes review, verification or access rules. See [sprint run modes](docs/cortex-workspace/local-task-execution.md#sprint-run-modes).
+- **Automatic sprint policy.** The Automatic continuation policy is a trusted Rust option that the
+  scheduler binds when it starts a task of an Automatic sprint. Commands, plans, model tool calls and the
+  wire protocol cannot set, change or remove it, and the `automatic.finish` and `automatic.queue`
+  operations are reachable only from the scheduler, never from ordinary RPC. The automatic finish admits
+  only the project folder checkout, with saved automatic acceptance or explicit owner consent for that
+  result version, digest, sprint and target, on the task's own branch. It makes a local commit of the
+  task's recorded files under the repository lock and never pushes, fetches, creates a pull request or
+  merges. A different target branch waits for owner confirmation through the existing integration path.
+  The runtime verifies the approved plan before automatic acceptance. A worker’s skipped, unrequested paid
+  qualification can be retained as a report note after verification of the current work. The note grants
+  no permission and supplies no passing receipt. Required plan commands, attempted checks and other policy
+  refusals retain their evidence requirements. Closing an unaccepted result as is records an owner
+  disposition with a verification warning and creates no commit. A stop is recorded as a continuation or a
+  pause with its reason, not as a question to the owner. The scheduler can recheck a known finish refusal
+  only against the same saved hold under the existing Git and machine
+  admission checks; no dispatched or unknown effect is replayed. Cancellation and archival never certify unfinished prerequisites or authorize discarding existing changes. At the retry limit, explicit task Resume requires the exact current version, settled processes and no unresolved effects before a fresh planning turn renews the retry budget. Neither the policy nor a continuation grants permission or changes review, verification or access rules. See [sprint run modes](docs/cortex-workspace/local-task-execution.md#sprint-run-modes).
 - Post-merge cleanup uses Git without force only after the integration is recorded. A retained dirty/failed cleanup never masquerades as a failed merge. Source updates retain the previous result identity/version and require different, passing runtime evidence before renewed acceptance. Large and non-text conflicts retain bounded metadata and explicit manual Git instructions rather than writing placeholder text into a file.
-- Task titles, commit messages and pull request texts are written by a model, so their inputs leave the machine for the chosen connection's provider (Anthropic for Claude, OpenAI for Codex), under the owner's existing native account: a task's description for its title; for a commit or pull request text the task description, the result summary, changed file names with line counts and a diff excerpt of at most 12,000 bytes. New files are sent by name only, and a file whose name looks private never contributes content: `.env*`, SSH keys (`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`), `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`, `*.kdbx`, `.netrc`, `.npmrc`, `.pypirc`, `.htpasswd`, `*.tfvars`, `*.tfstate`, `kubeconfig*`, `.kube/config`, `credentials`, `credentials.json`, `service-account*`, and names containing secret, credential, password or token. This is a name check, so a secret inside an ordinary source file that changed can still be in the excerpt. The text is written in a minimal ACP engine session started with the route's ordinary engine-session launch (cleared environment, real `HOME` and the connection's native directory; for Codex the native launcher that turns the owner's Codex MCP servers off and verifies that and the disabled shell, plugin, hook and app features before App Server starts; a Codex connection without that launcher is not used). The session gets an empty private scratch directory, no ACP MCP servers and the engine's read-only mode; every permission request is denied, and a permission request or tool call discards the answer. A Claude session gets the same native tool restriction as every Cortex Claude session (no native shell, edit, subagent, hook, plugin or owner-configured MCP server; see [Native engine tools](#native-engine-tools)). Denying permissions does not stop a tool the engine runs without asking (Claude's own read and search tools in its working directory); a tool call is detected and the answer discarded, but only after the tool has run, so the prompt asks for text only and this is not containment. The session has no runtime task, writes no project store and is not shown in any history; it ends after 25 seconds at most and its process group is reaped. Unicode format characters (bidirectional controls, zero-width characters, the byte order mark) are removed from every generated text. The answer is shown to the owner as editable text and is never committed, merged or pushed without the owner's confirmation. `short-text.log` (file 0600 in the private log folder) records route identity, reason and outcome codes only, never prompts, descriptions, diffs or answers. See [short model texts](docs/cortex-workspace/local-task-execution.md#short-model-texts).
-- Remote access (built, no-paid tests only, not qualified; nothing verified on a physical Android device or through a relay): when the owner turns it on, the service binds an iroh UDP endpoint that uses no n0 public relay and no n0 address lookup, with either no relay or exactly one configured relay. The machine identity is a 32-byte key in a 0600 file (`remote-host.key`) in the service's private state directory, and a phone's key is a 0600 file in the app's private data with Android backup off; neither is wrapped by an OS keyring or the Android Keystore. Pairing uses a single-use link (QR code or copied text; 5 minutes; the fifth wrong secret cancels it) followed by a fingerprint on both sides and an explicit Allow on the computer; there is no short pairing code, and only Allow stores the device. Revoking a device closes its connections at once. Each remote stream goes to a fresh local-socket connection, and every request first passes a closed, fail-closed allowlist (`crates/workspace-service/src/remote_policy.rs`): every `remote.*` method, `service.stop`, `terminal.*`, `voice.*`, file saves, all Git write actions, native login, package install and rollback, and unknown methods are refused. A paired phone can still start and steer work and change machine and project settings, which is command execution authority on the machine. A relay sees endpoint identities, timing, volume and client IP addresses, not content. See [remote access security](docs/cortex-workspace/security.md#remote-access-built-not-qualified).
+- Task titles, commit messages and pull request texts are written by a model, so their inputs leave the
+  machine for the chosen connection's provider (Anthropic for Claude, OpenAI for Codex), under the owner's
+  existing native account: a task's description for its title; for a commit or pull request text the task
+  description, the result summary, changed file names with line counts and a diff excerpt of at most
+  12,000 bytes. New files are sent by name only, and a file whose name looks private never contributes
+  content: `.env*`, SSH keys (`id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`), `*.pem`, `*.key`, `*.p12`,
+  `*.pfx`, `*.keystore`, `*.jks`, `*.kdbx`, `.netrc`, `.npmrc`, `.pypirc`, `.htpasswd`, `*.tfvars`,
+  `*.tfstate`, `kubeconfig*`, `.kube/config`, `credentials`, `credentials.json`, `service-account*`, and
+  names containing secret, credential, password or token. This is a name check, so a secret inside an
+  ordinary source file that changed can still be in the excerpt. The text is written in a minimal ACP
+  engine session started with the route's ordinary engine-session launch (cleared environment, real `HOME`
+  and the connection's native directory; for Codex the native launcher that turns the owner's Codex MCP
+  servers off and verifies that and the disabled shell, plugin, hook and app features before App Server
+  starts; a Codex connection without that launcher is not used). The session gets an empty private scratch
+  directory, no ACP MCP servers and the engine's read-only mode; every
+  permission request is denied, and a permission request or tool call discards the answer. A Claude
+  session gets the same native tool restriction as every Cortex Claude session (no native shell, edit,
+  subagent, hook, plugin or owner-configured MCP server; see [Native engine tools](#native-engine-tools)).
+  Denying permissions does not stop a tool the engine runs without asking (Claude's own read and search
+  tools in its working directory); a tool call is detected and the answer discarded, but only after the
+  tool has run, so the prompt asks for text only and this is not containment. The session has no runtime
+  task, writes no project store and is not shown in any history; it ends after 25 seconds at most and its
+  process group is reaped. Unicode format characters (bidirectional controls, zero-width characters, the
+  byte order mark) are removed from every generated text. The answer is shown to the owner as editable
+  text and is never committed, merged or pushed without the owner's confirmation. `short-text.log` (file
+  0600 in the private log folder) records route identity, reason and outcome codes only, never prompts,
+  descriptions, diffs or answers. See
+  [short model texts](docs/cortex-workspace/local-task-execution.md#short-model-texts).
+- Remote access (built, no-paid tests only, not qualified; nothing verified on a physical Android device
+  or through a relay): when the owner turns it on, the service binds an iroh UDP endpoint that uses no n0
+  public relay and no n0 address lookup, with either no relay or exactly one configured relay. The machine
+  identity is a 32-byte key in a 0600 file (`remote-host.key`) in the service's private state directory,
+  and a phone's key is a 0600 file in the app's private data with Android backup off; neither is wrapped
+  by an OS keyring or the Android Keystore. Pairing uses a single-use link (QR code or copied text; 5
+  minutes; the fifth wrong secret cancels it) followed by a fingerprint on both sides and an explicit
+  Allow on the computer; there is no short pairing code, and only Allow stores the device. Revoking a
+  device closes its connections at once. Each remote stream goes to a fresh local-socket connection, and
+  every request first passes a closed, fail-closed allowlist
+  (`crates/workspace-service/src/remote_policy.rs`): every `remote.*` method, `service.stop`,
+  `terminal.*`, `voice.*`, file saves, all Git write actions, native login, package install and rollback,
+  and unknown methods are refused. A paired phone can still start and steer work and change machine and
+  project settings, which is command execution authority on the machine. A relay sees endpoint identities,
+  timing, volume and client IP addresses, not content. See
+  [remote access security](docs/cortex-workspace/security.md#remote-access-built-not-qualified).
 - The same OS user is local trust, not isolation from hostile code running as that user. The different-OS-user peer check is not yet verified.
 
 Automatic result repair uses the assigned task and its existing access. A repair request grants no additional permission. Review and verification apply to the new result. Closing after workspace drift keeps the original acceptance attached to its earlier result version.
@@ -2599,7 +3028,22 @@ writes a file, never follows a symlinked `.claude`, `.claude/skills` or
 different existing link only after the user confirms (see
 [Project skill links](docs/features/permissions-and-containment/index.md#project-skill-links)).
 
-`/skill-management <request>` is the explicit coordinator command for creating, revising, or importing project skills. Imported files are untrusted input; source URL, exact revision, and license information are recorded, and the runtime retains independent review. Skill instructions do not expand assignment scopes. Repeated work may be proposed to the user through a durable question (`user_question_request` with `skill_proposal`). The runtime requires 2 to 5 retained reports as evidence, refuses duplicate proposals, and accepts only explicit, action-matched English or Russian approval/decline option pairs before persistence. A stored pair is checked again when an answer is interpreted, including after restart; reversed, misleading or unknown labels cannot approve even through text option `1`. A decline or unclear answer changes nothing in the project. Skills are never installed automatically or activated merely because files exist. Once present in the supported project layout, a skill is listed by name, description and path in the [project skills](docs/features/unified-system-prompt/index.md#project-skills) section of every Cortex engine session whose role can read project files (owner-home skill directories are not listed); Cortex does not guarantee selection or use. Skill text is model input and grants no additional tool access, filesystem scope, or permission. Cortex's conditional `read_skill` trigger catalogue is role-scoped guidance in the prompt and advertised tool schema; it likewise grants no access and does not cause runtime-side skill loading. Tool state inside the project (`.venv`, `node_modules/.cache`,
+`/skill-management <request>` is the explicit coordinator command for creating, revising, or importing
+project skills. Imported files are untrusted input; source URL, exact revision, and license information
+are recorded, and the runtime retains independent review. Skill instructions do not expand assignment
+scopes. Repeated work may be proposed to the user through a durable question (`user_question_request` with
+`skill_proposal`). The runtime requires 2 to 5 retained reports as evidence, refuses duplicate proposals,
+and accepts only explicit, action-matched English or Russian approval/decline option pairs before
+persistence. A stored pair is checked again when an answer is interpreted, including after restart;
+reversed, misleading or unknown labels cannot approve even through text option `1`. A decline or unclear
+answer changes nothing in the project. Skills are never installed automatically or activated merely
+because files exist. Once present in the supported project layout, a skill is listed by name, description
+and path in the [project skills](docs/features/unified-system-prompt/index.md#project-skills) section of
+every Cortex engine session whose role can read project files (owner-home skill directories are not
+listed); Cortex does not guarantee selection or use. Skill text is model input and grants no additional
+tool access, filesystem scope, or permission. Cortex's conditional `read_skill` trigger catalogue is
+role-scoped guidance in the prompt and advertised tool schema; it likewise grants no access and does not
+cause runtime-side skill loading. Tool state inside the project (`.venv`, `node_modules/.cache`,
 `.pytest_cache`, `__pycache__`, `.mypy_cache`, `target/`, build caches) is
 writable because a writing worker's grant is the whole project, with no list of
 tools. Internal-only writable hardlinks remain linked. Guarded/engine launches
@@ -2641,11 +3085,49 @@ account's session tokens) that should stay owner-only.
 
 ## Configuration management UI and RPC boundary
 
-The Paseo plugin's Cortex Settings screen edits only the closed surfaces exposed by the Cortex management API: user defaults, project policy ceiling, routing, MCP servers, connection metadata and the first-run actions described below. It does not edit Paseo's own plugin settings document or expose arbitrary paths, commands, or executable selection. Project scope is resolved from Paseo's workspace; the owner configuration root comes from the Cortex launch environment. For the Rust launch, Settings and automatic setup apply the same compiled-channel resolver as `cortex-acp`: dev adds `cortex-workspace-dev` to the raw XDG config root and `cortex-workspace-dev/state` to the raw XDG state root, while project configuration uses `.cortex-dev`. Release roots and `.cortex` are unchanged. Runtime channel variables cannot redirect native Settings into another channel. The plugin obtains its displayed binding from the tools binary's read-free `config --host` metadata; a missing or invalid answer refuses before the requested operation. HOME/native-account references and explicit owner routing overrides are preserved; this is cooperative channel separation, not same-user process isolation.
+The Paseo plugin's Cortex Settings screen edits only the closed surfaces exposed by the Cortex management
+API: user defaults, project policy ceiling, routing, MCP servers, connection metadata and the first-run
+actions described below. It does not edit Paseo's own plugin settings document or expose arbitrary paths,
+commands, or executable selection. Project scope is resolved from Paseo's workspace; the owner
+configuration root comes from the Cortex launch environment. For the Rust launch, Settings and automatic
+setup apply the same compiled-channel resolver as `cortex-acp`: dev adds `cortex-workspace-dev` to the raw
+XDG config root and `cortex-workspace-dev/state` to the raw XDG state root, while project configuration
+uses `.cortex-dev`. Release roots and `.cortex` are unchanged. Runtime channel variables cannot redirect
+native Settings into another channel. The plugin obtains its displayed binding from the tools binary's
+read-free `config --host` metadata; a missing or invalid answer refuses before the requested operation.
+HOME/native-account references and explicit owner routing overrides are preserved; this is cooperative
+channel separation, not same-user process isolation.
 
 That launch environment comes from the owner-private `paseo-plugin-launch.json` record that setup writes in the Cortex config root of its own environment (`$XDG_CONFIG_HOME/cortex/`, or `~/.config/cortex/`). A Paseo daemon with its own `XDG_CONFIG_HOME` reads its own record. It uses the `~/.config` record only if that record names the same `XDG_CONFIG_HOME`, so one Paseo instance never starts another instance's runtime against that instance's configuration and state. Setup replaces only a record it recognizes as Cortex's own: an older record for the same entrypoint, or a record with the complete Cortex-owned shape and the same storage roots. Any other existing file is refused, never overwritten or deleted. This separates records by environment. It is not an operating-system isolation boundary: every instance runs as the same user.
 
-The first-run actions are: connection discovery, which reads installed adapter versions and checks whether an engine's native login marker file exists, without creating anything; native-account onboarding of `codex-acp`, `claude-agent-acp` or `opencode`, which needs an explicit opt-in, the current connections revision, a qualified installed adapter and the login marker, and then references the owner's existing native directory without copying it; Download engine, which runs npm to install only the manifest-pinned `codex-acp` or `claude-agent-acp` package into Cortex's owned engine root (`$XDG_DATA_HOME/cortex/engines`), bounded to 60 seconds in the former Python management API (native Workspace npm uses the remaining 30-second request budget, reserving one second for kill/reap and reply), with no caller-supplied package, version, path or binary and no npm output returned; and default-preset read, apply (missing files only) and reset (confirmed, revision-checked, with private backups first). The manual Download engine action starts network access on an explicit press. Separately, plugin activation or agent startup automatically downloads these same qualified manifest pins in a non-blocking background pass (600-second npm bound per engine), registers a missing native-account connection only when its native login marker exists, and observes models immediately through prompt-free discovery. `CORTEX_ENGINE_UPDATE=off` disables this automatic pass. The Rust ACP entry runs the same pass with the same 600-second npm bound and allowlisted progress files; its registration waits for `connections.lock` without a bound and repairs the owner configuration root to 0700 (owner-only, current user, no symlink component), catalogue publication is fenced on the unchanged observed record, and a launch shape its verifier does not admit is never launched. Its registry reader accepts the shapes the former Python registry parser accepted and refuses the rest; a registry that parser could read but not re-encode (a lone UTF-16 surrogate) is never rewritten. Native markers are checked for existence only, never opened or copied. Removal atomically persists an engine opt-out in the registry, preventing automatic recreation even during concurrent startup; explicit Add connection remains available. Existing connection records are not overwritten by registration. Model-discovery failure does not roll back a valid connection or replace a prior catalogue. Progress files contain only allowlisted phase names, not npm output, credentials or raw engine errors. No request field carries an API key, credential, path, binary, command or package version, and API-key connections remain setup-command only. Responses carry no credential value; preset results show configuration paths in display form only.
+The first-run actions are: connection discovery, which reads installed adapter versions and checks whether
+an engine's native login marker file exists, without creating anything; native-account onboarding of
+`codex-acp`, `claude-agent-acp` or `opencode`, which needs an explicit opt-in, the current connections
+revision, a qualified installed adapter and the login marker, and then references the owner's existing
+native directory without copying it; Download engine, which runs npm to install only the manifest-pinned
+`codex-acp` or `claude-agent-acp` package into Cortex's owned engine root
+(`$XDG_DATA_HOME/cortex/engines`), bounded to 60 seconds in the former Python management API (native
+Workspace npm uses the remaining 30-second request budget, reserving one second for kill/reap and reply),
+with no caller-supplied package, version, path or binary and no npm output returned; and default-preset
+read, apply (missing files only) and reset (confirmed, revision-checked, with private backups first). The
+manual Download engine action starts network access on an explicit press. Separately, plugin activation or
+agent startup automatically downloads these same qualified manifest pins in a non-blocking background pass
+(600-second npm bound per engine), registers a missing native-account connection only when its native
+login marker exists, and observes models immediately through prompt-free discovery.
+`CORTEX_ENGINE_UPDATE=off` disables this automatic pass. The Rust ACP entry runs the same
+pass with the same 600-second npm bound and allowlisted progress files; its registration waits for
+`connections.lock` without a bound and repairs the owner configuration root to 0700 (owner-only, current
+user, no symlink component), catalogue publication is fenced on the unchanged observed record, and a
+launch shape its verifier does not admit is never launched. Its registry reader accepts the shapes the
+former Python registry parser accepted and refuses the rest; a registry that parser could read but not
+re-encode (a lone UTF-16 surrogate) is never rewritten. Native markers are checked for existence only,
+never opened or copied. Removal atomically persists an engine opt-out in the registry, preventing
+automatic recreation even during concurrent startup; explicit Add connection remains available. Existing
+connection records are not overwritten by registration. Model-discovery failure does not roll back a valid
+connection or replace a prior catalogue. Progress files contain only allowlisted phase names, not npm
+output, credentials or raw engine errors. No request field carries an API key, credential, path, binary,
+command or package version, and API-key connections remain setup-command only. Responses carry no
+credential value; preset results show configuration paths in display form only.
 
 Native first-run cached catalogue entries are validated for field and evidence
 shape and recomputed route identity before reporting readiness; invalid entries
@@ -2656,7 +3138,16 @@ This is not protection against lockless same-user writers or route authorization
 
 The plugin RPC handlers rely on Paseo daemon authorization (the installed 0.10.0 implementation requires `daemon.manage` for RPC invocation); the handler itself receives no caller identity for an additional per-call check. Writes use revision preconditions and refuse stale revisions. File and project-configuration writes use the existing lock/SQLite transaction path; lockless external writers may still race the final instant. A timeout does not prove that a write failed; re-read state before retrying.
 
-MCP environment values and credential values/paths are not returned. MCP secret values may be retained with an explicit keep marker without being read back. Treat settings JSON fields as sensitive input: only enter trusted configuration, and never paste secrets into support logs or reports. OpenCode onboarding is explicit opt-in, references the owner's existing login rather than copying it, and does not enable automatic routing. OpenCode models also stay off (routing `enabled`) until the owner switches each one on under Settings > Models; a model left out of `enabled` is refused exactly like a denied one. The Models section's **Refresh model lists** action (`cortex.config.catalog.refresh`, management action `refresh` on `route_catalog`) starts each registered connection's engine for `initialize` and `session/new` only, in a private empty temporary directory rather than the project, never sends a prompt, and only adds a catalog snapshot; a failed refresh keeps the previous snapshot and changes no routing.
+MCP environment values and credential values/paths are not returned. MCP secret values may be retained
+with an explicit keep marker without being read back. Treat settings JSON fields as sensitive input: only
+enter trusted configuration, and never paste secrets into support logs or reports. OpenCode onboarding is
+explicit opt-in, references the owner's existing login rather than copying it, and does not enable
+automatic routing. OpenCode models also stay off (routing `enabled`) until the owner switches each one on
+under Settings > Models; a model left out of `enabled` is refused exactly like a denied one. The Models
+section's **Refresh model lists** action (`cortex.config.catalog.refresh`, management action `refresh` on
+`route_catalog`) starts each registered connection's engine for `initialize` and `session/new` only, in a
+private empty temporary directory rather than the project, never sends a prompt, and only adds a catalog
+snapshot; a failed refresh keeps the previous snapshot and changes no routing.
 
 Connections background polling is read-only and retains the last successful view on read failure, visibly marked with retry controls. It does not retry writes or clear revision-conflict feedback. A passive read started before a local mutation cannot replace that mutation’s returned view.
 
@@ -2753,7 +3244,17 @@ pins.
 
 Quota-window associations are exact owner settings, not model-family inference. Unmapped windows conservatively retain account-wide applicability, including exhaustion; missing numeric evidence is not zero. Settings validation precedes quota IO, and invalid reset policy cannot erase an engine-reported refusal. Associations cannot expand enabled/deny/provider/consent eligibility. See [the quota settings contract](docs/configuration.md#exact-quota-window-associations); install data is not a runtime overlay and existing profiles/configuration require explicit adoption.
 
-Brokered Cortex MCP channel loss is indeterminate and does not grant route fallback or permission to replay an uncertain mutation. The existing bounded recovery path requires a fresh attempt after confirming the old one is absent. Replacement MCP servers must supply fresh, request-matched tool/schema evidence before readiness; old-generation replies/exits cannot clear current failures. Incomplete or malformed tool lists fail closed. Serialization failure is contained to the request; none of these protections establish the cause of a historical production disconnect. See [failures](docs/features/failures-and-cancellation/index.md). Captured steering remains immutable; native host composer queue manipulation is not a grant to erase source history. Normal queue draining waits for background continuation ownership instead of cancelling it. Explicit Stop/cancel still fences waiting prompts and unfinished work; pending, unacknowledged prompts cannot authorize dispatch after interruption. See [delivery ownership](docs/features/steering-and-questions/index.md#continuation-delivery-ownership).
+Brokered Cortex MCP channel loss is indeterminate and does not grant route fallback or permission to
+replay an uncertain mutation. The existing bounded recovery path requires a fresh attempt after confirming
+the old one is absent. Replacement MCP servers must supply fresh, request-matched tool/schema evidence
+before readiness; old-generation replies/exits cannot clear current failures. Incomplete or malformed tool
+lists fail closed. Serialization failure is contained to the request; none of these protections establish
+the cause of a historical production disconnect. See
+[failures](docs/features/failures-and-cancellation/index.md). Captured steering remains immutable; native
+host composer queue manipulation is not a grant to erase source history. Normal queue draining waits for
+background continuation ownership instead of cancelling it. Explicit Stop/cancel still fences waiting
+prompts and unfinished work; pending, unacknowledged prompts cannot authorize dispatch after interruption.
+See [delivery ownership](docs/features/steering-and-questions/index.md#continuation-delivery-ownership).
 
 The Paseo queued-message config channel now retains a runtime-owned canonical
 content checksum with each source capture. A reused message identity with changed

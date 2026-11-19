@@ -93,6 +93,7 @@ function teamLine(m: SessionModel, title: string, ids: string[]) {
 
 /** Why a recorded result is not offered as the current one right now, or null when it is. */
 function resultHeld(m: SessionModel, pending: boolean): string | null {
+  if (m.view.task.closedAs === "unconfirmed") return "The task was closed without verification";
   if (m.mode === "offline" || m.mode === "unconfirmed") return "State needs confirmation";
   if (pending || m.open.length > 0) return "A decision is pending";
   if (m.mode === "stopping") return "The stop is not confirmed yet";
@@ -221,6 +222,9 @@ function DecisionCard(props: { m: SessionModel; d: Decision; now: number }) {
     {/* A withdrawn question reads as its one-line reason; one the runtime replaced says so, so two stops never read as two different reasons. */}
     <Match when={props.d.withdrawn}><div class="answered"><I n="x" s={14} /><span class="grow">{withdrawnLine(props.d)}</span></div></Match>
     <Match when={props.d.answer}>{a => <Answered question={p() ? permissionLine(props.d) : props.d.text} answer={a().text} at={a().at} files={a().attachments} icon={props.d.kind === "permission" ? "shield" : "question"} />}</Match>
+    <Match when={props.m.view.task.closedAs === "unconfirmed"}>
+      <div class="answered"><I n="eye" s={14} /><span class="grow">{p() ? permissionLine(props.d) : props.d.text}</span><span class="faint">Kept on record; no answer needed</span></div>
+    </Match>
     <Match when={p()}>{perm => <div class="dc" id={`decision-${props.d.id}`} role="group" aria-label={`Permission asked by ${props.d.from || "a worker"}`}>
       <div class="dc-h"><I n="shield" s={14} />Permission<Show when={props.d.from}><span class="muted">Asked by {props.d.from}</span></Show><span class="r">{waited()}</span></div>
       <div class="dc-q">{permissionLine(props.d)}</div>
@@ -379,21 +383,27 @@ export function OwnerHoldCard(props: { m: SessionModel; route: TaskRoute }) {
   const [sentFor, setSentFor] = createSignal<{ action: string; key: string } | null>(null);
   const sent = () => { const s = sentFor(); return s && s.key === holdKey(hold()) ? s.action : null; };
   const setSent = (action: string) => setSentFor({ action, key: holdKey(hold()) });
-  const [error, setError] = createSignal<string | null>(null);
+  // A refusal is the answer to this hold: it stays in the card in plain words, and the refused action is not offered
+  // again until the hold changes (a new hold offers its actions again).
+  const [refusedFor, setRefusedFor] = createSignal<{ action: string; key: string; message: string } | null>(null);
+  const refused = () => { const r = refusedFor(); return r && r.key === holdKey(hold()) ? r : null; };
+  const refuse = (action: string, key: string, message: string) => setRefusedFor({ action, key, message });
+  const error = () => refused()?.message ?? null;
   const title = (h: OwnerHold) => h.mode === "automatic" ? "Automatic needs your decision" : h.source === "queue" ? "The queue needs your decision" : "This task needs your decision";
   const offer = () => {
     const v = view(), r = v.task.result;
     return v.sprint && r?.sourceVersion ? { sprintId: v.sprint.id, targetBranch: v.target, sourceVersion: r.sourceVersion, digest: r.digest } : null;
   };
   const loading = (a: OwnerHoldAction) => (a === "allow_finish" || a === "accept_result") && !view().task.result ? "Loading the result…" : null;
-  const why = (a: OwnerHoldAction) => a === "close_as_is" ? closeBlocked(props.m) : loading(a) ?? (sent() === a ? "Sent. Waiting for the queue to act on it…" : null);
+  const why = (a: OwnerHoldAction) => (a === "close_as_is" ? closeBlocked(props.m) : loading(a) ?? (sent() === a ? "Sent. Waiting for the queue to act on it…" : null))
+    ?? (refused()?.action === a ? refused()!.message : null);
   const run = (a: OwnerHoldAction, h: OwnerHold, control: HTMLElement) => {
     if (why(a)) return;
     const id = view().id, now = ws.store.clock();
+    const key = holdKey(h);
     const send = (command: Parameters<typeof ws.run>[0]) => {
-      setError(null);
-      void ws.busy(ws.run(command), control).then(receipt => receipt.ok ? setSent(a) : setError(receipt.message))
-        .catch(e => setError(e instanceof Error ? e.message : "The request could not be sent."));
+      void ws.busy(ws.run(command), control).then(receipt => receipt.ok ? setSent(a) : refuse(a, key, receipt.message))
+        .catch(e => refuse(a, key, e instanceof Error ? e.message : "The request could not be sent."));
     };
     switch (a) {
       case "allow_finish": { const o = offer(); if (o) ws.open({ kind: "accept", taskId: id, automaticFinish: o }); return; }
@@ -403,7 +413,7 @@ export function OwnerHoldCard(props: { m: SessionModel; route: TaskRoute }) {
       case "confirm_and_continue": send({ type: "retry_task", taskId: id, now }); return;
       case "retry": if (h.sprintId) send({ type: "run_sprint", sprintId: h.sprintId, now }); return;
       case "ask_agent": send({ type: "request_changes", taskId: id, text: ASK_AGENT_TEXT, now }); return;
-      case "close_as_is": ws.closeTask(id); return;
+      case "close_as_is": ws.closeTask(id, undefined, message => refuse(a, key, message)); return;
       default: return;
     }
   };
@@ -447,8 +457,7 @@ export function OwnerHoldCard(props: { m: SessionModel; route: TaskRoute }) {
 /**
  * The pinned decision of a task whose state Cortex cannot confirm (`unconfirmedState`, from the runtime's own warning). While a
  * session is still being stopped the runtime decides by itself: one quiet line. Otherwise it is the owner's: what happened in plain
- * words, where to inspect it, and Close as is… with its confirmation, which replays nothing. Records that disagree cannot be changed
- * by Cortex at all, and the card says so beside the disabled Close.
+ * words, where to inspect it, and Close as is… with its confirmation, which replays nothing.
  */
 export function UnconfirmedCard(props: { m: SessionModel; route: TaskRoute }) {
   const ws = useWs();
@@ -463,11 +472,14 @@ export function UnconfirmedCard(props: { m: SessionModel; route: TaskRoute }) {
   const title = () => view().sprint?.runMode === "automatic" ? "Automatic needs your decision" : "This task needs your decision";
   const reason = () => state()?.kind === "exit_unconfirmed"
     ? "A process of this task did not confirm that it stopped, so it is not known whether it still runs. Nothing it did is repeated, and the task cannot continue while this is unknown. The service checks it again by itself the next time it starts."
-    : "The saved records of this task disagree with each other, so it is not known whether the task runs or stopped, and the service changes nothing about it. Nothing is repeated.";
+    : state()?.closable
+      ? "The saved records of this task disagree, so the service cannot confirm whether it is running or stopped."
+      : "The service could not confirm this task’s state. Nothing is repeated.";
   const asks = () => state()?.kind === "exit_unconfirmed"
     ? ["Inspect what the task did: its workers and their activity are under Workers, and machine checks under Diagnostics.",
        "Or close the task as is: what it did stays as it is, the result is marked Not verified, and nothing is repeated."]
-    : ["Re-check the state. If it stays the same, open Diagnostics to see why the records disagree."];
+    : ["Re-check the state or open Diagnostics to inspect the records.",
+       ...(state()?.closable ? ["Or close the task as is. This keeps the records, verifies nothing and does not stop or resume the run."] : [])];
   const workers = (): Route => ({ name: "task", machine: props.route.machine, task: props.route.task, tab: "workers" });
   const blocked = () => closeBlocked(props.m);
   return <Show when={state()}>{s => <Show when={s().kind !== "stopping"} fallback={
@@ -483,7 +495,7 @@ export function UnconfirmedCard(props: { m: SessionModel; route: TaskRoute }) {
         <Show when={s().kind === "exit_unconfirmed"}><A class="btn btn-line btn-sm" to={workers()}>Open workers</A></Show>
         <A class="btn btn-line btn-sm" to={{ name: "settings", machine: view().machine.id, section: "diagnostics" }}>Open Diagnostics</A>
         <button class={`btn ${s().closable ? "btn-primary" : "btn-line"} btn-sm`} {...ws.needs("close_task")} aria-disabled={blocked() ? "true" : undefined}
-          data-why={blocked() ? "A task whose records disagree cannot be changed from here. Re-check the state, or open Diagnostics." : undefined}
+          data-why={blocked() ?? undefined}
           onClick={() => { if (!blocked()) ws.closeTask(view().id); }}>Close as is…</button>
       </ActionBar>
     </section>
@@ -573,7 +585,7 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
   };
   const stranded = () => m().view.column === "needs" && !m().view.unknown && m().open.length === 0;
   // Questions asked together are one form until their answers are recorded.
-  const asks = createMemo(() => m().session.decisions.filter(d => d.kind === "question" && (isOpen(d) || d.held)));
+  const asks = createMemo(() => m().view.task.closedAs === "unconfirmed" ? [] : m().session.decisions.filter(d => d.kind === "question" && (isOpen(d) || d.held)));
   const inAsks = (id: string) => asks().some(d => d.id === id);
   // While a decision waits or work runs, no completed result and no Accept stand beside it: the last one stays as history.
   const held = () => m().view.task.result ? resultHeld(m(), asks().length > 0) : null;
@@ -789,6 +801,10 @@ export function TaskPage(props: { id: string }) {
     ...(["offline", "unconfirmed"].includes(m().mode) ? [offline] : []),
     ...(m().mode === "live" && !m().view.ownerDecision && m().view.task.observedPhase === "recovery" ? [interrupted] : []),
     ...(m().view.task.notVerifiedByCortex && m().view.task.closedAs === "as_is" ? [unverified] : []),
+    ...(m().view.task.closedAs === "unconfirmed" ? [{
+      id: "closed-unconfirmed", tone: "warn" as const, icon: <I n="alert" s={14} />,
+      text: <>You closed this task without verification. Its records still disagree. <A class="lnk" to={{ name: "settings", machine: m().view.machine.id, section: "diagnostics" }}>Open Diagnostics</A>.</>,
+    }] : []),
     ...(m().mode !== "stopping" && titleBlock(m()) ? [titleWhy] : []),
   ]);
   return <Page class="l-work l-task" scroll="none" head={<TaskBar m={m()} tab={tab()} route={route()} />} status={<StatusLane items={status()} />}>

@@ -45,7 +45,7 @@ it("distinguishes an unconfirmed task from a disconnected machine without promot
   expect(model(s).view.unknown).toBe(true);
   expect(model(s).view.task.process).toBe("unknown");
   expect(model(s).mode).toBe("unconfirmed");
-  expect(closeBlocked(model(s))).toContain("state is confirmed");
+  expect(closeBlocked(model(s))).toBeNull();
   s.machines[0].connection = "disconnected";
   expect(model(s).mode).toBe("offline");
   expect(model(world("paused")).mode).toBe("paused");

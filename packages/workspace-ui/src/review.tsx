@@ -193,7 +193,7 @@ export function ReviewBar(props: { m: SessionModel }) {
   // The same step the header names: a project-folder task (or one without Git) is finished in place, never merged.
   const step = () => readyStep(t(), props.m.view.target, props.m.view.project.hasGit);
   const hint = () => props.m.view.automaticFact?.text ?? (t().status === "ready_to_merge" ? `${t().acceptance ? `${t().acceptance!.automatic ? "Automatically accepted" : "You accepted"} v${t().acceptance!.version}.` : "Checks passed."} ${step() === "Ready to finish" ? "The task waits for your confirmation." : "The task waits in Ready to merge."}`
-    : t().status === "done" ? "This task is closed." : `Accept moves the task to ${step()}. Request changes reopens it.`);
+     : t().status === "closed_unverified" ? "This task was closed without verification." : t().status === "done" ? "This task is closed." : `Accept moves the task to ${step()}. Request changes reopens it.`);
   const describedBy = () => acceptStripShown(props.m) ? why : undefined;
   return <section class="rv-bar" aria-label="Review this result">
     <ActionBar start={<><I n={t().status === "done" ? "check-circle" : "eye"} s={14} class="faint" /><span class="w500">Result v{r().version}</span>
@@ -346,7 +346,7 @@ export function ChangesPanel(props: { m: SessionModel; route: TaskRoute }) {
         <button class="btn btn-line" aria-disabled={drafts() ? undefined : "true"} data-why={drafts() ? undefined : "Add a comment on a line first"} {...ws.needs("send_comments")} onClick={send}>Send<Show when={ws.keys("Ctrl+Enter")}>{k => <span class="key">{k()}</span>}</Show></button>
       </>}>
         {/* A closed task has nothing left to commit from its review. */}
-        <Show when={t().status !== "done"}><Show when={checkout()} fallback={<button class="btn btn-line" aria-disabled="true" data-why={ws.t("noCheckoutRecord")}>Commit…</button>}><A class="btn btn-line" to={commitTo()}>Commit…</A></Show></Show>
+        <Show when={t().status !== "done" && t().status !== "closed_unverified"}><Show when={checkout()} fallback={<button class="btn btn-line" aria-disabled="true" data-why={ws.t("noCheckoutRecord")}>Commit…</button>}><A class="btn btn-line" to={commitTo()}>Commit…</A></Show></Show>
         <Show when={!sameBranch(t(), props.m.view.target)}><span class="vr"></span><button class="btn btn-line" aria-disabled={blockedMerge() ? "true" : undefined} data-why={blockedMerge()} {...ws.needs("integrate")} onClick={() => { if (!blockedMerge()) ws.open({ kind: "merge", taskId: t().id, how: "squash" }); }}>Merge…</button></Show>
       </ActionBar></Show>}>
       <Show when={bounded()} fallback={<>

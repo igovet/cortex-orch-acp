@@ -833,8 +833,12 @@ fn evaluate_exact(
             // or not run (never a failure, never a policy-blocked one) is a visible
             // note, not an open check. Runtime verification and independent review
             // decide; a superseded claim cannot be rerun from the result anyway.
-            let superseded_by_verification =
-                settled && matches!(outcome, "not_run" | "unverified") && !policy_gap;
+            // A limitation the runtime itself recorded (for example changes it could not
+            // list for review) is not a self-reported claim: it stays a manual check.
+            let superseded_by_verification = settled
+                && matches!(outcome, "not_run" | "unverified")
+                && !policy_gap
+                && check["source"] != "runtime";
             let attempt = attempts.get(assignment.as_deref(), index);
             let optional_policy = settled
                 && matches
@@ -863,6 +867,24 @@ fn evaluate_exact(
                     reason,
                     superseded_by_verification || policy_gap || attempt_reason.is_some(),
                 ));
+            }
+            if outcome == "unverified" && manual && check["source"] == "runtime" {
+                // A limitation the runtime recorded is shown to the owner as a manual check
+                // with its reason; it is never a pass and never an open check.
+                let mut row = not_run_row(
+                    check["name"].as_str().unwrap_or(""),
+                    None,
+                    "runtime",
+                    false,
+                    true,
+                    check["blocker"]
+                        .as_str()
+                        .or_else(|| check["detail"].as_str())
+                        .unwrap_or("The runtime could not confirm this."),
+                    false,
+                );
+                row["outcome"] = json!("unverified");
+                not_run_checks.push(row);
             }
             if superseded_by_verification {
                 superseded.push(superseded_note(&stage, check, outcome));

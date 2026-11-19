@@ -157,6 +157,15 @@ fn bytes(folder: &File, name: &str) -> CoreResult<Option<(Vec<u8>, u32)>> {
     file.take(u64::MAX).read_to_end(&mut b)?;
     Ok(Some((b, m.mode() & 0o777)))
 }
+/// SHA-256 of a project file's current bytes, read the same way `project_read`
+/// reads them (descriptor traversal, no symlinks, a regular unlinked file only).
+/// `None` when there are no such bytes to read: missing, a symlink, a directory,
+/// a hard-linked or unreadable entry.
+pub(super) fn current_sha256(root: &Path, path: &str) -> Option<String> {
+    let (folder, name) = parent(root, path, false).ok()?;
+    let (b, _) = bytes(&folder, &name).ok()??;
+    Some(digest(&b))
+}
 fn coverage_key(path: &str) -> String {
     format!("file-read:{}", digest(path.as_bytes()))
 }
@@ -968,4 +977,105 @@ mod line_delta_tests {
         assert_eq!(line_delta("a\nb\n", "a\n"), (0, 1));
         assert_eq!(line_delta("same\n", "same\n"), (0, 0));
     }
+}
+
+/// Lines of a modified, Git-tracked file a reviewer must read: every line of the
+/// current file that differs from `base` (the commit checked out when the task's
+/// execution started), with three lines of context, as inclusive 1-based
+/// `[start, end]` ranges. That difference includes all of the task's changes, also
+/// any committed since, and any uncommitted change that predates the task, so it
+/// never covers less than the task changed. `None` (the whole file stays required)
+/// for a file absent from `base`, a Git failure, or ranges not smaller than the file.
+pub(crate) fn review_line_ranges(root: &Path, base: &str, path: &str) -> Option<Vec<[u64; 2]>> {
+    if base.len() != 40 || !base.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    const CONTEXT: u64 = 3;
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(["-c", "core.quotePath=false"])
+            .args(args)
+            .current_dir(root)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+    };
+    let literal = format!(":(literal){path}");
+    run(&["cat-file", "-e", &format!("{base}:{path}")])?;
+    let out = run(&[
+        "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--unified=0", base, "--", &literal,
+    ])?;
+    let text = String::from_utf8(out.stdout).ok()?;
+    let total = fs::read(root.join(path)).ok()?.split(|b| *b == b'\n').count() as u64;
+    let mut ranges: Vec<[u64; 2]> = Vec::new();
+    for line in text.lines().filter(|l| l.starts_with("@@ ")) {
+        // @@ -a[,b] +c[,d] @@
+        let new = line.split(' ').nth(2)?.strip_prefix('+')?;
+        let (start, count) = match new.split_once(',') {
+            Some((s, n)) => (s.parse::<u64>().ok()?, n.parse::<u64>().ok()?),
+            None => (new.parse::<u64>().ok()?, 1),
+        };
+        // A pure deletion (count 0) sits after line `start`: read around it.
+        let (first, last) = if count == 0 { (start, start + 1) } else { (start, start + count - 1) };
+        let range = [first.saturating_sub(CONTEXT).max(1), (last + CONTEXT).min(total.max(1))];
+        match ranges.last_mut() {
+            Some(prev) if range[0] <= prev[1] + 1 => prev[1] = prev[1].max(range[1]),
+            _ => ranges.push(range),
+        }
+    }
+    let required: u64 = ranges.iter().map(|[a, b]| b + 1 - a).sum();
+    (!ranges.is_empty() && required < total).then_some(ranges)
+}
+/// Adds `review_lines` to each modified, tracked file of a review packet whose
+/// changed lines are fewer than the whole file (`review_line_ranges`), and drops a
+/// stale one. Called whenever the packet names the files' current bytes.
+/// `base` is the `head` of the packet's `change_boundary.baseline_event`; without
+/// one (no commit yet, or it is unknown) every file stays a complete read.
+pub(crate) fn add_review_lines(root: &Path, base: Option<&str>, packet: &mut Value) {
+    let Some(files) = packet["changed_files"]["files"].as_array_mut() else {
+        return;
+    };
+    let mut any = false;
+    for file in files {
+        if let Some(entry) = file.as_object_mut() {
+            entry.remove("review_lines");
+        }
+        if file["change"] != "modified" || !file["current_sha256"].is_string() {
+            continue;
+        }
+        let Some(path) = file["path"].as_str() else { continue };
+        if let Some(ranges) = base.and_then(|base| review_line_ranges(root, base, path)) {
+            file["review_lines"] = json!(ranges);
+            any = true;
+        }
+    }
+    if any {
+        packet["changed_files"]["review_lines_guidance"] = json!("A file with review_lines needs only those line ranges of its current bytes read completely with project_read (offset and limit), not the whole file: they are every line that differs from the commit the task started on, with context. Read more of it when you need context. A file without review_lines must be read completely.");
+    }
+}
+/// The commit checked out when the task's execution started: the `head` of the
+/// execution baseline a review packet's change boundary names.
+pub(crate) fn review_base(
+    db: &rusqlite::Connection,
+    task: &str,
+    packet: &Value,
+) -> CoreResult<Option<String>> {
+    use rusqlite::OptionalExtension;
+    let Some(event) = packet["change_boundary"]["baseline_event"].as_i64() else {
+        return Ok(None);
+    };
+    Ok(db
+        .query_row(
+            "SELECT json_extract(payload_json,'$.head') FROM runtime_events
+             WHERE id=? AND task_id=? AND type='EXECUTION_BASELINE'",
+            (event, task),
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
 }

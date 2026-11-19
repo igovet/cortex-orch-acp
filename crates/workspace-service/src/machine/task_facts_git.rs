@@ -195,6 +195,8 @@ enum Landing {
     /// The inspection deadline passed first.
     Deadline,
 }
+/// The recorded content of a path the task deleted (never a content digest).
+const DELETED: &str = "deleted";
 /// One recorded write: its path, the content digest it recorded and when.
 struct Recorded<'a> {
     name: &'a str,
@@ -212,6 +214,19 @@ async fn landing(
     let Recorded { name, wanted, at } = file;
     if tokio::time::Instant::now() >= deadline {
         return Ok(Landing::Deadline);
+    }
+    // A recorded deletion: the path must still be absent from the folder. Absent from
+    // the target too means nothing to commit (created and removed by the task).
+    if wanted == Some(DELETED) {
+        if path.join(name).symlink_metadata().is_ok() {
+            return Ok(Landing::Unknown);
+        }
+        let spec = format!("{target}:{name}");
+        return Ok(if git.success(path, &["cat-file", "-e", &spec]).await? {
+            Landing::Pending
+        } else {
+            Landing::Landed
+        });
     }
     if blob(git, path, target, name).await?.as_deref() == wanted {
         return Ok(Landing::Landed);
@@ -315,7 +330,7 @@ async fn same_branch(
         let rows=db.prepare("SELECT e.type,e.payload_json,cast(strftime('%s',e.created_at) as integer) FROM runtime_events e
             JOIN trusted_channels c ON c.task_id=e.task_id AND c.channel_id=CASE e.type WHEN 'TOOL_COMPLETED' THEN e.actor
                 ELSE json_extract(e.payload_json,'$.channel_id') END
-            WHERE e.task_id=? AND e.type IN ('TOOL_COMPLETED','NATIVE_PROJECT_WRITTEN') ORDER BY e.id LIMIT 1001")?
+            WHERE e.task_id=? AND e.type IN ('TOOL_COMPLETED','NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED') ORDER BY e.id LIMIT 1001")?
             .query_map([&runtime],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,Option<i64>>(2)?)))?
             .collect::<std::result::Result<Vec<_>,_>>()?;
         if rows.len()>1000{return Ok(None);}
@@ -326,6 +341,21 @@ async fn same_branch(
         let mut seen=std::collections::HashMap::<(String,String,String),i64>::new();
         for(kind,raw,at)in rows {
             let v:Value=serde_json::from_str(&raw)?;
+            // A deletion through the native project_delete tool is the path's latest
+            // recorded content: absent. Confirmed only by its completed receipt.
+            if kind=="NATIVE_PROJECT_CHANGED" {
+                if v["operation"]!="project_delete"{continue;}
+                let Some(name)=v["path"].as_str()else{return Ok(None);};
+                if relative(name).is_err(){return Ok(None);}
+                let channel=v["channel_id"].as_str().unwrap_or_default();
+                let confirmed:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?
+                    AND operation='project_delete' AND json_valid(result_json) AND json_extract(result_json,'$.complete')=1
+                    AND json_extract(result_json,'$.reply.structuredContent.deleted')=1
+                    AND json_extract(result_json,'$.reply.structuredContent.path')=?)",
+                    rusqlite::params![&runtime,channel,v["request_key"].as_str().unwrap_or_default(),name],|r|r.get(0))?;
+                content.insert(name.to_owned(),(confirmed.then(||DELETED.to_owned()),at));
+                continue;
+            }
             if kind=="NATIVE_PROJECT_WRITTEN" {
                 let Some(name)=v["path"].as_str()else{return Ok(None);};
                 if relative(name).is_err(){return Ok(None);}

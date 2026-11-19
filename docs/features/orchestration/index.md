@@ -339,8 +339,9 @@ each part of the change the review cannot cover itself, with its dead-end
 finishes its own review first: `result_submit` refuses, before publication and
 with the exact items in `missing`, an INCOMPLETE part without a valid blocker
 (`review_coverage_unfinished`), a changed regular file it has not read completely
-in its current bytes (`review_file_coverage_required`), a predecessor report not
-read to its last page (`review_predecessor_reports_required`) and a BLOCK without
+in its current bytes (`review_file_coverage_required`), a required predecessor report
+(its packet's `predecessor_reports`) not read to its last page
+(`review_predecessor_reports_required`) and a BLOCK without
 findings (`review_block_findings_required`); the review stays the one running
 assignment and the same session continues. An accepted INCOMPLETE schedules no
 second review of the same revision: actionable findings start their fixes,
@@ -358,9 +359,17 @@ carries a `review_packet`: the files the reviewed work changed (path, change kin
 the plan node that wrote it; at most 200, the rest counted by folder), built from
 the difference between the execution baseline's per-file manifest and the folder
 now plus the writes the sessions recorded, never from Git alone, with
-`complete: false` when only recorded writes were available; the predecessor
-reports with their size and page count; and the review's read scope, checked to
-cover every changed file.
+`complete: false` when only recorded writes were available (changed Git-ignored
+files are not deliverable: they only add an `ignored_files` note); the predecessor
+reports with their size and page count, split into the required reports of this
+review's round (`predecessor_reports`) and optional context (`optional_reports`:
+earlier rounds, work without recorded writes, earlier plans; see
+[roles and delegation](../roles-and-delegation/index.md)); and the review's read scope, checked to
+cover every changed file. A change set the host could not enumerate never makes
+approval impossible: the listed files must still be read completely, and an
+approval then carries an `unverified` runtime check (`REVIEW_CHANGE_SET_LIMITED`)
+that the final result discloses under Not verified, telling the owner to inspect
+the folder.
 Three unsuccessful review cycles block further automatic
 work. The loop never treats an ordinary final model message as a worker result.
 

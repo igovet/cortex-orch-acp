@@ -44,7 +44,8 @@ export const STOPPED = "A pull is stopped in this checkout. Continue or abort it
  * Finish on its stop question for one, reads as done but has no such record: its runtime phase is still shown
  * (`overlayTask` clears it only for a recorded status).
  */
-export function archiveBlocked(t: Pick<Task, "status" | "archive" | "observedPhase">): string | undefined {
+export function archiveBlocked(t: Pick<Task, "status" | "archive" | "observedPhase" | "warnings">): string | undefined {
+  if (t.warnings?.includes("contradictory_evidence")) return "The records disagree. The task and its evidence must stay in place.";
   if (t.archive) return "Already in the Archive";
   if (t.status !== "done") return "Available when the task is done";
   return t.observedPhase === undefined ? undefined : "Only a task merged or closed in this app can go to the Archive. This one was ended by the runtime.";

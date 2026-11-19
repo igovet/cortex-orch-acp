@@ -1162,8 +1162,13 @@ fsync'd atomic terminal status after output and sandbox cleanup. Recovery verifi
 output hash/size and commits the original receipt/output/finish event together,
 without inventing a project-revision digest. Missing, mismatched, dead-without-status
 or corrupt handles remain unknown and fenced; legacy, outside-command and runtime
-verification handles still use conservative unknown recovery. No branch relaunches
-a payload. Engine sessions and detached unsandboxed descendants are not adopted.
+verification handles still use conservative unknown recovery. Such a receipt is then
+settled (`complete: false`, `outcome: "unknown"`, never a success) once its process is
+provably gone: an earlier boot, a lost supervisor whose recorded payload process group
+is empty or whose read-only PID namespace ended with it, or an unsupervised process
+and its group gone. A launch whose payload was never released settles as
+`command_not_started`. See [recovery and replacement](../features/recovery-and-replacement/index.md).
+No branch relaunches a payload. Engine sessions and detached unsandboxed descendants are not adopted.
 Read-only Git disables hooks, fsmonitor, external
 diff/text conversion and configured clean/smudge/process filters.
 

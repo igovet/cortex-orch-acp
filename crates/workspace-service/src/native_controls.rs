@@ -2236,21 +2236,32 @@ impl Runtime {
         let route = self.coordinator_route(&task, None).await;
         let refused = route.as_ref().err().map(|e| e.code().to_owned());
         let t = task.clone();
+        // The task's own live driver can take the same answer first (the answer wakes
+        // it) and move the task on before the settle above cancels it. The
+        // continuation is then no longer owed, yet no driver is left: the task is
+        // resumed from its current state instead of being left silently stranded.
         let continued = self
             .host
             .executor
             .write(move |db| {
                 if !domain::stop_continuation_owed_tx(db, &t)? {
-                    return Ok(None);
+                    let owner = db
+                        .query_row(
+                            "SELECT owner_ref,epoch FROM task_owners WHERE task_id=?",
+                            [&t],
+                            |r| Ok(OwnerEpoch { owner: r.get(0)?, epoch: r.get(1)? }),
+                        )
+                        .optional()?;
+                    return Ok(Err(owner));
                 }
                 if let Some(code) = refused {
                     lifecycle::event_tx(db, &t, "NATIVE_DRIVER_STOPPED", json!({"reason":code}))?;
                     domain::stop_tx(db, &t, &code)?;
-                    return Ok(None);
+                    return Ok(Ok(None));
                 }
                 if let Err(error) = domain::native_continue_tx(db, &t) {
                     domain::native_recovery_required_tx(db, &t, error.code())?;
-                    return Ok(None);
+                    return Ok(Ok(None));
                 }
                 let (owner, epoch, goal, answer) = db.query_row(
                     "SELECT o.owner_ref,o.epoch,r.goal,(SELECT q.answer_text FROM pending_questions q
@@ -2266,10 +2277,15 @@ impl Runtime {
                         ))
                     },
                 )?;
-                Ok(Some((OwnerEpoch { owner, epoch }, goal, answer)))
+                Ok(Ok(Some((OwnerEpoch { owner, epoch }, goal, answer))))
             })?
             .await
             .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        let continued = match continued {
+            Ok(continued) => continued,
+            Err(Some(owner)) => return self.resume_task(task, owner).await,
+            Err(None) => None,
+        };
         if let (Some((owner, goal, answer)), Ok(route)) = (continued, route) {
             let prompt = format!(
                 "{goal}\n\nContinue from the retained task state. Owner input: {}",

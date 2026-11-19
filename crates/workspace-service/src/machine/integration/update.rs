@@ -11,6 +11,7 @@ use std::path::Path;
 /// The task fields an update writes; no other field of the saved record is touched.
 const OWNED: &[&str] = &[
     "requiresFreshResult",
+    "changesBaseRevision",
     "conflict",
     "merge",
     "acceptance",
@@ -164,6 +165,30 @@ pub(super) async fn run(
     crate::machine::integration_squash::replay(reply)
 }
 
+pub(super) async fn target_revision(path: &Path, target: &str, git: &mut Git) -> Result<String> {
+    let revision = git
+        .out(
+            path,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("refs/heads/{target}^{{commit}}"),
+            ],
+        )
+        .await?;
+    Ok(revision.trim().to_owned())
+}
+
+pub(super) async fn verify_merged(path: &Path, revision: &str, git: &mut Git) -> Result<()> {
+    match git
+        .success(path, &["merge-base", "--is-ancestor", revision, "HEAD"])
+        .await
+    {
+        Ok(true) => Ok(()),
+        _ => Err(refuse("integration_unknown", "Git reported success but the merged target could not be confirmed. Inspect the task branch before retrying.")),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn merge(
     state: &Path,
@@ -178,6 +203,7 @@ async fn merge(
 ) -> Result<Value> {
     let head = git.out(path, &["rev-parse", "HEAD"]).await?;
     let fresh = json!({"resultId":verified["resultId"],"version":verified["version"]});
+    let target_revision = target_revision(path, target, git).await?;
     let message = format!("Merge {target} into {source}");
     let merged = git
         .success(
@@ -189,7 +215,7 @@ async fn merge(
                 "-m",
                 &message,
                 "--",
-                target,
+                &target_revision,
             ],
         )
         .await?;
@@ -198,6 +224,8 @@ async fn merge(
         let mut merge = conflicts::build(path, source, target, &record, git).await?;
         // What Abort merge puts back: the tree is then exactly the reviewed one again.
         merge["kind"] = json!("update");
+        merge["targetRevision"] = json!(target_revision);
+        merge["sourceRevision"] = json!(head.trim());
         merge["before"]["requiresFreshResult"] = record["requiresFreshResult"].clone();
         let n = merge["files"].as_array().map_or(0, Vec::len);
         record["requiresFreshResult"] = fresh;
@@ -220,6 +248,8 @@ async fn merge(
         }
         return Err(refuse("integration_unknown", "Git may have changed the task branch. Inspect it in Git before requesting another action; nothing was retried."));
     }
+    verify_merged(path, &target_revision, git).await?;
+    record["changesBaseRevision"] = json!(target_revision);
     // The tree moved: the result the owner reviewed is not the current one any more.
     record["requiresFreshResult"] = fresh;
     record["acceptance"] = Value::Null;

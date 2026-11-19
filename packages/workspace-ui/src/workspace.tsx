@@ -244,6 +244,8 @@ export function Workspace(props: WorkspaceProps) {
   const unique = () => demo?.unique() ?? (globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`).slice(0, 8);
   const [closing, setClosing] = createSignal<string | null>(null);
   const [externalClose, setExternalClose] = createSignal<"external" | "already_in_target" | null>(null);
+  // Who opened the close dialog hears its refusals (a pinned decision keeps them in its card).
+  let closeRefused: ((message: string) => void) | undefined;
   const [paletteOpen, setPaletteOpen] = createSignal(false);
   const [helpOpen, setHelpOpen] = createSignal(false);
   const [menuTask, setMenuTask] = createSignal<string | null>(null);
@@ -313,7 +315,7 @@ export function Workspace(props: WorkspaceProps) {
     stopTask(taskId) {
       void store.dispatch({ type: "stop_task", taskId, confirmed: demo?.stopConfirmed() ?? true, now: store.clock() });
     },
-    closeTask: (id, how) => { setExternalClose(how ?? null); setClosing(id); },
+    closeTask: (id, how, refused) => { closeRefused = refused; setExternalClose(how ?? null); setClosing(id); },
     run: (command: WorkspaceCommand) => store.dispatch(command),
     dialog, open: setDialog, closeDialog: () => setDialog(null),
     accept(taskId) {
@@ -537,7 +539,7 @@ export function Workspace(props: WorkspaceProps) {
       <ReasonTip />
       <Palette open={paletteOpen()} onClose={() => setPaletteOpen(false)} />
       <Help open={helpOpen()} onClose={() => setHelpOpen(false)} />
-      <Show when={externalClose()} fallback={<CloseDialog taskId={closing()} onClose={() => setClosing(null)} />}>
+      <Show when={externalClose()} fallback={<CloseDialog taskId={closing()} onClose={() => setClosing(null)} onRefused={message => closeRefused?.(message)} />}>
         <ExternalDoneDialog taskId={closing()} how={externalClose()!} onClose={() => setClosing(null)} />
       </Show>
       <UnsavedOnClose open={closingWindow()} onClose={() => setClosingWindow(false)} />

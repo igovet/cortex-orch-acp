@@ -482,6 +482,190 @@ pub fn predecessor_reports(db: &Connection, task: &str, node: &str) -> CoreResul
     Ok(out)
 }
 
+/// Optional reports a review brief lists, newest first; the rest are counted.
+pub const OPTIONAL_REVIEW_REPORTS: usize = 24;
+/// How a reviewer uses the split, carried in its review packet.
+pub const REVIEW_READING_RULE: &str = "Read every predecessor_reports entry to its last page with read_report before result_submit; a review that has not is refused with the unread ids. optional_reports (earlier fix rounds and reviews, work without recorded writes, earlier plans) are context: read one only when it bears on what you judge. unavailable_reports cannot be read and are not required.";
+
+/// The predecessor reports of review node `review` (current revision), bounded to
+/// what that review judges.
+///
+/// `required` is the work of this review's round and nothing older: after a
+/// completed review of the same revision, the fixes scheduled since (every one,
+/// with or without writes) and that review's own report, so its findings are
+/// neither re-raised nor lost; for the first review of a revision, the work nodes
+/// whose writes or changes the runtime recorded (all of the round's work when none
+/// recorded any). Only nodes the review depends on count. `optional` lists every
+/// other report it builds on (earlier rounds, work without recorded writes) and the
+/// reports of earlier plans, newest first and at most [`OPTIONAL_REVIEW_REPORTS`];
+/// `optional_more` counts the rest. A required report without a published edition
+/// is moved to `unavailable` and never required.
+pub fn review_reports(db: &Connection, task: &str, review: &str) -> CoreResult<Value> {
+    let revision: i64 = db.query_row(
+        "SELECT revision FROM runtime_tasks WHERE task_id=?",
+        [task],
+        |r| r.get(0),
+    )?;
+    let own: Option<(i64, String)> = db
+        .query_row(
+            "SELECT rowid,dependencies_json FROM runtime_nodes WHERE task_id=? AND revision=? AND node_id=?",
+            (task, revision, review),
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let (own_row, deps) = own.unwrap_or((i64::MAX, "[]".into()));
+    let deps: std::collections::BTreeSet<String> = serde_json::from_str::<Vec<String>>(&deps)?
+        .into_iter()
+        .collect();
+    struct Node {
+        row: i64,
+        id: String,
+        role: String,
+        stage: String,
+        report: String,
+        marker: Option<String>,
+        wrote: bool,
+    }
+    let nodes: Vec<Node> = db
+        .prepare(
+            "SELECT n.rowid,n.node_id,n.role,n.stage,json_extract(n.result_json,'$.report_ref'),
+                json_extract(n.result_json,'$.report_structure.status'),
+                EXISTS(SELECT 1 FROM runtime_events e JOIN trusted_channels c ON c.task_id=e.task_id
+                  AND c.channel_id=json_extract(e.payload_json,'$.channel_id')
+                  WHERE e.task_id=n.task_id AND e.type IN ('NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED')
+                  AND c.assignment_id=n.assignment_ref)
+             FROM runtime_nodes n WHERE n.task_id=? AND n.revision=? AND n.rowid!=?
+             AND json_type(n.result_json,'$.report_ref')='text' ORDER BY n.rowid",
+        )?
+        .query_map((task, revision, own_row), |r| {
+            Ok(Node {
+                row: r.get(0)?,
+                id: r.get(1)?,
+                role: r.get(2)?,
+                stage: r.get(3)?,
+                report: r.get(4)?,
+                marker: r.get(5)?,
+                wrote: r.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|n| deps.contains(&n.id))
+        .collect();
+    let previous = nodes
+        .iter()
+        .filter(|n| {
+            n.stage == "review"
+                && n.row < own_row
+                && !crate::lifecycle::sprint_planning::is_plan_review(&n.id)
+        })
+        .max_by_key(|n| n.row);
+    let after = previous.map_or(i64::MIN, |p| p.row);
+    let round: Vec<&Node> = nodes
+        .iter()
+        .filter(|n| n.stage == "execution" && n.row > after)
+        .collect();
+    let mut chosen: Vec<&Node> = if previous.is_some() || !round.iter().any(|n| n.wrote) {
+        round.clone()
+    } else {
+        round.iter().copied().filter(|n| n.wrote).collect()
+    };
+    chosen.extend(previous);
+    let entry = |n: &Node, revision: Option<i64>| -> CoreResult<Value> {
+        let mut e = report_entry(db, task, &n.report, Some(&n.id), Some(&n.role))?;
+        e["page_characters"] = json!(PAGE_CHARACTERS);
+        if let Some(marker) = &n.marker {
+            e["report_structure"] = json!(marker);
+        }
+        if let Some(revision) = revision {
+            e["revision"] = json!(revision);
+        }
+        Ok(e)
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let (mut required, mut unavailable) = (Vec::new(), Vec::new());
+    for n in nodes
+        .iter()
+        .filter(|n| chosen.iter().any(|c| c.row == n.row))
+    {
+        if !seen.insert(n.report.clone()) {
+            continue;
+        }
+        let e = entry(n, None)?;
+        if e["availability"] == "unavailable" {
+            unavailable.push(e);
+        } else {
+            required.push(e);
+        }
+    }
+    let mut optional = Vec::new();
+    let mut more = 0usize;
+    for n in nodes.iter().rev() {
+        if !seen.insert(n.report.clone()) {
+            continue;
+        }
+        if optional.len() >= OPTIONAL_REVIEW_REPORTS {
+            more += 1;
+            continue;
+        }
+        let mut e = entry(n, None)?;
+        e["why_optional"] = json!(if n.row < after {
+            "earlier_round"
+        } else {
+            "no_recorded_writes"
+        });
+        optional.push(e);
+    }
+    // Earlier plans: bounded read, newest first; the remainder is only counted.
+    let earlier: Vec<Node> = db
+        .prepare(
+            "SELECT revision,node_id,role,stage,json_extract(result_json,'$.report_ref'),
+                json_extract(result_json,'$.report_structure.status')
+             FROM runtime_nodes WHERE task_id=? AND revision<?
+             AND json_type(result_json,'$.report_ref')='text' ORDER BY revision DESC,rowid DESC LIMIT ?",
+        )?
+        .query_map(
+            (task, revision, (OPTIONAL_REVIEW_REPORTS * 2) as i64),
+            |r| {
+                Ok(Node {
+                    row: r.get(0)?,
+                    id: r.get(1)?,
+                    role: r.get(2)?,
+                    stage: r.get(3)?,
+                    report: r.get(4)?,
+                    marker: r.get(5)?,
+                    wrote: false,
+                })
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let earlier_total: i64 = db.query_row(
+        "SELECT count(*) FROM runtime_nodes WHERE task_id=? AND revision<? AND json_type(result_json,'$.report_ref')='text'",
+        (task, revision),
+        |r| r.get(0),
+    )?;
+    let mut counted = 0i64;
+    for n in &earlier {
+        counted += 1;
+        if !seen.insert(n.report.clone()) {
+            continue;
+        }
+        if optional.len() >= OPTIONAL_REVIEW_REPORTS {
+            more += 1;
+            continue;
+        }
+        let mut e = entry(n, Some(n.row))?;
+        e["why_optional"] = json!("earlier_plan");
+        optional.push(e);
+    }
+    more += (earlier_total - counted).max(0) as usize;
+    let mut out = json!({"required":required,"optional":optional,"unavailable":unavailable});
+    if more > 0 {
+        out["optional_more"] = json!(more);
+    }
+    Ok(out)
+}
+
 /// The owner's constraints in force: the owner's messages to this task (newest kept,
 /// each text bounded with its size and sha256), the write denials and the access mode.
 pub fn constraints(db: &Connection, task: &str) -> CoreResult<Value> {
@@ -674,5 +858,190 @@ mod tests {
             .find(|l| l.starts_with("<!--"))
             .unwrap();
         assert!(guidance_remaining(&format!("# Report\n\n{line}\n")));
+    }
+    /// Three replans (revisions 1 to 4) and six fix rounds (2, 2, 0 and 2), each work
+    /// and fix node writing, each with a published report. Returns the report id of
+    /// every node by `(revision, node)`; the last review of revision 4 is pending.
+    fn long_history(
+        db: &rusqlite::Transaction<'_>,
+    ) -> crate::CoreResult<BTreeMap<(i64, String), String>> {
+        let mut reports = BTreeMap::new();
+        let mut counter = 0u32;
+        for (revision, rounds) in [(1i64, 2), (2, 2), (3, 0), (4, 2)] {
+            let mut ids: Vec<String> = Vec::new();
+            let mut add = |id: &str,
+                           role: &str,
+                           stage: &str,
+                           deps: &[String],
+                           wrote: bool,
+                           done: bool|
+             -> crate::CoreResult<()> {
+                counter += 1;
+                let assignment = format!("a{counter}");
+                let report = format!("r_{counter:012x}");
+                let result = done.then(|| json!({"report_ref":report}).to_string());
+                db.execute(
+                    "INSERT INTO runtime_nodes VALUES ('t',?,?,?,'o',?,'[\"src\"]',?,?,?,?)",
+                    (
+                        revision,
+                        id,
+                        role,
+                        json!(deps).to_string(),
+                        stage,
+                        if done { "completed" } else { "pending" },
+                        &assignment,
+                        result,
+                    ),
+                )?;
+                if done {
+                    db.execute("INSERT INTO reports(id,task_id,kind,filename,created_at) VALUES (?,'t','report',?,'0')", (&report, format!("{report}.md")))?;
+                    db.execute("INSERT INTO editions(report_id,title,summary,author,updated_at,digest,size_bytes) VALUES (?,'T','S','x','0','d',4100)", [&report])?;
+                    reports.insert((revision, id.to_owned()), report);
+                }
+                if wrote {
+                    let channel = format!("ch{counter}");
+                    db.execute("INSERT INTO trusted_channels(channel_id,secret_hash,task_id,principal_thread_id,role,assignment_id,attempt_id,owner_epoch,issued_at)
+                        VALUES (?,'x','t','p','worker',?,'x',1,'0')", (&channel, &assignment))?;
+                    crate::lifecycle::event_tx(
+                        db,
+                        "t",
+                        "NATIVE_PROJECT_WRITTEN",
+                        json!({"channel_id":channel,"path":"src/a.rs"}),
+                    )?;
+                }
+                Ok(())
+            };
+            add("work", "worker-backend-dev", "execution", &[], true, true)?;
+            ids.push("work".into());
+            add("scan", "worker-explorer", "execution", &[], false, true)?;
+            ids.push("scan".into());
+            add(
+                "docs",
+                "worker-technical-writer",
+                "execution",
+                &[],
+                false,
+                true,
+            )?;
+            ids.push("docs".into());
+            if revision > 1 {
+                add(
+                    "_consultation",
+                    "worker-senior-consultant",
+                    "execution",
+                    &[],
+                    false,
+                    true,
+                )?;
+                ids.push("_consultation".into());
+            }
+            for k in 1..=rounds {
+                let review = format!("_review_{k}");
+                add(
+                    &review,
+                    "worker-code-reviewer",
+                    "review",
+                    &ids.clone(),
+                    false,
+                    true,
+                )?;
+                ids.push(review.clone());
+                let fix = format!("_fix_{k}_work");
+                add(
+                    &fix,
+                    "worker-backend-dev",
+                    "execution",
+                    &[review],
+                    true,
+                    true,
+                )?;
+                ids.push(fix);
+            }
+            let last = format!("_review_{}", rounds + 1);
+            add(
+                &last,
+                "worker-code-reviewer",
+                "review",
+                &ids.clone(),
+                false,
+                revision < 4,
+            )?;
+        }
+        db.execute("UPDATE runtime_tasks SET revision=4 WHERE task_id='t'", [])?;
+        Ok(reports)
+    }
+    fn ids(list: &Value) -> Vec<String> {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["report_id"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    /// After three replans and six fix rounds the current review requires only its
+    /// round: the last fix and the review that asked for it. Everything older,
+    /// across revisions, is optional and bounded; the first review of a revision
+    /// requires the writing work only.
+    #[test]
+    fn review_reading_is_bounded_to_the_current_round() {
+        use crate::{lifecycle::TaskMachine, OpenMode, ProjectKey, StoreChannel};
+        let root = std::env::temp_dir().join(format!("review-reading-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let store = crate::Store::open(
+            ProjectKey::new(&root, StoreChannel::Dev).unwrap(),
+            OpenMode::Initialize,
+        )
+        .unwrap();
+        TaskMachine::new(&store)
+            .create("t", "Goal", "owner")
+            .unwrap();
+        let reports = store.write(|db| long_history(db)).unwrap();
+        let r = |rev: i64, id: &str| reports[&(rev, id.to_owned())].clone();
+        let split = store
+            .read(|db| review_reports(db, "t", "_review_3"))
+            .unwrap();
+        assert_eq!(
+            ids(&split["required"]),
+            [r(4, "_review_2"), r(4, "_fix_2_work")]
+        );
+        let required = &split["required"][0];
+        assert_eq!(required["node"], "_review_2");
+        assert_eq!(required["pages_at_most"], 2);
+        assert_eq!(required["page_characters"], PAGE_CHARACTERS);
+        let optional = split["optional"].as_array().unwrap();
+        assert_eq!(optional.len(), OPTIONAL_REVIEW_REPORTS);
+        // 6 other reports of revision 4 plus 8, 9 and 5 of revisions 1 to 3.
+        assert_eq!(
+            split["optional_more"],
+            6 + 8 + 9 + 5 - OPTIONAL_REVIEW_REPORTS
+        );
+        assert_eq!(optional[0]["report_id"], r(4, "_fix_1_work"));
+        assert_eq!(optional[0]["why_optional"], "earlier_round");
+        assert!(optional
+            .iter()
+            .any(|e| e["why_optional"] == "earlier_plan" && e["revision"] == 3));
+        assert!(split["unavailable"].as_array().unwrap().is_empty());
+        // The first review of a revision requires the work that wrote, not the
+        // explorer or the consultation (both optional).
+        let first = store
+            .read(|db| review_reports(db, "t", "_review_1"))
+            .unwrap();
+        assert_eq!(ids(&first["required"]), [r(4, "work")]);
+        let optional = ids(&first["optional"]);
+        assert!(optional.contains(&r(4, "scan")) && optional.contains(&r(4, "_consultation")));
+        // A required report without a published edition is unavailable, not required.
+        store
+            .write(|db| {
+                db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id='t' AND revision=4 AND node_id='_fix_2_work'",
+                    [json!({"report_ref":"r_ffffffffffff"}).to_string()])?;
+                Ok(())
+            })
+            .unwrap();
+        let split = store
+            .read(|db| review_reports(db, "t", "_review_3"))
+            .unwrap();
+        assert_eq!(ids(&split["required"]), [r(4, "_review_2")]);
+        assert_eq!(ids(&split["unavailable"]), ["r_ffffffffffff"]);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

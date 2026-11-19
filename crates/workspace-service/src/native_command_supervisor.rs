@@ -162,6 +162,12 @@ pub fn run() -> io::Result<()> {
         Err(_) => failure = Some("spawn_failed"),
         Ok(mut child) => {
             let pid = child.id();
+            // The payload leads its own process group. Recording it lets a later
+            // observer prove the payload gone after this supervisor is lost.
+            let _ = publish(
+                &spec.status,
+                &json!({"ref":spec.reference,"supervisor":own,"state":"ready","group":pid}),
+            );
             let stopping = Arc::new(AtomicBool::new(false));
             let out = drain(
                 child.stdout.take().unwrap(),

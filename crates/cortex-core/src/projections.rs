@@ -70,6 +70,26 @@ fn lifecycle(state: &str) -> (&'static str, &'static str) {
         _ => ("unknown", "unknown"),
     }
 }
+pub(crate) const CLOSE_UNCONFIRMED: &str = "tasks.close_unconfirmed";
+pub(crate) const CLOSED_UNCONFIRMED: &str = "owner_closed_unconfirmed";
+pub(crate) const CONTRADICTORY_EVIDENCE: &str = "contradictory_evidence";
+
+// Internal request identities are not accepted as client request IDs. The receipt
+// belongs to the Workspace task and execution pointer, not to a disputed runtime owner.
+pub(crate) fn unconfirmed_close_key(task: &str) -> String {
+    // The wire Identity allows any string up to 128 characters.
+    format!("/close-unconfirmed/{task}/{:0>129}", "")
+}
+
+pub fn task_records(
+    db: &Connection,
+    project: &str,
+    root: &str,
+    id: &str,
+) -> CoreResult<Option<TaskProjection>> {
+    task(db, project, root, id)
+}
+
 pub(super) fn task(
     db: &Connection,
     project: &str,
@@ -220,6 +240,31 @@ pub(super) fn task(
         }
         if state == "unknown" && warnings.is_empty() {
             warnings.push("contradictory_evidence".into());
+        }
+        let close = row(
+            db,
+            "SELECT json_extract(w.receipt_json,'$.closedAt') AS closed_at
+             FROM workspace_requests w JOIN workspace_projects p USING(project_id)
+             WHERE w.project_id=? AND p.project_root=? AND w.actor_id=p.activated_by
+             AND w.request_id=? AND w.operation=?
+             AND json_extract(w.receipt_json,'$.executionId')=?",
+            (
+                project,
+                root,
+                unconfirmed_close_key(id),
+                CLOSE_UNCONFIRMED,
+                execution,
+            ),
+        )?;
+        if let Some(closed_at) = close.as_ref().and_then(|r| field(r, "closed_at")) {
+            // Close the card, not a process we cannot safely identify.
+            (phase, state) = ("unknown", "unknown");
+            runtime_state = None;
+            reason = None;
+            at = Some(closed_at.to_owned());
+            route = None;
+            automatic_continuation = None;
+            warnings = vec![CONTRADICTORY_EVIDENCE.into(), CLOSED_UNCONFIRMED.into()];
         }
     }
     let mut result = TaskProjection {

@@ -365,7 +365,7 @@ use crate::{
     error::refuse,
     lifecycle::{self, domain, waits},
     ownership::OwnerEpoch,
-    CoreError, CoreResult, Store, TaskState,
+    projections, CoreError, CoreResult, Store, TaskState,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
@@ -387,7 +387,18 @@ pub fn binding(
     actor: &str,
     execution: &str,
 ) -> CoreResult<Binding> {
-    binding_with(db, root, project, actor, execution, true)
+    let binding = binding_with(db, root, project, actor, execution, true)?;
+    let task = projections::task(db, project, root, &binding.draft)?
+        .ok_or(CoreError::Refused("native_execution_binding_invalid"))?;
+    if task.execution_id.as_deref() != Some(execution)
+        || task
+            .warnings
+            .iter()
+            .any(|w| w == projections::CONTRADICTORY_EVIDENCE)
+    {
+        return refuse("native_execution_binding_invalid");
+    }
+    Ok(binding)
 }
 /// Read-only binding: the same project/root/owner/session identity, without
 /// requiring the Rust host to own the task. Completed tasks the Python host ran
@@ -427,6 +438,68 @@ fn binding_with(
         })).optional()?;
     row.ok_or(CoreError::Refused("native_execution_binding_invalid"))
 }
+/// An owner disposition for the stable Workspace row, never an admission
+/// against a possibly unrelated runtime task or session.
+pub fn close_unconfirmed(
+    store: &Store,
+    project: &str,
+    actor: &str,
+    task: &str,
+    execution: &str,
+    version: workspace_protocol::core::Version,
+) -> CoreResult<()> {
+    let root = store.key().root().to_string_lossy();
+    store.write(|db| {
+        let owns_project: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspace_projects
+             WHERE project_id=? AND project_root=? AND activated_by=?)",
+            (project, root.as_ref(), actor),
+            |r| r.get(0),
+        )?;
+        if !owns_project {
+            return refuse("unauthorized");
+        }
+        let projection = projections::task(db, project, &root, task)?
+            .ok_or(CoreError::Refused("invalid_task"))?;
+        if projection.execution_id.as_deref() != Some(execution) {
+            return refuse("stale_version");
+        }
+        let warned = |warning| projection.warnings.iter().any(|w| w == warning);
+        if warned(projections::CLOSED_UNCONFIRMED) {
+            return Ok(());
+        }
+        if projection.version != version {
+            return refuse("stale_version");
+        }
+        if !warned(projections::CONTRADICTORY_EVIDENCE) {
+            return refuse("records_not_conflicting");
+        }
+        let receipt = json!({"taskId": task, "executionId": execution, "closedAt": crate::now()});
+        let identity = json!({"taskId":task,"executionId":execution,"expectedVersion":version});
+        db.execute(
+            "INSERT INTO workspace_requests VALUES (?,?,?,?,?,?)",
+            (
+                project,
+                actor,
+                projections::unconfirmed_close_key(task),
+                projections::CLOSE_UNCONFIRMED,
+                crate::digest(identity.to_string().as_bytes()),
+                receipt.to_string(),
+            ),
+        )?;
+        let next = version
+            .get()
+            .checked_add(1)
+            .ok_or(CoreError::Refused("invalid_version"))?;
+        db.execute(
+            "UPDATE workspace_tasks SET version=? WHERE project_id=? AND task_id=?",
+            (next, project, task),
+        )?;
+        crate::store::append_public_tx(db, project, task, "task", next)?;
+        Ok(())
+    })
+}
+
 fn key(request: &Value) -> CoreResult<&str> {
     let key = request["requestId"]
         .as_str()

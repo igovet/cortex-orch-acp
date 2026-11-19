@@ -1341,16 +1341,56 @@ async fn channel_source_project_and_commands() {
             Ok(())
         })
         .unwrap();
+        // The supervisor finished, so the receipt is settled at once: its outcome stays
+        // unrecorded (never a success) and the same request is never run again.
         check(
             &r,
             "command_run",
             lost,
-            json!({"/result/structuredContent/code":"command_outcome_unknown"}),
+            json!({"/result/structuredContent/settled":true,"/result/structuredContent/complete":false,
+                "/result/structuredContent/failure":"outcome_not_recorded","/result/structuredContent/exit_code":0}),
         )
         .await;
         s.read(|db|{
             let count:i64=db.query_row("SELECT count(*) FROM runtime_events WHERE type='NATIVE_COMMAND_DIAGNOSTIC' AND json_extract(payload_json,'$.phase')='settlement' AND json_extract(payload_json,'$.stage')='after_process_registration'",[],|row|row.get(0))?;
             assert_eq!(count,1);
+            Ok(())
+        }).unwrap();
+        // A launch that fails before its supervisor is bound (here: the handle write is
+        // refused) never releases the payload; its receipt is settled as not started,
+        // so no unknown outcome is left behind for close or repair.
+        s.write(|db| { db.execute_batch("CREATE TRIGGER fixture_refuse_handle BEFORE UPDATE ON runtime_requests
+            WHEN json_type(NEW.result_json,'$.handle')='object' BEGIN SELECT RAISE(ABORT,'fixture'); END")?; Ok(()) }).unwrap();
+        check(
+            &r,
+            "command_run",
+            json!({"argv":["/bin/cat","src/value"],"request_key":"launch-failure"}),
+            json!({"/result/isError":true}),
+        )
+        .await;
+        s.write(|db| {
+            db.execute_batch("DROP TRIGGER fixture_refuse_handle")?;
+            Ok(())
+        })
+        .unwrap();
+        let receipt: Value = s
+            .read(|db| {
+                Ok(serde_json::from_str(&db.query_row(
+                    "SELECT result_json FROM runtime_requests WHERE request_key='launch-failure'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )?)?)
+            })
+            .unwrap();
+        assert_eq!(receipt["settled"], true, "{receipt}");
+        assert_eq!(receipt["complete"], false);
+        assert_eq!(receipt["failure"], "command_not_started");
+        assert_eq!(receipt["launched"], false);
+        assert!(receipt["handle"].is_null());
+        s.read(|db| {
+            assert!(!db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE operation='command_run'
+                AND json_extract(result_json,'$.settled') IS NOT 1 AND json_extract(result_json,'$.complete') IS NOT 1
+                AND request_key IN ('launch-failure','settlement-failure'))",[],|r|r.get::<_,bool>(0))?);
             Ok(())
         }).unwrap();
     }

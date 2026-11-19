@@ -27,6 +27,7 @@ fn save(state: &Path, project: &str, task: &str, product: &Value) -> Result<()> 
             "resolvedBy",
             "status",
             "requiresFreshResult",
+            "changesBaseRevision",
         ],
     )?;
     let _lock = Lock::wait(state, "machine.lock")?;
@@ -126,12 +127,22 @@ pub async fn run(
                 "Resolve and stage every conflict without markers first.",
             ));
         }
+        let merge = &product["tasks"][task]["merge"];
         if git
             .success(&path, &["rev-parse", "--verify", "MERGE_HEAD"])
             .await?
         {
             let head = git.out(&path, &["rev-parse", "HEAD"]).await?;
             let merge_head = git.out(&path, &["rev-parse", "MERGE_HEAD"]).await?;
+            if merge["targetRevision"]
+                .as_str()
+                .is_some_and(|revision| revision != merge_head.trim())
+            {
+                return Err(refuse(
+                    "unsafe_conflict",
+                    "The stopped merge no longer matches the saved target commit. Inspect the worktree in Git before continuing.",
+                ));
+            }
             effects = true;
             git.out(&path, &["commit", "-m", "Resolve task merge conflicts"])
                 .await?;
@@ -147,6 +158,24 @@ pub async fn run(
             {
                 return Err(unknown());
             }
+            if merge["targetRevision"].is_string() || merge["kind"] == "update" {
+                product["tasks"][task]["changesBaseRevision"] = json!(merge_head.trim());
+            }
+        } else if let Some(target) = merge["targetRevision"].as_str() {
+            // No MERGE_HEAD can mean a manual commit, an abort, or unrelated Git work.
+            let parents = git
+                .out(&path, &["show", "-s", "--format=%P", "HEAD"])
+                .await?;
+            if !merge["sourceRevision"]
+                .as_str()
+                .is_some_and(|source| parents.split_whitespace().eq([source, target]))
+            {
+                return Err(refuse(
+                    "unsafe_conflict",
+                    "HEAD is not the completed merge of the saved task and target commits. Inspect the worktree in Git before continuing.",
+                ));
+            }
+            product["tasks"][task]["changesBaseRevision"] = json!(target);
         }
         effects = true;
         let record = &mut product["tasks"][task];

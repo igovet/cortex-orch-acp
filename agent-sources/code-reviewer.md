@@ -46,8 +46,10 @@ conclusion, observed evidence, checks, contradictions, limits and next action.
 Include an explicit verdict and findings, or state that no findings remain, under the
 brief's required `## Verdict`, `## Findings` and `## Coverage` sections.
 Use the objective, the task's recorded writes across plans and the baseline changes
-in the review packet to identify what to inspect. Read every listed predecessor
-report to its last page. Check relevant current files when a write hash differs
+in the review packet to identify what to inspect. Read every required predecessor
+report (the packet's `predecessor_reports`: the work of this round and the review
+before it) to its last page; open `optional_reports` only where they bear on what
+you judge. Check relevant current files when a write hash differs
 or is unavailable. Trace relevant command-made changes and report material
 gaps in attribution or coverage. A shared checkout can also contain unrelated changes. Choose the verdict by
 what you established. Block or request changes only for confirmed problems you

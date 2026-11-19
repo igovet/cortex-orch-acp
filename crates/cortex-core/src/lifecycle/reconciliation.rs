@@ -292,6 +292,21 @@ pub fn record_baseline_manifest_tx(
     )?;
     Ok(())
 }
+/// How Git-ignored files compare with the execution baseline. They are not
+/// deliverable content (build outputs, dependency folders, caches), so this never
+/// decides whether the deliverable change set is complete; it only adds a note.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum IgnoredChange {
+    Unchanged,
+    Changed,
+    Unobserved,
+}
+/// The deliverable files that differ from the execution baseline, and how the
+/// ignored files compare.
+struct ChangeSet {
+    files: Vec<String>,
+    ignored: IgnoredChange,
+}
 /// Files whose content differs from the first execution baseline since the task was
 /// last reopened. None when that baseline metadata is missing or not that baseline.
 fn changed_files(
@@ -299,7 +314,7 @@ fn changed_files(
     task: &str,
     current: Option<&BTreeMap<String, String>>,
     current_ignored: Option<&str>,
-) -> CoreResult<Option<Vec<String>>> {
+) -> CoreResult<Option<ChangeSet>> {
     // No trustworthy manifest of the project now (incomplete or metadata-only
     // observation): the changed-file list cannot be built.
     let Some(current) = current else {
@@ -337,21 +352,26 @@ fn changed_files(
     if stored_digest != digest {
         return Ok(None);
     }
-    // The manifest lists only files Git would track or show. Changes to ignored files
-    // are covered by their own metadata digest; unless it is observed and unchanged,
-    // the list cannot account for every change.
-    if current_ignored.is_none() || baseline["ignored_digest"].as_str() != current_ignored {
-        return Ok(None);
-    }
+    // Both manifests list every deliverable path (tracked and untracked, not ignored),
+    // so their difference is the complete deliverable change set. Ignored files are
+    // not deliverable: their metadata digest only says whether they changed. Writes
+    // the task's own tools made under ignored paths are still listed by the packet
+    // from their write receipts.
+    let ignored = match (baseline["ignored_digest"].as_str(), current_ignored) {
+        (Some(before), Some(now)) if before == now => IgnoredChange::Unchanged,
+        (Some(_), Some(_)) => IgnoredChange::Changed,
+        _ => IgnoredChange::Unobserved,
+    };
     let before: BTreeMap<String, String> = serde_json::from_str(&manifest)?;
     let names: BTreeSet<&String> = before.keys().chain(current.keys()).collect();
-    Ok(Some(
-        names
+    Ok(Some(ChangeSet {
+        files: names
             .into_iter()
             .filter(|n| before.get(*n) != current.get(*n))
             .cloned()
             .collect(),
-    ))
+        ignored,
+    }))
 }
 /// Changed files listed in a review brief; the rest are counted by folder.
 pub const REVIEW_PACKET_FILES: usize = 200;
@@ -383,7 +403,7 @@ pub fn review_packet_tx(
     let mut files: BTreeMap<String, (String, BTreeSet<String>)> = BTreeMap::new();
     let mut last_writes = BTreeMap::new();
     let manifest = changed_files(db, task, current, current_ignored)?;
-    if let (Some(changed), Some(current)) = (&manifest, current) {
+    if let (Some(ChangeSet { files: changed, .. }), Some(current)) = (&manifest, current) {
         let stored: Option<String> = db
             .query_row(
                 "SELECT manifest_json FROM attempt_revisions WHERE attempt_id=? AND phase=? ORDER BY rowid DESC LIMIT 1",
@@ -471,6 +491,15 @@ pub fn review_packet_tx(
         "source":if complete {"execution baseline manifest and recorded writes"} else {"recorded writes only"}});
     if !complete {
         changed["note"] = json!("The folder could not be compared with the execution baseline, so files changed by commands are not listed; inspect the predecessor reports and the folder for them.");
+    }
+    match manifest.as_ref().map(|m| m.ignored) {
+        Some(IgnoredChange::Changed) => {
+            changed["ignored_files"] = json!("Build outputs and other git-ignored files changed; they are not deliverable and are not listed.");
+        }
+        Some(IgnoredChange::Unobserved) => {
+            changed["ignored_files"] = json!("Git-ignored files (build outputs and the like) could not be compared with the execution baseline; they are not deliverable and are not listed.");
+        }
+        _ => {}
     }
     if total > listed.len() {
         changed["more"] = json!({"count":total - listed.len(),
@@ -605,7 +634,10 @@ pub fn compose_runtime_synthesis_tx(
     if summaries.is_empty() || total > SUMMARY_CHAR_LIMIT {
         return Ok(None);
     }
-    let Some(changed) = changed_files(db, task, current, current_ignored)? else {
+    // Ignored files are not deliverable: whether they changed never keeps the
+    // coordinator, and they are not listed as changed files.
+    let Some(ChangeSet { files: changed, .. }) = changed_files(db, task, current, current_ignored)?
+    else {
         return Ok(None);
     };
     if changed.iter().any(|f| {
@@ -869,4 +901,104 @@ pub fn disclosed_gap(db: &Connection, task: &str, check: &Value) -> CoreResult<b
                 && g["blocker"].as_str().is_some_and(|s| !s.trim().is_empty())
         })
     }))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{lifecycle, store::Store};
+    fn store() -> (std::path::PathBuf, Store) {
+        let root = std::env::temp_dir().join(format!("reconciliation-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let key = crate::ProjectKey::new(&root, crate::StoreChannel::Dev).unwrap();
+        (
+            root.clone(),
+            Store::open(key, crate::OpenMode::Initialize).unwrap(),
+        )
+    }
+    fn manifest(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+    /// A baseline as an earlier build stored it when only the ignored listing failed:
+    /// `incomplete` and no ignored digest, with the deliverable manifest retained.
+    fn with_baseline(baseline: Value, ignored_case: impl FnOnce(&Store)) {
+        let (root, store) = store();
+        lifecycle::TaskMachine::new(&store)
+            .create("t", "g", "o")
+            .unwrap();
+        store
+            .write(|db| {
+                db.execute("UPDATE runtime_tasks SET state='REVIEWING',revision=1 WHERE task_id='t'", [])?;
+                lifecycle::event_tx(db, "t", "EXECUTION_BASELINE", baseline)?;
+                record_baseline_manifest_tx(db, "t", "d0", &manifest(&[("a.txt", "1"), ("b.txt", "2")]))?;
+                db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'_review_1','worker-code-reviewer','Review','[]','[\"**\"]','review','running','rv',NULL)", [])?;
+                Ok(())
+            })
+            .unwrap();
+        ignored_case(&store);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    fn packet(store: &Store, ignored: Option<&str>) -> Value {
+        let current = manifest(&[("a.txt", "9"), ("b.txt", "2")]);
+        store
+            .read(|db| review_packet_tx(db, "t", "_review_1", Some(&current), ignored, &current))
+            .unwrap()
+    }
+    #[test]
+    fn ignored_changes_never_make_the_deliverable_change_set_incomplete() {
+        with_baseline(
+            json!({"kind":"observed","revision_digest":"d0","ignored_digest":"i0","revision":1}),
+            |store| {
+                let same = packet(store, Some("i0"));
+                assert_eq!(same["changed_files"]["complete"], true);
+                assert!(same["changed_files"]["ignored_files"].is_null());
+                for ignored in [Some("i1"), None] {
+                    let p = packet(store, ignored);
+                    let files = &p["changed_files"];
+                    assert_eq!(files["complete"], true, "{ignored:?}");
+                    assert_eq!(files["total"], 1);
+                    assert_eq!(files["files"][0]["path"], "a.txt");
+                    assert!(files["note"].is_null());
+                    assert!(files["ignored_files"]
+                        .as_str()
+                        .unwrap()
+                        .contains("not deliverable and are not listed"));
+                }
+                let changed = packet(store, Some("i1"));
+                assert!(changed["changed_files"]["ignored_files"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Build outputs and other git-ignored files changed"));
+            },
+        );
+    }
+    #[test]
+    fn a_stored_baseline_incomplete_only_for_ignored_files_gives_a_complete_change_set() {
+        with_baseline(
+            json!({"kind":"observed","revision_digest":"d0","ignored_digest":null,
+                "metadata_only":false,"cap_reached":false,"incomplete":true,"revision":1}),
+            |store| {
+                let p = packet(store, Some("i0"));
+                assert_eq!(p["changed_files"]["complete"], true);
+                assert_eq!(p["changed_files"]["files"][0]["path"], "a.txt");
+                assert_eq!(p["changed_files"]["total"], 1);
+            },
+        );
+        // Without a retained manifest (what such a baseline usually left behind) the
+        // list stays the recorded writes only, and says so.
+        with_baseline(
+            json!({"kind":"observed","revision_digest":"d0","ignored_digest":null,"incomplete":true,"revision":1}),
+            |store| {
+                store
+                    .write(|db| Ok(db.execute("DELETE FROM attempt_revisions", [])?))
+                    .unwrap();
+                let p = packet(store, Some("i0"));
+                assert_eq!(p["changed_files"]["complete"], false);
+                assert!(p["changed_files"]["note"].is_string());
+            },
+        );
+    }
 }

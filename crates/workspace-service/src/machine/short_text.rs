@@ -915,6 +915,7 @@ pub(super) async fn run(
             Ok(job.done.clone().unwrap_or(json!({"state":"running"})))
         }
         "generate_title" => {
+            super::task_actions::require_consistent_records(root, project, &task)?;
             let product = super::native::product(state, project)?;
             let record = &product["tasks"][&task];
             if record["titleState"] == "user" || owner_titled(root, project, &task)? {
@@ -936,7 +937,15 @@ pub(super) async fn run(
                     let chosen = tests::held_route(&root).unwrap_or_else(|| choose(&config, &root));
                     #[cfg(not(test))]
                     let chosen = choose(&config, &root);
-                    let owner = || owner_titled(&root, &project, &task_for_job).unwrap_or(true);
+                    let owner = || {
+                        super::task_actions::require_consistent_records(
+                            &root,
+                            &project,
+                            &task_for_job,
+                        )
+                        .is_err()
+                            || owner_titled(&root, &project, &task_for_job).unwrap_or(true)
+                    };
                     title_job(
                         &state,
                         &project,
@@ -951,6 +960,7 @@ pub(super) async fn run(
             Ok(json!({"jobId":id}))
         }
         "draft_integration_text" => {
+            super::task_actions::require_consistent_records(root, project, &task)?;
             let method = p["method"]
                 .as_str()
                 .filter(|m| matches!(*m, "commit" | "squash" | "pr"))

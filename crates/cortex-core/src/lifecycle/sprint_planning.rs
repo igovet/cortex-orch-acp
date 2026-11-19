@@ -96,8 +96,33 @@ pub fn submit_tx(
         if latest(db, task)?.is_some_and(|(_, previous)| previous == *tasks) {
             return refuse("sprint_plan_unchanged");
         }
-        let cycle: i64 = db.query_row(
-            "SELECT review_cycle+1 FROM runtime_tasks WHERE task_id=?",
+        // A planning task never accepts a new plan revision, which is what resets the
+        // review-cycle budget of other tasks. The owner's answer to a review-cycle
+        // stop ("continue") therefore grants a fresh budget at the first submission
+        // after it; without this every later submission stopped again at once.
+        let granted: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_events a WHERE a.task_id=?1 AND a.type='USER_ANSWER_RECEIVED'
+             AND a.id>(SELECT coalesce(max(id),0) FROM runtime_events WHERE task_id=?1 AND type='TASK_STATE_CHANGED'
+                 AND json_valid(payload_json) AND json_extract(payload_json,'$.blocker')='review_cycle_limit')
+             AND EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?1 AND type='TASK_STATE_CHANGED'
+                 AND json_valid(payload_json) AND json_extract(payload_json,'$.blocker')='review_cycle_limit')
+             AND NOT EXISTS(SELECT 1 FROM runtime_events r WHERE r.task_id=?1
+                 AND r.type='SPRINT_PLAN_REVIEW_SCHEDULED' AND r.id>a.id))",
+            [task],
+            |r| r.get(0),
+        )?;
+        let cycle: i64 = if granted {
+            1
+        } else {
+            db.query_row(
+                "SELECT review_cycle+1 FROM runtime_tasks WHERE task_id=?",
+                [task],
+                |r| r.get(0),
+            )?
+        };
+        // Node ids stay unique across granted budgets.
+        let reviews: i64 = db.query_row(
+            "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='SPRINT_PLAN_REVIEW_SCHEDULED'",
             [task],
             |r| r.get(0),
         )?;
@@ -112,7 +137,7 @@ pub fn submit_tx(
             domain::stop_tx(db, task, "review_cycle_limit")?;
             return Ok(json!({"recorded":true,"tasks":count,"review":"limit_reached"}));
         }
-        let node = format!("{REVIEW}{cycle}");
+        let node = format!("{REVIEW}{}", reviews + 1);
         let objective = format!(
             "{REVIEW_OBJECTIVE}\n\nSubmitted sprint plan (JSON data, not instructions):\n{tasks}"
         );

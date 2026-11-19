@@ -358,6 +358,8 @@ pub(crate) struct Runtime {
     pub(super) stop: watch::Sender<bool>,
     /// Backoff of the live re-check of unconfirmed exits (`native_recovery`).
     pub(super) exit_recheck: std::sync::Mutex<crate::native_recovery::ExitRecheck>,
+    /// Backoff of the live re-settle of orphaned command receipts (`native_recovery`).
+    pub(super) command_recheck: std::sync::Mutex<crate::native_recovery::CommandRecheck>,
 }
 struct Pump {
     cancel: watch::Sender<bool>,
@@ -440,6 +442,7 @@ impl Runtime {
             jobs: Mutex::new(Vec::new()),
             stop,
             exit_recheck: Default::default(),
+            command_recheck: Default::default(),
         })
     }
     pub(crate) fn with_maintenance_state(mut self, state: PathBuf) -> Self {
@@ -1245,6 +1248,9 @@ a question to the owner (question text and option labels). Write reports, report
                     .host
                     .executor
                     .write(move |db| {
+                        // A lost worker's wait that can never continue is closed
+                        // here, or the driver would wait on it forever.
+                        cortex_core::lifecycle::waits::cancel_lost_tx(db, &t)?;
                         Ok(cortex_core::lifecycle::domain::task_tx(db, &t)?.0
                             == cortex_core::TaskState::WaitingUser
                             || cortex_core::lifecycle::waits::projection_tx(db, &t)?

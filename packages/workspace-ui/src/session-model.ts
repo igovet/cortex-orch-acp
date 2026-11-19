@@ -63,7 +63,7 @@ function composerMode(v: TaskView): ComposerMode {
     case "paused": return "paused";
     case "stopping": return "stopping";
     case "draft": return "draft";
-    case "done": return "closed";
+    case "done": case "closed_unverified": return "closed";
     // A failed run with known effects takes a message: it reopens the task for the agent (Request changes).
     case "failed": return v.task.reviewActions?.unblockAction === "request_changes" ? "review" : "ended";
     case "cancelled": return "ended";
@@ -79,7 +79,7 @@ export function sessionModel(index: WorkspaceIndex, id: string): SessionModel | 
   return {
     view, session, workers, messages, mode: composerMode(view),
     active: workers.filter(w => ACTIVE.includes(w.status) && !w.stale), finished: workers.filter(isFinished), running: workers.filter(w => w.status === "working"),
-    queue: messages.filter(m => m.delivery === "queued"), open: session.decisions.filter(isOpen),
+    queue: messages.filter(m => m.delivery === "queued"), open: view.task.closedAs === "unconfirmed" ? [] : session.decisions.filter(isOpen),
     planDone: nodes.filter(n => n.workerId && byId.get(n.workerId)?.status === "completed").length, planTotal: nodes.length,
   };
 }
@@ -118,6 +118,7 @@ export type Chip = { icon: string; tone: string; spin?: boolean; text: string; w
 /** The current state and the next step, for the title band. */
 export function stateChip(m: SessionModel): Chip {
   const { task } = m.view;
+  if (task.status === "closed_unverified") return { icon: "alert", tone: "st-idle", text: m.view.fact.text };
   if (m.view.unknown && task.status !== "stopping") return { icon: "alert", tone: "st-idle", text: m.mode === "unconfirmed" ? "Not confirmed" : m.view.fact.text };
   if (m.view.ownerDecision) return { icon: m.view.fact.icon ?? "question", tone: "st-warn", text: "Needs you" };
   if (m.view.ownerIntegration) return { icon: "merge", tone: "st-warn", text: "Needs you", next: "Confirm integration" };
@@ -143,6 +144,7 @@ export type Phase = { label: string; state: "done" | "now" | "todo" };
 const PHASE_STEP: Record<string, number> = { not_started: -1, planning: 0, execution: 1, review: 2, verification: 3, finalizing: 4 };
 export function phases(m: SessionModel): Phase[] {
   const { status, result, acceptance, closedAs, conflict, work, observedPhase } = m.view.task;
+  if (closedAs === "unconfirmed") return [];
   if (closedAs === "external") return [{ label: "Done outside the app", state: "done" }];
   if (result && !closedAs && (conflict !== "none" || ["review", "ready_to_merge", "done"].includes(status))) {
     const finished = m.view.task.integration?.automatic ? "Done" : sameBranch(m.view.task, m.view.target) ? "Finished" : "Merged";
@@ -241,6 +243,10 @@ export const checkedResult = (m: SessionModel) => {
 };
 /** What closing does, in numbers, before the owner agrees to it. */
 export function closeConsequences(m: SessionModel) {
+  if (unconfirmedState(m)?.kind === "records") return [
+    { icon: "alert", text: "The records still disagree. Closing records your decision without trying to stop or resume the run, and repeats nothing." },
+    { icon: "eye", text: "The task will be closed without verification. The conflicting records stay available in Diagnostics." },
+  ];
   // A question left open by a stop is not a running worker: it is counted as a question below.
   const live = m.workers.filter(w => w.status === "working" || (w.status === "waiting_you" && m.mode === "live"));
   const pending = m.messages.filter(x => x.workerId && ["sending", "recorded"].includes(x.delivery)).length;
@@ -273,8 +279,8 @@ export function closeConsequences(m: SessionModel) {
  * - `stopping`: a session of the task is still being stopped; the runtime decides by itself once its stop is observed.
  * - `exit_unconfirmed`: the runtime recorded that a process did not confirm its exit. Nothing in the running service
  *   observes it again (the next service start does), so the owner decides now: inspect, or Close as is, which replays nothing.
- * - `records`: the task's records disagree, so the runtime refuses every change to it; the owner can only inspect.
- * Close as is is possible exactly when the runtime can still bind the task (the first two).
+ * - `records`: the execution cannot be trusted; only a confirmed close of the Workspace task is allowed,
+ *   and only with an explicit contradiction from the service.
  */
 export type UnconfirmedState = { kind: "stopping" | "exit_unconfirmed" | "records"; closable: boolean };
 export function unconfirmedState(m: SessionModel): UnconfirmedState | null {
@@ -282,7 +288,7 @@ export function unconfirmedState(m: SessionModel): UnconfirmedState | null {
   const warnings = m.view.task.warnings ?? [];
   if (warnings.includes("process_exit_pending")) return { kind: "stopping", closable: true };
   if (warnings.includes("process_exit_unconfirmed")) return { kind: "exit_unconfirmed", closable: true };
-  return { kind: "records", closable: false };
+  return { kind: "records", closable: !!m.view.task.executionId && !!m.view.task.sourceVersion && warnings.includes("contradictory_evidence") };
 }
 export const closeBlocked = (m: SessionModel) =>
   m.mode === "stopping" ? "Available once every worker is confirmed as stopped"

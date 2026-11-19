@@ -28,7 +28,7 @@ export function acceptBlocked(task: Task): string | null {
   if (stale(task)) return `This version no longer matches the worktree. Request a new result`;
   if (task.conflict !== "none") return "Resolve the conflict first";
   if (task.acceptance) return task.acceptance.automatic ? `Automatically accepted v${task.acceptance.version}` : `You accepted v${task.acceptance.version}`;
-  if (task.status === "done") return "This task is closed";
+  if (task.status === "done" || task.status === "closed_unverified") return "This task is closed";
   if (task.reviewActions?.accept === false) return task.reviewActions.reason ?? "Refresh this result before accepting";
   // A task that has not finished has no acceptable result yet; that, not missing evidence, is why Accept is off.
   if (task.result.acceptanceAvailable === false && task.status !== "review" && task.status !== "ready_to_merge") return "Available once this task finishes";
@@ -43,8 +43,9 @@ export const sentence = (text: string) => { const t = text.trim(); return !t || 
 /** Whether a result offers Request changes. A closed task has nothing left to change, and one being integrated is past review. */
 export const changesOffered = (task: Task) => (task.status === "review" || task.status === "ready_to_merge") && !task.integration;
 /** Whether a result card offers Accept at all. A closed task, or one working again after Request changes, has nothing to accept. */
-export const acceptOffered = (task: Task) => task.status !== "done" && task.status !== "working" && task.status !== "stopping";
+export const acceptOffered = (task: Task) => task.status !== "done" && task.status !== "closed_unverified" && task.status !== "working" && task.status !== "stopping";
 export function mergeBlocked(task: Task): string | null {
+  if (task.status === "closed_unverified") return "This task is closed without verification";
   if (task.status === "done") return task.work === "merged" ? "This task is already merged" : "This task is closed";
   if (stale(task)) return "This result is stale. Request a new result or close the task as is";
   if (task.conflict !== "none") return "Resolve the conflict first";

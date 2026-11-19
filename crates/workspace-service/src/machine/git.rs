@@ -471,6 +471,30 @@ impl Git {
             ))
         }
     }
+    /// Whether a repository has any commit to integrate into. A freshly
+    /// initialized repository has no branch at all (`HEAD` names an unborn
+    /// branch), so no target branch can exist until its first commit.
+    pub(super) async fn has_history(&mut self, path: &Path) -> Result<bool> {
+        if self
+            .success(path, &["rev-parse", "--verify", "--quiet", "HEAD"])
+            .await?
+        {
+            return Ok(true);
+        }
+        Ok(!self
+            .out(
+                path,
+                &[
+                    "for-each-ref",
+                    "--count=1",
+                    "--format=%(refname)",
+                    "refs/heads",
+                ],
+            )
+            .await?
+            .trim()
+            .is_empty())
+    }
     pub(super) async fn trees(&mut self, root: &Path) -> Result<Vec<Value>> {
         let text = self.out(root, &["worktree", "list", "--porcelain"]).await?;
         let mut result = Vec::new();
@@ -1181,6 +1205,7 @@ impl Git {
                     json!([
                         r["checkout"],
                         r["baseRevision"],
+                        r["changesBaseRevision"],
                         r["integration"]["worktreeCleanup"],
                         r["integration"]["sourceHead"],
                         gone
@@ -1404,13 +1429,18 @@ impl Git {
             checkouts.push(record);
         }
         snapshot["checkouts"] = json!(checkouts);
-        // These are saved machine task baselines, not lifecycle/acceptance decisions.
+        // Target updates move only the Changes baseline, not the original task base
+        // used for attribution and integration ancestry.
         for (task, record) in product["tasks"]
             .as_object()
             .into_iter()
             .flat_map(|m| m.iter())
         {
-            let Some(base) = record["baseRevision"].as_str() else {
+            let Some(base) = record["changesBaseRevision"]
+                .as_str()
+                .filter(|s| valid_sha(s))
+                .or_else(|| record["baseRevision"].as_str())
+            else {
                 continue;
             };
             let removed = record["integration"]["worktreeCleanup"] == "removed"

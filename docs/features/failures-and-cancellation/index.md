@@ -9,6 +9,16 @@ permission bridge and binding registry, capacity, delivery ledger, questions and
 
 A worker that ends its turn after receiving a pending command reply or a `command_not_settled` refusal can receive up to two same-session follow-ups. Workspace waits for the supervised commands identified on that attempt and supplies their final receipts. This also covers a command that settles between the pending reply and the end of the turn. The command supervisor retains its original deadline. Missing terminal evidence blocks continuation.
 
+## Closing a task with conflicting records
+
+Workspace shows **Not confirmed** when its saved execution records disagree.
+The owner can inspect them through **Open Diagnostics** or confirm **Close as
+is…**. Only the close disposition is recorded: no work is repeated, no process
+is stopped or resumed, and the conflicting evidence is kept. After restart,
+the task still shows **Closed by you · Not verified**, not a decision waiting
+for the owner. It is grouped under **Closed, not verified**, not **Done**, and
+cannot unblock a dependent task. See [Workspace task execution](../../cortex-workspace/local-task-execution.md#recorded-data-and-pending-questions).
+
 ## 1. Failure classification
 
 `engine.failure_classification.classify(kind, message=None, exit_code=None,

@@ -40,6 +40,7 @@ function primaryAction(v: TaskView, startable: boolean): { label: string; kind: 
     default: return null;
   }
 }
+const manuallyMovable = (v: TaskView) => !v.unknown && v.task.status !== "done" && v.column !== "closed_unverified";
 const startable = (v: TaskView) => v.task.status === "draft" && !v.unknown && v.fact.icon !== "hourglass";
 
 function Card(props: { view: TaskView; named: boolean }) {
@@ -57,9 +58,9 @@ function Card(props: { view: TaskView; named: boolean }) {
     if (a.kind === "start") { const receipt = await ws.run({ type: "start_task", taskId: task, now: ws.store.clock() }); if (!receipt.ok) setError(receipt.message); }
     else if (a.kind === "resume") ws.run({ type: "continue_task", taskId: task, now: ws.store.clock() });
   };
-  return <article class={cls()} draggable={!v().unknown && v().task.status !== "done" && ws.can(capabilityOf("close_task"))}
+  return <article class={cls()} draggable={manuallyMovable(v()) && ws.can(capabilityOf("close_task"))}
     onDragStart={e => {
-      if ((e.target as Element).closest("button")) { e.preventDefault(); return; }
+      if (!manuallyMovable(v()) || (e.target as Element).closest("button")) { e.preventDefault(); return; }
       e.dataTransfer?.setData("application/x-workspace-task", v().id);
       if (e.dataTransfer) {
         e.dataTransfer.effectAllowed = "move";
@@ -125,14 +126,14 @@ function Board(props: { summary: ProjectSummary; views: TaskView[]; onQuick: () 
   createBoardMotion(() => wrap, createMemo(() => props.views.map(v => `${v.id}:${v.column}`).join("|")));
   const rows = (id: ColumnId): GroupedRow[] => props.grouped ? bySprint(columns()[id]) : columns()[id].map(view => ({ kind: "task", view }));
   return <><Show when={dropHint()}><div class="strip info" role="status">{dropHint()}</div></Show><div class="board-wrap" ref={wrap} onKeyDown={moveOnBoard}>
-    <For each={COLUMNS}>{col => {
+    <For each={COLUMNS.filter(col => col.id !== "closed_unverified" || columns()[col.id].length > 0)}>{col => {
       const open = () => columns()[col.id].length > 0 || (col.id === "todo" && !props.summary.offline);
       // One element whether it holds cards or sits folded, so a column opening around a card can be animated.
       return <section class={`col${open() ? "" : " strip"}`} data-col={col.id}
         onDragOver={e => { if (e.dataTransfer?.types.includes("application/x-workspace-task")) { e.preventDefault(); e.dataTransfer.dropEffect = col.id === "done" ? "move" : "none"; } }}
         onDrop={e => {
           const id = e.dataTransfer?.getData("application/x-workspace-task");
-          if (!id || !props.views.some(v => v.id === id && !v.unknown && v.task.status !== "done")) return;
+          if (!id || !props.views.some(v => v.id === id && manuallyMovable(v))) return;
           e.preventDefault();
           if (col.id !== "done") { setDropHint("Only Done accepts manual moves. Other columns follow the task's actual progress."); return; }
           setDropHint(""); ws.closeTask(id, "external");

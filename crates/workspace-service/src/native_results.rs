@@ -168,41 +168,53 @@ fn validate_result(
 }
 
 /// A reviewer's report is not complete merely because its result mentions it.
-/// Every predecessor report of the review node must have a successful page receipt
-/// whose `next_cursor` is null on this exact channel and attempt, unless an
-/// INCOMPLETE result names it in `not_covered` with its dead end. Returns the
-/// unread report ids; refusing on them leaves the same worker session alive.
-fn unread_predecessor_reports(
+/// Every report the review packet requires (`assignment_brief::review_reports`: the
+/// work of this review's round and the preceding review of the revision, never every
+/// historical report) must have a successful page receipt whose `next_cursor` is
+/// null on this exact channel and attempt, unless an INCOMPLETE result names it in
+/// `not_covered` with its dead end. Returns the unread report ids, which a refusal
+/// names while the same worker session stays alive, and the required reports that
+/// cannot be read at all (no published edition, or the runtime's own read of it
+/// fails other than by a busy lock) with their reason: those are dead ends retained
+/// on the result, never a refusal the reviewer could not clear.
+pub(super) fn predecessor_reading(
     store: &Store,
     c: &Credential,
     i: &Identity,
     args: &Value,
-) -> CoreResult<Vec<String>> {
+) -> CoreResult<(Vec<String>, Vec<Value>)> {
     let Some(assignment) = i.assignment.as_deref() else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let blocked = lifecycle::review::blocked_items(args);
-    store.read(|db| {
+    let (unread, mut unreadable) = store.read(|db| {
         use rusqlite::OptionalExtension;
         let node: Option<String> = db
             .query_row(
-                "SELECT node_id FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",
+                "SELECT n.node_id FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
+                 WHERE n.task_id=? AND n.assignment_ref=? AND n.revision=t.revision",
                 (&i.task, assignment),
                 |r| r.get(0),
             )
             .optional()?;
         let Some(node) = node else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         };
-        let reports = cortex_core::assignment_brief::predecessor_reports(db, &i.task, &node)?;
-        let mut missing = Vec::new();
-        for report in reports {
+        let reports = cortex_core::assignment_brief::review_reports(db, &i.task, &node)?;
+        let unreadable: Vec<Value> = reports["unavailable"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r["report_id"].as_str())
+            .filter(|id| !blocked.contains(*id))
+            .map(|id| json!({"report_id":id,"reason":"unavailable"}))
+            .collect();
+        let mut unread = Vec::new();
+        for report in reports["required"].as_array().into_iter().flatten() {
             let Some(id) = report["report_id"].as_str() else {
                 continue;
             };
-            // An unavailable predecessor is a genuine gap and is surfaced to the
-            // coordinator by the normal review result; it cannot be faked as read.
-            if report["availability"] == "unavailable" || blocked.contains(id) {
+            if blocked.contains(id) {
                 continue;
             }
             let read: bool = db.query_row(
@@ -219,11 +231,24 @@ fn unread_predecessor_reports(
                 |r| r.get(0),
             )?;
             if !read {
-                missing.push(id.to_owned());
+                unread.push(id.to_owned());
             }
         }
-        Ok(missing)
-    })
+        Ok((unread, unreadable))
+    })?;
+    // An unread report the runtime itself cannot read is a dead end, not work the
+    // reviewer can still do; a busy lock is transient and stays required.
+    let publisher = Publisher::new(store);
+    let mut missing = Vec::new();
+    for id in unread {
+        match publisher.read_report(&i.task, &id, None, 1) {
+            Err(e) if e.code() != "busy" => {
+                unreadable.push(json!({"report_id":id,"reason":e.code()}));
+            }
+            _ => missing.push(id),
+        }
+    }
+    Ok((missing, unreadable))
 }
 /// What this submission leaves undone that the worker can still do: the refusal
 /// code with the exact outstanding items, checked before anything is published.
@@ -244,7 +269,7 @@ pub(super) fn outstanding(
         return Ok(Some(found));
     }
     if stage == "review" {
-        let unread = unread_predecessor_reports(store, c, i, args)?;
+        let (unread, _) = predecessor_reading(store, c, i, args)?;
         if !unread.is_empty() {
             return Ok(Some(("review_predecessor_reports_required", unread)));
         }
@@ -372,6 +397,191 @@ mod evidence_tests {
                 "{code}"
             );
         }
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// Owner stores 2026-11-19: reviewers were refused until they had read every
+    /// report of every earlier round. After three replans and six fix rounds a review
+    /// requires only its round (the last fix and the review that asked for it); a
+    /// reviewer that read those is accepted, and a required report nobody can read is
+    /// a retained dead end, never a refusal that cannot be cleared.
+    #[test]
+    fn review_reading_requires_the_current_round_and_never_loops_on_unreadable_reports() {
+        let root = std::env::temp_dir().join(format!(
+            "native-review-reading-{}",
+            crate::native_effects::identity().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = Store::open(
+            ProjectKey::new(&root, StoreChannel::Dev).unwrap(),
+            OpenMode::Initialize,
+        )
+        .unwrap();
+        let owner = TaskMachine::new(&store)
+            .create("t", "review", "owner")
+            .unwrap();
+        TaskMachine::new(&store)
+            .transition(
+                "t",
+                &owner,
+                "planning",
+                TaskState::Planning,
+                None,
+                &FoundationGuards,
+            )
+            .unwrap();
+        let c = store
+            .write(|db| channels::issue_tx(db, "t", &owner, channels::Principal::Coordinator))
+            .unwrap();
+        let publisher = Publisher::new(&store);
+        let publish = |key: &str| -> String {
+            let d = publisher
+                .create_draft("t", "worker", "general", key)
+                .unwrap();
+            publisher
+                .write_draft(
+                    "t",
+                    "worker",
+                    &d.draft_id,
+                    &format!(
+                        "Cortex draft ID: `{}`\n\n# Round\n\n{}\n",
+                        d.draft_id,
+                        "x".repeat(5000)
+                    ),
+                )
+                .unwrap();
+            publisher
+                .publish(
+                    "t",
+                    "worker",
+                    &d.draft_id,
+                    key,
+                    Publication {
+                        title: "Round",
+                        summary: "Round report",
+                        author: "worker",
+                        source_revision: 0,
+                        artifacts: json!([]),
+                    },
+                )
+                .unwrap()
+                .report_id
+        };
+        // Revisions 1 to 4 (three replans) with 2, 2, 0 and 2 fix rounds; only the
+        // current round's two reports are real publications.
+        let live = [publish("review-2"), publish("fix-2")];
+        let mut counter = 0u32;
+        store
+            .write(|db| {
+                for (revision, rounds) in [(1i64, 2), (2, 2), (3, 0), (4, 2)] {
+                    let mut ids: Vec<String> = Vec::new();
+                    let mut add = |id: &str, stage: &str, deps: &[String], done: bool| -> CoreResult<()> {
+                        counter += 1;
+                        let report = match (revision, id) {
+                            (4, "_review_2") => live[0].clone(),
+                            (4, "_fix_2_work") => live[1].clone(),
+                            _ => format!("r_{counter:012x}"),
+                        };
+                        let assignment = if revision == 4 && !done { "rv".to_owned() } else { format!("a{counter}") };
+                        let result = done.then(|| json!({"report_ref":report}).to_string());
+                        db.execute("INSERT INTO runtime_nodes VALUES ('t',?,?,'worker-backend-dev','o',?,'[\"src\"]',?,?,?,?)",
+                            (revision, id, json!(deps).to_string(), stage, if done {"completed"} else {"running"}, assignment, result))?;
+                        Ok(())
+                    };
+                    for id in ["work", "scan"] {
+                        add(id, "execution", &[], true)?;
+                        ids.push(id.into());
+                    }
+                    for k in 1..=rounds {
+                        let review = format!("_review_{k}");
+                        add(&review, "review", &ids.clone(), true)?;
+                        ids.push(review.clone());
+                        let fix = format!("_fix_{k}_work");
+                        add(&fix, "execution", &[review], true)?;
+                        ids.push(fix);
+                    }
+                    add(&format!("_review_{}", rounds + 1), "review", &ids.clone(), revision < 4)?;
+                }
+                db.execute("UPDATE runtime_tasks SET revision=4 WHERE task_id='t'", [])?;
+                Ok(())
+            })
+            .unwrap();
+        let i = Identity {
+            task: "t".into(),
+            attempt: "xa_review".into(),
+            principal: "reviewer".into(),
+            epoch: 1,
+            role: "worker".into(),
+            profile: Some("worker-code-reviewer".into()),
+            stage: Some("review".into()),
+            assignment: Some("rv".into()),
+            session: None,
+        };
+        let args = json!({"verdict":"APPROVE","findings":[],"summary":"ok"});
+        let found = outstanding(&store, &c, &i, &args).unwrap();
+        assert_eq!(
+            found,
+            Some(("review_predecessor_reports_required", live.to_vec())),
+            "only the current round is required"
+        );
+        let read = |report: &str, next: Value| {
+            store
+                .write(|db| {
+                    lifecycle::event_tx(db, "t", "REPORT_PAGE_READ", json!({"channel_id":c.channel_id,
+                        "assignment_ref":"rv","attempt":"xa_review","report_id":report,"next_cursor":next}))?;
+                    Ok(())
+                })
+                .unwrap()
+        };
+        // A page that is not the last does not count.
+        read(&live[0], json!("cr.next"));
+        read(&live[1], Value::Null);
+        assert_eq!(
+            outstanding(&store, &c, &i, &args).unwrap(),
+            Some(("review_predecessor_reports_required", vec![live[0].clone()]))
+        );
+        read(&live[0], Value::Null);
+        assert_eq!(
+            outstanding(&store, &c, &i, &args).unwrap(),
+            None,
+            "read reviewer accepted"
+        );
+        assert!(predecessor_reading(&store, &c, &i, &args)
+            .unwrap()
+            .1
+            .is_empty());
+        // The fix's report becomes unreadable: an edition whose file is gone, and the
+        // review before it names a report that was never published.
+        store
+            .write(|db| {
+                db.execute("INSERT INTO reports(id,task_id,kind,filename,created_at) VALUES ('r_eeeeeeeeeeee','t','report','r_eeeeeeeeeeee.md','0')", [])?;
+                db.execute("INSERT INTO editions(report_id,title,summary,author,updated_at,digest,size_bytes) VALUES ('r_eeeeeeeeeeee','Gone','S','x','0','d',10)", [])?;
+                db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id='t' AND revision=4 AND node_id='_fix_2_work'",
+                    [json!({"report_ref":"r_eeeeeeeeeeee"}).to_string()])?;
+                db.execute("UPDATE runtime_nodes SET result_json=? WHERE task_id='t' AND revision=4 AND node_id='_review_2'",
+                    [json!({"report_ref":"r_dddddddddddd"}).to_string()])?;
+                Ok(())
+            })
+            .unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                outstanding(&store, &c, &i, &args).unwrap(),
+                None,
+                "no refusal loop"
+            );
+        }
+        let (missing, unreadable) = predecessor_reading(&store, &c, &i, &args).unwrap();
+        assert!(missing.is_empty());
+        let ids: Vec<&str> = unreadable
+            .iter()
+            .map(|u| u["report_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["r_dddddddddddd", "r_eeeeeeeeeeee"]);
+        assert_eq!(unreadable[0]["reason"], "unavailable");
+        assert!(unreadable[1]["reason"]
+            .as_str()
+            .is_some_and(|r| !r.is_empty() && r != "busy"));
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -705,9 +915,9 @@ pub(super) fn refusal_reply_with(code: &str, missing: Option<Vec<String>>) -> Va
         "review_project_revision_changed" => "The project changed while you reviewed it; the review is now bound to the current state. Re-read what changed, then submit with a fresh request_key.",
         "review_project_revision_unstable" => "The project kept changing during the review. Re-read the current state and submit with a fresh request_key once it is stable, or report the instability.",
         "review_resubmit_required" => "This request_key belongs to a refused submission of this review. Submit again with a fresh request_key.",
-        "review_predecessor_reports_required" => "Read each predecessor report listed in missing through its final page with read_report (or, if one is genuinely unreachable, name it in not_covered with its blocker under verdict INCOMPLETE). This review stays active in this session; then submit again.",
+        "review_predecessor_reports_required" => "Read each required predecessor report listed in missing (your review packet's predecessor_reports; optional_reports are not required) through its final page with read_report. A report the runtime cannot read is not required and is retained on your result instead. This review stays active in this session; then submit again.",
         "review_coverage_unfinished" => "The not_covered parts listed in missing name no dead end, so you can still cover them. Review each one now in this session, then submit again; keep in not_covered only parts you cannot reach yourself, each with its blocker.",
-        "review_file_coverage_required" => "The changed files listed in missing were not read completely in their current state. Read each one with project_read in this session and submit again; a part you genuinely cannot reach goes in not_covered with its blocker under verdict INCOMPLETE.",
+        "review_file_coverage_required" => "The changed files listed in missing were not read completely in their current state. Read each one with project_read in this session and submit again (for a file with review_lines in the review packet, reading those line ranges of its current bytes is enough); a part you genuinely cannot reach goes in not_covered with its blocker under verdict INCOMPLETE.",
         "review_block_findings_required" => "A BLOCK must name each confirmed problem in findings. Name them, or finish the review and choose the verdict your evidence supports.",
         "review_not_covered_required" => "not_covered goes with verdict INCOMPLETE only, and INCOMPLETE needs at least one not_covered part with its blocker.",
         "assignment_blocker_required" => "A failed assignment needs blocker: the dead end (kind and concrete detail) you cannot clear within your role and permissions. If you can still finish the work, finish it and submit the completed result instead.",
@@ -818,6 +1028,59 @@ fn title(args: &Value) -> CoreResult<&str> {
         .find_map(|line| line.strip_prefix("# "))
         .unwrap_or("Native worker report"))
 }
+/// A review rebinds to the current project revision when the project changes while
+/// it runs (`preflight_result_tx`), and the reviewer is told to re-check the changed
+/// project. Its recorded packet still names the bytes each changed file had at
+/// delivery, so a complete read of the new bytes could never satisfy the coverage
+/// check and every later verdict would be refused. Whenever the newest binding is
+/// newer than the newest packet, the packet is recorded again with each listed
+/// file's current bytes, read like `project_read` reads them. A file without such
+/// bytes now (removed, a symlink) has nothing to read, like a deletion. Nothing else
+/// in the packet changes, and an unchanged project never rewrites it.
+fn refresh_rebound_review_packet_tx(
+    db: &rusqlite::Connection,
+    root: &std::path::Path,
+    task: &str,
+    assignment: &str,
+) -> CoreResult<()> {
+    use rusqlite::OptionalExtension;
+    let latest = |kind: &str| -> CoreResult<Option<(i64, String)>> {
+        Ok(db
+            .query_row(
+                "SELECT id,payload_json FROM runtime_events WHERE task_id=? AND type=?
+                 AND json_extract(payload_json,'$.assignment_ref')=? ORDER BY id DESC LIMIT 1",
+                (task, kind, assignment),
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    };
+    let (Some((bound, _)), Some((recorded, raw))) =
+        (latest("REVIEW_STARTED")?, latest("REVIEW_PACKET")?)
+    else {
+        return Ok(());
+    };
+    if bound < recorded {
+        return Ok(());
+    }
+    let mut event: Value = serde_json::from_str(&raw)?;
+    if let Some(files) = event["packet"]["changed_files"]["files"].as_array_mut() {
+        for file in files {
+            if file["change"] == "deleted" {
+                continue;
+            }
+            let Some(path) = file["path"].as_str() else {
+                continue;
+            };
+            file["current_sha256"] = crate::native_project::current_sha256(root, path)
+                .map_or(Value::Null, Value::from);
+        }
+    }
+    let base = crate::native_project::review_base(db, task, &event["packet"])?;
+    crate::native_project::add_review_lines(root, base.as_deref(), &mut event["packet"]);
+    event["refreshed_from"] = json!(recorded);
+    lifecycle::event_tx(db, task, "REVIEW_PACKET", event)?;
+    Ok(())
+}
 /// Only called after schema validation, on the serial writer lane. Re-authenticate
 /// before every phase; external epoch changes may fence a publication in progress.
 /// Such a publication remains retained, but is never promoted to a node result.
@@ -854,7 +1117,10 @@ pub(super) fn submit(
         if current != i {
             return Err(CoreError::Refused("channel_identity_changed"));
         }
-        lifecycle::review::preflight_result_tx(db, &i.task, assignment, key, &evidence)
+        let refusal =
+            lifecycle::review::preflight_result_tx(db, &i.task, assignment, key, &evidence)?;
+        refresh_rebound_review_packet_tx(db, store.key().root(), &i.task, assignment)?;
+        Ok(refusal)
     })? {
         // The re-binding is committed; the worker gets a structured, correctable error
         // (re-check the changed project, submit with a fresh request_key).
@@ -995,6 +1261,14 @@ pub(super) fn submit(
     if let Some(verdict) = result["verdict"].as_str() {
         result["verdict"] = json!(verdict.to_ascii_uppercase());
     }
+    // A required predecessor report nobody can read is retained on the review result
+    // with its reason, for the coordinator; it never held the review back.
+    if i.stage.as_deref() == Some("review") {
+        let (_, unreadable) = predecessor_reading(store, credential, &i, args)?;
+        if !unreadable.is_empty() {
+            result["predecessor_reports_unreadable"] = json!(unreadable);
+        }
+    }
     let mut bound = json!({"report_ref":report.report_id,"attempt_id":i.attempt,"checks":checks});
     if let Some(structure) = &structure {
         // Visible to the reviewer and the coordinator with the result itself.
@@ -1023,4 +1297,101 @@ pub(super) fn submit(
             Ok(receipt)
         })
     })
+}
+
+#[cfg(test)]
+mod rebound_packet_tests {
+    use super::*;
+    use cortex_core::{lifecycle::TaskMachine, OpenMode, ProjectKey, StoreChannel};
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+
+    fn sha(b: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(b))
+    }
+    fn packets(store: &Store) -> Vec<Value> {
+        store
+            .read(|db| {
+                Ok(db
+                    .prepare(
+                        "SELECT payload_json FROM runtime_events WHERE task_id='t'
+                         AND type='REVIEW_PACKET' ORDER BY id",
+                    )?
+                    .query_map([], |r| r.get::<_, String>(0))?
+                    .map(|s| serde_json::from_str(&s.unwrap()).unwrap())
+                    .collect())
+            })
+            .unwrap()
+    }
+
+    /// Owner store 2026-11-19: CHANGELOG.md and a document changed 25 s after a
+    /// review packet was recorded. The review was rebound to the new project
+    /// revision, but the packet kept the old file hashes, so every complete read
+    /// of the current bytes was "missing or stale" and each verdict was refused.
+    #[test]
+    fn a_rebound_review_packet_names_the_current_bytes_of_its_changed_files() {
+        let root = std::env::temp_dir().join(format!(
+            "native-rebound-packet-{}",
+            crate::native_effects::identity().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let store = Store::open(
+            ProjectKey::new(&root, StoreChannel::Dev).unwrap(),
+            OpenMode::Initialize,
+        )
+        .unwrap();
+        TaskMachine::new(&store)
+            .create("t", "review", "owner")
+            .unwrap();
+        std::fs::write(root.join("a.md"), "reviewed\n").unwrap();
+        std::fs::write(root.join("gone.md"), "reviewed\n").unwrap();
+        let old = sha(b"reviewed\n");
+        let files = json!([
+            {"path":"a.md","change":"modified","current_sha256":old},
+            {"path":"gone.md","change":"added","current_sha256":old},
+            {"path":"was.md","change":"deleted"},
+        ]);
+        let refresh = || {
+            store
+                .write(|db| refresh_rebound_review_packet_tx(db, &root, "t", "a1"))
+                .unwrap()
+        };
+        store
+            .write(|db| {
+                lifecycle::event_tx(db, "t", "REVIEW_STARTED",
+                    json!({"assignment_ref":"a1","revision_digest":"r1"}))?;
+                lifecycle::event_tx(db, "t", "REVIEW_PACKET", json!({"assignment_ref":"a1",
+                    "node":"_review_1","packet":{"changed_files":{"complete":true,"files":files}}}))?;
+                Ok(())
+            })
+            .unwrap();
+        // The project changes while the review runs.
+        std::fs::write(root.join("a.md"), "edited meanwhile\n").unwrap();
+        std::fs::remove_file(root.join("gone.md")).unwrap();
+        // Without a rebind the delivered packet stays as recorded.
+        refresh();
+        assert_eq!(packets(&store).len(), 1);
+
+        store
+            .write(|db| {
+                lifecycle::event_tx(db, "t", "REVIEW_STARTED", json!({"assignment_ref":"a1",
+                    "revision_digest":"r2","rebound_from":"r1","rebind":1}))?;
+                Ok(())
+            })
+            .unwrap();
+        refresh();
+        let all = packets(&store);
+        assert_eq!(all.len(), 2);
+        let files = &all[1]["packet"]["changed_files"]["files"];
+        assert_eq!(files[0]["current_sha256"], sha(b"edited meanwhile\n"));
+        assert_eq!(files[1]["current_sha256"], Value::Null);
+        assert_eq!(files[2], json!({"path":"was.md","change":"deleted"}));
+        assert_eq!(all[1]["assignment_ref"], "a1");
+        assert_eq!(all[1]["packet"]["changed_files"]["complete"], true);
+        // Recorded once per rebind, never rewritten while the project is unchanged.
+        refresh();
+        assert_eq!(packets(&store).len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

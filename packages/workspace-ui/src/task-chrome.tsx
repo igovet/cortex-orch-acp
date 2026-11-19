@@ -255,7 +255,7 @@ export function ExternalDoneDialog(props: { taskId: string | null; how: "externa
 }
 
 /** Closing cannot be undone, so it says what will happen, in numbers. Cancel is the only red button, and only once chosen. */
-export function CloseDialog(props: { taskId: string | null; onClose: () => void }) {
+export function CloseDialog(props: { taskId: string | null; onClose: () => void; onRefused?: (message: string) => void }) {
   const ws = useWs();
   const [choice, setChoice] = createSignal<"as_is" | "cancel">("as_is");
   const m = createMemo(() => props.taskId ? sessionModel(ws.store.index(), props.taskId) : null);
@@ -264,31 +264,48 @@ export function CloseDialog(props: { taskId: string | null; onClose: () => void 
   const signature = (model: SessionModel) => JSON.stringify([
     model.view.id, model.view.task.sourceVersion, model.view.task.executionId,
     model.view.task.result?.sourceVersion, model.view.task.result?.digest,
-    model.view.sprint?.automaticQueue, model.view.task.status,
+    model.view.sprint?.automaticQueue, model.view.task.status, unconfirmedState(model),
   ]);
+  // A refusal stays in the dialog (a passing notice is dismissed by the next click) until the task changes or the
+  // owner tries again.
+  const [refused, setRefused] = createSignal<{ taskId: string; choice: string; signature: string; message: string } | null>(null);
+  const refusal = () => { const r = refused(), model = m(); return r && model && r.taskId === props.taskId && r.signature === signature(model) ? r : null; };
   const [reviewedHold, setReviewedHold] = createSignal<string | null>(null);
   createEffect(on(openedTask, id => {
     setChoice("as_is");
+    setRefused(null);
     const model = m();
-    setReviewedHold(id && model && automaticAcceptanceHold(model.view) ? signature(model) : null);
+    setReviewedHold(id && model && (automaticAcceptanceHold(model.view) || unconfirmedState(model)?.kind === "records") ? signature(model) : null);
   }));
   const paused = () => m()?.mode === "paused";
   // A failed or cancelled run has nothing left to stop or keep working on.
   const ended = () => m()?.mode === "ended";
+  const records = () => !!m() && unconfirmedState(m()!)?.kind === "records";
   const automaticHold = () => !!m() && automaticAcceptanceHold(m()!.view);
   const [closing, setClosing] = createSignal(false);
   const blocked = () => {
     const model = m();
     if (!model) return "Refresh the task first.";
-    if (reviewedHold() && signature(model) !== reviewedHold()) return "The task changed. Reopen this dialog to review its current result.";
+    if ((reviewedHold() || records()) && signature(model) !== reviewedHold()) return "The task changed. Reopen this dialog to review its current result.";
     return closeBlocked(model);
   };
   const close = () => {
     const id = props.taskId!;
     if (closing() || blocked()) return;
     setClosing(true);
-    void ws.run({ type: "close_task", taskId: id, choice: choice(), confirmed: true, now: ws.store.clock() })
-      .then(receipt => { if (receipt.ok && props.taskId === id) props.onClose(); })
+    setRefused(null);
+    const chosen = choice(), model = m()!;
+    // Quiet: the refusal is shown here and by whoever opened the dialog, not as a passing notice.
+    const base = { type: "close_task" as const, taskId: id, confirmed: true, now: ws.store.clock() };
+    const task = model.view.task;
+    void ws.store.dispatch(records()
+      ? { ...base, choice: "unconfirmed", executionId: task.executionId!, expectedVersion: task.sourceVersion! }
+      : { ...base, choice: chosen }, { quiet: true })
+      .then(receipt => {
+        if (receipt.ok) { if (props.taskId === id) props.onClose(); return; }
+        setRefused({ taskId: id, choice: chosen, signature: signature(model), message: receipt.message });
+        props.onRefused?.(receipt.message);
+      })
       .finally(() => setClosing(false));
   };
   return <Modal open={!!props.taskId && !!m()} onClose={props.onClose} label="Close task">
@@ -296,17 +313,18 @@ export function CloseDialog(props: { taskId: string | null; onClose: () => void 
       <div class="dlg-h"><h2>Close “{model().view.task.title}”?</h2><button class="ib" aria-label="Keep working" onClick={() => props.onClose()}><I n="x" /></button></div>
       <div class="dlg-b">
         <ul class="conseq"><Keyed each={closeConsequences(model())} by={l => `${l.icon}:${l.text}`}>{l => <li><I n={l().icon} s={14} /><span>{l().text}</span></li>}</Keyed></ul>
-        <div style={{ display: "grid", gap: "6px" }}>
+        <Show when={!records()}><div style={{ display: "grid", gap: "6px" }}>
           <label class="rc"><input type="radio" name="close-choice" checked={choice() === "as_is"} onChange={() => setChoice("as_is")} /><span><span class="t">Close as is</span><span class="d">{automaticHold() ? "This finishes the dependency and lets Automatic start the next ready task." : checkedResult(model()) ? "Keep what was done. The checked result and its evidence stay on record, and the task moves to Done." : "Keep what was done and decide about merging later. The result carries a lasting Not verified warning."}</span></span></label>
           <label class="rc danger"><input type="radio" name="close-choice" checked={choice() === "cancel"} onChange={() => setChoice("cancel")} /><span><span class="t">Cancel task</span><span class="d">Nothing from this task is needed. The task moves to Done as Cancelled. The checkout stays until you delete it.{automaticHold() ? " Cancelled dependencies can still keep later queued tasks blocked." : ""}</span></span></label>
-        </div>
-        <Show when={!ended() && !automaticHold()}><Show when={paused()} fallback={<Show when={ws.can(capabilityOf("continue_task"))}><div class="note-box plain"><I n="pause" s={14} /><span>Only want to pause? <button class="lnk" {...ws.needs("stop_task")} onClick={() => { const id = props.taskId!; props.onClose(); ws.stopTask(id); }}>Stop</button> keeps everything and can be resumed. It needs no confirmation.</span></div></Show>}>
+        </div></Show>
+        <Show when={!ended() && !automaticHold() && !records()}><Show when={paused()} fallback={<Show when={ws.can(capabilityOf("continue_task"))}><div class="note-box plain"><I n="pause" s={14} /><span>Only want to pause? <button class="lnk" {...ws.needs("stop_task")} onClick={() => { const id = props.taskId!; props.onClose(); ws.stopTask(id); }}>Stop</button> keeps everything and can be resumed. It needs no confirmation.</span></div></Show>}>
           <div class="note-box plain"><I n="pause" s={14} /><span>Only want to pause? This task is already stopped, and Resume picks it up again.</span></div>
         </Show></Show>
+        <Show when={refusal()}>{r => <div class="note-box st-bad" role="alert"><I n="alert" s={14} /><span>{r().message}</span></div>}</Show>
       </div>
-      <ActionBar place="dialog" hint={blocked() ?? (automaticHold() ? undefined : "Closing keeps the work. Deleting it is a separate, explicit step in the Archive.")}>
-        <button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>{paused() ? "Keep it paused" : ended() ? "Keep it open" : "Keep working"}</button>
-        <Show when={choice() === "as_is"} fallback={<button class="btn btn-danger btn-lg" disabled={closing()} aria-disabled={blocked() ? "true" : undefined} data-why={blocked() ?? undefined} onClick={close}>Cancel task</button>}><button class="btn btn-primary btn-lg" disabled={closing()} aria-disabled={blocked() ? "true" : undefined} data-why={blocked() ?? undefined} onClick={close}>{automaticHold() ? "Close as is and continue" : "Close task"}</button></Show>
+      <ActionBar place="dialog" hint={blocked() ?? (automaticHold() || records() ? undefined : "Closing keeps the work. Deleting it is a separate, explicit step in the Archive.")}>
+        <button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>{paused() ? "Keep it paused" : ended() || records() ? "Keep it open" : "Keep working"}</button>
+        <Show when={records() || choice() === "as_is"} fallback={<button class="btn btn-danger btn-lg" disabled={closing()} aria-disabled={blocked() ? "true" : undefined} data-why={blocked() ?? undefined} onClick={close}>Cancel task</button>}><button class="btn btn-primary btn-lg" disabled={closing()} aria-disabled={blocked() ? "true" : undefined} data-why={blocked() ?? undefined} onClick={close}>{records() ? "Close as is" : automaticHold() ? "Close as is and continue" : "Close task"}</button></Show>
       </ActionBar>
     </>}</Show>
   </Modal>;

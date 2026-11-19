@@ -281,6 +281,7 @@ async fn newer_target_updates_the_task_branch_and_requires_a_fresh_review() {
     let error = env.run(squash(&digest)).await.unwrap_err();
     assert_eq!(error.code, "review_required");
     // Main is untouched; the task branch now contains it; acceptance is withdrawn.
+    assert_eq!(env.overlay()["changesBaseRevision"], main_head);
     assert_eq!(git(&target, &["rev-parse", "main"]), main_head);
     git(&env.root, &["merge-base", "--is-ancestor", "main", "task"]);
     let saved = env.overlay();
@@ -300,6 +301,7 @@ async fn conflicting_target_records_the_conflict_in_the_task_checkout_only() {
     let env = Env::new("conflict");
     fs::write(env.root.join("a.txt"), "task side\n").unwrap();
     git(&env.root, &["commit", "-q", "-am", "Task edits a"]);
+    let task_head = git(&env.root, &["rev-parse", "HEAD"]);
     let target = env.base.join("target");
     git(
         &env.root,
@@ -321,6 +323,8 @@ async fn conflicting_target_records_the_conflict_in_the_task_checkout_only() {
     let saved = env.overlay();
     assert_eq!(saved["conflict"], "conflict");
     assert_eq!(saved["acceptance"], Value::Null);
+    assert_eq!(saved["merge"]["sourceRevision"], task_head);
+    assert_eq!(saved["merge"]["targetRevision"], main_head);
     let file = &saved["merge"]["files"][0];
     assert_eq!(file["path"], "a.txt");
     assert_eq!(file["blocks"][0]["ours"]["lines"], json!(["task side"]));
@@ -676,8 +680,22 @@ fn task_in(env: &Env, wt: &Path, digest: &str) -> Value {
     record(
         env,
         digest,
-        json!({"checkout":{"kind":"worktree","path":wt.to_str().unwrap(),"branch":"task"}}),
+        json!({"checkout":{"kind":"worktree","path":wt.to_str().unwrap(),"branch":"task"},
+            "baseRevision":git(wt, &["merge-base", "task", "main"])}),
     )
+}
+async fn assert_task_changes(env: &Env) {
+    let snapshot = Git::new()
+        .snapshot(&env.root, "p1", &env.state, None)
+        .await
+        .unwrap();
+    let paths: std::collections::BTreeSet<_> = snapshot["taskDiffs"]["t1"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["a.txt", "b.txt"].into_iter().collect());
 }
 fn update(digest: &str, request: &str) -> Value {
     json!({"confirmed":true,"taskId":"t1","digest":digest,"method":"update","requestId":request})
@@ -689,7 +707,10 @@ async fn update_from_target_merges_the_target_into_the_task_branch_and_withdraws
     let main = git(&env.root, &["rev-parse", "main"]);
     let task_head = git(&wt, &["rev-parse", "HEAD"]);
     let digest = env.evidence(&[]).await;
-    env.save(task_in(&env, &wt, &digest));
+    let record = task_in(&env, &wt, &digest);
+    let original = record["baseRevision"].clone();
+    env.save(record);
+    assert_task_changes(&env).await;
     // Confirmation first, as for every integration.
     let mut unconfirmed = update(&digest, "u0");
     unconfirmed["confirmed"] = json!(false);
@@ -717,6 +738,9 @@ async fn update_from_target_merges_the_target_into_the_task_branch_and_withdraws
     assert_eq!(saved["automaticReady"], false);
     assert!(saved["requiresFreshResult"]["resultId"].is_string());
     assert_eq!(saved["status"], "ready_to_merge");
+    assert_eq!(saved["baseRevision"], original);
+    assert_eq!(saved["changesBaseRevision"], main);
+    assert_task_changes(&env).await;
     // Nothing left to bring in, and the withdrawn acceptance cannot be used to merge.
     assert_eq!(
         env.run(update(&digest, "u2")).await.unwrap_err().code,
@@ -795,7 +819,10 @@ async fn an_update_conflict_is_the_tasks_own_and_abort_returns_the_reviewed_tree
     let head = git(&wt, &["rev-parse", "HEAD"]);
     let index = git(&wt, &["write-tree"]);
     let digest = env.evidence(&[]).await;
-    env.save(task_in(&env, &wt, &digest));
+    let mut record = task_in(&env, &wt, &digest);
+    let original = record["baseRevision"].clone();
+    record["changesBaseRevision"] = original.clone();
+    env.save(record);
     let refused = env.run(update(&digest, "c1")).await.unwrap_err();
     assert_eq!(refused.code, "merge_conflict", "{}", refused.message);
     assert!(
@@ -834,24 +861,68 @@ async fn an_update_conflict_is_the_tasks_own_and_abort_returns_the_reviewed_tree
     assert_eq!(saved["conflict"], "none");
     assert_eq!(saved["merge"], Value::Null);
     assert_eq!(saved["requiresFreshResult"], Value::Null);
+    assert_eq!(saved["baseRevision"], original);
+    assert_eq!(saved["changesBaseRevision"], original);
+    assert_task_changes(&env).await;
 }
 
 #[tokio::test]
 async fn a_resolved_update_conflict_finishes_as_a_merge_and_needs_a_fresh_result() {
+    assert_update_conflict_finishes(false).await;
+}
+
+#[tokio::test]
+async fn an_externally_committed_update_conflict_finishes_against_the_merged_target() {
+    assert_update_conflict_finishes(true).await;
+}
+
+async fn assert_update_conflict_finishes(externally_committed: bool) {
     let (env, wt) = update_env("update-finish", ("a.txt", "main side\n"));
+    fs::write(env.root.join("other.txt"), "target only\n").unwrap();
+    git(&env.root, &["add", "other.txt"]);
+    git(&env.root, &["commit", "-q", "-m", "Target adds other file"]);
     let head = git(&wt, &["rev-parse", "HEAD"]);
     let main = git(&env.root, &["rev-parse", "main"]);
     let digest = env.evidence(&[]).await;
-    env.save(task_in(&env, &wt, &digest));
+    let record = task_in(&env, &wt, &digest);
+    let original = record["baseRevision"].clone();
+    env.save(record);
     assert_eq!(
         env.run(update(&digest, "f1")).await.unwrap_err().code,
         "merge_conflict"
     );
+    assert_eq!(env.overlay()["changesBaseRevision"], Value::Null);
+    // Main can advance while this merge is stopped; Finish must use its actual parent.
+    fs::write(env.root.join("later.txt"), "not merged\n").unwrap();
+    git(&env.root, &["add", "later.txt"]);
+    git(&env.root, &["commit", "-q", "-m", "Target moves again"]);
     fs::write(wt.join("a.txt"), "task side\nmain side\n").unwrap();
     git(&wt, &["add", "a.txt"]);
     let mut product = super::super::native::product(&env.state, "p1").unwrap();
     let lock = Lock::new(&env.state, "machine.lock").unwrap();
     let mut g = Git::new();
+    let mut mismatched = product.clone();
+    mismatched["tasks"]["t1"]["merge"]["targetRevision"] = json!(head);
+    let error = crate::machine::task_merge::run(
+        &env.root,
+        "p1",
+        "t1",
+        &env.state,
+        &mut mismatched,
+        &json!({"action":"finish_merge","taskId":"t1","requestId":"wrong-target"}),
+        &mut g,
+        lock,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, "unsafe_conflict");
+    assert_eq!(git(&wt, &["rev-parse", "HEAD"]), head);
+    assert_eq!(env.overlay()["changesBaseRevision"], Value::Null);
+    let external_head = externally_committed.then(|| {
+        git(&wt, &["commit", "-q", "-m", "Resolve the update in Git"]);
+        git(&wt, &["rev-parse", "HEAD"])
+    });
+    let lock = Lock::new(&env.state, "machine.lock").unwrap();
     crate::machine::task_merge::run(
         &env.root,
         "p1",
@@ -868,12 +939,67 @@ async fn a_resolved_update_conflict_finishes_as_a_merge_and_needs_a_fresh_result
         git(&wt, &["show", "-s", "--format=%P", "HEAD"]),
         format!("{head} {main}")
     );
+    if let Some(external_head) = external_head {
+        assert_eq!(git(&wt, &["rev-parse", "HEAD"]), external_head);
+    }
     assert_clean(&wt);
     let saved = env.overlay();
     assert_eq!(saved["conflict"], "none");
     assert_eq!(saved["acceptance"], Value::Null);
+    assert_eq!(saved["baseRevision"], original);
+    assert_eq!(saved["changesBaseRevision"], main);
+    assert_task_changes(&env).await;
     // The tree changed: the reviewed result is not current, so it cannot be accepted again as is.
     assert!(saved["requiresFreshResult"]["resultId"].is_string());
+}
+
+#[tokio::test]
+async fn an_aborted_or_replaced_update_conflict_cannot_advance_the_changes_base() {
+    let (env, wt) = update_env("update-external-abort", ("a.txt", "main side\n"));
+    let target = git(&env.root, &["rev-parse", "main"]);
+    let digest = env.evidence(&[]).await;
+    let mut record = task_in(&env, &wt, &digest);
+    record["changesBaseRevision"] = record["baseRevision"].clone();
+    env.save(record);
+    assert_eq!(
+        env.run(update(&digest, "stop-update"))
+            .await
+            .unwrap_err()
+            .code,
+        "merge_conflict"
+    );
+    let stopped = env.overlay();
+    git(&wt, &["merge", "--abort"]);
+
+    for (request, replaced) in [("aborted-update", false), ("different-merge", true)] {
+        if replaced {
+            // Same target, but not the stopped update: a different first parent.
+            git(
+                &wt,
+                &["commit", "--allow-empty", "-q", "-m", "New task HEAD"],
+            );
+            git(&wt, &["merge", "-q", "-s", "ours", "--no-edit", &target]);
+        }
+        let head = git(&wt, &["rev-parse", "HEAD"]);
+        let mut product = super::super::native::product(&env.state, "p1").unwrap();
+        let lock = Lock::new(&env.state, "machine.lock").unwrap();
+        let error = crate::machine::task_merge::run(
+            &env.root,
+            "p1",
+            "t1",
+            &env.state,
+            &mut product,
+            &json!({"action":"finish_merge","taskId":"t1","requestId":request}),
+            &mut Git::new(),
+            lock,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "unsafe_conflict");
+        assert_eq!(git(&wt, &["rev-parse", "HEAD"]), head);
+        assert_clean(&wt);
+        assert_eq!(env.overlay(), stopped);
+    }
 }
 
 #[test]
@@ -896,4 +1022,64 @@ fn automatic_no_effect_finish_requires_complete_landing_facts() {
     ] {
         assert!(!super::task_already_landed(&facts));
     }
+}
+
+#[tokio::test]
+async fn a_repository_without_commits_finishes_automatic_in_place_and_refuses_a_merge() {
+    // `git init` without a first commit: HEAD names the unborn `master`, so no
+    // target branch exists and a merge can never succeed on retry.
+    let base = std::env::temp_dir()
+        .join(format!("cw-native-int-unborn-{}", settings::unique()))
+        .canonicalize_or_self();
+    let root = base.join("repo");
+    let state = base.join("state");
+    fs::create_dir_all(&root).unwrap();
+    git(&root, &["init", "-q", "-b", "master"]);
+    fs::write(root.join(".gitignore"), ".cortex/\n.cortex-dev/\n").unwrap();
+    fs::write(root.join("a.txt"), "task file\n").unwrap();
+    let env = Env { base, root, state };
+    let digest = env.evidence(&[]).await;
+    let mut task = json!({"status":"ready_to_merge","sprintId":"s1",
+        "acceptance":{"digest":digest,"automatic":true,"version":"1"},
+        "acceptedRevision":digest,"checkout":{"kind":"main"},"targetBranch":"master"});
+    let sprint = json!({"id":"s1","runMode":"automatic","queueState":"running","taskIds":["t1"]});
+    let product = json!({"tasks":{"t1":task.clone()},"sprints":[sprint],"drafts":{},"messages":[],"comments":{},
+        "sprintRunModeVersion":1});
+    settings::write_json(&product_path(&env.state, "p1").unwrap(), &product).unwrap();
+
+    // An owner merge is refused with the real cause, not "the branch must exist".
+    let error = env
+        .run(
+            json!({"confirmed":true,"taskId":"t1","digest":digest,"method":"commit",
+            "message":"Finish","requestId":"manual"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:?}").contains("no_commits"), "{error:?}");
+    assert_eq!(env.overlay(), task);
+
+    let mut g = Git::new();
+    let done = super::automatic(
+        &env.root,
+        "p1",
+        &env.state,
+        &json!({"taskId":"t1","sprintId":"s1"}),
+        &mut g,
+    )
+    .await
+    .unwrap();
+    assert_eq!(done, json!({"done":true,"inPlace":true}));
+    let saved = env.overlay();
+    assert_eq!(saved["status"], "done");
+    assert_eq!(saved["closedAs"], "as_is");
+    assert_eq!(saved["notVerifiedByCortex"], false);
+    // No Git effect: the repository still has no commit and the file is untracked.
+    assert!(!Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .current_dir(&env.root)
+        .status()
+        .unwrap()
+        .success());
+    task["status"] = json!("done");
+    assert_eq!(saved["acceptance"], task["acceptance"]);
 }

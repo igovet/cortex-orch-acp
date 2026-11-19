@@ -220,7 +220,9 @@ checks continued execution, completion while the service is offline, a recovered
 owner stop, and supervisor loss. Exact command/output identities, binary output
 beyond the inline limit, nonzero exit status, hash/size, one receipt after another
 restart and a single launch marker are asserted. A lost supervisor retains an
-unknown outcome and refuses a stop rather than signalling its old PID. Run just
+unknown outcome and refuses a stop rather than signalling its old PID; once its
+recorded payload process group is empty its receipt is settled as
+`outcome_not_recorded`, never as a success. Run just
 these cases with real namespaces (see above) with:
 
 ```sh

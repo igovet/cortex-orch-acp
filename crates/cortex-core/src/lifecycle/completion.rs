@@ -419,28 +419,24 @@ enum Independence {
 /// files must never become a surprise review obligation.
 /// The changed files a review has not read completely on its own channel, from its
 /// latest review packet. Each entry is `{"path"|"kind","reason"}`. An INCOMPLETE
-/// review is not asked for parts it declared blocked by a dead end, nor for host
-/// limits (an unenumerable change set, paths outside its read scope) that it
-/// cannot resolve itself; any other verdict must have read everything.
+/// review is not asked for parts it declared blocked by a dead end, nor for paths
+/// outside its read scope that it cannot resolve itself; any other verdict must have
+/// read every listed changed file.
+///
+/// A change set the host could not enumerate completely (no usable baseline
+/// manifest, or more changed files than the packet lists) is a host limit no
+/// reviewer can resolve, so it is not a missing item: the verdict covers the listed
+/// files, and `review_change_set_limits_tx` records what was not listed with the
+/// result, never as verified.
 pub fn review_coverage_missing_tx(
     db: &rusqlite::Connection,
     task: &str,
     assignment: &str,
     result: &Value,
 ) -> CoreResult<Vec<Value>> {
-    let raw: Option<String> = db
-        .query_row(
-            "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REVIEW_PACKET'
-             AND json_extract(payload_json,'$.assignment_ref')=? ORDER BY id DESC LIMIT 1",
-            (task, assignment),
-            |r| r.get(0),
-        )
-        .optional()?;
-    let Some(raw) = raw else {
+    let Some(packet) = review_packet_of(db, task, assignment)? else {
         return Ok(Vec::new());
     };
-    let event: Value = serde_json::from_str(&raw)?;
-    let packet = event["packet"].clone();
     let incomplete = result["verdict"]
         .as_str()
         .is_some_and(|v| v.eq_ignore_ascii_case("INCOMPLETE"));
@@ -448,11 +444,6 @@ pub fn review_coverage_missing_tx(
     let changed = &packet["changed_files"];
     let mut missing = Vec::new();
     if !incomplete {
-        if changed["complete"] != true || changed["more"]["count"].as_i64().unwrap_or(0) > 0 {
-            missing.push(
-                json!({"kind":"change_set","reason":"host could not enumerate every changed path"}),
-            );
-        }
         if packet["read_scope_covers_change"] != true {
             for path in packet["outside_read_scope"]
                 .as_array()
@@ -511,7 +502,10 @@ pub fn review_coverage_missing_tx(
             let valid = read
                 .as_deref()
                 .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .is_some_and(|v| v["complete"] == true && v["sha256"] == file["current_sha256"]);
+                .is_some_and(|v| {
+                    v["sha256"] == file["current_sha256"]
+                        && (v["complete"] == true || review_lines_read(&file["review_lines"], &v["lines"]))
+                });
             if !valid {
                 missing.push(
                     json!({"path":path,"reason":"current complete read is missing or stale"}),
@@ -520,6 +514,70 @@ pub fn review_coverage_missing_tx(
         }
     }
     Ok(missing)
+}
+/// Whether a read of the current bytes covered every line of the packet's
+/// `review_lines` ranges (the lines that differ from HEAD, with context). A file
+/// without such ranges is never covered this way: it needs a complete read.
+fn review_lines_read(ranges: &Value, lines: &Value) -> bool {
+    let (Some(ranges), Some(lines)) = (ranges.as_array(), lines.as_array()) else {
+        return false;
+    };
+    let read: BTreeSet<u64> = lines.iter().filter_map(Value::as_u64).collect();
+    !ranges.is_empty()
+        && ranges.iter().all(|range| {
+            match (range[0].as_u64(), range[1].as_u64()) {
+                (Some(start), Some(end)) if start >= 1 && start <= end => {
+                    (start..=end).all(|n| read.contains(&n))
+                }
+                _ => false,
+            }
+        })
+}
+/// The latest review packet the host recorded for `assignment`.
+fn review_packet_of(
+    db: &rusqlite::Connection,
+    task: &str,
+    assignment: &str,
+) -> CoreResult<Option<Value>> {
+    let raw: Option<String> = db
+        .query_row(
+            "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REVIEW_PACKET'
+             AND json_extract(payload_json,'$.assignment_ref')=? ORDER BY id DESC LIMIT 1",
+            (task, assignment),
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let mut event: Value = serde_json::from_str(&raw)?;
+    Ok(Some(event["packet"].take()))
+}
+/// What an approving review could not cover because the host could not list it,
+/// from its review packet: each is an `unverified` check (never a pass) that the
+/// final result must disclose, so the owner is told to inspect the folder. Empty
+/// when the packet listed every changed file.
+pub fn review_change_set_limits_tx(
+    db: &rusqlite::Connection,
+    task: &str,
+    assignment: &str,
+) -> CoreResult<Vec<Value>> {
+    let Some(packet) = review_packet_of(db, task, assignment)? else {
+        return Ok(Vec::new());
+    };
+    let changed = &packet["changed_files"];
+    let mut limits = Vec::new();
+    if changed["complete"] != true {
+        limits.push(json!({"name":"Changes outside the recorded writes","outcome":"unverified",
+            "blocker":"Changes made by commands outside the recorded writes could not be listed; inspect the folder.",
+            "source":"runtime"}));
+    }
+    if let Some(more) = changed["more"]["count"].as_i64().filter(|n| *n > 0) {
+        limits.push(json!({"name":"Changed files beyond the review list","outcome":"unverified",
+            "blocker":format!("{more} changed files beyond the review list were not read individually by the reviewer; inspect the folders named in the review packet."),
+            "source":"runtime"}));
+    }
+    Ok(limits)
 }
 /// What a submitted result leaves undone that its worker can still do, as the
 /// refusal code and the exact outstanding items. `None` when the result may be
@@ -789,6 +847,24 @@ pub fn record_result_tx(
                 result["review_independence"] = facts;
             }
             Independence::Refused => return refuse("review_not_independent"),
+        }
+        // An approval covers the changed files its packet listed. What the host
+        // could not list stays with the result as unverified checks the final
+        // result must disclose, never as covered.
+        if result["verdict"] == "APPROVE" {
+            let limits = review_change_set_limits_tx(db, task, assignment)?;
+            if !limits.is_empty() {
+                event_tx(
+                    db,
+                    task,
+                    "REVIEW_CHANGE_SET_LIMITED",
+                    json!({"assignment_ref":assignment,"limits":limits}),
+                )?;
+                match result["checks"].as_array_mut() {
+                    Some(checks) => checks.extend(limits),
+                    None => result["checks"] = json!(limits),
+                }
+            }
         }
         result["project_digest"] = json!(digest(snapshot)?);
     }

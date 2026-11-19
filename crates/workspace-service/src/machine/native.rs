@@ -310,7 +310,22 @@ pub async fn run(
                     super::short_text::run(root, project, state, params, config).await
                 }
                 "product.task" => {
-                    super::task_actions::run(root, project, state, params, &mut git).await
+                    let mut reply =
+                        super::task_actions::run(root, project, state, params, &mut git).await?;
+                    // An Automatic task closed as is is committed like the owner would by
+                    // hand, after the close released the machine lock.
+                    if params["action"] == "close"
+                        && params["choice"] == "as_is"
+                        && params["preflight"] != true
+                        && reply["done"] == true
+                    {
+                        if let Some(task) = params["taskId"].as_str() {
+                            reply["asIsCommit"] =
+                                super::close_commit::commit(root, project, state, task, &mut git)
+                                    .await;
+                        }
+                    }
+                    Ok(reply)
                 }
                 "product.read" => super::task_facts::read(root, state, project, &mut git).await,
                 "workers" => super::workers::read(root, project, params),

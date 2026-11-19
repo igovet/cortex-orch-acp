@@ -424,6 +424,7 @@ export function statusFilterOf(row: StateRow): StatusFilter | null {
   if (!row.view || !w) return "unknown";
   if (w.text === "Conflict" || w.text === "Run failed") return "problem";
   if (row.view.unknown) return "unknown";
+  if (w.group === "unverified") return "problem";
   if (w.group === "ready") return "finish";
   if (w.group === "merged" || w.group === "closed") return "done";
   switch (w.text) {

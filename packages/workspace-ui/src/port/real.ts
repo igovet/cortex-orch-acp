@@ -1364,10 +1364,27 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       }
       case "purge_many": for (const id of command.taskIds) await taskCall(task(id), { action: "purge", taskId: id, confirmed: command.confirmed }); return ok();
       case "close_task": {
+        if (command.choice === "unconfirmed") {
+          await taskCall(task(command.taskId), { action: "close_unconfirmed", taskId: command.taskId,
+            executionId: command.executionId, expectedVersion: command.expectedVersion, confirmed: command.confirmed });
+          return ok();
+        }
         const executionId = tasks.get(command.taskId)?.executionId;
-        if (executionId && command.choice !== "external" && command.choice !== "already_in_target") await control(command.taskId, {action:"close_task",confirmed:command.confirmed,expectedVersion:tasks.get(command.taskId)?.version});
+        const close = { action: "close", taskId: command.taskId, choice: command.choice, confirmed: command.confirmed };
+        const runtime = !!executionId && command.choice !== "external" && command.choice !== "already_in_target";
+        if (runtime) {
+          // The saved task's own close is checked first (it writes nothing), so its refusal never leaves the run
+          // closed and the task open.
+          await taskCall(task(command.taskId), { ...close, preflight: true });
+          await control(command.taskId, {action:"close_task",confirmed:command.confirmed,expectedVersion:tasks.get(command.taskId)?.version});
+        }
         // The execution records the owner's resolution; the card's closed disposition is the saved task's own.
-        await taskCall(task(command.taskId), { action: "close", taskId: command.taskId, choice: command.choice, confirmed: command.confirmed });
+        try { await taskCall(task(command.taskId), close); }
+        catch (error) {
+          // The run is already closed: say so, so closing again (which the run accepts) finishes the task.
+          if (runtime && error instanceof Refusal) throw new Refusal(error.code, `${error.message} The task's run is already closed; close the task again to finish it.`);
+          throw error;
+        }
         return ok();
       }
       case "accept_result": {

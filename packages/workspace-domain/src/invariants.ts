@@ -170,7 +170,7 @@ export function runBlockerOf(state: WorkspaceState, sprint: Sprint): { reason: s
     if (task.status === "done" && (task.closedAs === "external" || task.closedAs === "as_is")) continue;
     // The service skips a cancelled or archived member, as Automatic does; only its dependents wait, and the service
     // holds them with a decision that names the task. Continue queue must not be refused for the skipped member itself.
-    if (task.closedAs === "cancel" || task.archive) continue;
+    if (task.closedAs === "cancel" || task.closedAs === "unconfirmed" || task.archive) continue;
     if (task.closedAs) return { reason: `${task.title} was closed, so the queue cannot go on`, taskId: id };
     if (task.status === "needs_you") return { reason: `${task.title} needs you first`, taskId: id };
     if (task.status === "review") return { reason: task.reviewActions?.reason ? `${task.title}: ${task.reviewActions.reason}` : `Review ${task.title} first`, taskId: id };
@@ -187,7 +187,7 @@ export function checkAcceptanceBlocker(checks: Check[]): string | null {
   return null;
 }
 export function dependencyReady(task: Task, mode?: SprintRunMode) {
-  if (task.closedAs === "cancel") return false;
+  if (task.closedAs === "cancel" || task.closedAs === "unconfirmed") return false;
   if (mode === "automatic") return task.status === "done";
   return (task.status === "done" && (task.closedAs === "external" || task.closedAs === "as_is")) || task.work === "merged" || (task.status === "ready_to_merge" && task.result !== null &&
     (task.acceptance?.digest === task.workspaceDigest || (task.result.automaticReady === true && checksPassed(task.result.checks))) && task.result.digest === task.workspaceDigest && task.conflict === "none");

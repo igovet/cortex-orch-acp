@@ -112,11 +112,27 @@ created or last reopened (`attempt_revisions`, attempt `baseline:<task>`, phase
 `execution_baseline`; the manifest belongs to that baseline's digest). The files whose
 content differs from it at composition time are listed. A project too large for the
 manifest (more than 20,000 files), a missing manifest or a baseline whose digest
-differs keeps the coordinator, and so does a changed or unobserved ignored-files digest, because the list covers only files Git would track or show. Only execution-stage results are quoted; review
+differs keeps the coordinator. Git-ignored files are not deliverable: a changed or unobserved ignored-files digest neither keeps the coordinator nor adds them to the list, which covers every file Git would track or show. Only execution-stage results are quoted; review
 summaries never are. Open owner questions, a repeated review (`review_cycle` other
 than 1) and any `REVIEW_NOT_REQUIRED`, `VERIFICATION_REVISED`, `VERIFICATION_FAILED`,
 `REVIEW_CHANGES_REQUESTED`, `REPLAN_REQUEST_ACCEPTED`, `RETURNED_TO_COORDINATOR` or
 `TASK_REOPENED` event keep the coordinator too.
+
+A reviewer's packet lists its changed files from the same two manifests plus the
+writes the task's sessions recorded (including writes under Git-ignored paths), with
+`complete: true` whenever both manifests are trustworthy; changed Git-ignored files only
+add an `ignored_files` note ("Build outputs and other git-ignored files changed; they are
+not deliverable and are not listed."). Without a usable baseline manifest (for example a
+baseline an earlier build observed while its ignored listing failed, which retained no
+manifest) the packet is `complete: false` and lists the recorded writes only. That host
+limit does not make approval impossible: the reviewer must still read every listed
+changed file completely in its current bytes (and paths outside its read scope still
+count as missing), and an approval then records, in the review result and a
+`REVIEW_CHANGE_SET_LIMITED` event, an `unverified` runtime check "Changes outside the
+recorded writes" ("Changes made by commands outside the recorded writes could not be
+listed; inspect the folder."), or "Changed files beyond the review list" when more than
+the 200 listed files changed. The final result must disclose it under Not verified; the
+unlisted part is never recorded as reviewed.
 
 Synthesis, `SYNTHESIS_RUNTIME_COMPOSED` and COMPLETED commit in one transaction,
 under the unchanged report-integrity/project-digest completion gates and confirmed
@@ -224,12 +240,14 @@ disposition always wins; nothing is certified.
 
 An Automatic sprint can return a completed result to the coordinator when the checkout has changed or an ordinary required check still needs work. The coordinator must publish a fresh result. A pending permission or a dispatched action with an unknown outcome requires separate resolution. An owner can give a paused Automatic sprint permission to finish an eligible result on its current branch. The service binds that decision to the exact version and digest and retains the outcomes of acknowledged checks.
 
+A queue hold of a task whose dispatched actions still have an unknown outcome is decided by that fact for every hold code. While only command receipts are unsettled, the runtime acts next ("Waiting for an unconfirmed command of this task to settle"): it re-settles such receipts by itself once nothing can still run them, and the hold is decided again; a command still unsettled after 30 minutes, or any other unknown effect (a write, an edit, a call), goes to the owner. The owner's hold says in plain words that the outcome cannot be confirmed and offers only actions the service accepts in that state, always including Close as is; no agent repair, renewed attempts or automatic finish is offered. Confirming Close as is on that hold records each unknown receipt as settled with an unknown outcome (`settled_by: owner_close_as_is`) and an `OWNER_ACKNOWLEDGED_UNKNOWN_EFFECTS` event, never a success; a worker still being stopped refuses it. Closing a task with a run first checks the saved task's close without effect (`product.task` `close` with `preflight: true`) before the run records its resolution. See [sprint run modes](../../cortex-workspace/local-task-execution.md#sprint-run-modes).
+
 A task that an Automatic sprint started is bound at start to the runtime's automatic continuation policy (`AUTOMATIC_POLICY_BOUND`). The policy is a trusted host option that commands, plans and model tools cannot set. When a process stop or route problem would otherwise end recovery with a question, the runtime records `AUTOMATIC_CONTINUATION` with its reason and evidence instead, enters RECOVERING and resumes planning once the host has settled the process (`AUTOMATIC_RESUMED`). The fourth continuation of a task requests the senior consultant once (`AUTOMATIC_CONSULTATION_REQUESTED`); its answer joins the next plan through the ordinary consultation path. After eight continuations, the next stop pauses the task (`AUTOMATIC_PAUSED`, kind `continuation_cap`). The owner can open the paused task and use Resume; fresh planning renews the bounded budget only when process and effect evidence permits it. The lifetime count and one-time consultation are retained. A route problem pauses it as `external_blocker` and resumes when the route is qualified again. An unconfirmed effect pauses it as `outcome_unknown` and is never replayed or resumed by the runtime. A pause only for an unconfirmed process exit is the exception: once the running service settles that exit with process evidence, the task continues (`AUTOMATIC_CONTINUATION`, reason `native_process_exit_settled`) unless a dispatched effect is still unknown. Continuations and pauses never waive review or verification and never create an owner work decision. See [sprint run modes](../../cortex-workspace/local-task-execution.md#sprint-run-modes).
 
 A sprint's planning task is bound at Start to the runtime's sprint planning policy (`SPRINT_PLANNING_BOUND`), a trusted host option that commands, plans and model tools cannot set. The runtime refuses a plan with a writing role (`read_only_task_writer_refused`) and every project write of the task; its study plan may name no verification commands. Its coordinator submits the sprint plan with `sprint_plan_submit` at a coordinator turn (PLANNING or RECONCILING, no worker running). A large plan arrives in ordered parts (`SPRINT_PLAN_PART`; a first part discards an unfinished draft); the final part validates the whole assembled plan (`SPRINT_PLAN_SUBMITTED`). The runtime refuses an unchanged plan, and schedules a mandatory independent plan review (`SPRINT_PLAN_REVIEW_SCHEDULED`) within the usual review-cycle budget, moving the task to REVIEWING. Findings record `SPRINT_PLAN_CHANGES_REQUESTED` and return the task to its coordinator under the bounded coordinator returns; repeated findings, the round limit or exhausted returns stop it the run-mode way. After approval the runtime verification passes only for the newest, approved plan (`VERIFICATION_PASSED` with `runtime: sprint_plan`); otherwise it records `SPRINT_PLAN_PENDING` and completion stays refused. The task then completes through the ordinary gate. See [sprint planning limits](../../cortex-workspace/local-task-execution.md#sprint-planning-limits).
 
 Only an immutable, attempt-owned report and its structured result close a node.
-A reviewer, required whenever the project changed, submits APPROVE, REQUEST_CHANGES, BLOCK or INCOMPLETE. Every worker, a reviewer included, finishes its own assignment: `result_submit` refuses, correctably and before anything is published, a result that leaves something the worker can still do (an uncovered part without a dead-end blocker, an unread changed file or predecessor report, a BLOCK without findings, a failure without its blocker), names each outstanding item in `missing`, and the same session continues on the same channel. A turn that ends without a result is asked once more in the same session to finish. A reviewer submits INCOMPLETE only for parts blocked by a named dead end (`missing_access`, `owner_decision`, `other_role_work` or `tool_unavailable`); no second reviewer is scheduled for the same revision, and the dead ends go the run mode's way ([review outcomes](../orchestration/index.md)). A fix and review round continues only on progress: unchanged files or the same findings again stop it once (`review_no_progress`). When the runtime stops a task with its own question, the driver ends and the question is the one stop shown; its answer relaunches the coordinator. Changes produce
+A reviewer, required whenever the project changed, submits APPROVE, REQUEST_CHANGES, BLOCK or INCOMPLETE. Every worker, a reviewer included, finishes its own assignment: `result_submit` refuses, correctably and before anything is published, a result that leaves something the worker can still do (an uncovered part without a dead-end blocker, an unread changed file or required predecessor report of the review's round, a BLOCK without findings, a failure without its blocker), names each outstanding item in `missing`, and the same session continues on the same channel. A turn that ends without a result is asked once more in the same session to finish. A reviewer submits INCOMPLETE only for parts blocked by a named dead end (`missing_access`, `owner_decision`, `other_role_work` or `tool_unavailable`); no second reviewer is scheduled for the same revision, and the dead ends go the run mode's way ([review outcomes](../orchestration/index.md)). A fix and review round continues only on progress: unchanged files or the same findings again stop it once (`review_no_progress`). When the runtime stops a task with its own question, the driver ends and the question is the one stop shown; its answer relaunches the coordinator. Changes produce
 fix nodes and another review, with a three-cycle ceiling. A fix node never keeps a read-only role: the runtime gives it a writing role chosen from its scope. Structured review findings confine fixes to the
 named plan tasks when the runtime can verify them. With no findings and multiple
 implementers, the runtime first returns to the coordinator to plan the remedy
@@ -334,13 +352,26 @@ pass. Git-ignored files are not part of the delivered result: they are covered b
 metadata-only digest (type, mode, size, mtime, link target; no content), including the ignored
 files of nested checkouts. The waivers require that digest to equal the baseline's, so an
 unchanged `target/` or `node_modules/` still gets the waiver, while a changed, added or
-removed ignored file, or an ignored set that could not be listed completely (200,000
-entries), denies it and the review runs. The observation also covers the dirty state of
+removed ignored file, or an ignored set that could not be observed, denies it and the review
+runs. The ignored digest is computed over Git's sorted listing without a name limit (the
+metadata pass is bounded by the same five minutes). An ignored entry that vanishes after the
+listing is recorded by name as missing. If an ignored entry's metadata cannot be read, the
+ignored digest is unobserved. An unobserved ignored digest only denies the waivers: it never makes the
+deliverable observation `incomplete` or its per-file manifest unusable. An equal
+ignored digest compares only those metadata fields; it does not prove that the
+ignored file contents are equal. Each Git listing the
+observation uses (paths, index, ignored directories, ignored files) keeps up to 256 MiB and
+two minutes, and a listing past the byte bound is never cut short into a smaller project:
+the ignored-files listing then leaves the ignored digest unobserved, and any other listing
+refuses with `project_unobservable_too_many_paths` (a nested checkout's is recorded as
+unobserved and sets `incomplete`). The observation also covers the dirty state of
 every submodule and nested repository (tracked changes, untracked files; recursively to four
 levels) and empty directories, which Git does not track. A nested checkout that cannot be
 observed sets `incomplete`. The `EXECUTION_BASELINE` receipt records `metadata_only`,
 `cap_reached` and `incomplete`; a metadata-only or incomplete observation never supports
-either `REVIEW_NOT_REQUIRED` waiver.
+either `REVIEW_NOT_REQUIRED` waiver. It also records the observed project checkout's
+resolved Git commit as `head`, whether attached or detached. `head` is null for an
+unborn branch or a plain folder; a nested checkout's commit does not replace it.
 
 A plain project folder, in no Git repository at all, runs the same lifecycle (execution
 baseline, worker change lists, review packet, verification, completion and acceptance) on

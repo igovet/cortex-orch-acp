@@ -207,8 +207,9 @@ fn automatic_member(saved: &Value, task: &str, expected_sprint: &Value, recheck:
         })
 }
 
-/// Automatic finish in a folder without Git. The accepted result already is the
-/// project folder and there is no repository to commit it to, so — like a result
+/// Automatic finish in a folder without Git, or in a repository without any
+/// commit. The accepted result already is the project folder and there is no
+/// branch to commit it to, so — like a result
 /// whose changes already landed — it reaches Done without any Git effect: the task
 /// is closed as is with its acceptance and checks kept (never Not verified). Every
 /// gate before this point (current automatic acceptance, completed and verified
@@ -406,6 +407,15 @@ async fn integrate(
             return finish_in_place(state, project, task, record, scheduler_sprint, recheck);
         }
         return Err(refuse("git_required", "The accepted changes are already in the project folder. Close the task as-is, or initialize Git before using merge or PR operations."));
+    }
+    // A repository without any commit has no branch to integrate into: like a
+    // folder without Git, the accepted result already is the project folder.
+    // Retrying a merge could never succeed until the owner makes a first commit.
+    if !git.has_history(&path).await? {
+        if automatic {
+            return finish_in_place(state, project, task, record, scheduler_sprint, recheck);
+        }
+        return Err(refuse("no_commits", "This repository has no commits yet, so there is no branch to merge into. The accepted changes are already in the project folder: close the task as-is, or make a first commit before using merge or PR operations."));
     }
     let source = git
         .out(&path, &["branch", "--show-current"])

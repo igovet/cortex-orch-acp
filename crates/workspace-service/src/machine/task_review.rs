@@ -2483,6 +2483,50 @@ mod native_acceptance_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A limitation the runtime recorded with an approved review (changes it could not list)
+    /// is a manual check: never called a self-reported claim, never an open check.
+    #[tokio::test]
+    async fn a_runtime_recorded_review_limitation_is_a_manual_check_not_a_claim() {
+        let (root, runtime, draft) = completed().await;
+        report_checks(
+            &runtime,
+            json!([]),
+            json!([
+                {"name":"Changes outside the recorded writes","outcome":"unverified","source":"runtime",
+                 "blocker":"Changes made by commands outside the recorded writes could not be listed; inspect the folder."}
+            ]),
+        )
+        .await;
+        let task = presented(&runtime, &draft).await;
+        let actions = &task["reviewActions"];
+        assert_eq!(actions["accept"], true, "{task}");
+        assert_eq!(actions["acknowledgeOpenChecks"], false, "{task}");
+        let notes: Vec<&str> = task["result"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(
+            !notes.iter().any(|n| n.contains("self-reported")
+                || n.contains("Changes outside the recorded writes")),
+            "{notes:?}"
+        );
+        assert!(
+            task["result"]["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| {
+                    c["name"] == "Changes outside the recorded writes" && c["kind"] == "manual"
+                }),
+            "{task}"
+        );
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// A failed self-reported check is never softened into a note, and without a passing
     /// runtime verification of this version an unconfirmed claim still blocks Accept.
     #[tokio::test]

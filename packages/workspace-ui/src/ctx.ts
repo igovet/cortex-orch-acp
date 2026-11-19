@@ -128,8 +128,8 @@ export type Ws = {
   newItem: (kind: "task" | "sprint", project?: string | null, sprint?: string | null) => void;
   /** The one Stop: the same path from the title band, the composer, a card, its menu and the keyboard. */
   stopTask: (taskId: string) => void;
-  /** Opens the Close task dialog. Closing is never a single click. */
-  closeTask: (taskId: string, how?: "external" | "already_in_target") => void;
+  /** Opens the Close task dialog. Closing is never a single click. `refused` hears each refusal of the dialog's close, in plain words. */
+  closeTask: (taskId: string, how?: "external" | "already_in_target", refused?: (message: string) => void) => void;
   /** Unsent composer text, per task and worker, so moving around never loses it. */
   drafts: Map<string, string>;
   /** The one open review or Git dialog. */

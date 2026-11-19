@@ -248,6 +248,11 @@ describe("search and status", () => {
     const g = layout(plan([[], [], [1], [2]]));
     expect(finishedLayers(g.layers, new Map([["k1", "done"], ["k2", "done"], ["k3", "done"], ["k4", "unknown"]]))).toEqual([0]);
     expect(finishedLayers(g.layers, new Map())).toEqual([]);
+    const unverified = statusFilterOf(row(word("Closed by you · Not verified", "unverified")));
+    const mixed = new Map<string, StatusFilter | null>([["k1", "done"], ["k2", unverified]]);
+    expect(unverified).toBe("problem");
+    expect(graphMatches(items, "", new Set(["done"]), mixed)).toEqual(["k1"]);
+    expect(finishedLayers(g.layers, mixed)).toEqual([]);
   });
 });
 

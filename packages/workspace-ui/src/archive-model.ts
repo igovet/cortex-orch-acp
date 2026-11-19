@@ -5,14 +5,15 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 export const shortDate = (at: number) => { const d = new Date(at); return `${d.getDate()} ${MONTHS[d.getMonth()]}`; };
 export const sizeText = (mb: number) => mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
 
-export type Outcome = "committed" | "merged" | "as_is" | "cancel" | "external" | "done";
+export type Outcome = "committed" | "merged" | "as_is" | "cancel" | "external" | "unconfirmed" | "done";
 const OUTCOMES: Record<Outcome, { text: string; tone: string }> = {
   committed: { text: "Committed", tone: "st-idle" },
   external: { text: "Done outside the app", tone: "st-idle" },
+  unconfirmed: { text: "Closed by you · Not verified", tone: "st-idle" },
   merged: { text: "Merged", tone: "st-merge" }, as_is: { text: "Closed as is", tone: "st-idle" }, cancel: { text: "Cancelled", tone: "st-idle" }, done: { text: "Done", tone: "st-idle" },
 };
 export const OUTCOME_FILTERS: { id: Outcome; label: string }[] = [{ id: "committed", label: "Committed" }, { id: "merged", label: "Merged" }, { id: "as_is", label: "Closed as is" }, { id: "cancel", label: "Cancelled" }];
-const outcomeOf = (v: TaskView): Outcome => v.task.integration?.method === "commit" ? "committed" : v.task.work === "merged" ? "merged" : v.task.closedAs ?? "done";
+const outcomeOf = (v: TaskView): Outcome => v.task.closedAs === "unconfirmed" ? "unconfirmed" : v.task.integration?.method === "commit" ? "committed" : v.task.work === "merged" ? "merged" : v.task.closedAs ?? "done";
 
 export type ArchiveRow = {
   view: TaskView; group: "soon" | "later" | "blocked"; left: number; percent: number; outcome: Outcome; outcomeText: string; outcomeTone: string;
@@ -28,6 +29,7 @@ function subline(v: TaskView, outcome: Outcome, blocker: string | null) {
   if (outcome === "external") return "Done outside the app; not accepted or merged here";
   if (outcome === "as_is") return closedAsIs(v.task);
   if (outcome === "cancel") return `Cancelled${when}`;
+  if (outcome === "unconfirmed") return "The saved records still disagree";
   return "Done";
 }
 export function archiveRow(index: WorkspaceIndex, v: TaskView): ArchiveRow {

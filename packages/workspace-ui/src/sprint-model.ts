@@ -36,7 +36,7 @@ export function planningThread(sprint: Sprint, session: TaskSession | undefined)
 }
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-type Word = { text: string; tone: string; icon: string; spin?: boolean; group: "ready" | "working" | "needs" | "next" | "blocked" | "merged" | "closed" };
+type Word = { text: string; tone: string; icon: string; spin?: boolean; group: "ready" | "working" | "needs" | "next" | "blocked" | "merged" | "closed" | "unverified" };
 /** One word for a task inside a sprint. A dependency that has not unlocked reads as blocked, never as queued. */
 function wordOf(view: TaskView, next: boolean, index: WorkspaceIndex): Word {
   const t = view.task;
@@ -55,6 +55,7 @@ function wordOf(view: TaskView, next: boolean, index: WorkspaceIndex): Word {
     case "ready_to_merge": return { text: readyLabel(t, view.target), tone: "st-merge", icon: "merge", group: "ready" };
     case "failed": return { text: "Run failed", tone: "st-bad", icon: "x-circle", group: "needs" };
     case "cancelled": return { text: "Run cancelled", tone: "st-idle", icon: "x-circle", group: "needs" };
+    case "closed_unverified": return { text: view.fact.text, tone: "st-idle", icon: "alert", group: "unverified" };
     case "done": return t.integration?.automatic ? { text: view.fact.text, tone: "st-idle", icon: "check", group: "closed" }
       : t.integration?.method === "commit" ? { text: `Committed to ${t.integration.targetBranch}`, tone: "st-idle", icon: "check", group: "closed" } : t.work === "merged" ? { text: "Merged", tone: "st-merge", icon: "merge", group: "merged" }
       : { text: t.closedAs === "external" ? "Done outside the app" : t.closedAs === "cancel" ? "Cancelled" : "Closed as is", tone: "st-idle", icon: t.closedAs === "cancel" ? "x-circle" : "circle", group: "closed" };

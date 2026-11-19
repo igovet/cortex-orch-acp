@@ -635,21 +635,18 @@ fn runtime_synthesis_falls_back_to_the_coordinator_when_a_bound_or_baseline_is_m
         ))
         .unwrap()
         .is_none());
-    // Ignored files changed (or could not be observed): the list cannot be complete.
-    let (_p, s, c) = reconciling("Done", &[("src/a.rs", "9")]);
-    assert!(s
-        .write(|db| reconciliation::compose_runtime_synthesis_tx(
-            db,
-            "t",
-            Some(&c),
-            Some(&"j".repeat(64))
-        ))
-        .unwrap()
-        .is_none());
-    assert!(s
-        .write(|db| reconciliation::compose_runtime_synthesis_tx(db, "t", Some(&c), None))
-        .unwrap()
-        .is_none());
+    // Ignored files changed (or could not be observed): they are not deliverable, so
+    // the deliverable list stays complete and they are not listed.
+    for ignored in [Some("j".repeat(64)), None] {
+        let (_p, s, c) = reconciling("Done", &[("src/a.rs", "9")]);
+        let text = s
+            .write(|db| {
+                reconciliation::compose_runtime_synthesis_tx(db, "t", Some(&c), ignored.as_deref())
+            })
+            .unwrap()
+            .expect("the deliverable change set is complete");
+        assert!(text.contains("- `src/a.rs`"), "{text}");
+    }
     let (_p, s, c) = reconciling("Done", &[("src/a.rs", "9")]);
     s.write(|db| Ok(db.execute("DELETE FROM attempt_revisions", [])?))
         .unwrap();
@@ -754,4 +751,138 @@ fn unverifiable_independence_is_a_visible_warning_and_the_attempt_guard_is_hard(
         })
         .unwrap_err();
     assert_eq!(err.code(), "review_not_independent");
+}
+
+/// A started review whose host packet lists `changed`, its channel bound to the
+/// assignment so its reads count.
+fn review_with_packet(changed: Value) -> (Project, Store, EvidenceSnapshot) {
+    let (p, s, mut e, _o) = executed();
+    e.artifacts.insert("review".into(), "e".repeat(64));
+    s.write(|db| {
+        bind(db, "_review_1", "ar", "xr", "cr")?;
+        db.execute(
+            "UPDATE trusted_channels SET assignment_id='ar' WHERE channel_id='cr'",
+            [],
+        )?;
+        start_review_tx(db, "t", "ar", &e)?;
+        publish(db, "ar", "review")?;
+        event_tx(db, "t", "REVIEW_PACKET", json!({"assignment_ref":"ar","node":"_review_1",
+            "packet":{"changed_files":changed,"read_scope":["**"],"read_scope_covers_change":true,"outside_read_scope":[]}}))?;
+        Ok(())
+    })
+    .unwrap();
+    (p, s, e)
+}
+fn read_completely(s: &Store, path: &str, sha256: &str) {
+    use sha2::Digest;
+    let key = format!("file-read:{:x}", sha2::Sha256::digest(path.as_bytes()));
+    s.write(|db| {
+        Ok(db.execute(
+            "INSERT INTO runtime_requests VALUES ('t',?,'cr','native_file_read','fixture',?)",
+            (key, json!({"complete":true,"sha256":sha256}).to_string()),
+        )?)
+    })
+    .unwrap();
+}
+fn approve(s: &Store, e: &EvidenceSnapshot) -> CoreResult<()> {
+    s.write(|db| {
+        record_result_tx(
+            db,
+            "t",
+            "ar",
+            &json!({"report_ref":"review","summary":"ok","checks":[],"verdict":"APPROVE"}),
+            e,
+        )
+    })
+}
+fn approved_checks(s: &Store) -> Value {
+    s.read(|db| {
+        Ok(db.query_row(
+            "SELECT json_extract(result_json,'$.checks') FROM runtime_nodes WHERE node_id='_review_1'",
+            [],
+            |r| r.get::<_, String>(0),
+        )?)
+    })
+    .map(|c| serde_json::from_str(&c).unwrap())
+    .unwrap()
+}
+
+/// A change set the host could not enumerate never makes APPROVE impossible: the
+/// listed files must still be read completely, and the limit is recorded with the
+/// approval as an unverified check the final result must disclose.
+#[test]
+fn an_unenumerable_change_set_allows_approval_with_a_recorded_limitation() {
+    let hash = "c".repeat(64);
+    let (_p, s, e) = review_with_packet(
+        json!({"files":[{"path":"src/a.rs","change":"written","by":["n"],
+        "current_sha256":hash}],"total":1,"complete":false,"source":"recorded writes only"}),
+    );
+    let missing = s
+        .read(|db| review_coverage_missing_tx(db, "t", "ar", &json!({"verdict":"APPROVE"})))
+        .unwrap();
+    assert_eq!(
+        missing,
+        vec![json!({"path":"src/a.rs","reason":"current complete read is missing or stale"})]
+    );
+    assert_eq!(
+        approve(&s, &e).unwrap_err().code(),
+        "review_file_coverage_required"
+    );
+    read_completely(&s, "src/a.rs", &hash);
+    approve(&s, &e).unwrap();
+    let checks = approved_checks(&s);
+    assert_eq!(checks.as_array().unwrap().len(), 1, "{checks}");
+    assert_eq!(checks[0]["outcome"], "unverified");
+    assert_eq!(
+        checks[0]["blocker"],
+        "Changes made by commands outside the recorded writes could not be listed; inspect the folder."
+    );
+    let (limited, gaps) = s
+        .read(|db| {
+            Ok((
+                db.query_row(
+                    "SELECT count(*) FROM runtime_events WHERE type='REVIEW_CHANGE_SET_LIMITED'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?,
+                reconciliation::gaps(db, "t")?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(limited, 1);
+    assert!(
+        gaps.contains_key("changes outside the recorded writes"),
+        "{gaps:?}"
+    );
+}
+
+#[test]
+fn a_packet_with_more_files_than_listed_records_the_unlisted_count() {
+    let hash = "c".repeat(64);
+    let (_p, s, e) = review_with_packet(
+        json!({"files":[{"path":"src/a.rs","change":"modified","by":[],
+        "current_sha256":hash}],"total":4,"complete":true,
+        "more":{"count":3,"by_folder":[{"folder":"gen","files":3}]}}),
+    );
+    read_completely(&s, "src/a.rs", &hash);
+    approve(&s, &e).unwrap();
+    let checks = approved_checks(&s);
+    assert_eq!(checks.as_array().unwrap().len(), 1, "{checks}");
+    assert_eq!(checks[0]["name"], "Changed files beyond the review list");
+    assert!(checks[0]["blocker"]
+        .as_str()
+        .unwrap()
+        .starts_with("3 changed files"));
+}
+
+#[test]
+fn a_complete_packet_approval_records_no_limitation() {
+    let hash = "c".repeat(64);
+    let (_p, s, e) = review_with_packet(
+        json!({"files":[{"path":"src/a.rs","change":"modified","by":[],
+        "current_sha256":hash}],"total":1,"complete":true}),
+    );
+    read_completely(&s, "src/a.rs", &hash);
+    approve(&s, &e).unwrap();
+    assert_eq!(approved_checks(&s), json!([]));
 }

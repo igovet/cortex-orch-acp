@@ -301,6 +301,36 @@ pub fn cancel_unauthorized_tx(db: &Transaction<'_>, task: &str) -> CoreResult<us
     }
     Ok(cancelled)
 }
+/// Closes an interrupted worker wait that can never continue: its native session
+/// was lost (`continuation_required`), it is neither preserved by Pause or adoption
+/// nor still bound to a live channel, so its question is not answerable and Resume
+/// cannot revive it. Left open it would hold the driver forever, so neither the
+/// lost-worker retry nor the owner's queued messages could proceed. Only while the
+/// task executes or reviews: a paused task keeps its waits for Resume.
+pub fn cancel_lost_tx(db: &Transaction<'_>, task: &str) -> CoreResult<usize> {
+    if !matches!(
+        domain::task_tx(db, task)?.0,
+        TaskState::Executing | TaskState::Reviewing
+    ) {
+        return Ok(0);
+    }
+    let mut cancelled = 0;
+    for mut w in projection_tx(db, task)? {
+        if w["status"] == "open" && w["continuation_required"] == true && !valid_tx(db, &w)? {
+            w["status"] = json!("cancelled");
+            w["reason"] = json!("authority_lost");
+            change_tx(db, &mut w)?;
+            for q in question_ids(&w) {
+                db.execute(
+                    "UPDATE pending_questions SET status='cancelled' WHERE id=? AND status='open'",
+                    [q],
+                )?;
+            }
+            cancelled += 1;
+        }
+    }
+    Ok(cancelled)
+}
 /// Exact question answer and wait readiness commit together, including batches.
 pub fn answer_tx(
     db: &Transaction<'_>,

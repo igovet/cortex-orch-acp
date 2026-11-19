@@ -149,7 +149,7 @@ async fn concurrent_edits_and_unknown_start_keep_the_draft_fence() {
     ] {
         let reply = f.call(params).await;
         assert_eq!(reply["ok"], false);
-        assert!(["task_started", "busy"].contains(&reply["code"].as_str().unwrap()));
+        assert_eq!(reply["code"], "contradictory_evidence");
         assert_eq!(fs::read(f.path()).unwrap(), before);
     }
     f.service.stop().await.unwrap();
@@ -170,6 +170,21 @@ async fn a_started_task_can_still_be_renamed() {
     );
     store
         .write(|db| {
+            db.execute("INSERT INTO tasks VALUES ('r1',?,'now')", [f.root.to_str()])?;
+            db.execute(
+                "INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at)
+                VALUES ('r1','EXECUTING','Fixture','now','now')",
+                [],
+            )?;
+            db.execute("INSERT INTO task_owners VALUES ('r1','owner',1,'now')", [])?;
+            db.execute(
+                "INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",
+                [f.root.to_str()],
+            )?;
+            db.execute(
+                "INSERT INTO workspace_executions VALUES ('started','t1','r1','s1',1,1,'now')",
+                [],
+            )?;
             db.execute(
                 "UPDATE workspace_tasks SET execution_id='started' WHERE task_id='t1'",
                 [],
@@ -376,6 +391,8 @@ async fn owner_deletion_keeps_live_worker_and_exclusive_owner_fences() {
             store.write(|db| {
                 db.execute("INSERT INTO tasks VALUES ('r1',?,'now')",[f.root.to_str()])?;
                 db.execute("INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES ('r1','COMPLETED','Fixture','now','now')",[])?;
+                db.execute("INSERT INTO task_owners VALUES ('r1','owner',1,'now')",[])?;
+                db.execute("INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)",[f.root.to_str()])?;
                 db.execute("INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',1,1,'now')",[])?;
                 db.execute("UPDATE workspace_tasks SET execution_id='e1' WHERE task_id='t1'",[])?;
                 if fence=="running_worker" {
@@ -925,7 +942,36 @@ async fn check_actions(fixture: &Value) {
         if fixture["measuredBytes"] == true {
             normalize_measured_bytes(&mut reply, &case["expected"]);
         }
-        assert_eq!(reply, case["expected"], "{} reply", case["name"]);
+        // Deliberately contradictory bindings now fail at shared task admission,
+        // before the action-specific fences exercised by the historical oracle.
+        // Keep every case's persisted-state and effect assertions below.
+        let expected = match case["name"].as_str().unwrap() {
+            "external-foreign-owner"
+            | "external-missing-session"
+            | "external-foreign-session"
+            | "external-negative-revision"
+            | "external-completed-blocker"
+            | "external-start-unknown"
+            | "external-launch-prepare-False"
+            | "external-launch-prepare-True"
+            | "external-launch-unknown-False"
+            | "external-launch-unknown-True"
+            | "purge-start-unknown"
+            | "clear_old-start-unknown"
+            | "wrong-owner"
+            | "wrong-session"
+            | "missing-session"
+            | "unknown-start"
+            | "negative-revision"
+            | "completed-blocker"
+            | "missing-current-execution" => json!({
+                "ok": false,
+                "code": "contradictory_evidence",
+                "message": "The task's records disagree. Only the explicit close without verification is available."
+            }),
+            _ => case["expected"].clone(),
+        };
+        assert_eq!(reply, expected, "{} reply", case["name"]);
         if fixture["clock"].is_number() {
             assert_eq!(
                 store.as_ref().map(authority),
@@ -1244,4 +1290,142 @@ async fn a_task_the_owner_finished_through_the_runtime_reads_closed_and_archives
     );
     assert_eq!(kept["result"]["tasks"]["t1"]["doneAt"], 7);
     f.service.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn owner_close_with_conflicting_records_survives_service_restart_without_replay() {
+    let mut f = Fixture::new().await;
+    f.service.activate(&f.id).await.unwrap();
+    let store = f.store();
+    store.write(|db| {
+        db.execute("INSERT INTO workspace_tasks(task_id,project_id,description,execution_id,created_at)
+            VALUES ('t1',?,'Build task','e1','now')", [&f.id])?;
+        let root = f.root.to_str().unwrap();
+        db.execute("INSERT INTO tasks VALUES ('r1',?,'now')", [root])?;
+        db.execute("INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at)
+            VALUES ('r1','CANCELLED','Goal','now','now')", [])?;
+        db.execute("INSERT INTO task_owners VALUES ('r1','owner',1,'now')", [])?;
+        db.execute("INSERT INTO acp_host_sessions VALUES ('s1',?,'r1','{}','{}','[]','now',NULL)", [root])?;
+        db.execute("INSERT INTO workspace_executions VALUES ('e1','t1','r1','s1',2,1,'now')", [])?;
+        cortex_core::lifecycle::event_tx(db, "r1", "TASK_CREATED", json!({"execution_host":"rust"}))?;
+        Ok(())
+    }).unwrap();
+    let query = json!({"protocol":{"major":2,"mapping":2},"requestId":"board","projectId":f.id,
+        "operation":"tasks.page","payload":{"target":f.id,"cursor":null,"limit":50}});
+    let before = f.service.native_query(query.clone()).await.unwrap();
+    let before_task = &before["data"]["value"]["items"][0];
+    assert_eq!(before_task["phase"], "unknown");
+    assert_eq!(before_task["warnings"], json!(["contradictory_evidence"]));
+    let saved_before = fs::read(f.path()).ok();
+    for params in [
+        json!({"action":"close","taskId":"t1","choice":"as_is","confirmed":true}),
+        json!({"action":"close","taskId":"t1","choice":"as_is","confirmed":true,"preflight":true}),
+        json!({"action":"close","taskId":"t1","choice":"external","confirmed":true}),
+        json!({"action":"target","taskId":"t1","branch":"other"}),
+        json!({"action":"rename","taskId":"t1","title":"Other task"}),
+        json!({"action":"generate_title","taskId":"t1"}),
+        json!({"action":"draft_integration_text","taskId":"t1","method":"commit","targetBranch":"main"}),
+        json!({"action":"archive","taskId":"t1"}),
+    ] {
+        let refusal = f.call(params.clone()).await;
+        assert_eq!(
+            refusal["code"], "contradictory_evidence",
+            "{params}: {refusal}"
+        );
+    }
+    assert_eq!(fs::read(f.path()).ok(), saved_before);
+    let retry = f
+        .service
+        .control_execution(json!({"projectId":f.id,"executionId":"e1",
+        "requestId":"retry-before-close","action":"retry"}))
+        .await
+        .unwrap_err();
+    assert_eq!(retry.to_string(), "native_execution_binding_invalid");
+    let still_open = f.service.native_query(query.clone()).await.unwrap();
+    assert_eq!(still_open["data"]["value"]["items"][0], *before_task);
+    let close = |confirmed, version, execution| {
+        json!({"action":"close_unconfirmed","taskId":"t1",
+        "confirmed":confirmed,"expectedVersion":version,"executionId":execution})
+    };
+    for (params, code) in [
+        (close(false, "1", "e1"), "confirmation_required"),
+        (close(true, "0", "e1"), "stale_version"),
+        (close(true, "1", "e-other"), "stale_version"),
+    ] {
+        assert_eq!(f.call(params).await["code"], code);
+    }
+    let version = before_task["version"].as_str().unwrap();
+    let expected_next = (version.parse::<u64>().unwrap() + 1).to_string();
+    let request = close(true, version, "e1");
+    let mut preflight = request.clone();
+    preflight["preflight"] = json!(true);
+    assert_eq!(f.call(preflight).await["code"], "invalid_request");
+    let denied = cortex_core::workspace::control::close_unconfirmed(
+        &store,
+        &f.id,
+        "not-the-owner",
+        "t1",
+        "e1",
+        workspace_protocol::core::Version::new(version.parse().unwrap()).unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(denied.code(), "unauthorized");
+    let first = f.call(request.clone()).await;
+    assert_eq!(first["ok"], true, "{first}");
+    assert_eq!(f.call(request).await["ok"], true);
+    let closed = f.service.native_query(query.clone()).await.unwrap();
+    let closed_task = &closed["data"]["value"]["items"][0];
+    assert_eq!(closed_task["version"], expected_next);
+    assert_eq!(closed_task["executionState"], "unknown");
+    assert_eq!(
+        closed_task["warnings"],
+        json!(["contradictory_evidence", "owner_closed_unconfirmed"])
+    );
+    store.read(|db| {
+        let fact: (i64, i64, String) = db.query_row(
+            "SELECT e.owner_epoch,o.epoch,r.state FROM workspace_executions e
+             JOIN task_owners o ON o.task_id=e.runtime_task_id JOIN runtime_tasks r ON r.task_id=o.task_id",
+            [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        assert_eq!(fact, (2, 1, "CANCELLED".into()));
+        let counts: (i64, i64, i64) = db.query_row(
+            "SELECT (SELECT count(*) FROM runtime_events), (SELECT count(*) FROM runtime_requests),
+             (SELECT count(*) FROM workspace_requests WHERE operation='tasks.close_unconfirmed')",
+            [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        assert_eq!(counts, (1, 0, 1));
+        Ok(())
+    }).unwrap();
+    drop(store);
+    f.service.stop().await.unwrap();
+
+    let restarted = Service::bind(Config {
+        runtime_dir: f.base.join("restart"),
+        state_dir: f.state.clone(),
+        allowed_root: f.base.clone(),
+        launch: LaunchSpec::bare(),
+        request_timeout: Duration::from_secs(10),
+        shutdown_timeout: Duration::from_millis(100),
+        event_capacity: 16,
+    })
+    .await
+    .unwrap();
+    drop(std::mem::replace(&mut f.service, restarted.clone()));
+    restarted.activate(&f.id).await.unwrap();
+    let after = restarted.native_query(query).await.unwrap();
+    assert_eq!(after["data"]["value"]["items"][0], *closed_task);
+    let rejected = restarted
+        .control_execution(json!({"projectId":f.id,"executionId":"e1",
+        "requestId":"retry","action":"retry"}))
+        .await
+        .unwrap_err();
+    assert_eq!(rejected.to_string(), "native_execution_binding_invalid");
+    let archive = restarted
+        .machine(
+            serde_json::from_value(json!({"op":"product.task",
+        "projectId":f.id,"params":{"action":"archive","taskId":"t1"}}))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(archive["code"], "contradictory_evidence");
+    restarted.stop().await.unwrap();
 }

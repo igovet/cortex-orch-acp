@@ -99,15 +99,71 @@ The first implementation covers only the subset below. It is the contract of [CW
 
 **Transport.** The desktop shell reaches the service through a native bridge. The service listens on a Unix domain socket in a private runtime directory. Frames are length-prefixed UTF-8 JSON with a 4-byte big-endian length and an 8 MiB maximum, carrying JSON-RPC 2.0 requests and bounded subscription notifications. ACP keeps its own newline-delimited framing. No TCP, loopback HTTP or WebSocket listener is used. The service serves at most 64 connections at once; a later caller waits in the listen backlog until one ends and is never accepted and dropped. The desktop bridge keeps at most 48 ordinary requests in flight, so `service.status` and the subscription's own `projects.list` resync always find a connection (see [consistency and recovery](consistency-and-recovery.md)).
 
-**Operation layers.** The service handles these local operations itself: `service.status`, `service.capabilities`, `service.subscribe`, `service.stop`, `projects.register`, `projects.rename`, `projects.list`, `projects.status`, `projects.activate`, `projects.resynchronize`, `executions.cancel`, `executions.prompt`, `executions.control`, `directories.search`, `directories.cancel` and `machine.call`. `executions.cancel` resolves the public execution through the adapter and requests cancellation only of its bound ACP session; the response says that cancellation was requested, not that the run has stopped. `executions.prompt` durably captures an identified owner message through the existing steering path, including during a running turn; `recorded` means capture, not execution. Continuation consumes it at the turn boundary. `executions.control` resolves the same execution before forwarding the closed worker-message, worker-stop and command-stop controls to `_cortex/workspace_control`. These controls require a live owning session, not just a retained execution row. The built service advertises no session-option or permission operation. The schema reserves `sessions.options.*` and `permissions.*` as service operations, but they are not advertised. Adapter operations are sent to Cortex as `_cortex/workspace`: `capabilities.get`, `project.snapshot`, `tasks.list`, `tasks.get`, `tasks.create`, `executions.get`, `events.page`, `requests.get`, `results.get`, `decisions.list` and `decisions.get`. `tasks.start` and `decisions.answer` are advertised only when activation has bound their handlers. `history.page` is advertised and served from the durable display transcript/update sequence. Pages retain source order with a project/task/session/page-size-bound cursor and a frozen high-water mark; invalidations trigger a fresh read. User and coordinator text, plans, tool titles/status and each call's selected target (path, command, query, skill or report reference) and non-private edit text survive reopening; raw tool arguments, results, thoughts and private reports are excluded. An engine that sends a call's input or result in later untitled updates (claude-agent-acp) is judged by the title and kind retained for that call, so an untitled update of a Cortex write keeps its text and one of a report or draft call stays private. A refused call keeps only its reason, bounded to 1,000 characters and credential-redacted: the `message` of the runtime's `{code, message}` refusal, or a Cortex tool's own error text; an engine tool's output is never kept. Each stored chunk of agent text keeps its message identity, and a chunk that begins a different message than the agent chunk right before it is returned with a leading paragraph break, so two messages never read as one. Unknown or oversized display content is explicit, not silently clipped. The shell exposes a closed allowlist; it cannot forward arbitrary methods or paths.
+**Operation layers.** The service handles these local operations itself: `service.status`,
+`service.capabilities`, `service.subscribe`, `service.stop`, `projects.register`, `projects.rename`,
+`projects.list`, `projects.status`, `projects.activate`, `projects.resynchronize`, `executions.cancel`,
+`executions.prompt`, `executions.control`, `directories.search`, `directories.cancel` and `machine.call`.
+`executions.cancel` resolves the public execution through the adapter and requests cancellation only of
+its bound ACP session; the response says that cancellation was requested, not that the run has stopped.
+`executions.prompt` durably captures an identified owner message through the existing steering path,
+including during a running turn; `recorded` means capture, not execution. Continuation consumes it at the
+turn boundary. `executions.control` resolves the same execution before forwarding the closed
+worker-message, worker-stop and command-stop controls to `_cortex/workspace_control`. These controls
+require a live owning session, not just a retained execution row. The built service advertises no
+session-option or permission operation. The schema reserves `sessions.options.*` and `permissions.*` as
+service operations, but they are not advertised. Adapter operations are sent to Cortex as
+`_cortex/workspace`: `capabilities.get`, `project.snapshot`, `tasks.list`, `tasks.get`, `tasks.create`,
+`executions.get`, `events.page`, `requests.get`, `results.get`, `decisions.list` and `decisions.get`.
+`tasks.start` and `decisions.answer` are advertised only when activation has bound their handlers.
+`history.page` is advertised and served from the durable display transcript/update sequence. Pages retain
+source order with a project/task/session/page-size-bound cursor and a frozen high-water mark;
+invalidations trigger a fresh read. User and coordinator text, plans, tool titles/status and each call's
+selected target (path, command, query, skill or report reference) and non-private edit text survive
+reopening; raw tool arguments, results, thoughts and private reports are excluded. An engine that sends a
+call's input or result in later untitled updates (claude-agent-acp) is judged by the title and kind
+retained for that call, so an untitled update of a Cortex write keeps its text and one of a report or
+draft call stays private. A refused call keeps only its reason, bounded to 1,000 characters and
+credential-redacted: the `message` of the runtime's `{code, message}` refusal, or a Cortex tool's own
+error text; an engine tool's output is never kept. Each stored chunk of agent text keeps its message
+identity, and a chunk that begins a different message than the agent chunk right before it is returned
+with a leading paragraph break, so two messages never read as one. Unknown or oversized display content is
+explicit, not silently clipped. The shell exposes a closed allowlist; it cannot forward arbitrary methods
+or paths.
 
 **Saved task editor and sprint archive.** These extend the existing local `machine.call` helper, not the public adapter wire operation list: `product.task` action `edit` delegates to the adapter's host-only, version-checked draft write; `product.sprint` action `close` records a confirmed archived timestamp. The generated wire schema remains 1.8. Title, description, attachment bytes and options commit in the draft's SQLite transaction; the helper projects the saved title over auxiliary naming. A stale version or any execution identity refuses editing. Sprint closure is idempotent, keeps member state and files, and disables further sprint mutations. Closing and scheduler starts serialize through the existing owner-record lock; the scheduler rereads the current task version before claiming a start. See [editing and closure](local-task-execution.md#editing-saved-tasks-and-closing-sprints).
 
-**Action acknowledgement and refresh.** The window settles receipts before projection synchronization. Task/sprint actions reread only their project and show Updating confirmed state separately; registry changes still refresh capabilities and project membership. A read begun before a newer command reply cannot overwrite that reply’s confirmed rename/queue fields. Refusals and unknown outcomes remain failures and are never replayed. The fixed machine-helper operation `product.facts {taskIds}` returns `{product, workers}`, composing the existing readers under one helper startup; Git inspection runs separately and overlaps. The machine's settings reads (`overview`, `config.read`, `project.config.read`) run in their own two-slot lane, never behind repository inspections (`repo.snapshot`), so a slow Git call cannot delay the models a composer offers. The window's startup machine read (port query `machine.facts`) issues only `config.read` and the activated projects' `project.config.read`; `overview` (storage accounting, retention, worktree folder, version, GitHub CLI availability, cleanup and diagnostics) is the separate on-demand port query `machine.overview`, sent the first time a screen that shows those fields is on view and then repeated with each later machine refresh and machine poll. Its update carries only those fields and leaves engine usage and the composer's options unchanged. It is not a single SQLite snapshot across the product file and worker database, and does not change the generated wire version or mutation checks.
+**Action acknowledgement and refresh.** The window settles receipts before projection synchronization.
+Task/sprint actions reread only their project and show Updating confirmed state separately; registry
+changes still refresh capabilities and project membership. A read begun before a newer command reply
+cannot overwrite that reply’s confirmed rename/queue fields. Refusals and unknown outcomes remain failures
+and are never replayed. The fixed machine-helper operation `product.facts {taskIds}` returns
+`{product, workers}`, composing the existing readers under one helper startup; Git inspection runs
+separately and overlaps. The machine's settings reads (`overview`, `config.read`, `project.config.read`)
+run in their own two-slot lane, never behind repository inspections (`repo.snapshot`), so a slow Git call
+cannot delay the models a composer offers. The window's startup machine read (port query `machine.facts`)
+issues only `config.read` and the activated projects' `project.config.read`; `overview` (storage
+accounting, retention, worktree folder, version, GitHub CLI availability, cleanup and diagnostics) is the
+separate on-demand port query `machine.overview`, sent the first time a screen that shows those fields is
+on view and then repeated with each later machine refresh and machine poll. Its update carries only those
+fields and leaves engine usage and the composer's options unchanged. It is not a single SQLite snapshot
+across the product file and worker database, and does not change the generated wire version or mutation
+checks.
 
 **Permanent sprint deletion.** The owner command `delete_sprint {projectId, sprintId, confirmed}` maps to `machine.call` operation `product.sprint` action `delete`. The service owns preparation, task-wide cancellation and bounded completion; internal `delete_prepare`/`delete_finish` helper phases persist a start fence and retry state. The response is `{done, taskIds?, keptPaths?, reason?}`: `done: false` is explicitly incomplete, not successful deletion. Completed results replay idempotently by sprint identity. This extends the machine-helper contract, not the generated ACP adapter operation list; the wire schema stays 1.8. See [deletion and file preservation](local-task-execution.md#editing-saved-tasks-and-closing-sprints).
 
-**Creating a plan's tasks.** The owner command `materialize_plan {sprintId, version}` maps to one `machine.call` operation `product.sprint` action `materialize {sprintId, planVersion, requestId}`; the port sends no `tasks.create`, membership or sprint patch of its own. The service checks the sprint, plan version and readiness under the machine lock, then creates every draft in one project-store transaction that also replaces the saved sprint record (`planning: created`, `materializedVersion`, `taskIds`, memberships, titles and dependencies), all or nothing. Task identities derive from the sprint, plan version and plan key, so any repeat for a created version replays the same `{done, created: 0, taskIds}`. The reply also lists `strayTaskIds`: tasks an interrupted earlier client-side creation left naming the sprint without being its members; they are never adopted. Refusals: `stale_plan`, `plan_not_ready`, `sprint_started` (another version already created), `sprint_closed`, `invalid_plan`, `project_store_unavailable`. This extends the machine-helper contract, not the generated ACP adapter operation list; the wire schema stays 1.8. See [creating a plan's tasks](local-task-execution.md#creating-a-plans-tasks).
+**Creating a plan's tasks.** The owner command `materialize_plan {sprintId, version}` maps to one
+`machine.call` operation `product.sprint` action `materialize {sprintId, planVersion, requestId}`; the
+port sends no `tasks.create`, membership or sprint patch of its own. The service checks the sprint, plan
+version and readiness under the machine lock, then creates every draft in one project-store transaction
+that also replaces the saved sprint record (`planning: created`, `materializedVersion`, `taskIds`,
+memberships, titles and dependencies), all or nothing. Task identities derive from the sprint, plan
+version and plan key, so any repeat for a created version replays the same `{done, created: 0, taskIds}`.
+The reply also lists `strayTaskIds`: tasks an interrupted earlier client-side creation left naming the
+sprint without being its members; they are never adopted. Refusals: `stale_plan`, `plan_not_ready`,
+`sprint_started` (another version already created), `sprint_closed`, `invalid_plan`,
+`project_store_unavailable`. This extends the machine-helper contract, not the generated ACP adapter
+operation list; the wire schema stays 1.8. See
+[creating a plan's tasks](local-task-execution.md#creating-a-plans-tasks).
 
 **Coordinator activity and observed routes.** `history.page` rows optionally include
 typed worker-shaped `activity`; bookkeeping is hidden while continuation still
@@ -120,15 +176,75 @@ configuration confirmation for `route`, not dispatch intent or machine defaults;
 readable `model` and `effort` strings only. An unconfirmed route is null; an
 unreported effort is empty. See [recorded data](local-task-execution.md#recorded-data-and-pending-questions).
 
-**Machine versus project state.** `service.status` alone decides whether the machine is connected: while connected, two failed checks in a row take it offline, and one is followed by the next poll. A refused, slow or failed request is that action's answer and never changes the connection. `projects.register` takes `{root, displayName, create?, newFolder?}`: `root` is any folder the owner can write to, `~/` is the owner's home, links are resolved once, and `project_folder_missing` is returned until the caller sends `create: true`. `newFolder: true` creates exactly that one folder inside an existing parent, returns `project_folder_exists` when the name is taken, and removes the folder again if registration is refused. `projects.rename {projectId, displayName}` changes only the name shown. `projects.status` reports `state` (`ready`, `starting`, `recovering`, `failed` or `inactive`) with a stable `reason` code. An activated project with no working child stays registered and the service restarts its controller with backoff (never a task); `service.subscribe` announces `project_state` when a child starts or stops, and the desktop rereads capabilities. A change the service makes to a project's owner state in the background, such as a sprint planner question or plan, a planning failure or a sprint queue change, is announced as `invalidation` for that project when it is saved, and the desktop rereads that project; the desktop has no facts poll to wait for. `native.pick_folder` is the desktop's own folder chooser. It is answered by the shell, not the service. The bridge marks a refusal `refused:<text>` so a client can tell it from a reply that never came, which stays an unknown outcome.
+**Machine versus project state.** `service.status` alone decides whether the machine is connected: while
+connected, two failed checks in a row take it offline, and one is followed by the next poll. A refused,
+slow or failed request is that action's answer and never changes the connection. `projects.register` takes
+`{root, displayName, create?, newFolder?}`: `root` is any folder the owner can write to, `~/` is the
+owner's home, links are resolved once, and `project_folder_missing` is returned until the caller sends
+`create: true`. `newFolder: true` creates exactly that one folder inside an existing parent, returns
+`project_folder_exists` when the name is taken, and removes the folder again if registration is refused.
+`projects.rename {projectId, displayName}` changes only the name shown. `projects.status` reports `state`
+(`ready`, `starting`, `recovering`, `failed` or `inactive`) with a stable `reason` code. An activated
+project with no working child stays registered and the service restarts its controller with backoff (never
+a task); `service.subscribe` announces `project_state` when a child starts or stops, and the desktop
+rereads capabilities. A change the service makes to a project's owner state in the background, such as a
+sprint planner question or plan, a planning failure or a sprint queue change, is announced as
+`invalidation` for that project when it is saved, and the desktop rereads that project; the desktop has no
+facts poll to wait for. `native.pick_folder` is the desktop's own folder chooser. It is answered by the
+shell, not the service. The bridge marks a refusal `refused:<text>` so a client can tell it from a reply
+that never came, which stays an unknown outcome.
 
 **Folder search.** `directories.search {session, query, limit?}` finds folders on the machine for the Add project flow, and `directories.cancel {session}` stops one. Shared closed Rust types live in `crates/workspace-protocol/src/directories.rs`: a client sends only the text the owner typed, and `limit` is 1 to 100, 30 by default. The reply is `{query, home, entries:[{path, git}], complete, stopped?, scanned?, cancelled?}`. `query` echoes the request, `home` is that machine's home, `git` says a `.git` exists there, and `complete` is false when a limit ended the walk. A blank query answers at once with the home and starts nothing. A newer search in the same `session` replaces the one before it, which answers `cancelled: true`.
 
-The service runs the native directory search (`crates/workspace-service/src/directory_search.rs`), one worker thread per search and at most two at a time, and chooses every root and limit itself. A typed path anchors the walk under its parent; a fragment walks the home, `/mnt`, `/media`, `/srv` and the parents of registered projects, all inside the allowed root. The walk is breadth first, reaches 12 levels, 20,000 folders, 200,000 directory entries and 50,000 entries per folder, and stops after two seconds. After 5,000 folders it stops as soon as it holds a confident match. A search stuck in a read answers with what it has shortly after the deadline, and the service answers `directory_search_timeout` when no slot frees in time. It skips unreadable folders without an error, hidden folders unless the typed name starts with a dot, build output such as `node_modules` and `target`, every `.cortex`, and the service's private state and runtime directories. Links are offered, walked only while they stay in the tree, and each real folder is walked once, so a link loop ends. It reads directory entries and asks whether `.git` exists; it never opens a file. Like every other request it never changes the machine's connection.
+The service runs the native directory search (`crates/workspace-service/src/directory_search.rs`), one
+worker thread per search and at most two at a time, and chooses every root and limit itself. A typed path
+anchors the walk under its parent; a fragment walks the home, `/mnt`, `/media`, `/srv` and the parents of
+registered projects, all inside the allowed root. The walk is breadth first, reaches 12 levels, 20,000
+folders, 200,000 directory entries and 50,000 entries per folder, and stops after two seconds. After 5,000
+folders it stops as soon as it holds a confident match. A search stuck in a read answers with what it has
+shortly after the deadline, and the service answers `directory_search_timeout` when no slot frees in time.
+It skips unreadable folders without an error, hidden folders unless the typed name starts with a dot,
+build output such as `node_modules` and `target`, every `.cortex`, and the service's private state and
+runtime directories. Links are offered, walked only while they stay in the tree, and each real folder is
+walked once, so a link loop ends. It reads directory entries and asks whether `.git` exists; it never
+opens a file. Like every other request it never changes the machine's connection.
 
-**Owner terminal.** The local service separately advertises `terminal.open/read/write/resize/close`; these are not Python adapter or model MCP operations and do not use the durable mutation ledger. Shared closed Rust DTOs live in `crates/workspace-protocol/src/terminal.rs`. Open carries `{projectId,cols,rows}`, read carries `{projectId,sessionId,after}`, write carries `{projectId,sessionId,data}`, resize carries `{projectId,sessionId,cols,rows}`, and close carries `{projectId,sessionId}`. Open/read return `{sessionId,data,next,truncated,exited}`, with byte-array output and a safe-integer byte cursor; a gap is explicit. Write returns the accepted UTF-8 byte count, including a possible short write, never a command-completion receipt. Resize/close acknowledge `resized/closed`. Open reattaches the project's existing session and returns its retained tail. A lost response never replays input; explicit reconnect reattaches output only. The service, not the client, resolves the initial project cwd and user's shell. See [authority, bounds and cleanup](security.md#owner-terminal-built-local-linux).
+**Owner terminal.** The local service separately advertises `terminal.open/read/write/resize/close`; these
+are not Python adapter or model MCP operations and do not use the durable mutation ledger. Shared closed
+Rust DTOs live in `crates/workspace-protocol/src/terminal.rs`. Open carries `{projectId,cols,rows}`, read
+carries `{projectId,sessionId,after}`, write carries `{projectId,sessionId,data}`, resize carries
+`{projectId,sessionId,cols,rows}`, and close carries `{projectId,sessionId}`. Open/read return
+`{sessionId,data,next,truncated,exited}`, with byte-array output and a safe-integer byte cursor; a gap is
+explicit. Write returns the accepted UTF-8 byte count, including a possible short write, never a
+command-completion receipt. Resize/close acknowledge `resized/closed`. Open reattaches the project's
+existing session and returns its retained tail. A lost response never replays input; explicit reconnect
+reattaches output only. The service, not the client, resolves the initial project cwd and user's shell.
+See [authority, bounds and cleanup](security.md#owner-terminal-built-local-linux).
 
-**Machine helper.** `machine.call {op, projectId?, params?}` is answered by the native machine host (`crates/workspace-service/src/machine`; the former Python helper `machine_tools` was removed), one bounded call at a time, for what is not a runtime fact: Git status, history and actions; file reads and owner saves; worker activity read-only from the project store; Cortex settings through the configuration management API with its revision checks; machine settings, storage, diagnostics and cleanup; and the owner's own records. `op` is a closed set checked by both the bridge and the service. `repo.file` returns a file's text with its `revision` (the SHA-256 of its bytes), `readOnly` and `writer`. `repo.file.save {checkoutId, file, text, revision}` answers `saved` with the new revision, `conflict` with the current one (null when the file is gone) or `writer_active` with the task holding the checkout; `revision: null` means the file must not exist. `repo.list {checkoutId, dirs, overview}` reads one level of each named checkout folder (at most 32, `""` for the checkout itself) by descriptor without following links: each entry's `name`, `dir`, `link` and Git's `ignored` verdict (null when Git cannot judge it), at most 500 per folder with `more` (a lower bound when `exact` is false), or a per-folder `code` and `message`; `overview: true` adds what the repository snapshot's tree leaves out, collapsed (`path`, `dir`, `ignored`; at most 5,000, `truncated`). It never lists `.git` or Cortex's private names and refuses a path outside the checkout. `repo.locate` is the service's alone: the bridge asks it where to open a file, and a page cannot call it. The service supplies the project root and state directory itself, so a client names only a registered project and a path inside its checkout. These facts move without the runtime's project version moving, so they are not projections: each read replaces the last one for that project, and the app rereads them on a short poll. Owner records (titles, acceptance, Ready to merge, closing, archive, sprints, unsent queue and review comments) live in the service's private state as `product/<project>.json`, never in a project's `.cortex`. Archive purge now removes the bound runtime and adapter rows through journaled cleanup and attempts SQLite space reclamation. Active or unknown executions are protected; unmerged work requires the owner decision. See [task execution](local-task-execution.md).
+**Machine helper.** `machine.call {op, projectId?, params?}` is answered by the native machine host
+(`crates/workspace-service/src/machine`; the former Python helper `machine_tools` was removed), one
+bounded call at a time, for what is not a runtime fact: Git status, history and actions; file reads and
+owner saves; worker activity read-only from the project store; Cortex settings through the configuration
+management API with its revision checks; machine settings, storage, diagnostics and cleanup; and the
+owner's own records. `op` is a closed set checked by both the bridge and the service. `repo.file` returns
+a file's text with its `revision` (the SHA-256 of its bytes), `readOnly` and `writer`.
+`repo.file.save {checkoutId, file, text, revision}` answers `saved` with the new revision, `conflict` with
+the current one (null when the file is gone) or `writer_active` with the task holding the checkout;
+`revision: null` means the file must not exist. `repo.list {checkoutId, dirs, overview}` reads one level
+of each named checkout folder (at most 32, `""` for the checkout itself) by descriptor without following
+links: each entry's `name`, `dir`, `link` and Git's `ignored` verdict (null when Git cannot judge it), at
+most 500 per folder with `more` (a lower bound when `exact` is false), or a per-folder `code` and
+`message`; `overview: true` adds what the repository snapshot's tree leaves out, collapsed (`path`, `dir`,
+`ignored`; at most 5,000, `truncated`). It never lists `.git` or Cortex's private names and refuses a path
+outside the checkout. `repo.locate` is the service's alone: the bridge asks it where to open a file, and a
+page cannot call it. The service supplies the project root and state directory itself, so a client names
+only a registered project and a path inside its checkout. These facts move without the runtime's project
+version moving, so they are not projections: each read replaces the last one for that project, and the app
+rereads them on a short poll. Owner records (titles, acceptance, Ready to merge, closing, archive,
+sprints, unsent queue and review comments) live in the service's private state as
+`product/<project>.json`, never in a project's `.cortex`. Archive purge now removes the bound runtime and
+adapter rows through journaled cleanup and attempts SQLite space reclamation. Active or unknown executions
+are protected; unmerged work requires the owner decision. See [task execution](local-task-execution.md).
 
 **Local Git and review facts.** `repo.snapshot` and `product.read` expose `hasGit`. A non-Git snapshot still contains the project file tree and its main-folder checkout; Git-only controls must not be inferred from a non-null snapshot. Initialize explicitly through `machine.call {op:"git", projectId, params:{action:"git_init"}}`; the service also accepts the project-scoped `op:"git_init"` alias. This only runs `git init`, refuses an existing repository and returns `{done:true, hasGit:true}`. A native bridge with a closed operation list must allow the alias before using it; the existing `git` route avoids needing that extra bridge operation. No commit, remote, account configuration or task start is implied. `product.read.tasks[taskId].reviewActions` exposes the owner review gate; see [review behavior](local-task-execution.md#integration-and-conflicts). These helper facts are reread independently of runtime projection versions.
 
@@ -142,6 +258,17 @@ The service runs the native directory search (`crates/workspace-service/src/dire
 
 **Mapping version 1.** Runtime lifecycle maps to public phases as follows: draft without execution is `not_started`; CREATED, PLANNING and PLAN_READY are `planning`; EXECUTING is `execution`; REVIEWING is `review`; VERIFYING is `verification`; RECONCILING and ANSWER_READY are `finalizing`; WAITING_USER is `waiting`, with the wait reason shown separately; RECOVERING is `recovery`; PAUSED is `paused`; BLOCKED is `blocked`; FAILED is `failed`; CANCELLED is `stopped`; COMPLETED is `result`, which is not human acceptance. A missing, unrecognized or contradictory value is `unknown` with a warning. Percentages and time estimates are never produced.
 
+**Close with conflicting records.** The confirmed `product.task` action
+`close_unconfirmed` binds the current Workspace task ID, execution pointer and
+displayed task version. Core checks the project's owner and an explicit
+contradiction, then commits a close receipt, a new task version and a task
+outbox entry in one transaction. The projection keeps the execution state
+unknown with `contradictory_evidence` and adds `owner_closed_unconfirmed`.
+The latter describes an owner disposition, not runtime completion or permission
+to act on a disputed binding. The task action boundary refuses ordinary mutations
+while records disagree. The Workspace Board and List show the disposition as
+**Closed, not verified**, separate from Done.
+
 **Local dictation.** The owner-only native/socket surface additionally offers closed voice.start/read/stop/cancel controls, separate from the ACP/project wire schema. Start binds a request identity; further calls bind a random local session identity. Replies contain bounded phase, percentage, seconds, transcript and fixed error code, never audio. One read-refreshed capture lease is allowed; ten seconds without reads or service stop cancels it. Stop finalizes a preview, never a prompt. No path, URL, executable, environment or send parameter is accepted. See [voice input](local-task-execution.md#local-voice-input).
 
 For native-owned executions, worker guidance/stops, host-verifier stops/reruns and next-use task settings use the same `executions.control` actions without Python mutation fallback. Guarded-only settings and exact stored check identities are described in [native task controls](local-task-execution.md#native-desktop-task-controls); these controls do not certify work or grant broader permissions.
@@ -150,11 +277,30 @@ For native-owned executions, worker guidance/stops, host-verifier stops/reruns a
 
 **Start.** Saving a draft never starts an execution. An explicit start is idempotent by request identity. `busy` means the target task already has an execution, not that another project task is active. Other Workspace executions, unbound/unknown starts and ordinary ACP tasks never refuse a different task's start. Conversely, pending, unknown or running Workspace starts do not block a new ordinary ACP first prompt; source-event replay still returns its original task. Version, owner-epoch and host readiness checks still apply. A start is recorded and claimed before it is dispatched into a fresh ACP session; a crash leaves that task's execution unknown, and the operation is never replayed automatically. Sprint queue dependency selection and pausing belong to the service scheduler; manual `tasks.start` has no sprint-order check. An `end_turn` stop is not completion.
 
-**Questions and answers.** Durable pending questions are read by question identity, option identity, batch membership, execution and session binding, owner epoch and per-decision version. An identified single or batch answer is all-or-nothing. A winning answer triggers the existing continuation. When the activated adapter advertises `attachments: true`, each answer may carry `attachments: [{name,mimeType,size,sha256}]`, references to files uploaded once with `product.attachment` (inline bytes refuse with `inline_attachment_refused`); the service reads their bodies when it records the answer. Multiline text is delivered unchanged. The whole submission is bounded to eight files and 4 MiB decoded bytes. Answer resources and runtime source references commit with the winning answer; stale input captures nothing. `executions.prompt` accepts the same optional attachment references and snapshots their bodies through the ordinary prompt-resource path. Queue records retain the references privately; Edit restores them. See [attachment behavior and limits](local-task-execution.md#attachments).
+**Questions and answers.** Durable pending questions are read by question identity, option identity, batch
+membership, execution and session binding, owner epoch and per-decision version. An identified single or
+batch answer is all-or-nothing. A winning answer triggers the existing continuation. When the activated
+adapter advertises `attachments: true`, each answer may carry
+`attachments: [{name,mimeType,size,sha256}]`, references to files uploaded once with `product.attachment`
+(inline bytes refuse with `inline_attachment_refused`); the service reads their bodies when it records the
+answer. Multiline text is delivered unchanged. The whole submission is bounded to eight files and 4 MiB
+decoded bytes. Answer resources and runtime source references commit with the winning answer; stale input
+captures nothing. `executions.prompt` accepts the same optional attachment references and snapshots their
+bodies through the ordinary prompt-resource path. Queue records retain the references privately; Edit
+restores them. See [attachment behavior and limits](local-task-execution.md#attachments).
 
 **Results.** A result has a result identity and version, an execution binding, text, evidence references and digests, checks with explicit outcomes, and an optional observed workspace digest. A missing check is `not_run` or unknown, never a pass. `sequenceNumber` is the plain result ordinal displayed to the owner (first result is v1); the entity `version` remains separate for reconciliation and digest binding. Acceptance and merge are not part of the result contract.
 
-**Worker activity and delivery.** The machine helper projects real assignment, prose, tool and command-control rows. One attempt-bound continuation pages both task events and command-control/guidance, carrying both namespace positions. A worker DTO is bounded to 64 KiB and 200 combined events; snapshots share a 512-KiB history budget with a 768-KiB envelope ceiling. Deferred rows retain their continuation. Oversized metadata refuses explicitly; text clipping names the retained/original byte counts and leaves stored content unchanged. Older guidance includes delivery status and attachment names. Task-only legacy cursors require reopening history. Direct owner text and optional attachments are recorded for one live worker channel, then resource references are delivered at its next successful Cortex call. Delivery records response construction, not model acknowledgement/action. No immediate-interrupt, withdrawal or fallback-to-next-prompt claim is made. Native engine actions have no Cortex command-stop receipt.
+**Worker activity and delivery.** The machine helper projects real assignment, prose, tool and
+command-control rows. One attempt-bound continuation pages both task events and command-control/guidance,
+carrying both namespace positions. A worker DTO is bounded to 64 KiB and 200 combined events; snapshots
+share a 512-KiB history budget with a 768-KiB envelope ceiling. Deferred rows retain their continuation.
+Oversized metadata refuses explicitly; text clipping names the retained/original byte counts and leaves
+stored content unchanged. Older guidance includes delivery status and attachment names. Task-only legacy
+cursors require reopening history. Direct owner text and optional attachments are recorded for one live
+worker channel, then resource references are delivered at its next successful Cortex call. Delivery
+records response construction, not model acknowledgement/action. No immediate-interrupt, withdrawal or
+fallback-to-next-prompt claim is made. Native engine actions have no Cortex command-stop receipt.
 
 **Task pause.** Owner controls distinguish durable task pause/resume, confirmed terminal close, and engine-turn cancellation. Pause records the previous state and task-level question identities and commits public versions/invalidation in the same transaction. It does not reject merely because background progress advanced the display version; Resume does check that version and owner epoch. A paused task rejects model mutation and cannot answer a question. Explicit Resume after restart restores only the exact recorded session metadata and re-enters the runtime continuation path. Pending worker question/access waits retain their identities too. The runtime fences old worker channels and records a new-attempt continuation with the saved decision, revalidating access rather than transferring the old grant. Unknown outcomes still block replacement. Resume is not a user message or answer. Individual worker cancellation still ends its waits. These controls are not model MCP tools.
 
@@ -168,7 +314,18 @@ Capability replies to a version-1 client at minor 6 or earlier retain its origin
 
 **Sprint checkout.** The owner-only `product.sprint` create command also accepts optional `checkout: {kind: "main" | "worktree"}` and retains it with the sprint. Only those two kinds are accepted; paths and branch overrides are refused there. The service copies that kind into each materialized task’s saved `tasks.create` options, so `tasks.start` and the automatic scheduler use the same per-task preparation. Planning itself creates no checkout. This is an optional owner-product field, not a change to the generated runtime wire schema (1.8); older sprints without it keep their per-item/default behavior.
 
-**Sprint and review resources.** The owner-only `product.sprint` create/note commands accept optional `attachments` with the same validation as task creation. Saved sprint and conversation projections retain references to their files (`product.attachment` uploads each file once and reads one back by digest); old records without the field remain valid. The sprint's planning task receives them as its own draft attachments (ordinary ACP image/embedded-resource blocks), not serialized base64 prose. Its cumulative input shares the eight-file/4-MiB bound, checked before saving a note. Review add/edit comments retain optional attachments; sending comments forwards their combined resources through `executions.prompt` before marking comments sent. Queue edits preserve attachments when omitted and replace them when supplied. Conflict-resolution guidance carries attachments through the same prompt route. `product.read {taskId, attachments:true}` returns only the selected task's saved creation bytes for on-demand read-back, without enlarging board DTOs. Product-state saves refuse explicitly before exceeding the frame budget.
+**Sprint and review resources.** The owner-only `product.sprint` create/note commands accept optional
+`attachments` with the same validation as task creation. Saved sprint and conversation projections retain
+references to their files (`product.attachment` uploads each file once and reads one back by digest); old
+records without the field remain valid. The sprint's planning task receives them as its own draft
+attachments (ordinary ACP image/embedded-resource blocks), not serialized base64 prose. Its cumulative
+input shares the eight-file/4-MiB bound, checked before saving a note. Review add/edit comments retain
+optional attachments; sending comments forwards their combined resources through `executions.prompt`
+before marking comments sent. Queue edits preserve attachments when omitted and replace them when
+supplied. Conflict-resolution guidance carries attachments through the same prompt route.
+`product.read {taskId, attachments:true}` returns only the selected task's saved creation bytes for
+on-demand read-back, without enlarging board DTOs. Product-state saves refuse explicitly before exceeding
+the frame budget.
 
 **Limits, version 1.** 50 task summaries per page; 100 events or history rows per page; 64 KiB of content per response page; 8 MiB per local JSON frame; 32,000 characters per description or answer; request identities of at most 128 characters. Oversized content is marked unavailable or delivered through bounded text pages; it is never silently truncated.
 

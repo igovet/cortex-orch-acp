@@ -2892,6 +2892,20 @@ async fn binary_journey(scenario: &str) {
         assert!(!child.wait().await.unwrap().success());
         // Only fixture-owned processes and data, never a host service/session.
         if scenario == "command-restart-lost" {
+            // The supervisor records its payload's process group right after launch.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while serde_json::from_slice::<Value>(
+                    &std::fs::read(output.join(handle["status"].as_str().unwrap())).unwrap(),
+                )
+                .unwrap()["group"]
+                    .as_i64()
+                    .is_none()
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
             unsafe {
                 libc::kill(identity["pid"].as_u64().unwrap() as i32, libc::SIGKILL);
             }
@@ -2918,6 +2932,8 @@ async fn binary_journey(scenario: &str) {
         .await;
         if scenario == "command-restart-lost" {
             restart_signal(&store,"SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='NATIVE_COMMAND_RECOVERED' AND json_extract(payload_json,'$.handle_state')='unknown')").await;
+            // The Development payload outlives its lost supervisor (no PID namespace) and
+            // still waits in its recorded process group: the receipt stays unknown.
             assert_ne!(read_intent()["settled"], true);
             let execution: String = store
                 .read(|db| {
