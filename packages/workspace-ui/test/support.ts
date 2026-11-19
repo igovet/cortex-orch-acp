@@ -37,7 +37,7 @@ export function scriptedPort(options: { mode?: "real" | "demo"; capabilities?: P
   return {
     port, commands,
     emit(update: PortUpdate) { for (const listener of listeners) listener(update); },
-    receipt(ok = true, entityId?: string) { const r = receipts.shift()!; r({ requestId: commands.at(-1)!.requestId, ok, outcome: ok ? "recorded" : "unsupported", message: ok ? "Recorded" : "Refused", entityId }); },
+    receipt(ok = true, entityId?: string, outcome?: string) { const r = receipts.shift()!; r({ requestId: commands.at(-1)!.requestId, ok, outcome: (outcome ?? (ok ? "recorded" : "unsupported")) as CommandReceipt["outcome"], message: ok ? "Recorded" : "Refused", entityId }); },
     listeners,
   };
 }

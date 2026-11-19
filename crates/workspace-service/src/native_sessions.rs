@@ -22,6 +22,7 @@ use cortex_engine::{
     gateway::{Channel, Credentials, Gateway, GatewayCore},
     Error, FutureResult,
 };
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -495,7 +496,7 @@ impl NativeHost {
         let connection = route.connection.clone();
         let limit = route.connection_limit;
         let engine_kind = route.launch.engine;
-        let (credential, reservation, instructions) = receive(self.executor.write(move |db| {
+        let (credential, reservation, instructions, automatic) = receive(self.executor.write(move |db| {
             let credential = channels::issue_tx(
                 db,
                 &task,
@@ -513,11 +514,19 @@ impl NativeHost {
                 identity.stage.as_deref(),
             )
             .map_err(|_| CoreError::Refused("unknown_session_role"))?;
-            let instructions = crate::native_instructions::compose(
+            let mut instructions = crate::native_instructions::compose(
                 identity.profile.as_deref().unwrap_or("orchestrator"),
                 identity.stage.as_deref(),
                 engine_kind,
             )?;
+            let automatic = lifecycle::automatic::enabled(db, &task)?;
+            if identity.role == "coordinator" && automatic {
+                instructions.push_str("\n\n");
+                instructions.push_str(lifecycle::automatic::COORDINATOR_NOTE);
+                instructions.push_str(" Have execution workers use Cortex project file tools for changes that must be included in the task's local finish.");
+            } else if automatic && identity.stage.as_deref() == Some("execution") {
+                instructions.push_str("\n\nAutomatic sprint: make the task's final file changes through Cortex project file tools so the runtime retains attributable write receipts. Do not stage or commit changes yourself; automatic finish only commits changes it can attribute to this task.");
+            }
             let reservation = scheduler::reserve_tx(
                 db,
                 &Reservation {
@@ -534,7 +543,7 @@ impl NativeHost {
                 },
             )?
             .ok_or(CoreError::Refused("engine_capacity_exhausted"))?;
-            Ok((credential, reservation, instructions))
+            Ok((credential, reservation, instructions, automatic))
         })?)
         .await?;
         let policy = Arc::new(CorePolicy {
@@ -819,6 +828,18 @@ impl NativeHost {
                 && matches!(error, Error::Closed | Error::Io)
                 && matches!(phase, "configure" | "access_mode")
                 && observation == ProcessObservation::ConfirmedExited;
+            // The catalogue producer recognizes this same ACP authentication-required
+            // response during session discovery. Unclassified transport failures keep
+            // their generic startup diagnostic; no inference from engine text.
+            let explicit_auth =
+                automatic && phase == "session_new" && matches!(error, Error::Rpc(-32000));
+            let blocker = if automatic && observation != ProcessObservation::ConfirmedExited {
+                "native_session_outcome_unknown"
+            } else if explicit_auth {
+                "engine_authentication_required"
+            } else {
+                blocker
+            };
             let failure = StartFailure {
                 attempt,
                 phase,
@@ -848,6 +869,20 @@ impl NativeHost {
             let recorded = record_start_failure(&self.executor, &credential, failure).await;
             settle(&self.executor, credential.clone(), reservation, observation).await?;
             recorded?;
+            if explicit_auth && observation == ProcessObservation::ConfirmedExited {
+                let t = identity.task.clone();
+                let connection = route.connection.clone();
+                receive(self.executor.write(move |db| {
+                    lifecycle::event_tx(
+                        db,
+                        &t,
+                        "NATIVE_AUTOMATIC_AUTH_BLOCKED",
+                        json!({"connection":connection}),
+                    )?;
+                    Ok(())
+                })?)
+                .await?;
+            }
             return Err(CoreError::Refused(blocker));
         };
         Ok(SessionDriver {
@@ -886,6 +921,12 @@ pub struct Turn {
     pub updates: usize,
     pub compacted: bool,
 }
+pub(crate) enum SessionWait {
+    Open(Option<Duration>),
+    Ready,
+    None,
+}
+
 pub struct SessionDriver {
     executor: Arc<StoreExecutor>,
     credential: Credential,
@@ -1139,21 +1180,163 @@ impl SessionDriver {
             .await
             .map_err(|_| CoreError::Refused("native_cancel_outcome_unknown"))
     }
-    pub(crate) async fn wait_state(&self) -> CoreResult<Option<String>> {
-        let c = self.credential.clone();
-        receive(self.executor.write(move |db| {
-            let i: (String, String) = db.query_row(
-                "SELECT task_id,idempotency_key FROM delegation_provisioning WHERE channel_id=?",
-                [&c.channel_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            if let Some(state) =
-                lifecycle::skill_proposals::continuation(db, &i.0, &c.channel_id, false)?
-            {
-                return Ok(Some(state));
+    /// Resume the worker with its terminal receipts after a pending command reply
+    /// or premature submission. The supervisor owns the command deadline.
+    pub(crate) async fn command_continuation(
+        &self,
+        after: i64,
+    ) -> CoreResult<Option<(i64, String)>> {
+        let channel = self.credential.channel_id.clone();
+        let pending = receive(self.executor.read(move |db| {
+            // A successful result or a revoked channel already closed this assignment.
+            let mut events = db.prepare(
+                "SELECT e.id,e.type,e.payload_json,c.task_id FROM trusted_channels c
+                 JOIN runtime_nodes n ON n.task_id=c.task_id AND n.assignment_ref=c.assignment_id
+                 JOIN runtime_events e ON e.task_id=c.task_id
+                 WHERE c.channel_id=? AND c.revoked_at IS NULL AND n.status='running' AND n.result_json IS NULL
+                   AND e.id>? AND e.type IN ('NATIVE_COMMAND_PENDING_REPLY','WORKER_RESULT_REFUSED')
+                   AND json_extract(e.payload_json,'$.channel_id')=c.channel_id
+                   AND json_extract(e.payload_json,'$.attempt')=c.attempt_id ORDER BY e.id")?;
+            let mut rows = events.query((&channel, after))?;
+            let mut cursor = after;
+            let mut task = None;
+            let mut refs = std::collections::BTreeSet::new();
+            let mut refusal_code: Option<(String, Vec<String>)> = None;
+            while let Some(row) = rows.next()? {
+                cursor = row.get(0)?;
+                task = Some(row.get::<_, String>(3)?);
+                let kind: String = row.get(1)?;
+                let detail: Value = serde_json::from_str(&row.get::<_, String>(2)?)?;
+                if kind == "NATIVE_COMMAND_PENDING_REPLY" {
+                    refs.insert(detail["ref"].as_str().ok_or(CoreError::Refused("invalid_command_handle"))?.to_owned());
+                } else if detail["code"] == "command_not_settled" {
+                    refs.extend(serde_json::from_value::<Vec<String>>(detail["command_refs"].clone())?);
+                } else {
+                    refusal_code = detail["code"].as_str().map(|code| {
+                        let missing = serde_json::from_value::<Vec<String>>(detail["missing"].clone())
+                            .unwrap_or_default();
+                        (code.to_owned(), missing)
+                    });
+                }
             }
-            Ok(waits::current_tx(db, &i.0, &i.1)?
-                .and_then(|w| w["status"].as_str().map(str::to_owned)))
+            drop(rows);
+            // The turn ended with this assignment still open on this channel and no
+            // result: the worker has not finished, so the same session is asked to.
+            let open: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM trusted_channels c
+                 JOIN runtime_nodes n ON n.task_id=c.task_id AND n.assignment_ref=c.assignment_id
+                 WHERE c.channel_id=? AND c.revoked_at IS NULL AND n.status='running' AND n.result_json IS NULL)",
+                [&channel], |r| r.get(0),
+            )?;
+            let latest: i64 = db.query_row("SELECT coalesce(max(id),0) FROM runtime_events", [], |r| r.get(0))?;
+            Ok((cursor, refs, task, refusal_code, open, latest))
+        })?).await?;
+        let (id, refs, task, refusal_code, open, latest) = pending;
+        let Some(task) = task else {
+            return Ok(open.then(|| (latest, String::from(
+                "Your turn ended, but this assignment has no recorded result yet. Finish it in this session: complete every part you can within your role and permissions, then submit the complete result. Report a part as not done only for a genuine dead end, with its blocker as the result_submit schema describes."
+            ))));
+        };
+        for reference in &refs {
+            let done = self
+                .policy
+                .commands
+                .lock()
+                .await
+                .get(reference)
+                .filter(|command| command.task == task)
+                .map(|command| command.done.clone());
+            if let Some(mut done) = done {
+                let _ = done.wait_for(|settled| *settled).await;
+            }
+        }
+        let correction = refusal_code.map(|(code, missing)| {
+            let mut message = format!(
+                "Your result submission was refused with `{code}`. Correct the reported issue, rerun any failed check exactly, and submit the complete result again. Do not claim success from an incomplete or missing check."
+            );
+            if !missing.is_empty() {
+                message.push_str(&format!(
+                    " Still outstanding, to finish in this session: {}.",
+                    missing.join("; ")
+                ));
+            }
+            message
+        });
+        if refs.is_empty() {
+            return Ok(correction.map(|message| (id, message)));
+        }
+        let channel = self.credential.channel_id.clone();
+        let receipts = receive(self.executor.read(move |db| {
+            let mut receipts = Vec::new();
+            for reference in refs {
+                let receipt: Option<String> = db.query_row(
+                    "SELECT json_object('ref',?, 'exit_code',json_extract(result_json,'$.exit_code'),
+                    'failure',json_extract(result_json,'$.failure')) FROM runtime_requests
+                    WHERE task_id=? AND actor=? AND operation='command_run' AND json_extract(result_json,'$.tool_call_ref')=?
+                    AND json_extract(result_json,'$.settled')=1",
+                    (&reference, &task, &channel, &reference),
+                    |r| r.get(0),
+                )
+                .optional()?;
+                let Some(raw) = receipt else {
+                    return Err(CoreError::Refused("lost_worker_action_outcome_unknown"));
+                };
+                receipts.push(serde_json::from_str::<Value>(&raw)?);
+            }
+            Ok(receipts)
+        })?)
+        .await?;
+        let mut message = format!(
+            "Commands launched during your turn have now settled. Their final receipts: {}. Inspect their output with command_status and submit the result with the observed outcomes.",
+            json!(receipts)
+        );
+        if let Some(correction) = correction {
+            message.push('\n');
+            message.push_str(&correction);
+        }
+        Ok(Some((id, message)))
+    }
+    /// Return the event cursor immediately before a worker prompt starts. A
+    /// continuation must only consume a refusal produced by that prompt, never
+    /// one retained from an earlier turn on the same channel.
+    pub(crate) async fn event_cursor(&self) -> CoreResult<i64> {
+        receive(self.executor.read(|db| {
+            Ok(
+                db.query_row("SELECT coalesce(max(id),0) FROM runtime_events", [], |r| {
+                    r.get(0)
+                })?,
+            )
+        })?)
+        .await
+    }
+    pub(crate) async fn wait_state(&self) -> CoreResult<SessionWait> {
+        let c = self.credential.clone();
+        let session = self.session.id().to_owned();
+        receive(self.executor.write(move |db| {
+            let (task, assignment, coordinator): (String, String, bool) = db.query_row(
+                "SELECT task_id,idempotency_key,role_id='orchestrator' FROM delegation_provisioning WHERE channel_id=?",
+                [&c.channel_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            if coordinator {
+                let state = lifecycle::skill_proposals::continuation(db, &task, &c.channel_id, false)?;
+                return Ok(match state.as_deref() {
+                    Some("ready") => SessionWait::Ready,
+                    Some("open") => SessionWait::Open(None),
+                    _ => SessionWait::None,
+                });
+            }
+            let Some(mut wait) = waits::current_tx(db, &task, &assignment)? else {
+                return Ok(SessionWait::None);
+            };
+            if wait["channel_id"] != c.channel_id || wait["engine_session_ref"] != session {
+                return Ok(SessionWait::None);
+            }
+            let retry = scheduler::policy::poll_access_tx(db, &mut wait, &cortex_core::now())?;
+            Ok(match wait["status"].as_str() {
+                Some("open") => SessionWait::Open(retry),
+                Some("ready") => SessionWait::Ready,
+                _ => SessionWait::None,
+            })
         })?)
         .await
     }
@@ -1519,6 +1702,7 @@ impl GatewayCore for CorePolicy {
                 | "escalation_request"
         ) || crate::native_documents::supports(name)
             || crate::native_access::supports(name)
+            || crate::native_sprint_plan::supports(name)
             || crate::native_sources::supports(name)
             || crate::native_project::supports(name)
             || crate::native_project_ops::supports(name)
@@ -1836,6 +2020,15 @@ impl CorePolicy {
                     Err(e) => crate::native_tool_errors::reply(e.code()),
                 });
             }
+            if crate::native_sprint_plan::supports(&name) {
+                return crate::native_sprint_plan::execute(
+                    self.executor.clone(),
+                    self.credential.clone(),
+                    arguments,
+                )
+                .await
+                .map_err(tool_error);
+            }
             if crate::native_access::supports(&name) {
                 return crate::native_access::execute(
                     self.executor.clone(),
@@ -2022,28 +2215,30 @@ impl CorePolicy {
                                     .map_err(|_| CoreError::Refused("invalid_arguments"))?;
                                 crate::native_results::submit(store, &c, &i, &arguments, evidence)
                             })();
+                            // A refusal names exactly what is missing: report sections, or
+                            // the items the worker still has to do in this same session.
+                            let missing = match &submitted {
+                                Err(error) => crate::native_results::refusal_missing(
+                                    store,
+                                    &c,
+                                    &i,
+                                    &arguments,
+                                    error.code(),
+                                ),
+                                _ => None,
+                            };
                             // Every refusal of an authenticated worker's result is retained
-                            // by its code alone, so the owner can see why no result exists.
+                            // by its code and named items, so the owner can see why no
+                            // result exists and a continuation can repeat what is open.
                             if let Err(error) = &submitted {
                                 let _ = crate::native_results::record_refusal(
                                     store,
                                     &c,
                                     &i,
                                     error.code(),
+                                    missing.as_deref(),
                                 );
                             }
-                            // A structural refusal names exactly the missing report sections.
-                            let missing = match &submitted {
-                                Err(error)
-                                    if error.code()
-                                        == cortex_core::assignment_brief::SECTIONS_MISSING =>
-                                {
-                                    Some(crate::native_results::missing_sections(
-                                        store, &i, &arguments,
-                                    ))
-                                }
-                                _ => None,
-                            };
                             Ok((submitted, missing))
                         })
                         .map_err(tool_error)?,

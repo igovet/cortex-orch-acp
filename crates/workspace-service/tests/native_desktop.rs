@@ -7,7 +7,7 @@ mod hermetic;
 mod namespace_host;
 #[path = "../../cortex-engine/src/bin/fake-engine.rs"]
 mod peer;
-use cortex_core::{CoreResult, OpenMode, Store};
+use cortex_core::{lifecycle::TaskMachine, CoreResult, OpenMode, Store};
 use cortex_engine::environment::{EngineKind, LaunchSpec as EngineLaunch};
 use namespace_host::native_effects;
 #[allow(unused_imports)]
@@ -602,7 +602,7 @@ async fn saved_settings_start(route: &str, sprint: bool) {
                 "product.sprint",
                 &id,
                 json!({"action":"create","description":"Saved sprint",
-                "runMode":"automatic","checkout":{"kind":"main"},"settings":settings}),
+                "runMode":"hybrid","checkout":{"kind":"main"},"settings":settings}),
             )
             .await["sprintId"]
                 .clone(),
@@ -1085,6 +1085,9 @@ async fn queued_message_journey() {
 async fn controls(scenario: &str, action: &str) {
     let f = Fixture::new();
     std::fs::write(f.0.join("project/scenario.txt"), scenario).unwrap();
+    if scenario == "repair-failed-test" {
+        std::fs::write(f.0.join("project/expected.txt"), "expected").unwrap();
+    }
     let service = Service::bind_native(f.config(), Arc::new(Routes))
         .await
         .unwrap();
@@ -1109,6 +1112,17 @@ async fn controls(scenario: &str, action: &str) {
         ))
         .await
         .unwrap();
+    if scenario == "access-retry" {
+        TaskMachine::new(&store)
+            .create("access-holder", "Fixture holder", "owner")
+            .unwrap();
+        store.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='access-holder'", [])?;
+            db.execute("INSERT INTO runtime_nodes(task_id,revision,node_id,role,objective,dependencies_json,scope_json,stage,status,assignment_ref) VALUES ('access-holder',1,'holder','worker-backend-dev','Hold extra', '[]','[\"extra\"]','execution','running','access-holder-assignment')", [])?;
+            db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,attempt_id,role_id,step,status,channel_id,engine_session_ref,owner_epoch,created_at,updated_at) VALUES ('access-holder-assignment','access-holder','access-holder-attempt','worker-backend-dev','ready','ready','access-holder-channel','access-holder-session',1,?,?)", [cortex_core::now(), cortex_core::now()])?;
+            Ok(())
+        }).unwrap();
+    }
     let started = service
         .workspace(command(
             id,
@@ -1120,6 +1134,75 @@ async fn controls(scenario: &str, action: &str) {
         .await
         .unwrap();
     let execution = started["target"].as_str().unwrap();
+    if scenario == "repair-failed-test" {
+        let task: String = store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT runtime_task_id FROM workspace_executions WHERE execution_id=?",
+                    [execution],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let state: String = store
+                    .read(|db| {
+                        Ok(db.query_row(
+                            "SELECT state FROM runtime_tasks WHERE task_id=?",
+                            [&task],
+                            |r| r.get(0),
+                        )?)
+                    })
+                    .unwrap();
+                if state == "COMPLETED" {
+                    break;
+                }
+                assert!(
+                    !matches!(state.as_str(), "WAITING_USER" | "FAILED" | "CANCELLED"),
+                    "unexpected repair state {state}"
+                );
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        })
+        .await
+        .expect("repair did not reach completion");
+        let results: Vec<(String, String)> = store
+            .read(|db| {
+                Ok(db
+                    .prepare(
+                        "SELECT type,payload_json FROM runtime_events
+            WHERE task_id=? AND type IN ('VERIFICATION_FAILED','VERIFICATION_PASSED') ORDER BY id",
+                    )?
+                    .query_map([&task], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?)
+            })
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        let mut references = std::collections::HashSet::new();
+        for ((kind, raw), (expected, revision, code)) in results
+            .iter()
+            .zip([("VERIFICATION_FAILED", 1, 1), ("VERIFICATION_PASSED", 2, 0)])
+        {
+            let payload: Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(kind, expected);
+            assert_eq!(payload["revision"], revision);
+            let checks = payload["checks"].as_array().unwrap();
+            assert_eq!(checks.len(), 1);
+            assert_eq!(
+                checks[0]["argv"],
+                json!(["/usr/bin/cmp", "expected.txt", "work.txt"])
+            );
+            assert_eq!(checks[0]["exit_code"], code);
+            assert_eq!(checks[0]["complete"], true);
+            assert!(references.insert(checks[0]["receipt_ref"].as_str().unwrap().to_owned()));
+        }
+        let reviews:i64=store.read(|db|Ok(db.query_row("SELECT count(DISTINCT json_extract(payload_json,'$.assignment_ref')) FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED'",[&task],|r|r.get(0))?)).unwrap();
+        assert_eq!(reviews, 2);
+        service.stop().await.unwrap();
+        runner.await.unwrap().unwrap();
+        return;
+    }
     let query = json!({"protocol":{"major":2,"mapping":2},"requestId":"page","projectId":id,"operation":"tasks.page","payload":{"target":id,"cursor":null,"limit":50}});
     let mut events = service.subscribe();
     let initial = read_page(&service, query.clone()).await;
@@ -1151,6 +1234,82 @@ async fn controls(scenario: &str, action: &str) {
     });
     let current = read_page(&service, query.clone()).await;
     let version = current["data"]["value"]["items"][0]["version"].clone();
+    if scenario == "access-retry" {
+        let count = |sql: &str| {
+            store
+                .read(|db| Ok(db.query_row(sql, [], |r| r.get::<_, i64>(0))?))
+                .unwrap()
+        };
+        // No owner action or service notification drives either timed retry.
+        while count("SELECT count(*) FROM runtime_events WHERE type='WORKER_WAIT_CHANGED'
+            AND json_extract(payload_json,'$.status')='open' AND json_extract(payload_json,'$.retry_attempt')=1")==0 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let granted = action == "release";
+        if granted {
+            store.write(|db| {
+                db.execute("UPDATE delegation_provisioning SET status='terminated' WHERE idempotency_key='access-holder-assignment'", [])?;
+                Ok(())
+            }).unwrap();
+        }
+        while count("SELECT count(*) FROM runtime_events WHERE type='WORKER_WAIT_CHANGED' AND json_extract(payload_json,'$.status')='resumed'")==0 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let decision: String = store.read(|db| Ok(db.query_row("SELECT payload_json FROM runtime_events WHERE type='WORKER_CONTINUATION_STARTED'", [], |r| r.get(0))?)).unwrap();
+        let wait: Value = serde_json::from_str(&decision).unwrap();
+        assert_eq!(
+            wait["access_decision"]["status"],
+            if granted { "granted" } else { "denied" }
+        );
+        if !granted {
+            assert_eq!(wait["access_decision"]["reason"], "active_writer_conflict");
+        }
+        assert_eq!(
+            count("SELECT count(*) FROM runtime_events WHERE type='ACCESS_GRANTED'"),
+            i64::from(granted)
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM runtime_events WHERE type='WORKER_CONTINUATION_STARTED'"),
+            1
+        );
+        assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type IN ('USER_QUESTION_REQUESTED','ASSIGNMENT_RETRIED','NATIVE_DRIVER_STOPPED')"),0);
+        let recorded: bool = store.read(|db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE type='WORKER_COMPLETED' AND json_extract(payload_json,'$.attempt_id')=?)",
+            [wait["attempt_id"].as_str().unwrap()], |r| r.get(0))?)).unwrap();
+        assert!(recorded);
+        service.stop().await.unwrap();
+        runner.await.unwrap().unwrap();
+        return;
+    }
+    if action == "pending-result" || action == "pending-end-turn" {
+        let count = |sql: &str| {
+            store
+                .read(|db| Ok(db.query_row(sql, [], |r| r.get::<_, i64>(0))?))
+                .unwrap()
+        };
+        let refusal = "SELECT count(*) FROM runtime_events t JOIN runtime_events e ON t.task_id=e.task_id AND t.id>e.id AND t.type='NATIVE_TURN_SETTLED'
+              AND json_extract(t.payload_json,'$.channel_id')=json_extract(e.payload_json,'$.channel_id')
+              WHERE e.type='WORKER_RESULT_REFUSED' AND json_extract(e.payload_json,'$.code')='command_not_settled'";
+        let command_started = "SELECT count(*) FROM runtime_events t JOIN runtime_events e ON t.task_id=e.task_id AND t.id>e.id
+            WHERE t.type='NATIVE_TURN_SETTLED' AND e.type='NATIVE_COMMAND_PENDING_REPLY'
+            AND json_extract(t.payload_json,'$.channel_id')=json_extract(e.payload_json,'$.channel_id')";
+        while count(if action == "pending-end-turn" {
+            command_started
+        } else {
+            refusal
+        }) == 0
+        {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        std::fs::write(f.0.join("project/release-command"), "ready").unwrap();
+        while count("SELECT count(*) FROM runtime_events WHERE type='WORKER_COMPLETED'") == 0 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(count("SELECT count(*) FROM runtime_requests WHERE request_key='pending-command' AND json_extract(result_json,'$.exit_code')=0"),1);
+        assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type IN ('ASSIGNMENT_RETRIED','NATIVE_DRIVER_STOPPED','USER_QUESTION_REQUESTED')"),0);
+        service.stop().await.unwrap();
+        runner.await.unwrap().unwrap();
+        return;
+    }
     if action == "ambiguous" {
         store.write(|db| {db.execute_batch("CREATE TRIGGER fail_control_finish BEFORE INSERT ON runtime_requests WHEN NEW.operation='native_desktop_finished' BEGIN SELECT RAISE(ABORT,'injected'); END;")?;Ok(())}).unwrap();
         let request =
@@ -1439,6 +1598,23 @@ async fn controls(scenario: &str, action: &str) {
             "stale_version"
         );
         service.control_execution(resume).await.unwrap();
+    } else if action == "rolling" {
+        // The independent second worker remains held while the first worker
+        // releases its slot. A dependent third node must be provisioned before
+        // the held sibling is released, proving rolling replenishment.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let ready: bool = store.read(|db| Ok(db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_events
+                         WHERE type='NATIVE_ROUTE_SELECTED' AND json_extract(payload_json,'$.node')='third')
+                     AND EXISTS(SELECT 1 FROM runtime_nodes WHERE node_id='third' AND status='completed')
+                     AND EXISTS(SELECT 1 FROM runtime_nodes WHERE node_id='second' AND status='running')",
+                    [], |r| r.get(0))?)).unwrap();
+                if ready { break; }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("dependent node did not start while sibling was held");
+        std::fs::write(f.0.join("project/scenario.txt"), "complete").unwrap();
     } else if action == "prompt" {
         // Sent while the worker still runs: it keeps running, nothing is interrupted,
         // and the task stays EXECUTING. The coordinator receives the message once, after
@@ -3274,6 +3450,21 @@ fn main() {
                 .expect("batch control journey timeout");
             return;
         }
+        if mode == "repair-probe" { controls("repair-failed-test", "repair").await; return; }
+        if mode == "rolling-probe" {
+            tokio::time::timeout(Duration::from_secs(35), controls("rolling", "rolling"))
+                .await
+                .expect("rolling dispatch journey timeout");
+            println!("rolling dispatch: dependent worker started while an independent sibling was held");
+            return;
+        }
+        if mode == "access-retry-probe" {
+            for action in ["release", "deny"] {
+                tokio::time::timeout(Duration::from_secs(30), controls("access-retry", action)).await.expect("access retry journey timeout");
+            }
+            println!("access retry grant and denial delivered");
+            return;
+        }
         // One owner-control journey alone: `control-probe=<scenario>:<action>`.
         if let Some((scenario, action)) = mode.strip_prefix("control-probe=").and_then(|s| s.split_once(':')) {
             workspace_service::native_runtime::set_retry_window((scenario == "exit").then_some(
@@ -3387,12 +3578,18 @@ fn main() {
             .expect("worker exit while waiting timeout");
         workspace_service::native_runtime::set_retry_window(None);
         for (scenario, action) in [
+            ("access-retry", "release"),
+            ("access-retry", "deny"),
+            ("pending-result", "pending-result"),
+            ("pending-end-turn", "pending-end-turn"),
             ("hold", "pause"),
             ("hold", "stop"),
             ("hold", "prompt"),
             ("question", "answer"),
             ("question", "pause_resume_question"),
             ("reconcile-question", "pause_resume_question"),
+            ("rolling", "rolling"),
+            ("repair-failed-test", "repair"),
             ("batch", "answer_batch"),
             ("exit", "retry"),
             ("hold", "mark_resolved"),

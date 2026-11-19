@@ -1,13 +1,13 @@
 import { createEffect, createMemo, createSignal, For, on, Show, type JSX } from "solid-js";
-import { capabilityOf, taskRenamable } from "@cortex/workspace-domain";
-import { asOf, checkCounts, clock, dayClock, engineLimits, nothingToCommit, sameBranch, windowTitle, sprintTitle, type TaskView } from "./selectors";
+import { capabilityOf, taskRenamable, type Task } from "@cortex/workspace-domain";
+import { asOf, automaticAcceptanceHold, checkCounts, clock, dayClock, engineLimits, humanStatus, nothingToCommit, ownerHold, sameBranch, windowTitle, sprintModeLabel, sprintTitle, type TaskView } from "./selectors";
 import { useWs } from "./ctx";
 import { FieldEdit } from "./field-edit";
 import { onScreen } from "./freshness";
 import { A, FactLine, I, Keyed, Modal, Pop } from "./kit";
 import { ActionBar, revealWhenCut } from "./layout";
 import { behindTarget, conflictLine, finishBlocked, taskCheckout } from "./review-model";
-import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, languageLabel, modeLabel, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, usesMachineRoute, workerFace, workerModel, workersOutcome, type SessionModel } from "./session-model";
+import { checkedResult, checksOf, checkWhy, closeBlocked, closeConsequences, contextLine, editedFiles, languageLabel, modeLabel, sessionModel, stateChip, stoppedAt, stopLabel, taskSettings, tokens, unconfirmedState, usesMachineRoute, workerFace, workerModel, workersOutcome, type SessionModel } from "./session-model";
 import { CHECK_ICON, VERIFICATION } from "./worker";
 import { archiveBlocked } from "./git-actions-model";
 
@@ -17,10 +17,14 @@ const useModel = (id: () => string) => {
 };
 
 /** The crumb is the title: a click renames it in place, started or not, and a manual title always wins over a late generated one. */
+export function taskTitle(task: Pick<Task, "title" | "titleState" | "description">): string {
+  return task.titleState === "failed" ? task.description.split("\n")[0].slice(0, 60) : task.title;
+}
+
 export function TaskTitle(props: { view: TaskView }) {
   const ws = useWs();
   const title = () => props.view.task.title;
-  const shown = () => props.view.task.titleState === "failed" ? props.view.task.description.split("\n")[0].slice(0, 60) : title();
+  const shown = () => taskTitle(props.view.task);
   return <Show when={taskRenamable(props.view.task)} fallback={<span ref={revealWhenCut} class="cur trunc ws-title" data-whole="">{shown()}</span>}>
     <FieldEdit band label="Task title" value={title()} off={ws.gate("rename_task")} inputClass="ws-title-in" save={text => ws.run({ type: "rename_task", taskId: props.view.id, title: text })}
       closed={{ class: "cur trunc ws-title", text: saved => saved === title() ? shown() : saved, start: () => title().startsWith("Title unavailable") || props.view.task.titleState === "pending" ? "" : title() }} />
@@ -102,6 +106,12 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
     <Show when={mode() === "closed"}>
       <button class="btn btn-line" aria-describedby={archiveWhy() ? why() : undefined} aria-disabled={archiveWhy() ? "true" : undefined} data-why={archiveWhy()} {...ws.needs("archive_task")} onClick={() => { if (!archiveWhy()) ws.archiveTask(props.view.id); }}><I n="archive" s={12} />Archive</button>
     </Show>
+    {/* A queue hold decided for the owner: its actions are on the pinned card above the message box; this brings it into view. */}
+    <Show when={ownerHold(props.view)?.nextActor === "owner" || ["exit_unconfirmed", "records"].includes(m() ? unconfirmedState(m()!)?.kind ?? "" : "")}><button class="btn btn-primary" onClick={() => {
+      const tab = ws.router.route();
+      if (tab.name === "task" && (tab.tab || tab.live)) ws.go({ name: "task", machine: tab.machine, task: props.view.id });
+      queueMicrotask(() => onScreen().querySelector(".chat-review-hold")?.scrollIntoView({ block: "center" }));
+    }}>See what is needed</button></Show>
     {/* A held task waits for the owner: say what is expected with one concrete action, not only a message box. */}
     <Show when={mode() === "live" && props.view.task.observedPhase === "recovery" && props.view.task.conflict === "none"}><button class="btn btn-primary" {...ws.needs("retry_task")} onClick={() => ws.run({ type: "retry_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Continue</button></Show>
     {/* Start, Stop and Resume are the composer's action button. Where this machine offers no message composer, they stay here. */}
@@ -153,6 +163,8 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
   const checkout = createMemo(() => taskCheckout(ws.store.state(), t()));
   const blocks = () => ws.store.state().tasks.filter(x => x.dependencies.includes(t().id)).length;
   const note = () => {
+    if (m().view.automaticFact) return "";
+    if (m().view.ownerIntegration) return humanStatus(m().view.ownerIntegration!.reason);
     if (t().conflict === "resolving") return `Handed over by you${t().merge?.handedAt != null ? ` at ${clock(t().merge!.handedAt)}` : ""}. You can stop it and take over at any time.`;
     if (t().conflict !== "none") return "Resolve it yourself, resolve it automatically or abort the merge.";
     if (t().observedPhase === "recovery" && !m().view.unknown) return "Continue lets the coordinator decide the next step from the recorded state; nothing is replayed. Or send a message.";
@@ -160,7 +172,7 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
     if (t().status === "ready_to_merge") return t().acceptance ? "Waiting for you to confirm." : m().view.project.hasGit === false ? "Review the result before closing the task." : sameBranch(t(), m().view.target) ? "Nothing is committed or closed without your confirmation." : "Nothing merges without your confirmation.";
     if (m().mode === "ended") return "The run ended by itself. Close task moves it to Done and keeps what was done.";
     if (m().mode === "closed" && !archiveBlocked(t())) return "Archive moves it to the Archive with its work, without asking anything.";
-    return m().mode === "live" ? `${open() ? `${open()} question${open() === 1 ? "" : "s"} for you. ` : ""}Next step is Review.` : paused() ? "Resume, or send any message. Nothing was deleted." : "";
+    return m().mode === "live" && m().view.sprint?.runMode !== "automatic" ? `${open() ? `${open()} question${open() === 1 ? "" : "s"} for you. ` : ""}Next step is Review.` : paused() ? "Resume, or send any message. Nothing was deleted." : "";
   };
   const base = () => { const b = m().session.base; if (!b) return []; const behind = behindTarget(checkout(), b.branch); return [["Base", behind ? `${b.branch}, ${behind} behind` : b.branch, true] as [string, string, boolean]]; };
   const uncommitted = (): [string, string][] => { const c = checkout(); return c ? [["Uncommitted", c.files.length ? `${c.files.length} files` : "None"]] : m().session.changes ? [["Uncommitted", `${m().session.changes!.files} files`]] : []; };
@@ -184,7 +196,7 @@ function SessionPanel(props: { m: SessionModel; pick: string | null }) {
       <Kv rows={[...(t().checkout.kind === "worktree" ? [["Path", (t().checkout as { path: string }).path, true] as [string, string, boolean]] : []), ["Branch", t().checkout.branch, true], ...base(), [sameBranch(t(), m().view.target) ? "Target branch" : "Merge into", m().view.target, true], ...uncommitted(), ["Conflicts", t().merge && t().conflict !== "none" ? conflictLine(t().merge!) : "None"]]} />
     </div>
     <Show when={m().view.sprint}>{s => <div class="ins-sec"><div class="ins-h"><span>Sprint</span></div>
-      <Kv rows={[["Sprint", sprintTitle(s())], ["Run mode", s().runMode === "automatic" ? "Automatic" : "Manual"], ["Blocks", `${blocks()} task${blocks() === 1 ? "" : "s"}`]]} /></div>}</Show>
+      <Kv rows={[["Sprint", sprintTitle(s())], ["Run mode", sprintModeLabel[s().runMode]], ["Blocks", `${blocks()} task${blocks() === 1 ? "" : "s"}`]]} /></div>}</Show>
     <Show when={checks().length > 0}>
       <div class="ins-sec"><div class="ins-h"><span>Checks</span></div>
         <div class="chk-sum">
@@ -249,13 +261,35 @@ export function CloseDialog(props: { taskId: string | null; onClose: () => void 
   const m = createMemo(() => props.taskId ? sessionModel(ws.store.index(), props.taskId) : null);
   // A memo of the id: a refresh that replaces the task record must not reset the owner's choice.
   const openedTask = createMemo(() => props.taskId);
-  createEffect(on(openedTask, id => { if (id) setChoice("as_is"); }));
+  const signature = (model: SessionModel) => JSON.stringify([
+    model.view.id, model.view.task.sourceVersion, model.view.task.executionId,
+    model.view.task.result?.sourceVersion, model.view.task.result?.digest,
+    model.view.sprint?.automaticQueue, model.view.task.status,
+  ]);
+  const [reviewedHold, setReviewedHold] = createSignal<string | null>(null);
+  createEffect(on(openedTask, id => {
+    setChoice("as_is");
+    const model = m();
+    setReviewedHold(id && model && automaticAcceptanceHold(model.view) ? signature(model) : null);
+  }));
   const paused = () => m()?.mode === "paused";
   // A failed or cancelled run has nothing left to stop or keep working on.
   const ended = () => m()?.mode === "ended";
+  const automaticHold = () => !!m() && automaticAcceptanceHold(m()!.view);
+  const [closing, setClosing] = createSignal(false);
+  const blocked = () => {
+    const model = m();
+    if (!model) return "Refresh the task first.";
+    if (reviewedHold() && signature(model) !== reviewedHold()) return "The task changed. Reopen this dialog to review its current result.";
+    return closeBlocked(model);
+  };
   const close = () => {
     const id = props.taskId!;
-    ws.ok({ type: "close_task", taskId: id, choice: choice(), confirmed: true, now: ws.store.clock() }, () => { props.onClose(); });
+    if (closing() || blocked()) return;
+    setClosing(true);
+    void ws.run({ type: "close_task", taskId: id, choice: choice(), confirmed: true, now: ws.store.clock() })
+      .then(receipt => { if (receipt.ok && props.taskId === id) props.onClose(); })
+      .finally(() => setClosing(false));
   };
   return <Modal open={!!props.taskId && !!m()} onClose={props.onClose} label="Close task">
     <Show when={m()}>{model => <>
@@ -263,16 +297,16 @@ export function CloseDialog(props: { taskId: string | null; onClose: () => void 
       <div class="dlg-b">
         <ul class="conseq"><Keyed each={closeConsequences(model())} by={l => `${l.icon}:${l.text}`}>{l => <li><I n={l().icon} s={14} /><span>{l().text}</span></li>}</Keyed></ul>
         <div style={{ display: "grid", gap: "6px" }}>
-          <label class="rc"><input type="radio" name="close-choice" checked={choice() === "as_is"} onChange={() => setChoice("as_is")} /><span><span class="t">Close as is</span><span class="d">{checkedResult(model()) ? "Keep what was done. The checked result and its evidence stay on record, and the task moves to Done." : "Keep what was done and decide about merging later. The result carries a lasting Not verified warning."}</span></span></label>
-          <label class="rc danger"><input type="radio" name="close-choice" checked={choice() === "cancel"} onChange={() => setChoice("cancel")} /><span><span class="t">Cancel task</span><span class="d">Nothing from this task is needed. The task moves to Done as Cancelled. The checkout stays until you delete it.</span></span></label>
+          <label class="rc"><input type="radio" name="close-choice" checked={choice() === "as_is"} onChange={() => setChoice("as_is")} /><span><span class="t">Close as is</span><span class="d">{automaticHold() ? "This finishes the dependency and lets Automatic start the next ready task." : checkedResult(model()) ? "Keep what was done. The checked result and its evidence stay on record, and the task moves to Done." : "Keep what was done and decide about merging later. The result carries a lasting Not verified warning."}</span></span></label>
+          <label class="rc danger"><input type="radio" name="close-choice" checked={choice() === "cancel"} onChange={() => setChoice("cancel")} /><span><span class="t">Cancel task</span><span class="d">Nothing from this task is needed. The task moves to Done as Cancelled. The checkout stays until you delete it.{automaticHold() ? " Cancelled dependencies can still keep later queued tasks blocked." : ""}</span></span></label>
         </div>
-        <Show when={!ended()}><Show when={paused()} fallback={<Show when={ws.can(capabilityOf("continue_task"))}><div class="note-box plain"><I n="pause" s={14} /><span>Only want to pause? <button class="lnk" {...ws.needs("stop_task")} onClick={() => { const id = props.taskId!; props.onClose(); ws.stopTask(id); }}>Stop</button> keeps everything and can be resumed. It needs no confirmation.</span></div></Show>}>
+        <Show when={!ended() && !automaticHold()}><Show when={paused()} fallback={<Show when={ws.can(capabilityOf("continue_task"))}><div class="note-box plain"><I n="pause" s={14} /><span>Only want to pause? <button class="lnk" {...ws.needs("stop_task")} onClick={() => { const id = props.taskId!; props.onClose(); ws.stopTask(id); }}>Stop</button> keeps everything and can be resumed. It needs no confirmation.</span></div></Show>}>
           <div class="note-box plain"><I n="pause" s={14} /><span>Only want to pause? This task is already stopped, and Resume picks it up again.</span></div>
         </Show></Show>
       </div>
-      <ActionBar place="dialog" hint="Closing keeps the work. Deleting it is a separate, explicit step in the Archive.">
+      <ActionBar place="dialog" hint={blocked() ?? (automaticHold() ? undefined : "Closing keeps the work. Deleting it is a separate, explicit step in the Archive.")}>
         <button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>{paused() ? "Keep it paused" : ended() ? "Keep it open" : "Keep working"}</button>
-        <Show when={choice() === "as_is"} fallback={<button class="btn btn-danger btn-lg" onClick={close}>Cancel task</button>}><button class="btn btn-primary btn-lg" onClick={close}>Close task</button></Show>
+        <Show when={choice() === "as_is"} fallback={<button class="btn btn-danger btn-lg" disabled={closing()} aria-disabled={blocked() ? "true" : undefined} data-why={blocked() ?? undefined} onClick={close}>Cancel task</button>}><button class="btn btn-primary btn-lg" disabled={closing()} aria-disabled={blocked() ? "true" : undefined} data-why={blocked() ?? undefined} onClick={close}>{automaticHold() ? "Close as is and continue" : "Close task"}</button></Show>
       </ActionBar>
     </>}</Show>
   </Modal>;

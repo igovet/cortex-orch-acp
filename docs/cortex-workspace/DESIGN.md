@@ -104,6 +104,22 @@ These sizes hold at every window width and with every pointer: a phone-width pan
 - A menu or popover opens whole inside the window: one placed against a trigger near an edge, or opened from another menu, moves back in by its overflow, and one taller than the window scrolls inside it.
 - The shared stylesheet enforces the row size: in any row that holds an actionable control and at least one more control, every button, icon button, select, segmented choice, chip and single-line field takes the row's `--ctl-h`. That is 28 px by default and 32 px in a dialog bar or composer, at every width; the controls in a section head are 24 px. A row of status chips alone keeps its own size.
 
+## Settings forms
+
+**Status: built in the Workspace orchestration settings (`packages/workspace-ui`, unreleased 1.0.6). The rules below are the built behaviour; the screen structure is in [SCREENS.md](SCREENS.md#orchestration-settings-desktop).**
+
+Settings follow the Paseo settings panel's way of configuring. Every field shows its label and one plain sentence of what it does, and a field with a recommendation also shows a "Recommended: …" line. All of this is visible without a press. The longer help sits behind a `?` control after the label.
+
+- A settings row keeps its label and description visible; the recommendation sits under the description in caption size. Where a control cannot be used, its reason goes to the row's reason slot.
+- A group is a titled section inside a page, and its title is a real heading under the page title.
+- A disclosure row (for example a model's details) has a summary line with a button that exposes its open state. It opens by itself when it holds an error, and its open state is remembered per item.
+- A tier picker offers four toggle buttons in full words, Light, Standard, Deep and Flagship, in that order. Single letters are not used.
+- The profile bar sits on one line under the context bar on every settings section. Its state is a word with an icon, never colour alone.
+- Each draft's save bar names what it covers, for example "Save routing rules on <machine>". A section whose controls act at once has no save bar.
+- Built-in values are read-only, marked with a lock and the words "Built in".
+
+These components use the row, section-head and save-bar sizes above (28, 24 and 32 px). They add no tokens, colours, radii or sizes.
+
 ## Brand-free interface copy
 
 No interface text names the product. The product name remains only in the exceptions listed under [open choices](#open-choices). The prototype's labels are replaced in production:
@@ -135,6 +151,7 @@ These are unresolved. Each stays open until the owner or a later review decides 
 3. Product name in technical identifiers. The Diagnostics page's build and connection identifiers, real file paths such as the default worktree folder, and environment variable names keep the product name, because they are real identifiers. Whether the owner's "no Cortex in the interface" rule covers these exceptions needs confirmation.
 4. Push-to-talk, and whether Esc cancels a recording, remain open as recorded in [SCREENS.md](SCREENS.md#voice-input).
 5. Key bindings in general are proposals until the owner decides them.
+6. Help language in Workspace settings. The settings help is English only today, while [CW-U07](backlog/CW-U07.md) lists English, Russian or both (default both). The orchestration settings keep English until the owner decides ([SCREENS.md](SCREENS.md#orchestration-settings-desktop)).
 
 ## Verification status
 

@@ -1,5 +1,5 @@
 import { createMemo, createSignal, For, Match, Show, Switch, type JSX } from "solid-js";
-import type { Problem } from "@cortex/workspace-domain";
+import { TIER_LABELS, TIERS, type Problem, type Tier } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { onScreen } from "./freshness";
 import { A, I, Keyed, MenuItem, Pop } from "./kit";
@@ -8,19 +8,36 @@ import type { HelpText } from "./orch-help";
 import type { Route } from "./router";
 import type { Draft } from "./settings-state";
 
-/** A setting: its name and what it does, its control at the end. A control that cannot be used says why on the row's own next line. */
-export function Srow(props: { t: JSX.Element; d?: JSX.Element; children?: JSX.Element }) {
+/**
+ * A setting: its name and what it does, its control at the end. A recommendation reads beneath the description, so nothing
+ * needed to choose sits behind a "?". A control that cannot be used says why on the row's own next line.
+ */
+export function Srow(props: { t: JSX.Element; d?: JSX.Element; r?: JSX.Element; id?: string; children?: JSX.Element }) {
   let row: HTMLDivElement | undefined;
-  return <div class="srow" ref={row}>
-    <span><span class="t">{props.t}</span><Show when={props.d}><span class="d">{props.d}</span></Show><ReasonSlot bar={() => row} /></span>
+  return <div class="srow" ref={row} id={props.id}>
+    <span><span class="t">{props.t}</span><Show when={props.d}><span class="d">{props.d}</span></Show><Show when={props.r}><span class="d rec">Recommended: {props.r}</span></Show><ReasonSlot bar={() => row} /></span>
     <span class="ctl">{props.children}</span>
   </div>;
 }
+/** A recommendation for a whole group, under its heading. */
+export const Rec = (props: { children: JSX.Element }) => <p class="set-rec">Recommended: {props.children}</p>;
 
-/** A settings section's heading, with its help and actions at the end. A heading action that cannot be used says why right under it. */
+/** Tier toggles in full words, from light to flagship. Each is its own stop and says whether it is on. */
+export function Tiers(props: { label: string; on: Tier[]; onChange: (tier: Tier, on: boolean) => void; disabled?: string }) {
+  return <span class="tier" role="group" aria-label={`${props.label} tiers`}><For each={[...TIERS].reverse()}>{t =>
+    <button aria-pressed={props.on.includes(t)} aria-label={`${props.label}: ${TIER_LABELS[t]}`} data-why={props.disabled} aria-disabled={props.disabled ? "true" : undefined} onClick={e => { e.stopPropagation(); if (!props.disabled) props.onChange(t, !props.on.includes(t)); }}>{TIER_LABELS[t]}</button>
+  }</For></span>;
+}
+/** Tiers in words, in the same order as the toggles. */
+export const tierWords = (on: readonly Tier[]) => [...TIERS].reverse().filter(t => on.includes(t)).map(t => TIER_LABELS[t]).join(", ");
+
+/**
+ * A settings section's heading, with its help and actions at the end. A heading action that cannot be used says why right under it.
+ * It is an h2, right under the page's h1 title, so reading by heading follows the page's own outline.
+ */
 export function SetH(props: { title: JSX.Element; count?: number; children?: JSX.Element }) {
   let box: HTMLDivElement | undefined;
-  return <div class="set-h" ref={box}><SectionHead title={props.title} count={props.count}>{props.children}</SectionHead><ReasonSlot bar={() => box} /></div>;
+  return <div class="set-h" ref={box}><SectionHead level={2} title={props.title} count={props.count}>{props.children}</SectionHead><ReasonSlot bar={() => box} /></div>;
 }
 
 export function Seg<T extends string>(props: { label: string; value: T; options: readonly { id: T; label: string; icon?: string; off?: string }[]; onChange: (id: T) => void; disabled?: string }) {

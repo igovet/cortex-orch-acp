@@ -52,15 +52,16 @@ files, symlinks and dependency/build caches remain excluded:
 
 ```sh
 ./scripts/build-dev-deb.sh
-./scripts/build-prod-deb.sh --jobs 4
+./scripts/build-prod-deb.sh --jobs 6
 # Optional container engine:
 ./scripts/build-dev-deb.sh --engine podman
 ```
 
+The production wrapper sets `umask 022` and puts `$HOME/.cargo/bin` first in its build environment.
 Both wrap `cargo run --locked -p cortex-xtask -- build-deb` (the `cortex-xtask build-deb` driver; `--release`, `--local-release`, `--ci-dev` and `--resume` are reserved by the wrappers) and print the final absolute
 archive paths. Copies and their build manifest land in the git-ignored
 `.workspace-build/local-dev/build-*/` or `.workspace-build/local-prod/build-*/`.
-Original inputs, caches and artifacts remain under `.workspace-build/build-*/`.
+Each build retains its input snapshot and artifacts under `.workspace-build/build-*/`. Local builds reuse a Cargo target directory, registry and npm downloads under `.workspace-build/.cache/`, separately for each channel and builder image. The running container locks its cache. Unchanged source files retain their Cargo timestamps after byte and mode checks. Each invocation reinstalls the locked npm dependencies and creates a fresh archive and version. Official builds use a cache inside their own build directory. The default Cargo job count follows available CPUs up to six. Use `--jobs N` to override it.
 Each invocation uses a fresh build directory; channel flags and `--resume` are
 reserved by the wrappers. Other builder arguments pass through unchanged.
 

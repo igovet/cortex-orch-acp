@@ -61,6 +61,8 @@ const ACTIONS: Record<string, { kind: ToolPresentationKind; icon: ToolPresentati
   project_git: { kind: "read", icon: "FileText", action: "Read project Git" },
   draft_write: { kind: "edit", icon: "FilePenLine", action: "Write draft" },
   command_run: { kind: "shell", icon: "Terminal", action: "Shell" },
+  // Reads the state of a command already started; it runs nothing, so it is not a shell row.
+  command_status: { kind: "read", icon: "FileText", action: "Read command status" },
   // Runtime proposal operations.
   answer_submit: { kind: "edit", icon: "FilePenLine", action: "Submit answer" },
   replan_request: { kind: "governance", icon: "Scale", action: "Request revised plan" },
@@ -68,6 +70,7 @@ const ACTIONS: Record<string, { kind: ToolPresentationKind; icon: ToolPresentati
   escalation_request: { kind: "governance", icon: "Scale", action: "Request consultation" },
   task_get_context: { kind: "read", icon: "FileText", action: "Read task context" },
   plan_submit: { kind: "edit", icon: "FilePenLine", action: "Submit plan" },
+  sprint_plan_submit: { kind: "edit", icon: "FilePenLine", action: "Submit sprint plan" },
   synthesis_submit: { kind: "edit", icon: "FilePenLine", action: "Submit synthesis" },
   user_question_request: { kind: "governance", icon: "Scale", action: "Ask user" },
   result_submit: { kind: "edit", icon: "FilePenLine", action: "Submit result" },

@@ -1,7 +1,7 @@
-import { dependencyReady, isOpen, openPlanningQuestion, runBlockerOf, runOrder, type AttachmentInput, type PlanItem, type Sprint, type Task, type TaskSession } from "@cortex/workspace-domain";
+import { dependencyReady, isOpen, openPlanningQuestion, queueDrivenMode, runBlockerOf, runOrder, type AttachmentInput, type PlanItem, type Sprint, type Task, type TaskSession } from "@cortex/workspace-domain";
 import type { Ask } from "./questions";
 import { checksLine } from "./review-model";
-import { readyLabel, readyStep, type TaskView, type WorkspaceIndex } from "./selectors";
+import { humanStatus, readyLabel, readyStep, type TaskView, type WorkspaceIndex } from "./selectors";
 
 export const itemTitle = (item: PlanItem) => item.title ?? item.description;
 
@@ -40,6 +40,9 @@ type Word = { text: string; tone: string; icon: string; spin?: boolean; group: "
 /** One word for a task inside a sprint. A dependency that has not unlocked reads as blocked, never as queued. */
 function wordOf(view: TaskView, next: boolean, index: WorkspaceIndex): Word {
   const t = view.task;
+  if (view.ownerDecision) return { text: "Needs you", tone: "st-warn", icon: view.fact.icon ?? "question", group: "needs" };
+  if (view.ownerIntegration) return { text: humanStatus(view.ownerIntegration.reason), tone: "st-warn", icon: "merge", group: "needs" };
+  if (view.automaticFact) return { ...view.automaticFact, icon: view.automaticFact.icon ?? "hourglass", group: view.automaticFact.spin ? "working" : "blocked" };
   if (t.conflict !== "none") return { text: "Conflict", tone: "st-bad", icon: "alert", group: "working" };
   if (view.unknown) return { text: view.fact.text, tone: "st-idle", icon: "help", group: "working" };
   switch (t.status) {
@@ -52,10 +55,11 @@ function wordOf(view: TaskView, next: boolean, index: WorkspaceIndex): Word {
     case "ready_to_merge": return { text: readyLabel(t, view.target), tone: "st-merge", icon: "merge", group: "ready" };
     case "failed": return { text: "Run failed", tone: "st-bad", icon: "x-circle", group: "needs" };
     case "cancelled": return { text: "Run cancelled", tone: "st-idle", icon: "x-circle", group: "needs" };
-    case "done": return t.integration?.method === "commit" ? { text: `Committed to ${t.integration.targetBranch}`, tone: "st-idle", icon: "check", group: "closed" } : t.work === "merged" ? { text: "Merged", tone: "st-merge", icon: "merge", group: "merged" }
+    case "done": return t.integration?.automatic ? { text: view.fact.text, tone: "st-idle", icon: "check", group: "closed" }
+      : t.integration?.method === "commit" ? { text: `Committed to ${t.integration.targetBranch}`, tone: "st-idle", icon: "check", group: "closed" } : t.work === "merged" ? { text: "Merged", tone: "st-merge", icon: "merge", group: "merged" }
       : { text: t.closedAs === "external" ? "Done outside the app" : t.closedAs === "cancel" ? "Cancelled" : "Closed as is", tone: "st-idle", icon: t.closedAs === "cancel" ? "x-circle" : "circle", group: "closed" };
     case "draft": {
-      if (t.dependencies.some(id => { const d = index.byId.get(id); return !d || !dependencyReady(d.task); })) return { text: "Blocked", tone: "st-idle", icon: "hourglass", group: "blocked" };
+      if (t.dependencies.some(id => { const d = index.byId.get(id); return !d || !dependencyReady(d.task, view.sprint?.runMode); })) return { text: "Blocked", tone: "st-idle", icon: "hourglass", group: "blocked" };
       return next ? { text: "Next", tone: "st-idle", icon: "circle", group: "next" } : { text: "Queued", tone: "st-idle", icon: "circle", group: "blocked" };
     }
   }
@@ -89,11 +93,11 @@ export function planRows(index: WorkspaceIndex, sprint: Sprint, items: PlanItem[
       order = sprint.taskIds.map(id => index.byId.get(id) ?? null);
     }
   }
-  const nextId = order.find(v => v?.task.status === "draft" && !v.task.dependencies.some(id => { const d = index.byId.get(id); return !d || !dependencyReady(d.task); }))?.id;
+  const nextId = order.find(v => v?.task.status === "draft" && !v.task.dependencies.some(id => { const d = index.byId.get(id); return !d || !dependencyReady(d.task, sprint.runMode); }))?.id;
   const numbers = new Map<string, number>();
   items.forEach((i, n) => { if (!numbers.has(i.key)) numbers.set(i.key, n + 1); });
   const no = (key: string) => numbers.get(key) ?? 0;
-  const unready = (key: string) => { const d = views?.get(key); return !d || !dependencyReady(d.task); };
+  const unready = (key: string) => { const d = views?.get(key); return !d || !dependencyReady(d.task, sprint.runMode); };
   return items.map((item, i) => {
     const view = views?.get(item.key) ?? null;
     return { item, no: i + 1, deps: item.dependsOn.map(no), view, word: view ? wordOf(view, view.id === nextId, index) : null, waits: item.dependsOn.filter(unready).map(no), backed: views !== null };
@@ -152,10 +156,10 @@ export function planCaption(items: PlanItem[], selected: string | null) {
 }
 
 export type SummaryRow = { view: TaskView; word: Word; checks: string; branch: string };
-const checksOf = (task: Task, word: Word, index: WorkspaceIndex): string => {
+const checksOf = (task: Task, word: Word, index: WorkspaceIndex, mode: Sprint["runMode"]): string => {
   if (task.result) return checksLine(task.result.checks);
   if (word.group === "blocked" && word.text === "Blocked") {
-    const dep = task.dependencies.map(id => index.byId.get(id)).find(d => d && !dependencyReady(d.task));
+    const dep = task.dependencies.map(id => index.byId.get(id)).find(d => d && !dependencyReady(d.task, mode));
     return dep ? `Waits for ${dep.task.title}` : "Waits for a dependency";
   }
   return task.status === "draft" ? "Not started" : "No result yet";
@@ -165,10 +169,10 @@ export function sprintSummary(index: WorkspaceIndex, sprint: Sprint) {
   const views = sprint.taskIds.flatMap(id => { const v = index.byId.get(id); return v ? [v] : []; });
   const loaded = new Set(views.map(v => v.id));
   const rows = planRows(index, sprint, views.map(v => ({ key: v.id, title: v.task.title, description: v.task.description, dependsOn: v.task.dependencies.filter(d => loaded.has(d)) })), "tasks");
-  const next = views.find(v => v.task.status === "draft" && v.task.dependencies.every(id => { const d = index.byId.get(id); return !!d && dependencyReady(d.task); }));
+  const next = views.find(v => v.task.status === "draft" && v.task.dependencies.every(id => { const d = index.byId.get(id); return !!d && dependencyReady(d.task, sprint.runMode); }));
   const list: SummaryRow[] = views.map(view => {
     const word = wordOf(view, view.id === next?.id, index);
-    return { view, word, checks: checksOf(view.task, word, index), branch: view.task.checkout.branch };
+    return { view, word, checks: checksOf(view.task, word, index, sprint.runMode), branch: view.task.checkout.branch };
   });
   const count = (group: Word["group"]) => list.filter(r => r.word.group === group).length;
   return { rows: list, planRows: rows, ready: count("ready"), working: count("working"), needs: count("needs"), next: count("next"), blocked: count("blocked"), merged: count("merged"), closed: count("closed") };
@@ -194,7 +198,7 @@ export function sprintGap(index: WorkspaceIndex, sprint: Sprint): { title: strin
 export function queueStall(index: WorkspaceIndex, sprint: Sprint): { reason: string; taskId: string | null } | null {
   if (sprint.planning !== "created" || sprint.queueState === "running" || sprint.queueState === "complete") return null;
   if (sprint.taskIds.some(id => !index.byId.has(id))) return null;
-  if (sprint.runMode === "automatic") { const b = runBlockerOf(index.state, sprint); return b?.taskId ? b : null; }
+  if (queueDrivenMode(sprint.runMode)) { const b = runBlockerOf(index.state, sprint); return b?.taskId ? b : null; }
   const drafts = sprint.taskIds.map(id => index.byId.get(id)!).filter(v => v.task.status === "draft");
   const ready = (v: TaskView) => v.task.dependencies.every(id => { const d = index.byId.get(id); return !!d && dependencyReady(d.task); });
   if (!drafts.length || drafts.some(ready)) return null;

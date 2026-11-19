@@ -19,6 +19,9 @@ const WRITERS: &[(&str, &str, &str)] = &[
     ("pending_question_late_answers", "runtime", "task_id"),
     ("task_language", "runtime", "task_id"),
     ("task_stopped", "runtime", "task_id"),
+    // A settled (or unconfirmed) process changes what the task projection can say
+    // about it; nothing else is written when a session's shutdown is observed.
+    ("capacity_reservations", "runtime", "task_id"),
     ("acp_host_sessions", "session", "session_id"),
     ("acp_session_access_defaults", "session", "session_id"),
     ("host_transcript", "session", "session_id"),

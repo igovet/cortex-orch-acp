@@ -277,12 +277,19 @@ impl Bridge {
         let url = reply["result"]["url"]
             .as_str()
             .filter(|u| opener::web_address(u))
-            .ok_or("This pull request's address is not a plain https address, so it was not opened.")?;
+            .ok_or(
+                "This pull request's address is not a plain https address, so it was not opened.",
+            )?;
         let (program, args) =
             opener::system_opener().ok_or("No browser opener is installed on this machine.")?;
         let mut args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
         args.push(url.into());
-        opener::launch(&program, &args, "The browser could not open this pull request.").await?;
+        opener::launch(
+            &program,
+            &args,
+            "The browser could not open this pull request.",
+        )
+        .await?;
         Ok(json!({"outcome":"opened"}))
     }
     async fn open_logs(&self) -> Result<Value, String> {

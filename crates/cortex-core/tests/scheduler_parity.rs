@@ -682,3 +682,82 @@ fn finished_deleted_or_settled_work_holds_no_files_for_other_tasks() {
         ["reset"]
     );
 }
+
+#[test]
+fn shared_checkout_review_waits_for_active_writers_and_queues_new_writers() {
+    let (p, s, _) = setup();
+    TaskMachine::new(&s)
+        .create("u", "other work", "owner")
+        .unwrap();
+    s.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1", [])?;
+        node(db, "t", "done", "worker-backend-dev", &["one"], &[])?;
+        db.execute(
+            "UPDATE runtime_nodes SET status='completed' WHERE task_id='t'",
+            [],
+        )?;
+        node(db, "u", "active", "worker-backend-dev", &["two"], &[])?;
+        bind(db, "u", "active", "a", "x", "c")?;
+        assert_eq!(write_conflict_tx(db, "t")?.unwrap()["holder_task"], "u");
+        db.execute(
+            "UPDATE delegation_provisioning SET status='terminated' WHERE attempt_id='x'",
+            [],
+        )?;
+        assert!(review_writer_tx(db, "t")?.is_none());
+        node(db, "u", "next", "worker-backend-dev", &["three"], &[])?;
+        let policy = NativePolicy::default();
+        for state in ["REVIEWING", "VERIFYING"] {
+            db.execute(
+                "UPDATE runtime_tasks SET state=? WHERE task_id='t'",
+                [state],
+            )?;
+            assert!(!policy.may_claim(db, "u", "next")?);
+            assert_eq!(write_conflict_tx(db, "u")?.unwrap()["holder_task"], "t");
+        }
+        // A verified revision keeps the checkout reservation while its owner-facing
+        // synthesis is reconciled. Completion releases it, while a new plan or owner
+        // wait releases it as well.
+        db.execute(
+            "UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id='t'",
+            [],
+        )?;
+        event_tx(db, "t", "VERIFICATION_PASSED", json!({"revision": 1}))?;
+        assert!(!policy.may_claim(db, "u", "next")?);
+        assert_eq!(write_conflict_tx(db, "u")?.unwrap()["holder_task"], "t");
+        db.execute(
+            "UPDATE runtime_tasks SET state='COMPLETED' WHERE task_id='t'",
+            [],
+        )?;
+        assert!(policy.may_claim(db, "u", "next")?);
+        db.execute(
+            "UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id='t'",
+            [],
+        )?;
+        db.execute(
+            "UPDATE runtime_tasks SET state='WAITING_USER' WHERE task_id='t'",
+            [],
+        )?;
+        assert!(policy.may_claim(db, "u", "next")?);
+        db.execute(
+            "UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id='t'",
+            [],
+        )?;
+        db.execute(
+            "UPDATE runtime_tasks SET state='PLANNING' WHERE task_id='t'",
+            [],
+        )?;
+        assert!(policy.may_claim(db, "u", "next")?);
+        // A task worktree is a separate checkout even when project_root is shared.
+        db.execute(
+            "UPDATE runtime_tasks SET state='RECONCILING' WHERE task_id='t'",
+            [],
+        )?;
+        db.execute(
+            "INSERT INTO task_workspaces(task_id,workspace_root,recorded_at) VALUES ('u',?,'now')",
+            [p.0.join("other-worktree").to_str().unwrap()],
+        )?;
+        assert!(policy.may_claim(db, "u", "next")?);
+        Ok(())
+    })
+    .unwrap();
+}

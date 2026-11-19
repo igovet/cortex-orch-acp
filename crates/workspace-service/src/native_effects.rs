@@ -376,17 +376,27 @@ struct Observed {
     /// hash per file, `dir:<commit>:<nested digest>` per nested checkout, and `empty/`
     /// per empty directory.
     manifest: std::collections::BTreeMap<String, String>,
+    /// Raw content hashes for regular files fully read in this observation.
+    raw_manifest: std::collections::BTreeMap<String, String>,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ManifestMode {
+    None,
+    Identity,
+    Review,
 }
 const NESTED_DEPTH: u8 = 4;
 pub(super) async fn observe(root: PathBuf) -> CoreResult<EvidenceSnapshot> {
-    Ok(observe_with(root, false).await?.0)
+    Ok(observe_with(root, ManifestMode::None).await?.0)
 }
 /// `observe`'s project digest alone, for presentation reads that compare a result with
 /// the folder. Ignored files feed only the ignored digest and completeness flags, so
 /// this pass never lists or visits them (a dependency folder can hold most of a
 /// project's files); the digest is the one `observe` returns for the same folder.
 pub(super) async fn observe_digest(root: PathBuf) -> CoreResult<String> {
-    Ok(observe_checkout(root, 0, false, false).await?.digest)
+    Ok(observe_checkout(root, 0, ManifestMode::None, false)
+        .await?
+        .digest)
 }
 /// Observation plus the per-file manifest of the same pass, for change attribution.
 /// The manifest is `None` when the observation is incomplete or stands in by metadata
@@ -397,14 +407,32 @@ pub(super) async fn observe_manifest(
     EvidenceSnapshot,
     Option<std::collections::BTreeMap<String, String>>,
 )> {
-    let (snapshot, manifest) = observe_with(root, true).await?;
+    let (snapshot, manifest, _) = observe_with(root, ManifestMode::Identity).await?;
     let usable = !(snapshot.incomplete || snapshot.metadata_only || snapshot.cap_reached);
     Ok((snapshot, usable.then_some(manifest)))
 }
+/// Observation used to prepare a reviewer packet. Raw SHA-256 values are
+/// retained only for regular files whose complete bytes were read during the
+/// same bounded observation.
+pub(super) async fn observe_review_manifest(
+    root: PathBuf,
+) -> CoreResult<(
+    EvidenceSnapshot,
+    Option<std::collections::BTreeMap<String, String>>,
+    std::collections::BTreeMap<String, String>,
+)> {
+    let (snapshot, manifest, raw) = observe_with(root, ManifestMode::Review).await?;
+    let usable = !(snapshot.incomplete || snapshot.metadata_only || snapshot.cap_reached);
+    Ok((snapshot, usable.then_some(manifest), raw))
+}
 async fn observe_with(
     root: PathBuf,
-    with_manifest: bool,
-) -> CoreResult<(EvidenceSnapshot, std::collections::BTreeMap<String, String>)> {
+    with_manifest: ManifestMode,
+) -> CoreResult<(
+    EvidenceSnapshot,
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, String>,
+)> {
     let o = observe_checkout(root, 0, with_manifest, true).await?;
     let manifest = o.manifest;
     let o = Observed {
@@ -421,12 +449,18 @@ async fn observe_with(
             ..Default::default()
         },
         manifest,
+        o.raw_manifest,
     ))
 }
 type ObservedFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = CoreResult<Observed>> + Send>>;
 fn observe_root(root: PathBuf, depth: u8, with_ignored: bool) -> ObservedFuture {
-    Box::pin(observe_checkout(root, depth, false, with_ignored))
+    Box::pin(observe_checkout(
+        root,
+        depth,
+        ManifestMode::None,
+        with_ignored,
+    ))
 }
 /// What one observation pass hashes: Git's listing of a repository, or the plain walk
 /// of a folder that is in no repository (`plain_listing`).
@@ -441,7 +475,7 @@ struct Listing {
 async fn observe_checkout(
     root: PathBuf,
     depth: u8,
-    with_manifest: bool,
+    with_manifest: ManifestMode,
     with_ignored: bool,
 ) -> CoreResult<Observed> {
     // A plain project folder (in no Git repository at all) is observed by walking it.
@@ -631,7 +665,7 @@ async fn git_listing(root: &Path, with_ignored: bool) -> CoreResult<Listing> {
 async fn observe_listed(
     root: PathBuf,
     depth: u8,
-    with_manifest: bool,
+    with_manifest: ManifestMode,
     with_ignored: bool,
     listing: Listing,
 ) -> CoreResult<Observed> {
@@ -703,6 +737,7 @@ async fn observe_listed(
     let root2 = root.clone();
     let digest = tokio::task::spawn_blocking(move || {
         let mut manifest = std::collections::BTreeMap::new();
+        let mut raw_manifest = std::collections::BTreeMap::new();
         let (d, f) = tree_collect_in(
             &root2,
             &paths,
@@ -710,15 +745,17 @@ async fn observe_listed(
             Some(&head),
             &heads,
             (FILE_LIMIT, TOTAL_LIMIT, TIME_LIMIT),
-            with_manifest.then_some(&mut manifest),
+            (with_manifest != ManifestMode::None).then_some(&mut manifest),
+            (with_manifest == ManifestMode::Review).then_some(&mut raw_manifest),
             pruned.as_ref(),
         )?;
         let i = ignored.and_then(|l| ignored_tree(&root2, &l));
-        Ok::<_, CoreError>((d, i, f, manifest))
+        Ok::<_, CoreError>((d, i, f, manifest, raw_manifest))
     })
     .await
     .map_err(|_| refused())??;
     let manifest = digest.3;
+    let raw_manifest = digest.4;
     flags.merge(digest.2);
     if let Some((_, f)) = &digest.1 {
         flags.merge(*f);
@@ -749,6 +786,7 @@ async fn observe_listed(
         ignored,
         flags,
         manifest,
+        raw_manifest,
     })
 }
 #[cfg(test)]
@@ -782,6 +820,33 @@ mod tests {
         let after = manifest(b"a\0b\0");
         assert_ne!(before["a"], after["a"]);
         assert_eq!(before["b"], after["b"]);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn review_manifest_records_raw_sha256_for_fully_read_files() {
+        let base = std::env::temp_dir().join(format!("native-raw-manifest-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("one"), b"one").unwrap();
+        let heads = std::collections::BTreeMap::new();
+        let mut identity = std::collections::BTreeMap::new();
+        let mut raw = std::collections::BTreeMap::new();
+        tree_collect_in(
+            &base,
+            b"one\0",
+            b"",
+            None,
+            &heads,
+            (u64::MAX, u64::MAX, Duration::from_secs(60)),
+            Some(&mut identity),
+            Some(&mut raw),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            raw.get("one").map(String::as_str),
+            Some("7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add73ff431ed")
+        );
         std::fs::remove_dir_all(&base).unwrap();
     }
     struct Fixture(PathBuf);
@@ -1359,7 +1424,10 @@ mod tests {
         assert!(!r.truncated);
 
         let (_cancel, receiver) = tokio::sync::watch::channel(false);
-        let c = command(&f.0, &["/bin/sh".into(), "-c".into(), "kill -TERM $$".into()]);
+        let c = command(
+            &f.0,
+            &["/bin/sh".into(), "-c".into(), "kill -TERM $$".into()],
+        );
         let r = capture(c, Duration::from_secs(2), receiver).await.unwrap();
         assert!(!r.complete);
         assert_eq!(r.code, None);
@@ -1736,7 +1804,9 @@ fn tree_collect(
     limits: (u64, u64, Duration),
     manifest: Option<&mut std::collections::BTreeMap<String, String>>,
 ) -> CoreResult<(String, Flags)> {
-    tree_collect_in(root, paths, index, head, heads, limits, manifest, None)
+    tree_collect_in(
+        root, paths, index, head, heads, limits, manifest, None, None,
+    )
 }
 /// `tree_collect` whose empty-directory walk skips the `pruned` ignored directories.
 #[allow(clippy::too_many_arguments)]
@@ -1748,6 +1818,7 @@ fn tree_collect_in(
     heads: &std::collections::BTreeMap<String, String>,
     (file_limit, total_limit, time_limit): (u64, u64, Duration),
     mut manifest: Option<&mut std::collections::BTreeMap<String, String>>,
+    mut raw_manifest: Option<&mut std::collections::BTreeMap<String, String>>,
     pruned: Option<&BTreeSet<Vec<u8>>>,
 ) -> CoreResult<(String, Flags)> {
     use sha2::Digest;
@@ -1788,6 +1859,7 @@ fn tree_collect_in(
                         && started.elapsed() <= time_limit
                     {
                         let mut buffer = vec![0u8; 64 * 1024];
+                        let mut raw_entry = raw_manifest.as_ref().map(|_| sha2::Sha256::new());
                         let mut read = 0u64;
                         loop {
                             let n = file.read(&mut buffer).map_err(|_| unreadable())?;
@@ -1800,6 +1872,9 @@ fn tree_collect_in(
                             }
                             h.update(&buffer[..n]);
                             entry.update(&buffer[..n]);
+                            if let Some(raw_entry) = raw_entry.as_mut() {
+                                raw_entry.update(&buffer[..n]);
+                            }
                         }
                         let after = file.metadata()?;
                         if read != before.len() || before.modified()? != after.modified()? {
@@ -1807,6 +1882,11 @@ fn tree_collect_in(
                         }
                         hashed += read;
                         h.update(b"content");
+                        if let (Some(raw_manifest), Some(raw_entry)) =
+                            (raw_manifest.as_deref_mut(), raw_entry)
+                        {
+                            raw_manifest.insert(name.to_owned(), hex(raw_entry));
+                        }
                     } else {
                         // Over the limits: size, mtime and mode stand in for the content.
                         // That is metadata only: restoring the mtime defeats it, so no waiver.

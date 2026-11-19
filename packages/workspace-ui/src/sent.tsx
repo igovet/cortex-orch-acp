@@ -4,6 +4,7 @@ import { useWs } from "./ctx";
 import { I, Keyed } from "./kit";
 import { CopySource } from "./message-copy";
 import { ResultText } from "./result-text";
+import { humanStatus } from "./selectors";
 import type { Sending, SendPlace } from "./sends";
 
 /** What a sent message's line says while the machine confirms it, and what the owner can do when it did not arrive. */
@@ -12,7 +13,7 @@ function SentStatus(props: { e: Sending }) {
   return <Switch>
     <Match when={props.e.state === "sending"}><I n="loader" s={12} class="spin ws-wait" /><span aria-live="polite">Sending…</span></Match>
     <Match when={props.e.state === "sent"}><I n="check" s={12} /><span aria-live="polite">Sent</span></Match>
-    <Match when={props.e.state === "failed"}><I n="alert" s={12} class="st-bad" /><span class="st-bad" role="alert">Not sent: {props.e.reason}</span>
+    <Match when={props.e.state === "failed"}><I n="alert" s={12} class="st-bad" /><span class="st-bad" role="alert">Not sent: {humanStatus(props.e.reason)}</span>
       <span class="act">
         <button type="button" class="lnk" onClick={() => void ws.store.sends.retry(props.e.key)}>Retry</button>
         <button type="button" class="lnk" onClick={() => ws.store.sends.edit(props.e.key)}>Edit</button>

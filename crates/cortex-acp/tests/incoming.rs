@@ -279,7 +279,11 @@ async fn rollover_and_reconciliation() {
                 let frame = c.recv().await;
                 if frame["method"] == "session/request_permission" {
                     assert_eq!(frame["params"]["_meta"]["cortexQuestion"], true);
-                    assert!(frame.to_string().contains("How should we finish?"));
+                    assert!(
+                        frame.to_string().contains("How should we finish?"),
+                        "{scenario}: unexpected question {:?}",
+                        frame["params"]["toolCall"]["title"]
+                    );
                     assert_eq!(
                         f.query("SELECT count(*) FROM runtime_tasks WHERE state='WAITING_USER'"),
                         1

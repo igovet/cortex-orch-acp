@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, useContext, type Accessor, type JSX } from "solid-js";
-import { capabilityOf, FEATURES, isOpen, type Activity, type Decision, type TimelineEntry, type Worker } from "@cortex/workspace-domain";
+import { capabilityOf, FEATURES, isOpen, type Activity, type Decision, type OwnerHoldAction, type TimelineEntry, type Worker } from "@cortex/workspace-domain";
 import { CodeView } from "./code";
 import { archiveRow, daysLeft } from "./archive-model";
 import { AttachChips, Composer, TaskAttachments } from "./composer";
@@ -8,13 +8,13 @@ import { Confirmed, createBodyMark, createTicker, ScreenActive } from "./freshne
 import { A, closePop, Count, createFollow, I, Keyed, Loading, MenuItem, Pop, useWantOverview } from "./kit";
 import { ConflictPanel, ReadyPanel } from "./merge";
 import { Answered, QuestionForm, type Ask, type AskAnswer } from "./questions";
-import { ChangesPanel, ResultCard } from "./review";
+import { AcceptBlocker, ChangesPanel, ResultCard } from "./review";
 import { ActionBar, Page, StatusLane, Toolbar, Whole, type StripItem } from "./layout";
 import { taskWhyId, titleBlock } from "./task-chrome";
 import { inConflict, repoOf, sentence, taskCheckout } from "./review-model";
 import type { Route, TaskTab } from "./router";
-import { age, clock, stopReason } from "./selectors";
-import { contextOf, coordinatorLine, duration, elapsedOf, isFinished, messageDelivery, workersOutcome, phases, recordedCoordinatorRoute, sessionModel, tokens, verificationFace, workerFace, workerState, workingNow, type SessionModel } from "./session-model";
+import { age, clock, humanStatus, ownerHold, sprintRoute, stopReason, type OwnerHold } from "./selectors";
+import { closeBlocked, contextOf, coordinatorLine, duration, elapsedOf, isFinished, messageDelivery, reviewLine, workersOutcome, phases, recordedCoordinatorRoute, sessionModel, tokens, unconfirmedState, verificationFace, workerFace, workerState, workingNow, type SessionModel } from "./session-model";
 import { CORTEX, Pill, StopCommand, VERIFICATION, WorkerPane, WaitingIndicator, WorkingIndicator } from "./worker";
 import { createOpenState, Fold, TextSteps } from "./feed";
 
@@ -22,6 +22,7 @@ import { ResultText, resultPreview } from "./result-text";
 import { CopySource, MessageTools } from "./message-copy";
 import { SentMessages } from "./sent";
 import { viewOfText } from "./tool-names";
+import { usePlanningSprint, useTaskRoutes } from "./task-place";
 
 type TaskRoute = Extract<Route, { name: "task" }>;
 const useTicker = () => {
@@ -169,6 +170,7 @@ function TeamBar(props: { m: SessionModel; now: number; pick: string; onPick: (k
   const [stopping, setStopping] = createSignal<{ worker: Worker; item: Activity } | null>(null);
   const runningCommand = (w: Worker) => w.status === "working" ? w.activity.find(a => a.command?.state === "running") : undefined;
   const pick = (id: string, el: Element) => { closePop(el); props.onPick(id); };
+  const routes = useTaskRoutes(() => ({ machine: props.m.view.machine.id, id: props.m.view.id }));
   return <Show when={ids().length > 0}>
     <div class="ws-team" role="group" aria-label="Workers now">
       <Show when={lead()}>{w => {
@@ -194,7 +196,7 @@ function TeamBar(props: { m: SessionModel; now: number; pick: string; onPick: (k
             <button class="btn btn-sm" {...ws.needs("stop_command")} onClick={e => { if (!ws.gate("stop_command")) { closePop(e.currentTarget); setStopping({ worker: w(), item: c() }); } }}>Stop…</button></div></div>}</Show>
         </>}</Show>}</For>
       </div>
-      <div class="ws-team-foot"><A class="lnk" to={{ name: "task", machine: props.m.view.machine.id, task: props.m.view.id, tab: "workers" }} onClick={e => closePop(e.currentTarget)}>Work details</A></div>
+      <div class="ws-team-foot"><A class="lnk" to={routes.workers()} onClick={e => closePop(e.currentTarget)}>Work details</A></div>
     </Pop>
     {/* The stop dialog stands outside the menu: a dialog inside a closed popover would never show. */}
     <StopCommand target={stopping()} onClose={() => setStopping(null)} />
@@ -212,6 +214,9 @@ function DecisionCard(props: { m: SessionModel; d: Decision; now: number }) {
   const answer = (text: string, optionId: string | null) => { if (!blocked()) ws.run({ type: "answer_decision", taskId: props.m.view.id, decisionId: props.d.id, answer: text, optionId, now: ws.store.clock() }); };
   const waited = () => props.d.at === null ? "" : `waiting ${age(props.d.at, props.now)}`;
   const p = () => props.d.permission;
+  const closeWhy = () => closeBlocked(props.m);
+  // The task planning a sprint closes with its sprint's planning, never on its own.
+  const planning = usePlanningSprint();
   return <Switch>
     {/* A withdrawn question reads as its one-line reason; one the runtime replaced says so, so two stops never read as two different reasons. */}
     <Match when={props.d.withdrawn}><div class="answered"><I n="x" s={14} /><span class="grow">{withdrawnLine(props.d)}</span></div></Match>
@@ -221,13 +226,18 @@ function DecisionCard(props: { m: SessionModel; d: Decision; now: number }) {
       <div class="dc-q">{permissionLine(props.d)}</div>
       <Show when={blocked() && props.m.mode === "paused"}><div class="cap muted ws-dc-note">Preserved while paused. Resume the task to answer.</div></Show>
       <dl class="kv ws-dc-kv">
-        <dt>What</dt><dd><PermissionPaths paths={perm().paths} /></dd>
+        <dt>Operation</dt><dd>{OPERATION[perm().operation] ?? perm().operation}</dd>
+        <dt>Resource</dt><dd><PermissionPaths paths={perm().paths} /></dd>
         <dt>Why</dt><dd>{permissionWhy(perm())}</dd>
         <Show when={perm().access}><dt>Mode</dt><dd>{accessName(perm().access)}</dd></Show>
       </dl>
+      <div class="cap muted ws-dc-note">Allow once lets this worker continue this request under the shown access mode. It does not grant a standing permission.</div>
       <div class="ws-dc-acts">
         <button type="button" class="btn btn-line btn-sm" aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("answer_decision")} onClick={() => answer("Deny", option("Deny"))}>Deny</button>
         <button type="button" class="btn btn-primary btn-sm" aria-disabled={blocked() ? "true" : undefined} data-why={blocked()} {...ws.needs("answer_decision")} onClick={() => answer("Allow once", option("Allow once"))}>Allow once</button>
+        <Show when={props.m.view.task.status !== "done" && !props.m.view.unknown && !planning()}>
+          <button type="button" class="btn btn-line btn-sm" aria-disabled={closeWhy() ? "true" : undefined} data-why={closeWhy() ?? undefined} {...ws.needs("close_task")} onClick={() => { if (!closeWhy()) ws.closeTask(props.m.view.id); }}>Close task…</button>
+        </Show>
       </div>
     </div>}</Match>
     <Match when={true}><div class="dc" id={`decision-${props.d.id}`}>
@@ -279,13 +289,17 @@ function Questions(props: { m: SessionModel; asks: Decision[]; now: number }) {
   const decision = (ask: Ask) => props.asks.find(d => d.id === ask.id)!;
   const blocked = (ask: Ask) => decisionBlocked(props.m, decision(ask));
   // The answer goes into the task's running session, whose model and effort are already chosen, so the form offers neither.
+  // A sprint's planning task is answered through its sprint's planning, which keeps the sprint's state with the answer.
+  const planning = usePlanningSprint();
   const send = (answers: AskAnswer[]) => {
     if (!answers.length || answers.some(a => blocked(a.ask))) return undefined;
     const [first] = answers;
-    return ws.run({ type: "answer_decision", taskId: props.m.view.id, decisionId: first.ask.id, answer: first.text, optionId: first.optionId, attachments: first.attachments, now: ws.store.clock(),
-      ...(answers.length > 1 ? { answers: answers.map(a => ({ decisionId: a.ask.id, answer: a.text, optionId: a.optionId, attachments: a.attachments })) } : {}) });
+    const batch = answers.length > 1 ? { answers: answers.map(a => ({ decisionId: a.ask.id, answer: a.text, optionId: a.optionId, attachments: a.attachments })) } : {};
+    const sprint = planning();
+    if (sprint) return ws.run({ type: "answer_planning", sprintId: sprint.id, decisionId: first.ask.id, answer: first.text, optionId: first.optionId, attachments: first.attachments, now: ws.store.clock(), ...batch });
+    return ws.run({ type: "answer_decision", taskId: props.m.view.id, decisionId: first.ask.id, answer: first.text, optionId: first.optionId, attachments: first.attachments, now: ws.store.clock(), ...batch });
   };
-  return <QuestionForm asks={props.asks} needs="answer_decision" blocked={blocked} projectId={props.m.view.project.id} onSend={send} waiting={ask => ask.at === null ? "" : `waiting ${age(ask.at, props.now)}`}
+  return <QuestionForm asks={props.asks} needs={planning() ? "answer_planning" : "answer_decision"} blocked={blocked} projectId={props.m.view.project.id} onSend={send} waiting={ask => ask.at === null ? "" : `waiting ${age(ask.at, props.now)}`}
     note={ask => <>
       <Show when={blocked(ask) && props.m.mode === "paused"}><div class="cap muted ws-dc-note">Preserved while paused. Resume the task to answer.</div></Show>
       <StopTargets m={props.m} d={decision(ask)} />
@@ -299,10 +313,8 @@ export const withdrawnLine = (d: Decision) => d.replacedBy ? `Replaced by the qu
 /** What the runtime's stop question names, as places to open: the task holding the files, the review report, the denied path. */
 function StopTargets(props: { m: SessionModel; d: Decision }) {
   const machine = () => props.m.view.machine.id;
-  const report = (id: string): Route => {
-    const w = props.m.workers.find(w => w.result?.reportId === id);
-    return w ? { name: "task", machine: machine(), task: props.m.view.id, tab: "workers", worker: w.id } : { name: "task", machine: machine(), task: props.m.view.id, tab: "workers" };
-  };
+  const routes = useTaskRoutes(() => ({ machine: machine(), id: props.m.view.id }));
+  const report = (id: string): Route => routes.workers(props.m.workers.find(w => w.result?.reportId === id)?.id);
   return <Show when={props.d.targets?.length}><div class="ws-dc-acts ws-dc-targets">
     <For each={props.d.targets}>{t => t.kind === "task"
       ? <A class="btn btn-line btn-sm" to={{ name: "task", machine: machine(), task: t.taskId }}><I n="external" s={12} />Open task{t.title ? ` “${t.title}”` : ""}</A>
@@ -321,11 +333,16 @@ function Waiting(props: { m: SessionModel }) {
     <div class="dc-h"><I n={t().conflict !== "none" ? "alert" : "pause"} s={14} />{t().conflict !== "none" ? "Conflict" : "Waiting for you"}</div>
     <div class="dc-q">{t().conflict !== "none" ? `Merge conflict with ${props.m.view.target}` : t().issue ?? "Waiting for a decision"}</div>
     {/* A card's action bar, so a way out the machine does not offer says why beside it. */}
-    <Show when={t().conflict === "none"}><p class="dc-note">Decision details are not available yet. Use Answer in the task header to open the decision; if details are still loading, try again after the conversation refreshes.</p></Show>
+    <Show when={t().conflict === "none"}><p class="dc-note">{ws.store.can(capabilityOf("clear_issue"))
+      ? "Decision details are not available yet. Use Answer in the task header to open the decision; if details are still loading, try again after the conversation refreshes."
+      : "The question for this step is not available. Continue lets the agent decide the next step from the recorded state; nothing is repeated. Or close the task as is."}</p></Show>
     <ActionBar place="card">
       <Show when={t().conflict === "none"} fallback={<><A class="btn btn-line btn-sm" to={conflict()}>Open the conflict</A><button class="btn btn-primary btn-sm" {...ws.needs("resolve_with_cortex")} onClick={() => ws.open({ kind: "cortex", taskId: t().id })}>Resolve automatically…</button></>}>
         {/* A way out this machine does not offer is not presented as one. */}
-        <Show when={ws.store.can(capabilityOf("clear_issue"))}>
+        <Show when={ws.store.can(capabilityOf("clear_issue"))} fallback={<>
+          <button class="btn btn-primary btn-sm" {...ws.needs("retry_task")} onClick={e => void ws.busy(ws.run({ type: "retry_task", taskId: t().id, now: ws.store.clock() }), e.currentTarget)}>Continue</button>
+          <button class="btn btn-line btn-sm" {...ws.needs("close_task")} aria-disabled={closeBlocked(props.m) ? "true" : undefined} data-why={closeBlocked(props.m) ?? undefined} onClick={() => { if (!closeBlocked(props.m)) ws.closeTask(t().id); }}>Close as is…</button>
+        </>}>
           <button class="btn btn-line btn-sm" {...ws.needs("clear_issue")} onClick={() => ws.run({ type: "clear_issue", taskId: t().id })}>{ws.t("clearWait")}</button>
         </Show>
       </Show>
@@ -338,6 +355,141 @@ function PlainDock(props: { children: JSX.Element }) {
   return <div class="dock">{props.children}</div>;
 }
 
+/** What each owner action of a hold is called on its button. */
+const HOLD_ACTION_LABEL: Record<OwnerHoldAction, string> = {
+  allow_finish: "Allow Automatic to finish…", accept_result: "Accept with recorded checks…", allow_repair: "Let the agent fix it",
+  allow_retries: "Allow more attempts", confirm_and_continue: "I checked it, continue", resume_task: "Resume", retry: "Try again",
+  confirm_integration: "Review and confirm integration…", resolve_conflict: "Open the conflict", change_run_mode: "Open sprint settings",
+  ask_agent: "Ask the agent to try again", close_as_is: "Close as is…",
+};
+const ASK_AGENT_TEXT = "Try again from the recorded state. Finish every unfinished or failed step of this task, obtain the required review and verification again, and publish a result.";
+
+/**
+ * The pinned decision of a held task, above the message box. It renders the service's decision alone (`ownerHold`): the
+ * plain-language list of what is asked, the primary action that grants it so the queue finishes by itself, and the separate
+ * Close as is… with its confirmation. It appears as soon as the hold arrives; an action that needs the result waits for it.
+ * When the agent or the runtime acts next, it is one quiet line and asks nothing of the owner.
+ */
+export function OwnerHoldCard(props: { m: SessionModel; route: TaskRoute }) {
+  const ws = useWs();
+  const view = () => props.m.view;
+  const hold = () => props.m.open.length ? null : ownerHold(view());
+  // A sent action waits only for the hold it answered: a new hold (another code, reason or consent) offers its actions again.
+  const holdKey = (h: OwnerHold | null) => h ? `${h.holdId ?? ""}|${h.code}|${h.reason}|${h.allowed}|${h.actions.join(",")}` : "";
+  const [sentFor, setSentFor] = createSignal<{ action: string; key: string } | null>(null);
+  const sent = () => { const s = sentFor(); return s && s.key === holdKey(hold()) ? s.action : null; };
+  const setSent = (action: string) => setSentFor({ action, key: holdKey(hold()) });
+  const [error, setError] = createSignal<string | null>(null);
+  const title = (h: OwnerHold) => h.mode === "automatic" ? "Automatic needs your decision" : h.source === "queue" ? "The queue needs your decision" : "This task needs your decision";
+  const offer = () => {
+    const v = view(), r = v.task.result;
+    return v.sprint && r?.sourceVersion ? { sprintId: v.sprint.id, targetBranch: v.target, sourceVersion: r.sourceVersion, digest: r.digest } : null;
+  };
+  const loading = (a: OwnerHoldAction) => (a === "allow_finish" || a === "accept_result") && !view().task.result ? "Loading the result…" : null;
+  const why = (a: OwnerHoldAction) => a === "close_as_is" ? closeBlocked(props.m) : loading(a) ?? (sent() === a ? "Sent. Waiting for the queue to act on it…" : null);
+  const run = (a: OwnerHoldAction, h: OwnerHold, control: HTMLElement) => {
+    if (why(a)) return;
+    const id = view().id, now = ws.store.clock();
+    const send = (command: Parameters<typeof ws.run>[0]) => {
+      setError(null);
+      void ws.busy(ws.run(command), control).then(receipt => receipt.ok ? setSent(a) : setError(receipt.message))
+        .catch(e => setError(e instanceof Error ? e.message : "The request could not be sent."));
+    };
+    switch (a) {
+      case "allow_finish": { const o = offer(); if (o) ws.open({ kind: "accept", taskId: id, automaticFinish: o }); return; }
+      case "accept_result": ws.open({ kind: "accept", taskId: id }); return;
+      case "allow_repair": if (h.sprintId) send({ type: "allow_queue_repair", sprintId: h.sprintId, taskId: id, code: h.code, ...(h.holdId ? { holdId: h.holdId } : {}), now }); return;
+      case "allow_retries": case "resume_task": send({ type: "continue_task", taskId: id, now }); return;
+      case "confirm_and_continue": send({ type: "retry_task", taskId: id, now }); return;
+      case "retry": if (h.sprintId) send({ type: "run_sprint", sprintId: h.sprintId, now }); return;
+      case "ask_agent": send({ type: "request_changes", taskId: id, text: ASK_AGENT_TEXT, now }); return;
+      case "close_as_is": ws.closeTask(id); return;
+      default: return;
+    }
+  };
+  const link = (a: OwnerHoldAction): Route | null => {
+    const r = props.route;
+    if (a === "confirm_integration") return { name: "task", machine: r.machine, task: r.task, tab: "changes" };
+    if (a === "resolve_conflict") return { name: "task", machine: r.machine, task: r.task, tab: "changes", sub: "conflict" };
+    if (a === "change_run_mode" && view().sprint) return sprintRoute(r.machine, view().sprint!);
+    return null;
+  };
+  const NEEDS: Partial<Record<OwnerHoldAction, Parameters<typeof ws.needs>[0]>> = {
+    allow_finish: "accept_result", accept_result: "accept_result", allow_repair: "allow_queue_repair", allow_retries: "continue_task", resume_task: "continue_task",
+    confirm_and_continue: "retry_task", retry: "run_sprint", ask_agent: "request_changes", close_as_is: "close_task",
+  };
+  const Action = (p: { a: OwnerHoldAction; h: OwnerHold; primary: boolean }) => {
+    const cls = `btn ${p.primary ? "btn-primary" : "btn-line"} btn-sm`;
+    const to = link(p.a);
+    const needs = NEEDS[p.a];
+    return to ? <A class={cls} to={to}>{HOLD_ACTION_LABEL[p.a]}</A>
+      : <button class={cls} {...(needs ? ws.needs(needs) : {})} aria-disabled={why(p.a) ? "true" : undefined} data-why={why(p.a) ?? undefined}
+          onClick={e => run(p.a, p.h, e.currentTarget)}>{HOLD_ACTION_LABEL[p.a]}</button>;
+  };
+  return <Show when={hold()}>{h => <Show when={h().nextActor === "owner"} fallback={
+    <div class="answered ws-hold-quiet" role="status"><I n="loader" s={14} /><span>{h().nextActor === "agent" ? "The agent is fixing this: " : "This continues by itself: "}{sentence(humanStatus(h().reason))}</span></div>}>
+    <section class="chat-review-hold" aria-label="Your decision is needed"><div class="chat-review-box">
+      <div class="chat-review-decision" role="status">
+        <h3>{title(h())}</h3>
+        <p class="chat-review-reason">{sentence(humanStatus(h().reason, view().fact.text))}</p>
+        <Show when={h().asks.length}><p>What you are asked to allow:</p><ul class="chat-review-asks"><For each={h().asks}>{ask => <li>{ask}</li>}</For></ul></Show>
+        <Show when={h().allowed}><p class="cap muted">You allowed this. The queue acts on it in its next step.</p></Show>
+      </div>
+      <Show when={error()}>{e => <div class="cap st-bad" role="alert">{e()}</div>}</Show>
+      <ActionBar place="card">
+        <For each={h().actions.filter(a => a !== "close_as_is")}>{(a, i) => <Action a={a} h={h()} primary={i() === 0} />}</For>
+        <Show when={h().actions.includes("close_as_is")}><Action a="close_as_is" h={h()} primary={h().actions.length === 1} /></Show>
+      </ActionBar>
+    </div></section>
+  </Show>}</Show>;
+}
+
+/**
+ * The pinned decision of a task whose state Cortex cannot confirm (`unconfirmedState`, from the runtime's own warning). While a
+ * session is still being stopped the runtime decides by itself: one quiet line. Otherwise it is the owner's: what happened in plain
+ * words, where to inspect it, and Close as is… with its confirmation, which replays nothing. Records that disagree cannot be changed
+ * by Cortex at all, and the card says so beside the disabled Close.
+ */
+export function UnconfirmedCard(props: { m: SessionModel; route: TaskRoute }) {
+  const ws = useWs();
+  const state = () => unconfirmedState(props.m);
+  const view = () => props.m.view;
+  const [checking, setChecking] = createSignal(false);
+  const recheck = () => {
+    if (checking()) return;
+    setChecking(true);
+    void ws.store.reload().finally(() => setChecking(false));
+  };
+  const title = () => view().sprint?.runMode === "automatic" ? "Automatic needs your decision" : "This task needs your decision";
+  const reason = () => state()?.kind === "exit_unconfirmed"
+    ? "A process of this task did not confirm that it stopped, so it is not known whether it still runs. Nothing it did is repeated, and the task cannot continue while this is unknown. The service checks it again by itself the next time it starts."
+    : "The saved records of this task disagree with each other, so it is not known whether the task runs or stopped, and the service changes nothing about it. Nothing is repeated.";
+  const asks = () => state()?.kind === "exit_unconfirmed"
+    ? ["Inspect what the task did: its workers and their activity are under Workers, and machine checks under Diagnostics.",
+       "Or close the task as is: what it did stays as it is, the result is marked Not verified, and nothing is repeated."]
+    : ["Re-check the state. If it stays the same, open Diagnostics to see why the records disagree."];
+  const workers = (): Route => ({ name: "task", machine: props.route.machine, task: props.route.task, tab: "workers" });
+  const blocked = () => closeBlocked(props.m);
+  return <Show when={state()}>{s => <Show when={s().kind !== "stopping"} fallback={
+    <div class="answered ws-hold-quiet" role="status"><I n="loader" s={14} /><span>This continues by itself: the service is confirming that this task's processes stopped.</span></div>}>
+    <section class="chat-review-hold" aria-label="Your decision is needed">
+      <div class="chat-review-decision" role="status">
+        <h3>{title()}</h3>
+        <p class="chat-review-reason">{reason()}</p>
+        <p>What you can do:</p><ul class="chat-review-asks"><For each={asks()}>{ask => <li>{ask}</li>}</For></ul>
+      </div>
+      <ActionBar place="card">
+        <button class="btn btn-line btn-sm" aria-busy={checking() ? "true" : undefined} onClick={recheck}>Re-check state</button>
+        <Show when={s().kind === "exit_unconfirmed"}><A class="btn btn-line btn-sm" to={workers()}>Open workers</A></Show>
+        <A class="btn btn-line btn-sm" to={{ name: "settings", machine: view().machine.id, section: "diagnostics" }}>Open Diagnostics</A>
+        <button class={`btn ${s().closable ? "btn-primary" : "btn-line"} btn-sm`} {...ws.needs("close_task")} aria-disabled={blocked() ? "true" : undefined}
+          data-why={blocked() ? "A task whose records disagree cannot be changed from here. Re-check the state, or open Diagnostics." : undefined}
+          onClick={() => { if (!blocked()) ws.closeTask(view().id); }}>Close as is…</button>
+      </ActionBar>
+    </section>
+  </Show>}</Show>;
+}
+
 /** Whether the retained conversation below is all of it: still being read, or a read that did not complete, with its reason
  *  and a way to read it again. An empty conversation is never shown as if nothing had been said. */
 function HistoryState(props: { m: SessionModel }) {
@@ -346,7 +498,7 @@ function HistoryState(props: { m: SessionModel }) {
   return <Switch>
     <Match when={read()?.state === "loading"}><Loading class="cap faint" text="Loading the conversation…" /></Match>
     <Match when={read()?.state === "failed"}>
-      <div class="answered" role="alert"><I n="alert" s={14} /><span>{props.m.session.timeline.length ? "The latest conversation could not be read" : "The conversation could not be read"}: {(read() as { reason: string }).reason}. Retrying automatically.</span>
+        <div class="answered" role="alert"><I n="alert" s={14} /><span>{props.m.session.timeline.length ? "The latest conversation could not be read" : "The conversation could not be read"}: {humanStatus((read() as { reason: string }).reason)}. Retrying automatically.</span>
         <button class="lnk" onClick={() => ws.store.retryHistory(props.m.view.id)}>Retry now</button></div>
     </Match>
   </Switch>;
@@ -362,7 +514,7 @@ function Earlier(props: { m: SessionModel }) {
     <Switch>
       <Match when={earlier().state === "loading"}><Loading class="cap faint" text="Loading earlier…" /></Match>
       <Match when={earlier().state === "failed"}>
-        <div class="answered" role="alert"><I n="alert" s={14} /><span>Earlier conversation could not be read: {(earlier() as { reason: string }).reason}.</span>
+        <div class="answered" role="alert"><I n="alert" s={14} /><span>Earlier conversation could not be read: {humanStatus((earlier() as { reason: string }).reason)}.</span>
           <button class="lnk" onClick={load}>Retry</button></div>
       </Match>
       <Match when={earlier().state === "available"}>
@@ -386,9 +538,15 @@ export function createPrepended(ids: Accessor<string[]>) {
   }, 0);
 }
 
-function Conversation(props: { model: Accessor<SessionModel>; now: number; pick: string; onPick: (key: string) => void }) {
+/**
+ * A task's conversation: its brief, timeline, questions, result and composer. The task that plans a sprint reads it on its
+ * sprint's page (PlanningPlace): `brief` is then the sprint's own description, `tail` the proposed plan's line, and its
+ * plan stands for approval on the sprint, so neither a result card nor a task decision is offered here.
+ */
+export function Conversation(props: { model: Accessor<SessionModel>; now: number; pick: string; onPick: (key: string) => void; route?: TaskRoute; hidden?: boolean; brief?: JSX.Element; tail?: JSX.Element }) {
   const ws = useWs();
   const m = () => props.model();
+  const planning = usePlanningSprint();
   const opened = createOpenState();
   let scroller: HTMLDivElement | undefined;
   // The team is not a feed entry: it stands pinned above the composer (TeamBar), so the feed never ends in a workers block.
@@ -401,7 +559,7 @@ function Conversation(props: { model: Accessor<SessionModel>; now: number; pick:
   // What the owner just sent, and the work it starts, come into view above the composer even from a reader who had scrolled
   // up: left where it was, the reply's Working line stayed out of view below.
   // A message counts from the press, while it is still on its way, and once its record takes its place it is not counted twice.
-  const sentHere = () => ({ kind: "task" as const, taskId: m().view.id });
+  const sentHere = () => { const s = planning(); return s ? { kind: "sprint" as const, sprintId: s.id } : { kind: "task" as const, taskId: m().view.id }; };
   const mine = createMemo(() => ids().slice(Math.max(0, older())).filter(id => { const k = entry(id).kind; return k === "said" || k === "message"; }).length + ws.store.sends.shown(sentHere()).length);
   let mineSeen = mine();
   createEffect(() => { const n = mine(); if (n > mineSeen) follow.jump(); mineSeen = n; });
@@ -421,10 +579,10 @@ function Conversation(props: { model: Accessor<SessionModel>; now: number; pick:
   const held = () => m().view.task.result ? resultHeld(m(), asks().length > 0) : null;
   const changesAt = (): Route => ({ name: "task", machine: m().view.machine.id, task: m().view.id, tab: "changes" });
   const team = () => <TeamBar m={m()} now={props.now} pick={props.pick} onPick={props.onPick} />;
-  return <section class="task-panel" aria-label="Conversation">
+  return <section class="task-panel" aria-label="Conversation" hidden={props.hidden}>
     <div class="timeline" ref={scroller} onScroll={() => { follow.onScroll(); nearTop(); }}>
       <div class="tl-in">
-        <Brief m={m()} />
+        <Show when={props.brief} fallback={<Brief m={m()} />}>{props.brief}</Show>
         <HistoryState m={m()} />
         <Earlier m={m()} />
         <For each={ids()}>{id => <Switch>
@@ -469,8 +627,9 @@ function Conversation(props: { model: Accessor<SessionModel>; now: number; pick:
         <Keyed each={m().open.filter(d => !m().session.timeline.some(e => e.kind === "decision" && e.decisionId === d.id))} by={d => d.id}>{d => <Show when={d().kind === "question"} fallback={<DecisionCard m={m()} d={d()} now={props.now} />}><Questions m={m()} asks={[d()]} now={props.now} /></Show>}</Keyed>
         {/* Only a task that waits on the owner reads as waiting for a decision: a cancelled or failed run has none. */}
         <Show when={stranded() && m().view.task.observedPhase !== "recovery" && (m().view.task.status === "needs_you" || m().view.task.conflict !== "none")}><Waiting m={m()} /></Show>
-        <Show when={m().view.task.result && !held()}><ResultCard m={m()} /></Show>
-        <Show when={m().view.task.result && held()}>
+        {props.tail}
+        <Show when={m().view.task.result && !held() && !planning()}><ResultCard m={m()} /></Show>
+        <Show when={m().view.task.result && held() && !planning()}>
           <div class="answered ws-prev-result" role="note"><I n="eye" s={14} /><span>Previous result v{m().view.task.result!.version}, read-only. {held()}.</span> <A class="lnk ws-ml4" to={changesAt()}>Open</A></div>
         </Show>
         {/* The last line says what the task is doing now, as its header does: waiting for an answer is not working. */}
@@ -479,6 +638,7 @@ function Conversation(props: { model: Accessor<SessionModel>; now: number; pick:
         </Show>
       </div>
     </div>
+    <Show when={props.route && !planning()}><OwnerHoldCard m={m()} route={props.route!} /><UnconfirmedCard m={m()} route={props.route!} /></Show>
     <Show when={!ws.can(capabilityOf("send_message"))}><PlainDock><Pill follow={follow} />{team()}</PlainDock></Show>
     <Show when={ws.can(capabilityOf("send_message"))}><Composer model={props.model} pill={<Pill follow={follow} />} team={team()} folded={m().open.some(d => d.kind === "question")} /></Show>
   </section>;
@@ -487,7 +647,7 @@ function Conversation(props: { model: Accessor<SessionModel>; now: number; pick:
 function WorkerCard(props: { w: Worker; now: number; to: Route; selected: boolean }) {
   const ws = useWs();
   const f = () => workerState(props.w);
-  const line = () => props.w.waitsFor ? `Waits for ${props.w.waitsFor}` : isFinished(props.w) ? resultPreview(props.w.result?.summary ?? props.w.goal) : props.w.now ?? props.w.goal;
+  const line = () => props.w.waitsFor ? `Waits for ${props.w.waitsFor}` : reviewLine(props.w) ?? (isFinished(props.w) ? resultPreview(props.w.result?.summary ?? props.w.goal) : props.w.now ?? props.w.goal);
   const elapsed = () => duration(elapsedOf(props.w, props.now));
   return <A class="wcard" role="tab" to={props.to} aria-selected={props.selected ? "true" : "false"}>
     <span class="l1"><span class="ic"><I n={f().icon} s={14} class={`${f().spin ? "spin " : ""}${f().tone === "st-idle" ? "faint" : f().tone}`} /></span>{props.w.role}<span class={`st ${f().tone}`}>{f().label}</span></span>
@@ -497,8 +657,10 @@ function WorkerCard(props: { w: Worker; now: number; to: Route; selected: boolea
   </A>;
 }
 
-function WorkersList(props: { m: SessionModel; now: number; pick: string; route: TaskRoute }) {
-  const at = (worker: string): Route => ({ name: "task", machine: props.route.machine, task: props.route.task, tab: "workers", worker });
+/** The coordinator, the workers by lane, runtime verification and the finished workers, each opening its activity beside it. */
+export function WorkersList(props: { m: SessionModel; now: number; pick: string }) {
+  const routes = useTaskRoutes(() => ({ machine: props.m.view.machine.id, id: props.m.view.id }));
+  const at = (worker: string): Route => routes.workers(worker);
   const lane = (name: "execution" | "review") => props.m.workers.filter(w => w.lane === name && !isFinished(w));
   const coordinator = () => props.m.session.coordinator;
   const ws = useWs();
@@ -547,9 +709,9 @@ function WriteDenials(props: { m: SessionModel }) {
 /** The same Changes tab carries the diff review, Ready to merge and the conflict, so a task's state decides what it opens on. */
 function ChangesTab(props: { m: SessionModel; route: TaskRoute }) {
   const t = () => props.m.view.task;
-  const merging = () => inConflict(t()) || t().status === "ready_to_merge" || (t().integration?.method === "squash" || t().integration?.method === "commit");
+  const merging = () => !props.m.view.automaticFact && (inConflict(t()) || t().status === "ready_to_merge" || t().integration?.method === "squash" || t().integration?.method === "commit");
   return <Switch fallback={<ChangesPanel m={props.m} route={props.route} />}>
-    <Match when={props.route.sub === "conflict"}><ConflictPanel m={props.m} route={props.route} /></Match>
+    <Match when={!props.m.view.automaticFact && props.route.sub === "conflict"}><ConflictPanel m={props.m} route={props.route} /></Match>
     <Match when={props.route.sub === undefined && merging()}><ReadyPanel m={props.m} route={props.route} /></Match>
   </Switch>;
 }
@@ -625,7 +787,7 @@ export function TaskPage(props: { id: string }) {
     ...(m().mode === "stopping" ? [stoppingItem] : []),
     ...(m().mode === "archived" ? [archived] : []),
     ...(["offline", "unconfirmed"].includes(m().mode) ? [offline] : []),
-    ...(m().mode === "live" && m().view.task.observedPhase === "recovery" ? [interrupted] : []),
+    ...(m().mode === "live" && !m().view.ownerDecision && m().view.task.observedPhase === "recovery" ? [interrupted] : []),
     ...(m().view.task.notVerifiedByCortex && m().view.task.closedAs === "as_is" ? [unverified] : []),
     ...(m().mode !== "stopping" && titleBlock(m()) ? [titleWhy] : []),
   ]);
@@ -634,18 +796,28 @@ export function TaskPage(props: { id: string }) {
       <Show when={live()} fallback={
         <div class="task-body">
           <Switch>
-            <Match when={tab() === undefined}><Conversation model={model} now={now()} pick={pick()} onPick={onPick} /></Match>
+            <Match when={tab() === undefined}><Conversation model={model} now={now()} pick={pick()} onPick={onPick} route={route()} /></Match>
             <Match when={tab() === "changes"}><ChangesTab m={m()} route={route()} /></Match>
             <Match when={tab() === "code"}><CodeTab m={m()} route={route()} /></Match>
             <Match when={tab() === "terminal"}><div class="note-panel task-panel"><span class="w500">Terminal</span><span>{ws.t("terminalNote")}</span>
               <button class="btn btn-line btn-sm" onClick={() => { if (!ws.panels.terminalOpen()) ws.toggleTerminal(); }}>Open the bottom panel</button></div></Match>
           </Switch>
         </div>}>
-        <div class="task-body live">
-          <section class="task-panel" aria-label="Workers"><WorkersList m={m()} now={now()} pick={pick()} route={route()} /></section>
-          <section class="livepane" aria-label={`${pick() === CORTEX ? "Coordinator" : pick() === VERIFICATION ? "Runtime verification" : m().workers.find(w => w.id === pick())?.role ?? "Worker"} activity`}><label class="ws-worker-picker">Worker <select class="inp" value={pick()} onChange={e => onPick(e.currentTarget.value)}><option value={CORTEX}>Coordinator</option><Keyed each={m().workers} by={w => w.id}>{w => <option value={w().id}>{w().role}</option>}</Keyed><option value={VERIFICATION}>Runtime verification</option></select></label><WorkerPane model={model} pick={pick()} now={now()} /></section>
-        </div>
+        <TaskWorkers model={model} now={now()} pick={pick()} onPick={onPick} />
       </Show>
     </div>
   </Page>;
 }
+
+/** A task's Work details: the list of who works on it, and the picked one's activity beside it. */
+export function TaskWorkers(props: { model: Accessor<SessionModel>; now: number; pick: string; onPick: (key: string) => void }) {
+  const m = () => props.model();
+  return <div class="task-body live">
+    <section class="task-panel" aria-label="Workers"><WorkersList m={m()} now={props.now} pick={props.pick} /></section>
+    <section class="livepane" aria-label={`${props.pick === CORTEX ? "Coordinator" : props.pick === VERIFICATION ? "Runtime verification" : m().workers.find(w => w.id === props.pick)?.role ?? "Worker"} activity`}><label class="ws-worker-picker">Worker <select class="inp" value={props.pick} onChange={e => props.onPick(e.currentTarget.value)}><option value={CORTEX}>Coordinator</option><Keyed each={m().workers} by={w => w.id}>{w => <option value={w().id}>{w().role}</option>}</Keyed><option value={VERIFICATION}>Runtime verification</option></select></label><WorkerPane model={props.model} pick={props.pick} now={props.now} /></section>
+  </div>;
+}
+/** The worker a Work details view opens on when none is named. */
+export const firstWorker = (m: SessionModel) => firstPick(m);
+/** A task session's one-second clock, for elapsed times. */
+export const useSessionClock = useTicker;

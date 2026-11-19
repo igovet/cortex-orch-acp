@@ -779,6 +779,19 @@ describe("real port", () => {
       await expect(p.readTaskAttachments!("not-a-task")).rejects.toThrow("Unknown task");
     });
 
+    it("sends a plan change request to the planning task and resumes that same task", async () => {
+      const sprint = {id:"sp",projectId:"p",planningTaskId:"task-1",planning:"ready",conversation:[],plan:{version:1,items:[]}};
+      const {s,p,asked,ready} = helper({sprints:[sprint]});
+      await ready();
+      expect(await p.command(envelope({type:"plan_message",sprintId:"sp",text:"Split the second part"},"change"))).toMatchObject({ok:true});
+      expect(s.calls.filter(c => c.operation === "executions.prompt").at(-1)?.message).toMatchObject({text:"Split the second part"});
+      // Create tasks waits for the revised plan of the same task.
+      expect(asked.filter(c => c.op === "product.sprint" && c.params?.action === "patch").at(-1)?.params).toMatchObject({sprintId:"sp",patch:{planning:"planning"}});
+      expect(await p.command(envelope({type:"resume_planning",sprintId:"sp"},"resume"))).toMatchObject({ok:true});
+      expect(s.calls.filter(c => c.operation === "executions.control").at(-1)?.message).toMatchObject({action:"resume"});
+      expect(asked.filter(c => c.op === "product.sprint" && c.params?.action === "patch").at(-1)?.params).toMatchObject({patch:{planning:"planning"}});
+    });
+
     it("does not silently turn a stale attached planning answer into plain steering", async () => {
       const {s,p,asked,ready} = helper({sprints:[{id:"sp",projectId:"p",planningTaskId:"task-1",planning:"question",conversation:[]}]});
       await ready();
@@ -824,6 +837,12 @@ describe("real port", () => {
       expect(s.calls.find(c => c.operation === "executions.control")?.message).toMatchObject({checkName:"Native check",resultVersion:"47",digest:result.digest});
       expect(await p.command(envelope({type:"accept_result",taskId:"task-1",digest:result.digest,openChecks:true}))).toMatchObject({ok:true});
       expect(asked.find(c => c.op === "product.task")?.params).toMatchObject({action:"accept",version:"47",digest:result.digest,acknowledgeOpenChecks:true});
+      const automaticFinish = {sprintId:"sprint", targetBranch:"main"};
+      asked.length = 0;
+      expect(await p.command(envelope({type:"accept_result",taskId:"task-1",digest:result.digest,sourceVersion:"2",automaticFinish}))).toMatchObject({ok:false,outcome:"stale_result"});
+      expect(asked.some(c => c.op === "product.task")).toBe(false);
+      expect(await p.command(envelope({type:"accept_result",taskId:"task-1",digest:result.digest,sourceVersion:"47",openChecks:true,automaticFinish}))).toMatchObject({ok:true});
+      expect(asked.find(c => c.op === "product.task")?.params).toMatchObject({action:"accept",version:"47",acknowledgeOpenChecks:true,automaticFinish});
 
       for (const missing of [null, {...result,sourceVersion:""}]) {
         overlay.result = missing;
@@ -1004,22 +1023,56 @@ describe("real port", () => {
       expect(result).toMatchObject({ok:true,observation:{tools:[{name:"read"}]}});
     });
 
-    it.each(["main", "worktree"] as const)("materialized tasks inherit sprint route and %s checkout before any start", async kind => {
-      const settings = {model:"connection-two:model",effort:"high",mode:"guarded",language:"en"} as const;
-      const sprint = {id:"sp",projectId:"p",description:"Sprint",runMode:"automatic",checkout:{kind},targetBranch:"release",settings,planning:"ready",conversation:[],plan:{version:1,items:[{key:"a",title:"Planned name",description:"First",dependsOn:[]},{key:"b",description:"Next",dependsOn:["a"]}]},materializedVersion:null,taskIds:[],queueState:"idle",pauseReason:null};
-      const {s,p,ready} = helper({sprints:[sprint]});
+    /** The service creates a plan's tasks and the sprint's transition in one operation; the port only names the plan. */
+    const materializing = (items: unknown[], answer: (n: number) => Record<string, unknown>) => {
+      const sprint = {id:"sp",projectId:"p",description:"Sprint",runMode:"automatic",checkout:{kind:"worktree"},targetBranch:"release",
+        settings:{model:"connection-two:model",effort:"high",mode:"guarded",language:"en"},planning:"ready",conversation:[],plan:{version:1,items},
+        materializedVersion:null,taskIds:[],queueState:"idle",pauseReason:null};
+      const h = helper({sprints:[sprint]});
+      const previous = h.s.answers["machine.call"]!;
+      let n = 0;
+      h.s.answers["machine.call"] = message => {
+        const call = message as {op:string;params?:{action?:string}};
+        if (call.op === "product.sprint" && call.params?.action === "materialize") { previous(message); return {ok:true,result:answer(n++)}; }
+        return previous(message);
+      };
+      return h;
+    };
+    const materializeCalls = (asked: {op:string;params?:Record<string, unknown>}[]) => asked.filter(c => c.op === "product.sprint" && c.params?.action === "materialize");
+
+    it("creates a 120-task plan with one service operation, never a create loop", async () => {
+      const items = Array.from({length:120}, (_, i) => ({key:`t${i + 1}`,title:`Item ${i + 1}`,description:`Do item ${i + 1}`,dependsOn:i > 0 ? [`t${i}`] : []}));
+      const ids = items.map((_, i) => `wt_${i}`);
+      const {s,p,asked,ready} = materializing(items, () => ({done:true,created:120,taskIds:ids,strayTaskIds:[]}));
       await ready();
-      s.answers["tasks.create"] = message => receipt(message,"recorded",(message as {requestId:string}).requestId);
-      expect(await p.command(envelope({type:"materialize_plan",sprintId:"sp",version:1}))).toMatchObject({ok:true});
-      const creates = s.calls.filter(c => c.operation === "tasks.create");
-      expect(creates).toHaveLength(2);
-      for (const call of creates) expect(call.message).toMatchObject({payload:{settings,checkout:{kind}}});
-      expect(s.calls.some(c => (c.message as {params?:{action?:string}}).params?.action === "rename")).toBe(false);
-      // Live run: every sprint task read as the first sentence of its description. The plan's own title names
-      // the task when it joins the sprint; an item without one keeps the description label.
-      const joins = s.calls.map(c => (c.message as {params?:{action?:string;title?:string}}).params).filter(p => p?.action === "sprint");
-      expect(joins.map(p => p!.title)).toEqual(["Planned name", undefined]);
-      expect(s.calls.some(c => c.operation === "tasks.start")).toBe(false);
+      s.calls.length = 0;
+      expect(await p.command(envelope({type:"materialize_plan",sprintId:"sp",version:1},"big"))).toMatchObject({ok:true,requestId:"big"});
+      expect(materializeCalls(asked)).toHaveLength(1);
+      expect(materializeCalls(asked)[0]).toMatchObject({projectId:"p",params:{sprintId:"sp",planVersion:1,requestId:"big"}});
+      // No draft, membership or sprint write of its own: the service owns every one of them.
+      expect(s.calls.some(c => c.operation === "tasks.create" || c.operation === "tasks.start")).toBe(false);
+      expect(asked.some(c => c.op === "product.task")).toBe(false);
+      expect(asked.some(c => c.op === "product.sprint" && c.params?.action === "patch")).toBe(false);
+    });
+
+    it("a repeated Create tasks is the same one operation and says what an earlier unfinished one left", async () => {
+      const items = [{key:"a",description:"First",dependsOn:[]},{key:"b",description:"Next",dependsOn:["a"]}];
+      const {p,asked,ready} = materializing(items, n => ({done:true,created:n === 0 ? 2 : 0,taskIds:["wt_a","wt_b"],strayTaskIds:n === 0 ? [] : ["wt_old"]}));
+      await ready();
+      expect(await p.command(envelope({type:"materialize_plan",sprintId:"sp",version:1},"first"))).toMatchObject({ok:true});
+      const again = await p.command(envelope({type:"materialize_plan",sprintId:"sp",version:1},"second"));
+      expect(again).toMatchObject({ok:true,message:expect.stringContaining("1 task left by an earlier unfinished Create tasks is not part of the sprint")});
+      expect(materializeCalls(asked).map(c => c.params?.planVersion)).toEqual([1, 1]);
+    });
+
+    it("a refused Create tasks reads as the service's refusal and creates nothing here", async () => {
+      const {s,p,ready} = helper({sprints:[{id:"sp",projectId:"p",planning:"ready",plan:{version:2,items:[]},materializedVersion:null,taskIds:[],conversation:[],history:[]}]});
+      await ready();
+      const previous = s.answers["machine.call"]!;
+      s.answers["machine.call"] = message => (message as {op:string;params?:{action?:string}}).params?.action === "materialize"
+        ? {ok:false,code:"stale_plan",message:"The plan changed to v2. Review it, then create its tasks."} : previous(message);
+      expect(await p.command(envelope({type:"materialize_plan",sprintId:"sp",version:1}))).toMatchObject({ok:false,message:expect.stringContaining("The plan changed to v2")});
+      expect(s.calls.some(c => c.operation === "tasks.create")).toBe(false);
     });
 
     it("reading an automatic sprint never schedules work in the window", async () => {

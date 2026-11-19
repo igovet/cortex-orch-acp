@@ -145,6 +145,123 @@ fn persist(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L2: a rewrite of the same condition keeps the hold's identity; any other hold,
+    /// even with the same code and task, is a new one.
+    #[test]
+    fn a_queue_hold_keeps_its_identity_only_while_it_is_the_same_hold() {
+        let hold = |reason: &str| {
+            json!({"kind":"settlement_blocked","code":"task_failed","taskId":"t","reason":reason,
+                "nextActor":"owner","ownerActions":["allow_repair","close_as_is"]})
+        };
+        let first = with_hold_id(&Value::Null, hold("Failed."));
+        let id = first["holdId"].as_str().unwrap().to_owned();
+        let mut decided = hold("Failed.");
+        decided["ownerActions"] = json!(["close_as_is"]);
+        assert_eq!(with_hold_id(&first, decided)["holdId"], id.as_str());
+        let other = with_hold_id(&first, hold("Failed again."));
+        assert_ne!(other["holdId"], id.as_str());
+        let mut moved = hold("Failed.");
+        moved["taskId"] = json!("u");
+        assert_ne!(with_hold_id(&first, moved)["holdId"], id.as_str());
+    }
+
+    #[test]
+    fn sprint_run_modes_migrate_legacy_product_without_changing_queue_state() {
+        use std::os::unix::fs::DirBuilderExt;
+        let state = std::env::temp_dir().join(format!("cw-sprint-modes-{}", settings::unique()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&state)
+            .unwrap();
+        let path = product_path(&state, "p").unwrap();
+        let legacy = json!({"tasks":{"task":{"status":"ready_to_merge","acceptance":{"automatic":true}}},
+            "sprints":[{"id":"old","runMode":"automatic","queueState":"running","taskIds":["task"],"plan":{"version":2}},
+                {"id":"manual","runMode":"manual","queueState":"idle"}]});
+        settings::write_json(&path, &legacy).unwrap();
+        let loaded = product(&state, "p").unwrap();
+        let mut expected = legacy.clone();
+        expected["sprints"][0]["runMode"] = json!("hybrid");
+        assert_eq!(loaded["tasks"], expected["tasks"]);
+        assert_eq!(loaded["sprints"], expected["sprints"]);
+        assert_eq!(settings::read_json(&path, json!({})).unwrap(), legacy);
+        assert!(queue_driven_mode(&loaded["sprints"][0]));
+        assert!(!queue_driven_mode(&loaded["sprints"][1]));
+
+        let created = sprint(
+            &state,
+            "p",
+            &json!({"action":"create","description":"New","runMode":"automatic"}),
+        )
+        .unwrap();
+        let loaded = product(&state, "p").unwrap();
+        assert_eq!(loaded["sprints"][0]["runMode"], "hybrid");
+        assert_eq!(loaded["sprints"][2]["id"], created["sprintId"]);
+        assert_eq!(loaded["sprints"][2]["runMode"], "automatic");
+        assert!(queue_driven_mode(&loaded["sprints"][2]));
+        assert!(!queue_driven_mode(
+            &json!({"runMode":"hybrid","archivedAt":1})
+        ));
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn sprint_run_modes_validate_create_and_patch_before_persisting() {
+        use std::os::unix::fs::DirBuilderExt;
+        let state = std::env::temp_dir().join(format!("cw-sprint-enum-{}", settings::unique()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&state)
+            .unwrap();
+        let created = sprint(
+            &state,
+            "p",
+            &json!({"action":"create","description":"Default"}),
+        )
+        .unwrap();
+        let id = created["sprintId"].clone();
+        assert_eq!(
+            product(&state, "p").unwrap()["sprints"][0]["runMode"],
+            "manual"
+        );
+        for mode in ["manual", "hybrid", "automatic"] {
+            sprint(
+                &state,
+                "p",
+                &json!({"action":"create","description":"Valid","runMode":mode}),
+            )
+            .unwrap();
+            sprint(
+                &state,
+                "p",
+                &json!({"action":"patch","sprintId":id,"patch":{"runMode":mode}}),
+            )
+            .unwrap();
+            assert_eq!(product(&state, "p").unwrap()["sprints"][0]["runMode"], mode);
+        }
+        let before = product(&state, "p").unwrap();
+        for mode in [
+            json!("unknown"),
+            json!(null),
+            json!(false),
+            json!(["hybrid"]),
+        ] {
+            assert_eq!(
+                sprint(
+                    &state,
+                    "p",
+                    &json!({"action":"create","description":"Invalid","runMode":mode})
+                )
+                .unwrap_err()
+                .code,
+                "invalid_sprint"
+            );
+            assert_eq!(sprint(&state, "p", &json!({"action":"patch","sprintId":id,"patch":{"runMode":mode,"title":"Not saved"}})).unwrap_err().code, "invalid_sprint");
+        }
+        assert_eq!(product(&state, "p").unwrap(), before);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
     #[test]
     fn only_oldest_sent_bytes_give_way_and_pending_bytes_stay() {
         let file = json!({"name":"a","data":"x".repeat(200),"mimeType":"text/plain"});
@@ -445,6 +562,75 @@ pub fn settle_taken(
     }
     persist(state, project, &mut product, &before)
 }
+fn sprint_run_mode(value: &Value) -> Result<&str> {
+    match value.as_str() {
+        Some(mode @ ("manual" | "hybrid" | "automatic")) => Ok(mode),
+        _ => Err(refuse(
+            "invalid_sprint",
+            "Choose Manual, Hybrid or Automatic for the sprint.",
+        )),
+    }
+}
+
+/// A queue hold keeps its identity (`holdId`) while the scheduler rewrites the same
+/// condition (same kind, code, task and reason); any other hold is a new one. An owner
+/// decision names the hold it answers, so a click on an older card never applies to
+/// a newer hold that happens to share its code.
+pub(super) fn with_hold_id(prior: &Value, mut pause: Value) -> Value {
+    let same = ["kind", "code", "taskId", "reason"]
+        .iter()
+        .all(|key| prior[*key] == pause[*key]);
+    pause["holdId"] = match prior["holdId"].as_str() {
+        Some(id) if same => json!(id),
+        _ => json!(format!("h_{}", settings::unique())),
+    };
+    pause
+}
+
+/// Compare the scheduler's observed sprint against the saved one so a
+/// background pause/resume cannot overwrite a concurrent owner action.
+pub(super) fn automatic_queue(state: &Path, project: &str, p: &Value) -> Result<Value> {
+    let _lock = Lock::new(state, "machine.lock")?;
+    let mut product = product(state, project)?;
+    let expected = &p["expected"];
+    let Some(sprint) = product["sprints"]
+        .as_array_mut()
+        .and_then(|sprints| sprints.iter_mut().find(|s| s["id"] == expected["id"]))
+    else {
+        return Ok(json!({"changed":false}));
+    };
+    if sprint != expected || !queue_sprint(sprint) {
+        return Ok(json!({"changed":false}));
+    }
+    let pause = &p["pause"];
+    sprint["queueState"] = json!(if pause.is_null() { "running" } else { "paused" });
+    sprint["pauseReason"] = pause["reason"].clone();
+    if pause.is_null() {
+        sprint.as_object_mut().unwrap().remove("automaticQueue");
+    } else {
+        sprint["automaticQueue"] = with_hold_id(&sprint["automaticQueue"], pause.clone());
+    }
+    if sprint == expected {
+        return Ok(json!({"changed":false}));
+    }
+    settings::write_json(&product_path(state, project)?, &product)?;
+    Ok(json!({"changed":true}))
+}
+
+/// An open sprint whose queue the scheduler drives (Hybrid or Automatic). Both keep
+/// their system holds in `automaticQueue`, decided by the same next-actor rule.
+pub(super) fn queue_sprint(sprint: &Value) -> bool {
+    matches!(sprint["runMode"].as_str(), Some("automatic" | "hybrid"))
+        && sprint["archivedAt"].is_null()
+        && (sprint["deleting"].is_null() || sprint["deleting"] == false)
+}
+
+pub(super) fn automatic_sprint(sprint: &Value) -> bool {
+    sprint["runMode"] == "automatic"
+        && sprint["archivedAt"].is_null()
+        && (sprint["deleting"].is_null() || sprint["deleting"] == false)
+}
+
 pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
     let _lock = Lock::new(state, "machine.lock")?;
     let mut product = product(state, project)?;
@@ -457,8 +643,12 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
             .chars()
             .take(32000)
             .collect::<String>();
-        let mode = p["runMode"].as_str().unwrap_or("manual");
-        if description.trim().is_empty() || !["manual", "automatic"].contains(&mode) {
+        let mode = p
+            .get("runMode")
+            .map(sprint_run_mode)
+            .transpose()?
+            .unwrap_or("manual");
+        if description.trim().is_empty() {
             return Err(refuse("invalid_sprint", "Describe the sprint first."));
         }
         let id = format!("sp_{}", settings::unique());
@@ -490,6 +680,9 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
             .as_array_mut()
             .ok_or_else(|| refuse("state_unreadable", "Invalid sprint state."))?
             .push(sprint);
+        if mode == "automatic" {
+            product["sprintRunModeVersion"] = json!(1);
+        }
         persist(state, project, &mut product, &before)?;
         return Ok(json!({"sprintId":id}));
     }
@@ -511,7 +704,12 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
             sprint["archivedAt"] = json!(now_ms());
             sprint["queueState"] = json!("paused");
             sprint["pauseReason"] = json!("Sprint closed by you");
-            for key in ["pauseKind", "questionExecutions", "planningAttempt"] {
+            for key in [
+                "pauseKind",
+                "questionExecutions",
+                "planningAttempt",
+                "automaticQueue",
+            ] {
                 sprint.as_object_mut().unwrap().remove(key);
             }
         }
@@ -525,7 +723,33 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
         ));
     }
     let mut target = None;
-    if action == "patch" {
+    if action == "allow" {
+        // The owner's consent to the one decision the queue hold asks for. The
+        // scheduler acts on it in its next pass, through its own bounded route.
+        let hold = &sprint["automaticQueue"];
+        let wanted = p["ownerAction"].as_str().unwrap_or("");
+        if !queue_sprint(sprint)
+            || sprint["queueState"] != "paused"
+            || hold["nextActor"] != "owner"
+            || hold["taskId"] != p["taskId"]
+            || hold["code"] != p["code"]
+            // A decision that names its hold applies only to that hold. A request
+            // without `holdId` (an older window) is matched by task and code alone.
+            || !p["holdId"].is_null() && hold["holdId"] != p["holdId"]
+            || wanted != "allow_repair"
+            || !hold["ownerActions"]
+                .as_array()
+                .is_some_and(|actions| actions.iter().any(|a| a == wanted))
+        {
+            return Err(refuse(
+                "automatic_hold_changed",
+                "Automatic is no longer waiting for this decision. Check the task again.",
+            ));
+        }
+        if hold["allowedAt"].is_null() {
+            sprint["automaticQueue"]["allowedAt"] = json!(now_ms());
+        }
+    } else if action == "patch" {
         let patch = p["patch"]
             .as_object()
             .ok_or_else(|| refuse("unsupported_action", "This action is not available."))?;
@@ -543,6 +767,7 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
                 "pauseReason",
                 "settings",
                 "planningTaskId",
+                "planningRun",
             ]
             .contains(&k.as_str())
         }) {
@@ -551,9 +776,13 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
                 "That sprint change is not supported.",
             ));
         }
-        if patch.contains_key("runMode") {
+        if let Some(mode) = patch.get("runMode") {
+            sprint_run_mode(mode)?;
             // A mode switch re-evaluates every waiting result of the project.
             super::task_review::forget_refusals(state, project);
+            if sprint["runMode"] != *mode {
+                sprint.as_object_mut().unwrap().remove("automaticQueue");
+            }
         }
         if let Some(settings) = patch.get("settings").filter(|v| !v.is_null()) {
             workspace_protocol::validate(
@@ -568,7 +797,7 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
             }
         }
         if patch.contains_key("queueState") {
-            for key in ["pauseKind", "questionExecutions"] {
+            for key in ["pauseKind", "questionExecutions", "automaticQueue"] {
                 sprint.as_object_mut().unwrap().remove(key);
             }
         }
@@ -616,6 +845,9 @@ pub fn sprint(state: &Path, project: &str, p: &Value) -> Result<Value> {
         combined.extend(note["attachments"].as_array().cloned().unwrap_or_default());
     }
     saved_total(&combined)?;
+    if action == "patch" && p["patch"]["runMode"] == "automatic" {
+        product["sprintRunModeVersion"] = json!(1);
+    }
     if let Some(target) = target {
         for record in product["tasks"]
             .as_object_mut()

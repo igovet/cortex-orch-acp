@@ -1,4 +1,5 @@
 import { children, createSignal, createUniqueId, For, onCleanup, onMount, Show, splitProps, type Accessor, type JSX } from "solid-js";
+import { Dynamic } from "solid-js/web";
 import { Count } from "./kit";
 
 /*
@@ -143,12 +144,13 @@ export function Action(props: ActionProps) {
 
 /**
  * The only heading inside a panel. Its side inset equals its rows'; a count and any actions sit at its end, and `lead`, such
- * as a panel toggle, before the title. `id` names the whole head, count included, for aria-labelledby.
+ * as a panel toggle, before the title. `id` names the whole head, count included, for aria-labelledby. `level` is its place in
+ * the page's outline: 2 right under a page's own h1, 3 (the default) inside a panel that already has a heading.
  */
-export function SectionHead(props: { title: JSX.Element; count?: number; lead?: JSX.Element; children?: JSX.Element; class?: string; id?: string }) {
+export function SectionHead(props: { title: JSX.Element; count?: number; lead?: JSX.Element; children?: JSX.Element; class?: string; id?: string; level?: 2 | 3 }) {
   return <div id={props.id} class={cx("l-sect", props.class)}>
     <Show when={props.lead}><div class="l-sect-lead">{props.lead}</div></Show>
-    <h3 class="l-sect-t"><span ref={revealWhenCut} class="l-whole" data-whole="">{props.title}</span></h3>
+    <Dynamic component={props.level === 2 ? "h2" : "h3"} class="l-sect-t"><span ref={revealWhenCut} class="l-whole" data-whole="">{props.title}</span></Dynamic>
     <Show when={props.count !== undefined}><Count n={props.count!} /></Show>
     <div class="l-sect-end">{props.children}</div>
   </div>;

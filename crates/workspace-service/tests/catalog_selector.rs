@@ -99,7 +99,8 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, (u32, Vec<u8>)> {
     out
 }
 fn alias(v: &Value) -> bool {
-    v.as_str().is_some_and(|m| m.eq_ignore_ascii_case("default"))
+    v.as_str()
+        .is_some_and(|m| m.eq_ignore_ascii_case("default"))
 }
 fn without_alias_models(v: &mut Value) {
     match v {
@@ -149,7 +150,10 @@ fn catalog_selector_and_composed_settings_match_the_oracle() {
             .unwrap()
             .retain(|r| !alias(&r["model"]));
         for engine in expected["routes"]["engines"].as_array_mut().unwrap() {
-            let dropped = aliases.iter().filter(|e| engine["engine"] == e.as_str()).count() as u64;
+            let dropped = aliases
+                .iter()
+                .filter(|e| engine["engine"] == e.as_str())
+                .count() as u64;
             engine["route_count"] = json!(engine["route_count"].as_u64().unwrap() - dropped);
         }
         assert_eq!(
@@ -166,12 +170,7 @@ fn catalog_selector_and_composed_settings_match_the_oracle() {
         // The same alias is not an observed model in the settings view either.
         let mut settings = f.expand(&case["settings"]);
         without_alias_models(&mut settings);
-        assert_eq!(
-            actual.view,
-            settings,
-            "settings: {}",
-            case["name"]
-        );
+        assert_eq!(actual.view, settings, "settings: {}", case["name"]);
         assert_eq!(before, snapshot(&f.0), "read effects: {}", case["name"]);
     }
 }

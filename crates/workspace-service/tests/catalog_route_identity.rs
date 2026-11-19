@@ -300,7 +300,10 @@ fn a_saved_config_naming_the_default_alias_loads_and_never_selects_it() {
         .view;
     assert_eq!(models(&view, "claude-agent-acp"), [CLAUDE_ROUTE]);
     let defaults = reader.user_defaults_management_observation().unwrap();
-    assert_ne!(defaults["result"]["coordinator_resolution"]["state"], "bound");
+    assert_ne!(
+        defaults["result"]["coordinator_resolution"]["state"],
+        "bound"
+    );
     let resolver = RouteResolver::load(
         &f.0.join("project"),
         &f.0.join("project/.cortex-dev"),

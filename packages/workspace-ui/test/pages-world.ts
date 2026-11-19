@@ -1,6 +1,45 @@
-import type { Sprint, Task, WorkspaceState } from "@cortex/workspace-domain";
+import { capture, setPreferred, type EngineConnection, type McpServer, type Sprint, type Task, type WorkspaceState } from "@cortex/workspace-domain";
 import { conversationWorld } from "./conversation-world";
 import { draftTask } from "./support";
+
+/**
+ * The pages world with a set-up machine for the orchestration settings captures: two engines connected with their models, a
+ * few switched on and routed, a pin, an MCP server and an active profile with one change. Fake data, as above.
+ */
+export function settingsWorld(): WorkspaceState {
+  const s = pagesWorld();
+  const m = s.machines[0], c = m.config;
+  const connection = (id: string, engine: EngineConnection["engine"], label: string): EngineConnection => ({ id, engine, label, note: "Native account", sessions: 4, state: "connected", checkedAt: Date.UTC(2026, 10, 19, 9, 0),
+    detail: { connectionId: id, provider: engine === "claude" ? "anthropic" : "openai", authMode: "native", keyKind: null, endpoint: null, launchCommand: "adapter", credential: "native", qualified: true, createdAt: "2026-11-05", updatedAt: "2026-11-05" } });
+  m.connections = [connection("cn_1", "claude", "Claude"), connection("cn_2", "codex", "Codex")];
+  const at = Date.UTC(2026, 10, 19, 9, 5);
+  c.setup["claude-agent-acp"].status = "connected";
+  c.setup["codex-acp"].status = "connected";
+  c.catalogue["claude-agent-acp"] = { observedAt: at, failed: false, models: [
+    { id: "opus", label: "Opus 5.5", efforts: ["low", "medium", "high", "max"], observed: true, contextWindow: 1000000 },
+    { id: "sonnet", label: "Sonnet 5", efforts: ["low", "medium", "high"], observed: true, contextWindow: 1000000 },
+    { id: "haiku", label: "Haiku 4.5", efforts: ["low", "medium", "high"], observed: true, contextWindow: 200000 },
+  ] };
+  c.catalogue["codex-acp"] = { observedAt: at, failed: false, models: [
+    { id: "gpt-6.2-sol", label: "GPT-6.2 Sol", efforts: ["low", "medium", "high", "xhigh"], observed: true, contextWindow: 400000 },
+    { id: "gpt-6.1-terra", label: "GPT-6.1 Terra", efforts: ["low", "medium", "high"], observed: true },
+    { id: "gpt-6-luna", label: "GPT-6 Luna", efforts: ["low", "medium"], observed: false },
+  ] };
+  const r = c.surfaces.routing;
+  r.providers = ["claude-agent-acp", "codex-acp"];
+  r.engines["claude-agent-acp"] = { ...r.engines["claude-agent-acp"], enabled: ["opus", "sonnet", "haiku"], auto: ["opus", "sonnet", "haiku"], tiers: { opus: ["deep", "flagship"], sonnet: ["standard", "deep"], haiku: ["light"] } };
+  r.engines["codex-acp"] = { ...r.engines["codex-acp"], enabled: ["gpt-6.2-sol", "gpt-6-luna"], auto: ["gpt-6.2-sol", "gpt-6-luna"], tiers: { "gpt-6.2-sol": ["standard", "deep"], "gpt-6-luna": ["light"] } };
+  r.pins = { "worker-security-auditor": { engine: "claude-agent-acp", model: "opus", effort: "high" } };
+  c.surfaces.routing = [["claude-agent-acp", "sonnet", "writing"], ["claude-agent-acp", "sonnet", "implementation_backend"], ["claude-agent-acp", "haiku", "writing"], ["codex-acp", "gpt-6.2-sol", "writing"]]
+    .reduce((rules, [e, id, kind]) => setPreferred(rules, e as "claude-agent-acp" | "codex-acp", id, kind, true), r);
+  c.surfaces.user_defaults = { ...c.surfaces.user_defaults, coordinator: { engine: "claude-agent-acp", model: "opus", effort: "high", parameters: {} }, language: "ru", mode: "auto" };
+  c.surfaces.mcp_servers = [{ name: "docs-search", enabled: true, command: "/usr/local/bin/docs-mcp", args: [], env: [], network: false, readPaths: [], writePaths: [], runtimeDirEnv: [], allowedTools: ["search", "read"], readOnlyTools: ["search", "read"], coordinatorTools: ["search"], alwaysLoadTools: null, roles: ["worker"], engines: null, handTools: [], unsupportedKeys: [], problem: null } as unknown as McpServer];
+  const sessions = Object.fromEntries(m.connections.map(x => [x.id, x.sessions]));
+  const saved = capture({ ...c.surfaces, user_defaults: { ...c.surfaces.user_defaults, language: "auto" } }, sessions);
+  c.profiles = [{ id: "default", name: "default", description: "Everyday routing", updatedAt: Date.UTC(2026, 10, 18, 17, 0), sections: saved }, { id: "cheap-review", name: "cheap-review", description: "Light models for reviews", updatedAt: Date.UTC(2026, 10, 12, 10, 0), sections: saved }];
+  c.active = "default";
+  return s;
+}
 
 // Fake data for the page captures: the conversation world plus a draft, an accepted task, a closed task, a sprint being
 // planned and the model choices a connected machine offers. Disposable and opt-in; no service, engine or store is involved.

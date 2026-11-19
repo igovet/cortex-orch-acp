@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
-import { capabilityOf, FEATURES, machineDefaults, type CommandReceipt, type TaskSettings } from "@cortex/workspace-domain";
+import { capabilityOf, FEATURES, machineDefaults, type CommandReceipt, type SprintRunMode, type TaskSettings } from "@cortex/workspace-domain";
 import { createAttachments, createDictation, MessageComposer, RouteBar } from "./composer";
 import { useWs } from "./ctx";
 import { FieldEdit } from "./field-edit";
@@ -8,7 +8,7 @@ import { Tile } from "./frame";
 import { I, MenuItem, Pop } from "./kit";
 import { ActionBar, Toolbar } from "./layout";
 import type { Route } from "./router";
-import { projectsOn, readyStep, sprintTitle } from "./selectors";
+import { sprintModeDescription, projectsOn, readyStep, sprintTitle } from "./selectors";
 
 /** A branch-safe name, cut at a word so a long title never ends mid-word. */
 function slug(text: string) {
@@ -36,7 +36,7 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
   const separate = () => ws.can(FEATURES.taskWorktrees) && !noGit();
   const noWorktree = () => noGit() ? "A worktree needs Git. This folder has no Git repository, so work stays in the project folder." : ws.t("noTaskWorktrees");
   const checkout = () => pickedSprint()?.checkout?.kind ?? (separate() ? chosen() : "main");
-  const [runMode, setRunMode] = createSignal<"manual" | "automatic">("manual");
+  const [runMode, setRunMode] = createSignal<SprintRunMode>("manual");
   const [chosenRoute, setSettings] = createSignal<TaskSettings>(defaults.settings);
   let routePicked = false;
   createEffect(() => {
@@ -196,8 +196,9 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
       <div class="fld">
         <span class="lab">How tasks run after planning <span class="faint">You can switch this later</span></span>
         <div class="two">
-          <label class="rc"><input type="radio" name="sprint-run" checked={runMode() === "manual"} onChange={() => setRunMode("manual")} /><span><span class="t">Manual</span><span class="d">You start each ready task. Starting one never starts its neighbours.</span></span></label>
-          <label class="rc"><input type="radio" name="sprint-run" checked={runMode() === "automatic"} onChange={() => setRunMode("automatic")} /><span><span class="t">Automatic</span><span class="d">One task at a time, in dependency order. Questions and failures pause the queue.</span></span></label>
+          <label class="rc"><input type="radio" name="sprint-run" checked={runMode() === "manual"} onChange={() => setRunMode("manual")} /><span><span class="t">Manual</span><span class="d">{sprintModeDescription.manual}</span></span></label>
+          <label class="rc"><input type="radio" name="sprint-run" checked={runMode() === "hybrid"} onChange={() => setRunMode("hybrid")} /><span><span class="t">Hybrid</span><span class="d">{sprintModeDescription.hybrid}</span></span></label>
+          <label class="rc"><input type="radio" name="sprint-run" checked={runMode() === "automatic"} onChange={() => setRunMode("automatic")} /><span><span class="t">Automatic</span><span class="d">{sprintModeDescription.automatic}</span></span></label>
         </div>
       </div>
       <Checkout />

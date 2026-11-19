@@ -234,7 +234,8 @@ pub async fn main() {
                     None => break,
                 },
                 _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
-                    if !std::fs::read_to_string("scenario.txt").unwrap_or_default().contains("hold") {
+                    let scenario = std::fs::read_to_string("scenario.txt").unwrap_or_default();
+                    if !scenario.contains("hold") && scenario.trim() != "rolling" {
                         for (sid, mut frame) in releasable.drain() {
                             held.remove(&sid);
                             frame["__fixture_released"] = json!(true);
@@ -642,6 +643,7 @@ pub async fn main() {
                 )
                 .unwrap_or(Value::Null);
                 let is_second = assignment["node"] == "second";
+                let is_third = assignment["node"] == "third";
                 let n = prompts.entry(sid.clone()).or_default();
                 if !replayed {
                     *n += 1;
@@ -743,8 +745,9 @@ pub async fn main() {
                     || scenario.trim() == "guidance" && *n == 1
                     || scenario.trim() == "guidance-preempt" && *n <= 2
                     || scenario.trim() == "stop-siblings" && !is_second
+                    || scenario.trim() == "rolling" && is_second
                 {
-                    if scenario.trim() == "hold" {
+                    if scenario.trim() == "hold" || scenario.trim() == "rolling" && is_second {
                         releasable.insert(sid.clone(), r.clone());
                     }
                     held.insert(sid, id);
@@ -767,6 +770,22 @@ pub async fn main() {
                         reconciliation_fixture(mode, &full_scenario, &context)
                     {
                         params
+                    } else if mode == "desktop-coordinator" && full_scenario == "repair-failed-test"
+                    {
+                        if context["state"] == "RECONCILING" {
+                            json!({"name":"synthesis_submit","arguments":{"text":"Repaired the output and reran the failed check."}})
+                        } else {
+                            let repair =
+                                context["retained_decisions"]
+                                    .as_array()
+                                    .is_some_and(|events| {
+                                        events.iter().any(|e| e["type"] == "VERIFICATION_FAILED")
+                                    });
+                            let node = if repair { "fix-output" } else { "work" };
+                            json!({"name":"plan_submit","arguments":{"request_key":node,"plan":{
+                                "tasks":[{"id":node,"role":"backend-dev","objective":"Write the expected output","dependencies":[],"scope":["work.txt"],"model":"auto"}],
+                                "verification":[["/usr/bin/cmp","expected.txt","work.txt"]]}}})
+                        }
                     } else if mode == "desktop-coordinator"
                         && full_scenario == "slow-check"
                         && context["state"] == "PLANNING"
@@ -819,13 +838,14 @@ pub async fn main() {
                         if full_scenario == "separate-task-hold" {
                             tasks[0]["scope"] = json!(["separate.txt"]);
                         }
-                        if std::fs::read_to_string("scenario.txt")
-                            .unwrap_or_default()
-                            .trim()
-                            == "stop-siblings"
+                        if full_scenario.trim() == "stop-siblings"
+                            || full_scenario.trim() == "rolling"
                             || full_scenario == "reconcile-worker-replan"
                         {
                             tasks.as_array_mut().unwrap().push(json!({"id":"second","role":"backend-dev","objective":"Change other.txt","dependencies":[],"scope":["other.txt"],"model":"auto"}));
+                        }
+                        if full_scenario.trim() == "rolling" {
+                            tasks.as_array_mut().unwrap().push(json!({"id":"third","role":"backend-dev","objective":"Change third.txt after work.txt","dependencies":["work"],"scope":["third.txt"],"model":"auto"}));
                         }
                         // Owner messages handed over after verified work: this fixture's
                         // messages need no further change, so it answers directly.
@@ -864,6 +884,8 @@ pub async fn main() {
                     } else if scenario.trim() == "outside-write" {
                         json!({"name":"outside_write","arguments":{"path":std::fs::read_to_string("outside-target").unwrap(),
                             "content":"client-approved","request_key":"client-write"}})
+                    } else if scenario.trim() == "access-retry" && *n == 1 {
+                        json!({"name":"access_request","arguments":{"paths":["extra"],"reason":"Fixture reservation","request_key":"access-retry"}})
                     } else if scenario.trim() == "guidance" && *n == 2
                         || scenario.trim() == "guidance-preempt" && *n == 3
                     {
@@ -881,6 +903,15 @@ pub async fn main() {
                     } else if matches!(scenario.trim(), "question" | "question-exit") && *n == 1 {
                         json!({"name":"ask_question","arguments":{"question":"Which output?","options":["Detailed","Brief"],"request_key":"question"}})
                     } else {
+                        if scenario.trim() == "access-retry" {
+                            assert_eq!(*n, 2);
+                            let answer: Value =
+                                serde_json::from_str(raw.rsplit_once("\n\n").unwrap().1).unwrap();
+                            assert!(matches!(
+                                answer["status"].as_str(),
+                                Some("granted" | "denied")
+                            ));
+                        }
                         let consultant = context["current_nodes"].as_array().is_some_and(|a| {
                             a.iter().any(|n| {
                                 n["assignment"] == context["recipient"]["assignment"]
@@ -892,8 +923,20 @@ pub async fn main() {
                         }
                         if mode == "desktop-worker" && !consultant {
                             std::fs::write(
-                                if is_second { "other.txt" } else { "work.txt" },
-                                "after",
+                                if is_second {
+                                    "other.txt"
+                                } else if is_third {
+                                    "third.txt"
+                                } else {
+                                    "work.txt"
+                                },
+                                if full_scenario == "repair-failed-test"
+                                    && assignment["node"] == "fix-output"
+                                {
+                                    "expected"
+                                } else {
+                                    "after"
+                                },
                             )
                             .unwrap();
                         }
@@ -1042,6 +1085,7 @@ pub async fn main() {
                         "ask_question",
                         "user_question_request",
                         "plan_submit",
+                        "sprint_plan_submit",
                         "list_route_options",
                         "result_submit",
                         "create_draft",
@@ -1090,6 +1134,117 @@ pub async fn main() {
                     }
                     if mode == "desktop-worker" || mode == "desktop-reviewer" {
                         assert!(!tools.iter().any(|t| t["name"] == "list_route_options"));
+                    }
+                    let plain_pending_turn = scenario.trim() == "pending-end-turn"
+                        && params["name"] == "result_submit"
+                        && *n == 1;
+                    if (scenario.trim() == "pending-result"
+                        || scenario.trim() == "pending-end-turn")
+                        && params["name"] == "result_submit"
+                    {
+                        if *n == 1 {
+                            wire::write_frame(&mut stdin,&json!({"jsonrpc":"2.0","id":40,"method":"tools/call",
+                                "params":{"name":"command_run","arguments":{"argv":["/bin/sh","-c","while [ ! -f release-command ]; do sleep 0.1; done"],"timeout_seconds":25,"request_key":"pending-command"}}})).await.unwrap();
+                            let pending = wire::read_frame(&mut stdout).await.unwrap().unwrap();
+                            assert_eq!(
+                                pending["result"]["structuredContent"]["settled"], false,
+                                "{pending}"
+                            );
+                        } else {
+                            assert!(
+                                raw.contains("final receipts") && raw.contains("\"exit_code\":0")
+                            );
+                        }
+                    }
+                    if plain_pending_turn {
+                        // Deliberately end the model turn without submitting a result while
+                        // the command is still running. The native supervisor must observe the
+                        // command from this turn, wait for its receipt, and continue this worker
+                        // session instead of declaring its outcome unknown.
+                        wire::write_frame(
+                            &mut output,
+                            &json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}),
+                        )
+                        .await
+                        .unwrap();
+                        relay.kill().await.unwrap();
+                        relay.wait().await.unwrap();
+                        continue;
+                    }
+                    if mode == "desktop-reviewer" && params["name"] == "result_submit" {
+                        // A reviewer finishes its coverage before its verdict: read every
+                        // visible project file completely through the channel.
+                        let mut stack = vec![std::path::PathBuf::from(".")];
+                        let mut call = 100;
+                        while let Some(dir) = stack.pop() {
+                            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                                if entry.file_name().to_string_lossy().starts_with('.') {
+                                    continue;
+                                }
+                                let Ok(kind) = entry.file_type() else {
+                                    continue;
+                                };
+                                let path = entry.path();
+                                if kind.is_dir() {
+                                    stack.push(path);
+                                    continue;
+                                }
+                                if !kind.is_file() {
+                                    continue;
+                                }
+                                let rel = path
+                                    .strip_prefix(".")
+                                    .unwrap_or(&path)
+                                    .to_string_lossy()
+                                    .into_owned();
+                                call += 1;
+                                wire::write_frame(
+                                    &mut stdin,
+                                    &json!({"jsonrpc":"2.0","id":call,"method":"tools/call",
+                                    "params":{"name":"project_read","arguments":{"path":rel}}}),
+                                )
+                                .await
+                                .unwrap();
+                                wire::read_frame(&mut stdout).await.unwrap().unwrap();
+                            }
+                        }
+                        // ...and every report id its brief names, to the last page.
+                        let bytes = raw.as_bytes();
+                        let mut reports = std::collections::BTreeSet::new();
+                        for start in 0..bytes.len().saturating_sub(13) {
+                            let id = &bytes[start..start + 14.min(bytes.len() - start)];
+                            if id.len() == 14
+                                && id.starts_with(b"r_")
+                                && id[2..]
+                                    .iter()
+                                    .all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+                                && (start == 0 || !bytes[start - 1].is_ascii_alphanumeric())
+                            {
+                                reports.insert(String::from_utf8_lossy(id).into_owned());
+                            }
+                        }
+                        for report in reports {
+                            let mut cursor = Value::Null;
+                            for _ in 0..64 {
+                                call += 1;
+                                let mut arguments = json!({"report_id":report});
+                                if cursor.is_string() {
+                                    arguments["cursor"] = cursor.clone();
+                                }
+                                wire::write_frame(
+                                    &mut stdin,
+                                    &json!({"jsonrpc":"2.0","id":call,"method":"tools/call",
+                                    "params":{"name":"read_report","arguments":arguments}}),
+                                )
+                                .await
+                                .unwrap();
+                                let page = wire::read_frame(&mut stdout).await.unwrap().unwrap();
+                                cursor = page["result"]["structuredContent"]["next_cursor"].clone();
+                                if !cursor.is_string() {
+                                    break;
+                                }
+                            }
+                        }
                     }
                     wire::write_frame(
                         &mut stdin,

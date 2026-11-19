@@ -19,7 +19,7 @@ pub(super) fn unsettled() -> Refused {
 }
 /// Match the retained _facts/require_settled boundary, including stopped launches.
 /// The caller can hold its immediate transaction through the overlay replacement.
-pub(super) fn settled(db: &Connection, root: &Path, project: &str, task: &str) -> CoreResult<()> {
+pub(crate) fn settled(db: &Connection, root: &Path, project: &str, task: &str) -> CoreResult<()> {
     let row = db
         .query_row(
             "SELECT e.runtime_task_id,e.acp_session_id,e.execution_id,e.owner_epoch
@@ -108,10 +108,10 @@ pub(super) fn settled(db: &Connection, root: &Path, project: &str, task: &str) -
     Ok(())
 }
 pub(super) fn settle_error(e: CoreError) -> Refused {
-    if e.code() == "stop_required" {
-        unsettled()
-    } else {
-        context::core(e)
+    match e.code() {
+        "stop_required" | "lost_worker_termination_unconfirmed" => unsettled(),
+        "native_outside_outcome_unknown" => refuse(e.code(), "A dispatched action still has an unknown outcome. Inspect the task activity before handing its folder to the next task."),
+        _ => context::core(e),
     }
 }
 pub(super) fn external(p: &Value) -> bool {
@@ -199,8 +199,21 @@ pub async fn apply(
                 }
                 record["closedAs"] = json!("external");
             } else {
+                // An old automatic acceptance cannot turn a changed worktree into a
+                // verified close. Keep the task's evidence honest when the owner uses
+                // Close as is after the result became stale.
+                let result_matches_workspace = record["workspaceDigest"]
+                    .as_str()
+                    .zip(record["result"]["digest"].as_str())
+                    .is_none_or(|(workspace, result)| workspace == result);
+                let acceptance_matches_workspace = record["acceptance"]["digest"]
+                    .as_str()
+                    .zip(record["workspaceDigest"].as_str())
+                    .is_none_or(|(accepted, workspace)| accepted == workspace);
                 let checked = record["status"] == "ready_to_merge"
-                    && (truth(&record["acceptance"]) || truth(&record["automaticReady"]));
+                    && (truth(&record["acceptance"]) || truth(&record["automaticReady"]))
+                    && result_matches_workspace
+                    && acceptance_matches_workspace;
                 record["notVerifiedByCortex"] = json!(choice == "as_is" && !checked);
                 record["closedAs"] = json!(choice);
             }

@@ -1,17 +1,20 @@
 import { batch, createEffect, createMemo, createSignal, createUniqueId, For, Match, on, onCleanup, Show, Switch, useContext, type Accessor } from "solid-js";
-import { dependencyProblem, runBlocker, type PlanItem, type Sprint, type TaskSettings, type WorkspaceState } from "@cortex/workspace-domain";
+import { automaticQueueOf, dependencyProblem, queueDrivenMode, runBlocker, SPRINT_RUN_MODES, type PlanItem, type Sprint, type TaskSettings, type WorkspaceState } from "@cortex/workspace-domain";
 import { AttachChips, createAttachments, createDictation, MessageComposer, RouteBar } from "./composer";
 import { useWs } from "./ctx";
 import { FieldEdit } from "./field-edit";
 import { createFollow } from "./follow";
 import { Pill } from "./worker";
-import { createUnsent, ScreenActive } from "./freshness";
+import { createBodyMark, createUnsent, ScreenActive } from "./freshness";
 import { A, I, Keyed, MenuItem, placeFocus, Pop } from "./kit";
 import { ActionBar, Page, revealCutIn, revealWhenCut, SectionHead, StatusLane, Toolbar, type StripItem, type StripTone } from "./layout";
 import { Hint } from "./settings-kit";
 import { Answered, QuestionForm, type AskAnswer } from "./questions";
 import type { Route } from "./router";
-import { clock, sprintTitle, sprintView, type ProjectSummary } from "./selectors";
+import { clock, decisionRoute, humanStatus, planningTaskOf, sprintModeDescription, sprintModeLabel, sprintTitle, sprintView, stopReason, type ProjectSummary } from "./selectors";
+import { Conversation as TaskConversation, firstWorker, TaskWorkers, useSessionClock } from "./session";
+import { sessionModel, type SessionModel } from "./session-model";
+import { PlanningPlace } from "./task-place";
 import { share } from "./stable";
 import { ResultText } from "./result-text";
 import { CopySource, MessageTools } from "./message-copy";
@@ -53,19 +56,24 @@ function SprintCheckout(props: { sprint: Sprint }) {
 
 export function RunMode(props: { sprint: Sprint; describedBy?: string }) {
   const ws = useWs();
-  const set = (runMode: "manual" | "automatic") => { if (props.sprint.runMode !== runMode) ws.run({ type: "set_run_mode", sprintId: props.sprint.id, runMode }); };
+  const set = (runMode: Sprint["runMode"]) => { if (props.sprint.runMode !== runMode) ws.run({ type: "set_run_mode", sprintId: props.sprint.id, runMode }); };
   const described = () => ws.gate("set_run_mode") ? props.describedBy : undefined;
+  const id = createUniqueId();
   return <div class="seg" role="group" aria-label="Sprint run mode">
-    <button aria-current={props.sprint.runMode === "manual" ? "true" : "false"} aria-describedby={described()} {...ws.needs("set_run_mode")} onClick={() => set("manual")}>Manual</button>
-    <button aria-current={props.sprint.runMode === "automatic" ? "true" : "false"} aria-describedby={described()} {...ws.needs("set_run_mode")} onClick={() => set("automatic")}>Automatic</button>
+    <For each={SPRINT_RUN_MODES}>{mode => <>
+      <button aria-current={props.sprint.runMode === mode ? "true" : "false"} aria-describedby={[`${id}-${mode}`, described()].filter(Boolean).join(" ")} {...ws.needs("set_run_mode")} onClick={() => set(mode)}>{sprintModeLabel[mode]}</button>
+      <span hidden id={`${id}-${mode}`}>{sprintModeDescription[mode]}</span>
+    </>}</For>
   </div>;
 }
 
 // The plan can name tasks the project's runtime has not loaded yet; the queue waits for them instead of the screen failing.
-const queueBlocker = (state: WorkspaceState, sprint: Sprint) => sprint.taskIds.every(id => state.tasks.some(t => t.id === id)) ? runBlocker(state, sprint) : "This sprint's tasks are not loaded yet";
+const queueBlocker = (state: WorkspaceState, sprint: Sprint) => sprint.runMode === "automatic" && automaticQueueOf(sprint)
+  || sprint.taskIds.every(id => state.tasks.some(t => t.id === id))
+  ? runBlocker(state, sprint) : "This sprint's tasks are not loaded yet";
 
 /**
- * The sprint's one run control: Start in Manual, Run, Pause or Continue in Automatic. `steady` keeps one width as its label swaps.
+ * The sprint's one run control: Start in Manual, Run, Pause or Continue in a queued mode. `steady` keeps one width as its label swaps.
  * A refusal is said in the strip `describedBy` names, or by a press; the control itself never holds the words.
  */
 export function QueueButton(props: { sprint: Sprint; line?: boolean; small?: boolean; steady?: boolean; describedBy?: string }) {
@@ -82,7 +90,7 @@ export function QueueButton(props: { sprint: Sprint; line?: boolean; small?: boo
   // label, and beside the other outlined controls of the board bar a disabled Continue queue read as usable.
   const runCls = () => blocker() || ws.gate("run_sprint") ? `btn btn-primary${size()}` : cls();
   return <Show when={!props.sprint.archivedAt && props.sprint.planning === "created"}>
-    <Show when={props.sprint.runMode === "automatic"} fallback={<Show when={next()}>{v => <button class={cls()} aria-describedby={described("start_task")} {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: v().id, now: ws.store.clock() })}>Start task {number()}</button>}</Show>}>
+    <Show when={queueDrivenMode(props.sprint.runMode)} fallback={<Show when={next()}>{v => <button class={cls()} aria-describedby={described("start_task")} {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: v().id, now: ws.store.clock() })}>Start task {number()}</button>}</Show>}>
       <Show when={props.sprint.queueState === "running"} fallback={<Show when={!complete()}>
         <button class={runCls()} aria-disabled={blocker() ? "true" : undefined} data-why={blocker()} aria-describedby={described("run_sprint", blocker())} {...ws.needs("run_sprint")} onClick={run}>{props.sprint.queueState === "paused" ? "Continue queue" : "Run sprint"}</button>
       </Show>}>
@@ -97,19 +105,22 @@ const stop = (text: string) => text.replace(/\.+$/, "");
 /** What the queue is doing or waiting for, when that needs saying. One answer, so the same words appear on every screen and only once on each. */
 function queueWords(ws: ReturnType<typeof useWs>, sprint: Sprint): QueueWords | null {
   const index = ws.store.index();
+  const automatic = automaticQueueOf(sprint);
+  if (automatic) return { tone: "warn", icon: automatic.kind === "owner_integration" ? "merge" : automatic.needsOwner ? "alert" : "pause", iconClass: "st-warn",
+    taskId: automatic.taskId, role: "status", text: automatic.kind === "continuation" ? stopReason(automatic.reason) : humanStatus(automatic.reason) };
   // Queue state belongs to the service, not completeness of a window read.
   if (sprint.taskIds.some(id => !index.byId.has(id))) return null;
   const stall = queueStall(index, sprint);
-  const waiting = sprint.runMode === "automatic" && sprint.planning === "created" && sprint.queueState !== "running" && sprint.queueState !== "complete";
+  const waiting = queueDrivenMode(sprint.runMode) && sprint.planning === "created" && sprint.queueState !== "running" && sprint.queueState !== "complete";
   const blocker = waiting ? queueBlocker(index.state, sprint) : null;
   if (sprint.queueState === "paused" && sprint.pauseReason) return { tone: "warn", icon: "pause", iconClass: "st-warn", taskId: stall?.taskId ?? null,
-    text: `Queue paused: ${stop(stall?.reason ?? blocker ?? sprint.pauseReason)}.${stall || blocker ? "" : " Continue queue when you are ready."}` };
+    text: `Queue paused: ${stop(stall?.reason ?? blocker ?? humanStatus(sprint.pauseReason))}.${stall || blocker ? "" : queueDrivenMode(sprint.runMode) ? " Continue queue when you are ready." : " Start the next task when you are ready."}` };
   if (stall || blocker) return { tone: "warn", icon: "alert", iconClass: "st-warn", taskId: stall?.taskId ?? null, role: "status", text: `${stop(stall?.reason ?? blocker!)}.` };
   // Once every task of the sprint is closed nothing waits for confirmation any more, so the queue has nothing to say.
-  if (sprint.queueState === "complete") return sprint.taskIds.every(id => index.byId.get(id)!.task.status === "done") ? null
+  if (sprint.queueState === "complete") return sprint.runMode === "automatic" || sprint.taskIds.every(id => index.byId.get(id)!.task.status === "done") ? null
     : { tone: "ok", icon: "check-circle", iconClass: "st-ok", taskId: null, text: "All queued tasks have run. Finished results wait for your confirmation; nothing closes by itself." };
   // A control the machine does not offer is greyed out: its reason still has to be somewhere the owner can read.
-  const refused = ws.gate("set_run_mode") ?? ws.gate(sprint.runMode !== "automatic" ? "start_task" : sprint.queueState === "running" ? "pause_sprint" : "run_sprint");
+  const refused = ws.gate("set_run_mode") ?? ws.gate(!queueDrivenMode(sprint.runMode) ? "start_task" : sprint.queueState === "running" ? "pause_sprint" : "run_sprint");
   return refused ? { tone: "info", icon: "help", iconClass: "faint", taskId: null, role: "status", text: refused } : null;
 }
 const sameWords = (a: QueueWords | null, b: QueueWords | null) => JSON.stringify(a) === JSON.stringify(b);
@@ -120,15 +131,15 @@ export function createQueueStrip(sprint: Accessor<Sprint | null | undefined>, do
   const words = createMemo(() => { const s = sprint(); return s ? queueWords(ws, s) : null; }, null, { equals: sameWords });
   const task = () => { const id = words()?.taskId; return id ? ws.store.index().byId.get(id) : undefined; };
   const icon = <I n={words()?.icon ?? "help"} s={14} class={words()?.iconClass} />;
-  const open = <Show when={task()}>{v => <A class="lnk" to={{ name: "task", machine: v().machine.id, task: v().id }}>Open task</A>}</Show>;
+  const open = <Show when={task()}>{v => <A class="lnk" to={decisionRoute(v())}>Open task</A>}</Show>;
   const item: StripItem = { id: "queue", domId, icon, action: open, get tone() { return words()?.tone ?? "info"; }, get text() { return words()?.text ?? ""; }, get role() { return words()?.role; } };
   return () => words() ? item : null;
 }
 
 /** What automatic running means, kept out of the way of the work and one press from it. */
-const queueHelp = (sprint: Sprint) => `Passed checks leave each task ready for your final confirmation and start the next ready task. Nothing finishes without your confirmation.${sprint.queueState === "running" ? " Pause queue stops new starts; the task already running keeps going." : ""}`;
+const queueHelp = (sprint: Sprint) => `${sprintModeDescription[sprint.runMode]}${sprint.runMode === "automatic" ? " Finishing on a different target branch still needs confirmation." : ""}${sprint.queueState === "running" ? " Pause queue stops new starts; the task already running keeps going." : ""}`;
 export function QueueHelp(props: { sprint: Sprint }) {
-  return <Show when={props.sprint.runMode === "automatic"}><Hint text={queueHelp(props.sprint)} label="the automatic queue" /></Show>;
+  return <Show when={queueDrivenMode(props.sprint.runMode)}><Hint text={queueHelp(props.sprint)} label="the automatic queue" /></Show>;
 }
 
 /** Some of the sprint's tasks could not be read: say how many, keep the membership, and read again on request. One strip for the life of the page. */
@@ -184,6 +195,64 @@ export function SprintActions(props: { sprint: Sprint; tab: SprintRoute["tab"] }
   </></Show>;
 }
 
+/** What the owner asked of the sprint, as the head of its planning conversation. */
+function SprintBrief(props: { sprint: Sprint }) {
+  const ws = useWs();
+  return <div class="brief"><ResultText breaks text={props.sprint.description} /><AttachChips files={props.sprint.attachments} open />
+    <div class="meta"><Show when={ws.t("planningBadge")}><span>{ws.t("planningBadge")}</span></Show><Show when={props.sprint.description}><CopySource text={props.sprint.description} /></Show></div></div>;
+}
+
+/** The proposed plan is a line in the conversation, and the line opens the Plan tab. */
+function PlanLine(props: { sprint: Sprint; onOpenPlan?: () => void }) {
+  const s = () => props.sprint;
+  return <Show when={s().plan}>{plan => <div class="answered sp-plan-line"><I n="layers" s={14} />
+    <span class="grow">{s().planning === "created" && s().materializedVersion !== null ? `Tasks created from Plan v${s().materializedVersion}` : `Plan v${plan().version} proposed: ${plan().items.length} task${plan().items.length === 1 ? "" : "s"}`}</span>
+    <Show when={props.onOpenPlan}>{open => <button class="btn btn-line" onClick={() => open()()}>Open plan</button>}</Show>
+  </div>}</Show>;
+}
+
+const planningRoute = (machine: string, sprint: Sprint, tab: "planning" | "workers", worker?: string): Route =>
+  ({ name: "sprint", machine, project: sprint.projectId, sprint: sprint.id, tab, ...(worker ? { worker } : {}) });
+
+/**
+ * The planning task's conversation, read on its sprint as an ordinary task's conversation: the coordinator's messages, its
+ * "Worked …" steps, its questions and the composer, all the task page's own. It is headed by the sprint's description, its
+ * plan stands for approval on the Plan tab, and what the service said about planning (a failure, a time limit) reads after
+ * the conversation. Stays mounted while hidden, so a half-written message and its attachments survive.
+ */
+function PlanningTaskConversation(props: { sprint: Sprint; taskId: string; hidden?: boolean; onOpenPlan: () => void }) {
+  const ws = useWs();
+  const model = createMemo<SessionModel | null>(prev => sessionModel(ws.store.index(), props.taskId) ?? prev ?? null);
+  const now = useSessionClock();
+  const machine = () => model()?.view.machine.id ?? ws.machine().id;
+  const onPick = (key: string) => ws.go(planningRoute(machine(), props.sprint, "workers", key));
+  // The service's own notes on planning; the coordinator's replies and the owner's messages are the task's conversation.
+  const notes = createMemo(() => {
+    const said = new Set((model()?.session.timeline ?? []).flatMap(e => e.kind === "cortex" ? [e.text.trim()] : []));
+    return props.sprint.conversation.flatMap((e, i) => (e.kind === "note" || e.kind === "event") && !said.has(e.text.trim()) ? [{ key: `${e.kind}:${i}`, ...e }] : []);
+  });
+  const tail = <>
+    <Keyed each={notes()} by={n => n.key}>{n => <Show when={n().kind === "note"} fallback={<div class="answered"><I n="check" s={14} /><span>{n().text}</span><Show when={n().at != null}><span class="faint">{clock(n().at!)}</span></Show></div>}>
+      <div class="ai"><ResultText breaks text={n().text} /><AttachChips files={n().attachments} open /></div><MessageTools text={n().text} /></Show>}</Keyed>
+    <PlanLine sprint={props.sprint} onOpenPlan={props.onOpenPlan} />
+  </>;
+  return <Show when={model()}>{m => <PlanningPlace.Provider value={{ sprint: () => props.sprint }}>
+    <TaskConversation model={m} now={now()} pick={firstWorker(m())} onPick={onPick} hidden={props.hidden} brief={<SprintBrief sprint={props.sprint} />} tail={tail} />
+  </PlanningPlace.Provider>}</Show>;
+}
+
+/** The planning task's workers, read on its sprint as an ordinary task's Work details. */
+function PlanningTaskWorkers(props: { sprint: Sprint; taskId: string; worker?: string }) {
+  const ws = useWs();
+  const model = createMemo<SessionModel | null>(prev => sessionModel(ws.store.index(), props.taskId) ?? prev ?? null);
+  const now = useSessionClock();
+  createBodyMark("tab", () => "workers");
+  const onPick = (key: string) => ws.go(planningRoute(model()?.view.machine.id ?? ws.machine().id, props.sprint, "workers", key));
+  return <Show when={model()}>{m => <PlanningPlace.Provider value={{ sprint: () => props.sprint }}>
+    <TaskWorkers model={m} now={now()} pick={props.worker ?? firstWorker(m())} onPick={onPick} />
+  </PlanningPlace.Provider>}</Show>;
+}
+
 /** Stays mounted while hidden, so a half-written message and its attachments survive. `onUnsent` says whether any is waiting. */
 function Conversation(props: { sprint: Sprint; hidden?: boolean; onUnsent?: (unsent: boolean) => void; onOpenPlan?: () => void }) {
   const ws = useWs();
@@ -233,7 +302,7 @@ function Conversation(props: { sprint: Sprint; hidden?: boolean; onUnsent?: (uns
   const follow = createFollow(() => timeline, () => thread().length + ws.store.sends.shown(sentHere()).length + asks().length + (s().plan ? 1 : 0));
   return <section class="sp-conv" aria-label="Planning conversation" hidden={props.hidden}>
     <div class="timeline" ref={timeline} onScroll={follow.onScroll}><div class="tl-in">
-      <div class="brief"><ResultText breaks text={s().description} /><AttachChips files={s().attachments} open /><div class="meta"><Show when={ws.t("planningBadge")}><span>{ws.t("planningBadge")}</span></Show><Show when={s().description}><CopySource text={s().description} /></Show></div></div>
+      <SprintBrief sprint={s()} />
       <Keyed each={thread()} by={e => e.key}>{e => <Switch>
         <Match when={e().kind === "note"}><div class="ai"><ResultText breaks text={e().text} /><AttachChips files={e().attachments} open /></div><MessageTools text={e().text} /></Match>
         <Match when={e().kind === "qa"}><Answered question={e().question ?? ""} answer={e().text} at={e().at} files={e().attachments} /></Match>
@@ -241,11 +310,7 @@ function Conversation(props: { sprint: Sprint; hidden?: boolean; onUnsent?: (uns
         <Match when={e().kind === "event"}><div class="answered"><I n="check" s={14} /><span>{e().text}</span><Show when={e().at !== null}><span class="faint">{clock(e().at)}</span></Show></div></Match>
       </Switch>}</Keyed>
       <SentMessages place={sentHere()} />
-      {/* The proposed plan is a line in the conversation, and the line opens the Plan tab. */}
-      <Show when={s().plan}>{plan => <div class="answered sp-plan-line"><I n="layers" s={14} />
-        <span class="grow">{s().planning === "created" && s().materializedVersion !== null ? `Tasks created from Plan v${s().materializedVersion}` : `Plan v${plan().version} proposed: ${plan().items.length} task${plan().items.length === 1 ? "" : "s"}`}</span>
-        <Show when={props.onOpenPlan}>{open => <button class="btn btn-line" onClick={() => open()()}>Open plan</button>}</Show>
-      </div>}</Show>
+      <PlanLine sprint={s()} onOpenPlan={props.onOpenPlan} />
       <Show when={asks().length > 0}><QuestionForm asks={asks()} needs="answer_planning" blocked={() => undefined} projectId={s().projectId} note={() => null} onSend={answer}
         waiting={ask => ask.at === null ? "" : clock(ask.at)} /></Show>
       <Show when={s().planning === "planning"}><div class="answered"><I n="loader" s={14} class="spin" />Working on the plan</div></Show>
@@ -323,7 +388,7 @@ function PlanItemPanel(props: { row: PlanRow; total: number; onClose: () => void
       <div class="ws-read-d"><ResultText breaks text={props.row.item.description} /></div>
       <Show when={props.row.item.acceptance}><div class="ins-h ws-read-s"><span>Acceptance and checks</span></div><div class="ws-read-d"><ResultText breaks text={props.row.item.acceptance} /></div></Show>
     </div>
-    <Show when={props.row.view}>{v => <ActionBar class="ws-read-f"><A class="btn btn-line" to={{ name: "task", machine: v().machine.id, task: v().id }}>Open task<I n="arrow-right" s={14} /></A></ActionBar>}</Show>
+    <Show when={props.row.view}>{v => <ActionBar class="ws-read-f"><A class="btn btn-line" to={decisionRoute(v())}>Open task<I n="arrow-right" s={14} /></A></ActionBar>}</Show>
   </aside>;
 }
 
@@ -431,7 +496,7 @@ function Plan(props: PlanProps) {
         <Show when={!created() && !past()}><button class="btn btn-line btn-sm" aria-disabled={props.request.why ? "true" : undefined} data-why={props.request.why ?? undefined} onClick={() => { if (!props.request.why) props.request.run(); }}>Request changes</button></Show>
         <Show when={selectedRow()?.view}>{v => <>
           <Show when={startable()}><button class="btn btn-line btn-sm" {...ws.needs("start_task")} onClick={() => ws.run({ type: "start_task", taskId: v().id, now: ws.store.clock() })}>Start</button></Show>
-          <A class="btn btn-line btn-sm" to={{ name: "task", machine: v().machine.id, task: v().id }}>Open task</A>
+          <A class="btn btn-line btn-sm" to={decisionRoute(v())}>Open task</A>
         </>}</Show>
       </ActionBar>
       </Show>
@@ -439,12 +504,18 @@ function Plan(props: PlanProps) {
   </section>;
 }
 
-/** Chat, Plan, Board and Summary: one tab each, so the chat and the plan each have the whole width. */
+/**
+ * Chat, Plan, Board and Summary: one tab each, so the chat and the plan each have the whole width. A sprint planned by a
+ * runtime task reads that task as an ordinary task reads: Conversation and Workers, then the plan it proposed.
+ */
 function Tabs(props: { route: SprintRoute; sprint: Sprint }) {
-  const at = (tab: SprintRoute["tab"]): Route => ({ ...props.route, tab });
+  const ws = useWs();
+  const at = (tab: SprintRoute["tab"]): Route => ({ ...props.route, tab, worker: undefined });
   const board = (): Route => ({ name: "project", machine: props.route.machine, project: props.route.project, view: "board", scope: { kind: "sprint", id: props.sprint.id } });
+  const task = () => planningTaskOf(ws.store.state(), props.sprint);
   return <><Toolbar small class="tabs" mid={<div class="ws-tablist" role="tablist" aria-label="Sprint views">
-    <A class="tab" role="tab" to={at("planning")} aria-selected={props.route.tab === "planning" ? "true" : "false"}>Chat</A>
+    <A class="tab" role="tab" to={at("planning")} aria-selected={props.route.tab === "planning" || (props.route.tab === "workers" && !task()) ? "true" : "false"}>{task() ? "Conversation" : "Chat"}</A>
+    <Show when={task()}><A class="tab" role="tab" to={at("workers")} aria-selected={props.route.tab === "workers" ? "true" : "false"}>Workers</A></Show>
     <A class="tab" role="tab" to={at("plan")} aria-selected={props.route.tab === "plan" ? "true" : "false"}>Plan</A>
     <A class="tab" role="tab" to={board()} aria-selected="false">Board</A>
     <A class="tab" role="tab" to={at("summary")} aria-selected={props.route.tab === "summary" ? "true" : "false"}>Summary</A>
@@ -486,12 +557,14 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
   const why = createUniqueId(), queueWhy = createUniqueId();
   const queueStrip = createQueueStrip(() => created() ? s() : null, queueWhy);
   const gapStrip = createGapStrip(s);
-  const info = "Sprint planning. The planning conversation runs on the chosen model; no task runs until you create the tasks and start them.";
+  const info = () => planningTaskOf(ws.store.state(), s())
+    ? "Sprint planning. The planner studies the project read-only, with read-only workers, and proposes a plan; nothing is changed and no task runs until you create the tasks and start them."
+    : "Sprint planning. The planning conversation runs on the chosen model; no task runs until you create the tasks and start them.";
   const planning: StripItem = { id: "planning", tone: "info", domId: why, icon: <I n="layers" s={14} class="faint" />,
-    get text() { const r = createBlocked(); return r ? `Create tasks: ${r}. ${info}` : info; },
+    get text() { const r = createBlocked(); return r ? `Create tasks: ${r}. ${info()}` : info(); },
     action: <button class="btn btn-sm" {...ws.needs("cancel_planning")} onClick={() => ws.run({ type: "cancel_planning", sprintId: s().id })}>Cancel planning</button> };
   const stopped: StripItem = { id: "cancelled", tone: "info", domId: why, icon: <I n="x" s={14} class="faint" />,
-    get role() { return s().planningFailure ? "alert" as const : undefined; }, get text() { return s().planningFailure ?? "Planning is cancelled. Your draft, answers and plan are kept."; },
+    get role() { return s().planningFailure ? "alert" as const : undefined; }, get text() { return (s().planningFailure ? humanStatus(s().planningFailure) : null) ?? "Planning is cancelled. Your draft, answers and plan are kept."; },
     action: <button class="btn btn-sm" {...ws.needs("resume_planning")} onClick={() => ws.run({ type: "resume_planning", sprintId: s().id })}>{s().planningFailure ? "Retry planning" : "Resume planning"}</button> };
   const line: StripItem = { id: "created", tone: "info", icon: <I n="play" s={14} class="faint" />, text: <CreatedLine sprint={s()} /> };
   const status = createMemo<StripItem[]>(() => created()
@@ -500,8 +573,12 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
 
   // ---------- Space: the chat and the plan are tabs; in the plan, one yield rule and Full view ----------
   const panels = ws.panels;
-  const at = (tab: SprintRoute["tab"]): Route => ({ ...props.route, tab });
-  const chatTab = () => props.route.tab === "planning";
+  const at = (tab: SprintRoute["tab"]): Route => ({ ...props.route, tab, worker: undefined });
+  // A sprint planned by a runtime task reads it as that task's own Conversation and Workers; an older sprint keeps its chat.
+  const planningTask = createMemo(() => planningTaskOf(ws.store.state(), s()));
+  const workersTab = () => props.route.tab === "workers" && !!planningTask();
+  /** Conversation or Workers: everything but the plan, each with the whole width. */
+  const chatTab = () => props.route.tab !== "plan";
   const shown = useContext(ScreenActive);
   const memory = new Map<string, GraphMemory>();
   const [api, setApi] = createSignal<GraphApi | null>(null);
@@ -546,7 +623,7 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
   /** Request changes opens the chat, leaving Full view if need be, and puts the cursor in its message box. Selection and view stay. */
   const requestChanges = () => {
     batch(() => { setFull(false); showConv(); });
-    const input = () => body.querySelector<HTMLTextAreaElement>("#ws-plan-input");
+    const input = () => body.querySelector<HTMLTextAreaElement>("#ws-plan-input") ?? body.querySelector<HTMLTextAreaElement>('section[aria-label="Conversation"] .dock textarea');
     input()?.focus();
     queueMicrotask(() => input()?.focus());
   };
@@ -562,7 +639,8 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
   // Full view and short windows keep only the strips that block work. Stopped planning blocks it whatever its tone: its
   // explanation and its Retry or Resume stay.
   const blocks = (i: StripItem) => i.tone === "warn" || i.tone === "fail" || i === stopped;
-  const lane = () => fullOn() || (onGraph() && winH() < 800) ? status().filter(blocks) : status();
+  // The Workers tab's activity and its worker composer need the height too.
+  const lane = () => fullOn() || ((onGraph() || workersTab()) && winH() < 800) ? status().filter(blocks) : status();
   const columns = () => {
     const sp = space();
     if (chatTab() || sp.swap) return "minmax(0, 1fr)";
@@ -587,7 +665,9 @@ function PlanningTab(props: { route: SprintRoute; sprint: Sprint; summary: Proje
     </Show>}
     status={<StatusLane items={lane()} />}>
     <div ref={body} class="sp-body" data-reading={details() ? "true" : undefined} data-full={fullOn() ? "" : undefined} style={{ "grid-template-columns": columns() }}>
-      <Conversation sprint={s()} hidden={!chatTab()} onUnsent={setUnsent} onOpenPlan={() => ws.go(at("plan"))} />
+      <Show when={planningTask()} keyed fallback={<Conversation sprint={s()} hidden={!chatTab()} onUnsent={setUnsent} onOpenPlan={() => ws.go(at("plan"))} />}>{task =>
+        <PlanningTaskConversation sprint={s()} taskId={task} hidden={!chatTab() || workersTab()} onOpenPlan={() => ws.go(at("plan"))} />}</Show>
+      <Show when={workersTab() && planningTask()} keyed>{task => <PlanningTaskWorkers sprint={s()} taskId={task} worker={props.route.worker} />}</Show>
       <Plan sprint={s()} draft={draft()} setDraft={setDraft} reading={reading()} onRead={key => { if (key) setOpened("details"); setReading(key); }} rows={setRows}
         hidden={chatTab() || (space().replaced && details())} full={fullOn()} setFull={setFull} conv={conv}
         request={request} memory={memory} active={shown} api={setApi} />

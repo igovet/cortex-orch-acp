@@ -1,9 +1,10 @@
 #!/bin/sh
 set -eu
+umask 022
+export PATH="$HOME/.cargo/bin:$PATH"
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 cd "$root"
 # The build driver is the Rust cortex-xtask tool; no scripting runtime is involved.
-command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"
 xtask() { cargo run --locked --quiet -p cortex-xtask -- "$@"; }
 
 # The wrapper owns channel selection and a fresh, invocation-specific output.

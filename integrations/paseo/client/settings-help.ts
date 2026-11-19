@@ -235,8 +235,8 @@ export const HELP = {
         "Для light-модели: 1–3 возрастающих effort для лёгкой работы, обычной работы и повтора после неудачи. Добавляйте только наблюдённые уровни модели, меняйте порядок или удаляйте их. Очистка списка сохраняет Neutral (unset).",
       )],
       ["also_standard_for", h(
-        "Work kinds where a light model also counts as a standard candidate (for example testing).",
-        "Виды работ, где light-модель тоже считается кандидатом уровня standard (например testing).",
+        "Work kinds where a light model also counts as a standard candidate.",
+        "Виды работ, где light-модель тоже считается кандидатом уровня standard.",
       )],
       ["preferred_for", h(
         "Work kinds this model is preferred for within its tier; pick them from the list. The model must be an automatic member. With preferred_when set, these kinds only narrow that condition (none: any kind).",
@@ -507,18 +507,21 @@ export const ROLE_HELP: Record<string, HelpText> = {
   "worker-database-architect": h("designs schemas, indexes, migrations and query plans", "проектирует схемы, индексы, миграции и планы запросов"),
   "worker-debugger": h("reproduces failures, proves the root cause, fixes and verifies", "воспроизводит сбои, доказывает причину, исправляет и проверяет"),
   "worker-devops-engineer": h("works on CI/CD, containers and deployment safety", "работает с CI/CD, контейнерами и безопасностью развёртывания"),
-  "worker-explorer": h("maps execution paths, dependencies and relevant files without changing them", "изучает пути выполнения, зависимости и нужные файлы, ничего не меняя"),
+  "worker-explorer": h("maps execution paths, dependencies and relevant files without changing them; automatic model tier: light for low and normal, standard for high complexity", "изучает пути выполнения, зависимости и нужные файлы, ничего не меняя; автоматический выбор уровня модели: лёгкий для низкой и обычной, стандартный для высокой сложности"),
   "worker-frontend-dev": h("implements UI components, state, styling and UI tests", "реализует компоненты интерфейса, состояние, стили и UI-тесты"),
   "worker-fullstack-dev": h("makes coordinated backend and frontend changes", "делает согласованные изменения бэкенда и фронтенда"),
-  "worker-general": h("general agent for research, analysis or small implementation", "универсальный агент для исследования, анализа или небольших правок"),
+  "worker-general": h("general agent for research, analysis or small implementation; automatic model tier: light for low, standard for normal, deep for high complexity", "универсальный агент для исследования, анализа или небольших правок; автоматический выбор уровня модели: лёгкий для низкой, стандартный для обычной, углублённый для высокой сложности"),
   "worker-mobile-dev": h("implements iOS, Android, React Native or Flutter changes", "реализует изменения для iOS, Android, React Native или Flutter"),
   "worker-performance-engineer": h("finds bottlenecks and makes safe optimizations", "находит узкие места и делает безопасные оптимизации"),
-  "worker-planner": h("breaks work into steps, dependencies, risks and checks", "разбивает работу на шаги, зависимости, риски и проверки"),
+  "worker-planner": h("breaks work into steps, dependencies, risks and checks; automatic model tier: light for low, standard for normal, deep for high complexity", "разбивает работу на шаги, зависимости, риски и проверки; автоматический выбор уровня модели: лёгкий для низкой, стандартный для обычной, углублённый для высокой сложности"),
   "worker-qa-engineer": h("writes automated tests and reproduction scenarios", "пишет автотесты и сценарии воспроизведения"),
   "worker-refactorer": h("restructures code without changing behavior", "перестраивает код без изменения поведения"),
   "worker-security-auditor": h("audits auth, secrets, cryptography, dependencies and data protection", "проверяет авторизацию, секреты, криптографию, зависимости и защиту данных"),
   "worker-senior-consultant": h("gives senior decisions on the coordinator's request from published reports", "даёт решения старшего уровня по запросу координатора на основе опубликованных отчётов"),
-  "worker-technical-writer": h("writes project and feature documentation", "пишет документацию проекта и функций"),
+  "worker-technical-writer": h(
+    "writes project and feature documentation; automatic model tier: light for low, standard for normal, deep for high complexity",
+    "пишет документацию проекта и функций; автоматический выбор уровня модели: лёгкий для низкой, стандартный для обычной, углублённый для высокой сложности",
+  ),
   "worker-ux-designer": h("designs layouts, interaction flows and responsive behavior", "проектирует макеты, сценарии взаимодействия и адаптивность"),
 };
 

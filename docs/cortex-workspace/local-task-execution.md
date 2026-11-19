@@ -922,6 +922,12 @@ current version, so a competing edit may legitimately refuse Start without repla
 
 Machine connectivity and task process confirmation are separate. An unconfirmed task on a connected machine shows one notice with one icon, explains that the machine is connected but cannot confirm whether the task is running or stopped, and offers **Re-check state**. The composer stays read-only and points to that control, not a fictitious reconnect requirement. Re-check rereads the existing projections; a still-unknown reply stays blocked and points to Machine settings → Diagnostics. A failed read keeps the task and a retry explanation. No task is resumed, stopped or replayed by this read.
 
+An unconfirmed task never leaves the owner without a decision. A native `RECOVERING` task with no recorded reason is unconfirmed only while one of its owned processes is not confirmed gone, and its projection names which case holds:
+
+- `process_exit_pending`: a session of the task is still being stopped (its delegation or capacity reservation is still live). Its own shutdown observation settles it, and a settled reservation republishes the task (capacity reservations are hooked into the change outbox), so the task becomes an ended turn by itself. The conversation shows one quiet line and asks nothing; an Automatic or Hybrid queue waits for it without a hold.
+- `process_exit_unconfirmed`: the host recorded that the process did not confirm its exit (delegation and reservation `ambiguous`). The running service checks it again by itself on its scheduler passes (on the 30-second safety tick and on task changes, in any project that has such an exit), with the same process evidence startup recovery uses: when no engine process works in the project or a task folder any more, it settles the attempt exactly as a restart would (delegation `terminated`, reservation `released` with observation `no_engine_process`, one `NATIVE_PROCESS_SETTLED` event with evidence `unconfirmed_exit_and_no_engine_process_in_project`) and the task is republished as an ordinary interrupted turn. It never signals or relaunches anything, only re-checks attempts bound to the task's current owner epoch whose every unsettled row is a recorded unconfirmed exit, and backs off while the evidence stays inconclusive (15 seconds, doubling to 10 minutes; a newly unconfirmed exit is checked at once). In Automatic, a task that only that exit held (stopped with no other reason, or paused only because a process exit was unconfirmed) continues by itself in the same pass, as an automatic continuation that never replays an unknown effect or waives review or verification; any other task waits for its owner as an interrupted turn. A service start still applies its own recovery rules (a later boot also settles it). While the evidence stays inconclusive the conversation pins a decision card: what happened in plain words, **Re-check state**, **Open workers** and **Open Diagnostics** to inspect it, and **Close as is…** with its confirmation. Closing commits the cancellation, stops what the service still runs for the task, records that a process was unconfirmed and repeats nothing. A message or **I checked it, continue** would be refused while the exit is unknown, so neither is offered, and the queue's hold for such a task offers only **Close as is…**.
+- Records that disagree (`contradictory_evidence`, for example an execution bound to a different owner epoch or session) are refused by every task control. The card explains this and offers **Re-check state** and **Open Diagnostics**; its **Close as is…** stays disabled with that reason.
+
 A matching bound `RECOVERING` / `recovery` / `recovering` projection with `waitReason: turn_interrupted` and no contradictory-evidence warning is different: the cancelled turn is waiting for an owner message. It shows **Interrupted** under Needs you, with **Send a message to continue from the recorded state**. Re-check installs that same recorded wait and restores messaging; it does not itself continue work. The generic Working indicator and Mark as handled card are absent. The task is not declared physically stopped, so process-quiescence guards remain in force. Missing bindings, mismatched runtime facts and other recovery states stay unconfirmed.
 
 A bound `EXECUTING` or `REVIEWING` projection whose next step is queued behind another unfinished task's files carries the `waiting_for_files` warning and a `waitReason` sentence naming that task and the files. It stays Working and reads "Waiting for the task “<title>” to release <files>"; the step starts by itself when the holding ends, and Stop and Pause stay available. Nothing asks the owner.
@@ -983,6 +989,63 @@ A worker can ask while the runtime remains EXECUTING for other workers. Its acti
 
 Weekly Claude/Codex usage comes from the runtime quota reader used by route selection. Packaged Claude discovery can use the verified SDK CLI when no global `claude` is on PATH. Claude uses named weekly windows; Codex uses the reported 10080-minute duration in either primary or secondary, never the slot name alone. Missing Codex duration stays unknown. Multiple scopes/connections use the highest reported percentage, not their sum or the last entry. Unknown usage/observation time remains unknown; OpenCode and five-hour windows are omitted. These source and fixture checks do not qualify live account availability.
 
+## Sprint run modes
+
+A sprint has one run mode, chosen when it is created and changed from its controls. The mode decides what starts the next task and what waits for the owner. The interface labels are **Manual**, **Hybrid** and **Automatic**, with these descriptions:
+
+- Manual: "You start each ready task. Starting one never starts its neighbours."
+- Hybrid: "The queue runs one task at a time in dependency order. You confirm each merge."
+- Automatic: "Tasks go to Done on their own in the current branch. You answer work questions and permission requests, and review blocked results."
+
+A sprint saved with the former `automatic` value (the queue and acceptance behavior without automatic finishing) opens as **Hybrid** with unchanged behavior. The first product write that persists this migration also records `sprintRunModeVersion: 1`. The three modes share the sprint's saved checkout choice and per-task options.
+
+**Manual** starts a task only when you press Start. Each result is accepted and finished by you.
+
+**Hybrid** runs the queue. When a task's result passes its checks, it is accepted by the automatic acceptance rules described below and waits in Ready to merge. The queue starts the next dependency-ready task, and you confirm each merge or pull request yourself. Hybrid holds its queue under the same next-actor rule as Automatic (see **Who acts next** below): a result that cannot be accepted, or a run that failed with every effect known, goes back to its agent first; cancelled and archived members no longer stop independent work; every hold names its task, and the hold clears by itself when its cause is gone. Only your own **Pause** stays until you continue the queue; a result that could not be accepted never replaces its reason or lifts it. A refused start also waits for **Try again** instead of being retried by itself. A Hybrid hold that needs you asks for acceptance with the recorded checks (**Accept with recorded checks…**), never for a merge.
+
+**Automatic** runs the same queue and finishes each accepted result on its own:
+
+- It runs only in the project folder checkout, on its current branch. A sprint whose checkout is a separate worktree does not start. Its queue pauses with the recorded reason "Automatic cannot start in a separate worktree. It runs only in the project folder." No fallback checkout, sprint branch or final sprint merge is created.
+- A result is accepted automatically only under the rules of a manual Accept: the runtime verification has passed, no check is open or unpassed, no owner resolution is recorded, and the ordinary acceptance validator passes. An ordinary failed or missing check can return the task to its coordinator for repair. A fresh result goes through review, verification and acceptance again.
+- The accepted result is committed on the same branch as a local commit of the task's recorded files, and then reads Done. The commit does not push, fetch, create a pull request or merge. A result whose recorded changes have already landed on the target reads Done without a second commit. In a folder without Git there is no commit to make: a verified, automatically accepted result reaches Done by itself, closed as is with its acceptance and checks kept (never Not verified), no repository is created, and the queue continues. Unrelated staged files stay in the index. Dependencies release only at Done, not at Ready to merge.
+- If the workspace changed after automatic acceptance, the service can return the task for a fresh result. A Git failure or an unconfirmed effect can still pause the queue. The scheduler rechecks known preconditions and uses the same durable integration identity; a dispatched Git effect is never repeated. The queue never stages files the task did not record.
+- A task whose target branch differs from the current branch is not committed. The queue waits for your confirmation through the existing merge or pull request action (recorded as `owner_integration`).
+
+**Who acts next.** Every hold of a Hybrid or Automatic queue has exactly one next actor, decided in one place by the service and saved on the hold with what the owner is asked and the actions offered:
+
+| Next actor | When | What happens |
+| --- | --- | --- |
+| Agent | A result that cannot be accepted but can be repaired (failed or missing ordinary checks, a changed workspace, changed task files, a result that must be refreshed), or a run that ended as failed with every effect known (for example an answer the runtime could not certify because a review or worker did not finish) | The service sends the task back to its coordinator by itself and keeps the queue running. Each distinct repair is attempted once, with at most two automatic repairs per task. Review and verification run again; a fresh result is accepted and finished by the ordinary rules. Changed task files are named to the coordinator, which must reconcile them with current files. While the repair runs no hold is saved. If the service is busy at that moment (another control, maintenance, or the service stopping), nothing is decided: the repair is tried again on the next pass, and a consent you already gave is kept. |
+| Runtime | A route, quota or sign-in blocker, a conflict being resolved, a sprint task that could not be read, a session of a task that is still being stopped, or a verified result in a folder without Git (it reaches Done by itself, like already landed work) | The service rechecks on every pass and continues by itself. The conversation shows one quiet line and asks nothing. |
+| Owner | Everything else: the repairs are used up, a restricted check was not run, an effect's outcome is unknown (a failed run with such an effect offers only **Close as is…**), an acceptance the finish cannot use (saved without the revision it accepted, or made by hand), you paused or stopped the task, a process of the task did not confirm that it stopped and Cortex cannot yet confirm it by itself (only **Close as is…**; Cortex keeps checking and the hold lifts by itself once it confirms; see unconfirmed task state above), a prerequisite was cancelled, a different target branch, a failed commit, or a finish precondition outside the task | The task's conversation pins a decision card above the message box as soon as the hold arrives, even before the result details load. It states the reason, lists in plain words what Cortex asks you to allow, and offers the primary action that grants it, then the separate **Close as is…** with its own confirmation. The task header's **See what is needed** brings the card into view. |
+
+The owner actions are: **Allow Automatic to finish…** (accept the displayed version with its recorded checks and let Automatic commit it on the named branch and close it), **Accept with recorded checks…** (Hybrid), **Let the agent fix it** (one more bounded repair after the automatic ones, or after a failed commit a fresh result that Automatic checks and commits again; the queue sends it by itself on its next pass, and it applies only to the hold it was offered on), **Allow more attempts** (renews the continuation budget), **I checked it, continue** (acknowledges actions whose outcome is unknown, without replaying them, and lets the agent continue from the recorded state), **Resume** (a task you paused), **Try again** (rechecks a refused start or a finish precondition), **Review and confirm integration…**, **Open the conflict**, **Open sprint settings** and **Close as is…**. After an allow action the service continues and brings the task to Done without further owner action when its checks pass. An outcome that is unknown is never repeated automatically and is never handed to an agent; its card offers only **Close as is…** or, for a stopped run, **I checked it, continue**. A normally completed Automatic task reaches Done without any owner action.
+
+Outside a queue, a run that failed with every effect known shows the same card with **Ask the agent to try again** and **Close as is…**, and its message box stays open: a message reopens the task for its coordinator.
+
+When a tool needs permission, its decision in the conversation names the operation and resource. **Allow once** resumes that request. A result that needs owner review appears in **Needs you**. **Open task** takes you to its conversation. Ordinary manual acceptance and integration into a different branch retain their separate finish controls.
+
+The sidebar keeps the task title visible during recovery. A short status appears beside the title, with the detailed reason available in the task.
+
+**Close as is** lets you end a blocked review in the task itself. The confirmation shows reported outstanding checks. Closing preserves the result and pending files in the shared folder, marks unaccepted work **Not verified**, and creates no commit. The scheduler rechecks the saved pause and can start the next ready member. A policy-restricted check cannot be launched from the result card. An unrequested paid qualification recorded only as a skipped report observation stays visible after current runtime verification. It does not add an obligation to the verification plan or count as a successful check.
+
+**Continuations and pauses.** When a process stop ends a task in an Automatic sprint (for example a driver stop, a session that fails to start, a lost worker, or a failed or unobserved check), the runtime records a continuation with its reason and evidence, and resumes planning without asking you. Each continuation is counted per task:
+
+- The fourth continuation asks the senior consultant once. Its answer joins the next plan through the ordinary consultation path.
+- After eight continuations, the next stop pauses the queue (`continuation_cap`). The task's decision card offers **Allow more attempts**. It starts fresh planning with a renewed bounded retry budget only after the runtime confirms the previous processes and effects have settled. It does not reset the lifetime continuation count or ask the consultant again.
+- A route, connection, quota or authentication problem pauses the task as `external_blocker`. The service resumes it by itself only after the route is observed qualified again. It does not log in or make a paid model call to do so.
+- An effect whose outcome cannot be confirmed pauses the task as `outcome_unknown`. It is never replayed and does not resume by itself; the decision card offers **I checked it, continue** and **Close as is…**.
+
+The scheduler rechecks blocked queues when state changes and on its safety tick. Cancelled and archived members no longer stop independent work. Skipping a member does not make it a completed prerequisite: if only blocked dependents remain, the hold names the task that depends on the prerequisite the queue will not finish, and that prerequisite, and that task's card offers **Close as is…** (whose dialog also offers Cancel). Holds that require you surface as paused-sprint notifications when enabled; a hold the service or an agent resolves, and your own **Pause**, do not notify. **Continue queue** is offered exactly when the hold offers **Try again**; no control overrides an unknown effect, failed verification or manual pause on a task. A hold saved by an earlier version is rewritten with its decision on the next scheduler pass.
+
+A failed or not-run mandatory check is never waived. A repair plan that drops a failed required check is refused. Review and verification remain required, and a continuation grants no new permission.
+
+**Changing the mode.** Switching to Manual stops the queue from starting further tasks; results already accepted stay accepted. Switching to Automatic accepts waiting results that pass. A mode change clears the queue's previous automatic pause. A task that has already started keeps the policy it was started with.
+
+**Policy binding.** The continuation policy is a trusted runtime option. The scheduler binds it when it starts a task of an Automatic sprint. Commands, plans, model tool calls and wire fields cannot set, change or remove it, and the scheduler-only operations that finish and advance an Automatic queue are not reachable from ordinary requests.
+
+**Limits.** Fixture-based WebKitGTK checks cover the acceptance hold, its task link and the close dialog. Full live desktop qualification of Automatic remains outstanding. Real provider authentication, quota recovery and a native GUI run are not observed here. Builds that predate Hybrid do not understand the mode marker, and mixed-version or rollback use is not qualified. Keep the service and the interface at the same version.
+
 ## Editing saved tasks and closing sprints
 
 A task that has never started offers **Edit task…** in its title bar and board/list menu. The shared composer edits the original description and attachments, with title, model/effort/access/language and checkout choices. Saved files load before Save is enabled; a failed read offers Retry and never silently replaces them with an empty list. Save changes starts nothing. The original task version is checked transactionally against Start: an intervening edit refuses a stale save, and any execution identity (including an unknown or failed start) permanently makes the saved request read-only. Live messages and supported session-option changes remain separate actions.
@@ -1009,6 +1072,7 @@ starts do not reserve the project against a new ordinary ACP first prompt.
 Source-event replay still recovers the original ACP task without creating another.
 Each execution has its own ACP session and cancellation target. Project-folder
 tasks still share files; start admission is not a filesystem isolation boundary.
+When all execution steps finish, new writers in that checkout wait for independent review, verification and final reconciliation of the verified revision. Writers already running can finish. Other checkouts have their own reservations.
 Sprint queues retain their dependency checks and pause rules. Manual
 `tasks.start` does not itself check sprint dependencies; dependency-aware
 board/sprint controls are presentation guards, not server enforcement.
@@ -1083,28 +1147,126 @@ are never forcibly removed. After a confirmed squash, optional immediate cleanup
 
 Acceptance binds the runtime-evidence event version, not the execution display version: late transcript/progress writes cannot stale an unchanged result. New runtime evidence and changed source still invalidate old decisions. The UI uses current service review actions and source-drift warnings rather than inferring availability from check counts. An unsuccessful or unconfirmed Accept keeps its reason and Refresh result action beside the result after the transient toast closes. A paused queue identifies the blocking task and its review reason; review it, then use Continue queue.
 
-Automatic sprint acceptance is recorded by the sprint service's `auto_ready` action, not by an owner click. The action decides from the sprint's current run mode at the moment the acceptance would be written: it reads the run mode under the machine lock that a `product.sprint` `patch` of `runMode` also takes, in the same critical section that writes the acceptance. Switching a sprint to Manual stops automatic acceptance of every result not yet accepted, including one that finished while the sprint was Automatic; such a result keeps Accept as an owner action. Switching a sprint to Automatic settles its finished results that are still waiting, through the same validator. The background sprint pass runs when something can move the sprint on (an owner or loop change of a sprint or task record, a runtime task event while a sprint is in motion, start or activation, and a 30-second safety tick while one is), at most every two seconds per project, and offers `auto_ready` only for unaccepted finished members of sprints currently in Automatic, including in a paused queue; a Manual sprint costs that pass no task read, folder observation or window refresh. The action then requires a completed runtime execution whose runtime verification passed and that the owner has not resolved, zero open failed, not-run and unverified checks, no evidence warning, and the source version and digest a manual Accept would record, and it repeats the manual validator under the write transaction. A refusal from that validator (stale result, required checks or review, required acknowledgement, unavailable result) returns `accepted: false`, leaves the task unaccepted and leaves the queue to pause. No open check is acknowledged on the owner's behalf. The action never waits for the machine lock: while another operation holds it, the action returns `accepted: false` with `deferred: true`, the queue neither accepts nor pauses on that pass, and the next pass tries again. A refusal is not evaluated again on every pass: it is kept while the runtime evidence of the task (its revision, state, latest event and latest node), its saved record and the project folder's change signal are unchanged, for at most 30 seconds, and a run-mode change of any sprint of the project drops it. A folder without a usable change signal (no Git, no commit, a nested checkout, over 100,000 paths, or a file changed in the last two seconds) keeps the refusal only while the same inputs hold, for at most 10 seconds. A settle that cannot complete (an unreadable checkout, a Git timeout, a failed save) answers `accepted: false` with the failure and its reason instead of failing the pass, is kept for 10 seconds, and pauses only its own sprint's queue with a reason that names the task and says the result could not be accepted automatically; a paused queue shows that reason, and every other task and sprint keeps running. The kept refusal only skips a refusal; an acceptance always runs the full validator. Task completion does not read sprint state or take the machine lock, so a long operation holding that lock never delays or fails a completion. An automatic record has the manual shape plus `"automatic": true`; a manual record keeps its previous shape.
+Automatic sprint acceptance is recorded by the sprint service's `auto_ready` action, not by an owner click. The action decides from the sprint's current run mode at the moment the acceptance would be written: it reads the run mode under the machine lock that a `product.sprint` `patch` of `runMode` also takes, in the same critical section that writes the acceptance. Switching a sprint to Manual stops automatic acceptance of every result not yet accepted, including one that finished while the sprint was Automatic; such a result keeps Accept as an owner action. Switching a sprint to Automatic settles its finished results that are still waiting, through the same validator. The background sprint pass runs when something can move the sprint on (an owner or loop change of a sprint or task record, a runtime task event while a sprint is in motion, start or activation, and a 30-second safety tick while one is), at most every two seconds per project, and offers `auto_ready` only for unaccepted finished members of sprints currently in Automatic, including in a paused queue; a Manual sprint costs that pass no task read, folder observation or window refresh. The action then requires a completed runtime execution whose runtime verification passed and that the owner has not resolved, zero open failed, not-run and unverified checks, no evidence warning, and the source version and digest a manual Accept would record, and it repeats the manual validator under the write transaction. A refusal from that validator (stale result, required checks or review, required acknowledgement, unavailable result) returns `accepted: false` and leaves the task unaccepted; the queue then sends a repairable result back to the agent or pauses with an owner decision (see [sprint run modes](#sprint-run-modes)). No open check is acknowledged on the owner's behalf. The action never waits for the machine lock: while another operation holds it, the action returns `accepted: false` with `deferred: true`, the queue neither accepts nor pauses on that pass, and the next pass tries again. A refusal is not evaluated again on every pass: it is kept while the runtime evidence of the task (its revision, state, latest event and latest node), its saved record and the project folder's change signal are unchanged, for at most 30 seconds, and a run-mode change of any sprint of the project drops it. A folder without a usable change signal (no Git, no commit, a nested checkout, over 100,000 paths, or a file changed in the last two seconds) keeps the refusal only while the same inputs hold, for at most 10 seconds. A settle that cannot complete (an unreadable checkout, a Git timeout, a failed save) answers `accepted: false` with the failure and its reason instead of failing the pass, is kept for 10 seconds, and pauses only its own sprint's queue with a reason that names the task and says the result could not be accepted automatically; a paused queue shows that reason, and every other task and sprint keeps running. The kept refusal only skips a refusal; an acceptance always runs the full validator. Task completion does not read sprint state or take the machine lock, so a long operation holding that lock never delays or fails a completion. An automatic record has the manual shape plus `"automatic": true`; a manual record keeps its previous shape.
 
 #### Sprint planning limits
 
-Each description-only sprint planning pass bounds engine initialization,
-configuration and response to five minutes. A clarification ends the pass,
-so waiting for the owner does not use that time. An answer is saved to the
-conversation before it starts a fresh pass with the original description and
-all saved answers. If the engine exceeds the limit, the service stops the
-pass and shows a readable reason, not raw engine errors or output. **Resume
-planning** starts a fresh pass from the saved draft and conversation after a
-timeout or **Stop**. Neither planning nor resuming creates or runs tasks.
+A sprint is planned by its own read-only planning task. Creating the sprint
+saves it, then the service creates and starts that task in the project folder
+and records it on the sprint (`planningTaskId`). The task is bound at Start to
+the runtime's sprint planning policy (`SPRINT_PLANNING_BOUND`), a trusted host
+option that commands, plans and model tools cannot set. It is an ordinary task
+with its own coordinator, conversation and workers, but it is shown only inside
+its sprint (see [Sprint planning conversation](#sprint-planning-conversation)).
 
-The planner asks for concise task descriptions without dropping required work,
-acceptance criteria, owner decisions or dependencies. The full reply is limited
-to 128 KiB of UTF-8 text per pass. The service discards an over-limit reply
-rather than parsing a truncated plan. A completed reply that exceeds this
-budget or fails validation gets one corrective pass with its own deadline.
-If the second reply is too long, the chat explains why and suggests splitting
-the work into smaller sprints if retrying keeps failing. A failed revision
-keeps the previous proposal visible for reference, but **Create tasks** stays
-disabled while planning is cancelled.
+The planning task studies the project: its coordinator reads the project and,
+when the study needs it, plans read-only specialists (explorer, architect,
+planner, auditors and the other read-only roles). The runtime refuses a plan
+with a writing role (`read_only_task_writer_refused`) and refuses every project
+write of the task. Its study plan names no verification commands (`[]`, refused
+for every other plan); the runtime verifies the deliverable itself.
+
+The deliverable is the sprint plan, submitted with the `sprint_plan_submit` tool,
+whose schema states the item fields and limits. A plan may have any number of
+tasks. One call carries at most 50 tasks and 128 KiB of UTF-8 JSON, so a larger
+plan arrives in ordered parts; a first part starts a new plan and discards an
+unfinished earlier one. The runtime checks every part with the parts before it
+and, at the final part, the whole assembled plan: unique keys, dependencies that
+name only keys of the whole plan, no cycles, non-empty descriptions and at most
+512 KiB of UTF-8 JSON for the whole plan. A refusal names the failing item
+(1-based index over the whole plan, and key) and rule so the coordinator corrects
+it in the same turn. A plan identical to the previous assembled plan is refused.
+The review receives the whole assembled plan. Every recorded
+plan gets a mandatory independent review against the sprint request and the
+studied evidence (coverage of the description, self-contained items, sane
+dependencies, nothing the evidence contradicts). Findings return the task to its
+coordinator for a revised plan under the usual bounded review rounds and
+coordinator returns; repeated findings or the round limit stop the task the
+run-mode way. An approved plan passes the runtime verification
+(`VERIFICATION_PASSED` with `runtime: sprint_plan`) only when it is the newest
+plan and the one that review approved; the task then completes through the
+ordinary completion gate.
+
+When the planning task completes, the service turns its newest plan into the
+sprint's proposal (a new plan version) and shows **Create tasks**. A completed
+task without a new plan, after the owner asked something and the coordinator
+answered, keeps the current proposal. A task that completes without any plan is
+asked once, in its own conversation, to submit one; if it completes again
+without a plan, planning is cancelled with a readable note. A planning task that
+fails or is cancelled cancels planning with a readable note. **Stop** pauses the
+planning task; **Resume planning** resumes it, asks the same task to continue
+after a cancelled plan, or starts a new planning task when the previous one
+ended. A message in the sprint conversation asks the same planning task for
+changes and disables **Create tasks** until its revised plan is ready; a
+failed revision keeps the previous proposal visible for reference. Planning,
+resuming and revising never create or run the sprint's tasks. Create tasks
+materializes the plan, and the service then closes the planning task as done.
+Closing or deleting the sprint stops a working planning task through
+its execution control. A sprint saved by an earlier version whose
+description-only planning was interrupted keeps its cancelled state and note;
+an answer or Resume planning starts a planning task with the description and
+the saved conversation.
+
+#### Creating a plan's tasks
+
+**Create tasks** is one service operation (`product.sprint` action
+`materialize {sprintId, planVersion}`), not a sequence of client requests. Under
+the machine lock the service checks that the sprint is open, that its planning
+is ready and that the named version is its current plan, validates the plan
+(keys, descriptions, dependencies and cycles), and then creates every task
+together with the sprint's transition to created: all drafts, with the sprint's
+route and checkout kind (a sprint-wide checkout wins over a plan item's own),
+the plan item's title, sprint membership, dependencies mapped from plan keys to
+task identities and the inherited target branch, and the sprint's
+`planning: created`, `materializedVersion` and `taskIds`. The drafts are written
+in one project-store transaction and the saved sprint record is replaced inside
+that same transaction. Any failure rolls the drafts back and leaves the sprint
+ready with the same plan; if the saved record was already replaced, it is
+restored to the copy read under the lock. A plan of any size is one transition,
+so a closed window, a lost connection or a service restart never leaves part of
+a plan created.
+
+Each task's identity is derived from the sprint, the plan version and the plan
+key, so the same plan always names the same tasks. A repeated **Create tasks**
+(a double click, a retry after a lost reply, or a new request) for a version that
+is already created answers with the same tasks and creates nothing; another
+version of a created sprint, a stale version, a plan that is not ready, and an
+unbound project store are refused before any effect.
+
+Earlier versions created a plan's tasks one by one from the window and recorded
+the sprint as created only at the end, so an interrupted Create tasks could leave
+tasks that name the sprint but are not among its tasks. They are never adopted:
+their set is unknown and they were created under other identities. Create tasks
+creates the full plan beside them and its reply lists them; the window says how
+many there are, and they can be deleted on the Board. **Delete sprint** also
+removes them with the sprint.
+
+#### Sprint planning conversation
+
+A sprint whose planning runs as its own read-only planning task (the sprint
+names it as `planningTaskId`) shows that task inside the sprint, never as a
+task of its own. The sprint page has **Conversation**, **Workers**, **Plan**,
+**Board** and **Summary**. Conversation is the planning task's conversation
+drawn with the same parts as any task's: the coordinator's messages, the
+folded "Worked …" steps, question and permission cards, the workers bar and
+the task composer. It starts with the sprint's description, not the planner's
+instructions, and ends with the proposed plan's line (**Open plan**) and any
+note the service wrote about planning, such as a failure or a time limit.
+Workers is the planning task's Work details, with each worker's activity.
+
+A message from the composer asks for changes to the plan and continues the same
+planning task; **Create tasks** waits for the revised plan. Answers, **Stop**,
+**Resume** and the model choice go through the sprint's planning, so the
+sprint's planning state changes with them. Sending closes once the tasks are
+created. The plan is reviewed, edited and approved on the Plan tab as before.
+
+The planning task has no sidebar row, board card, list row, count, Inbox row,
+search result or desktop notification of its own, and no Git or commit
+action is offered for it. Its open question or permission makes the sprint
+read **Needs you** and gives the sprint one Inbox row; a notification about it
+opens the sprint's Conversation, and any address of the planning task opens
+its sprint (its Workers tab for a worker address). A sprint planned without such
+a task keeps its earlier **Chat** tab and planning conversation.
 
 ### Already in the branch and external completion
 
@@ -1136,9 +1298,9 @@ On activation, a saved materialized sprint whose members are missing from the se
 
 Retracted worker checks (withdrawn probes or invocation errors) are rederived from the persisted result, exact provisioning and command receipts, not the reviewer-only `current_outcome` field. Valid retractions are omitted from the active result checks and worker overview counts, as in the runtime's own completion gate. They neither block Accept/Ready to merge nor count as passes. Other failures, missing receipts and current runtime verification requirements remain blocking.
 
-Sprint creation first checks that the chosen model exists in the current selectable catalogue. A missing/unavailable model refuses with a connect/select-model explanation, keeps the description in the form and creates no sprint or planning task. A preset name alone is not a connected model. Sprint creation offers the same **Where it works** choice as a single task: **Project folder** (the currently open local branch) or **Separate worktree**. The machine default fills the form until the owner chooses; unsupported worktrees and non-Git folders use Project folder with an explanation. Creation saves its chosen checkout kind, route and target before starting description-only planning. Planning and Summary show the saved checkout choice. Every task materialized from the plan inherits the sprint checkout kind, overriding per-item plan hints; worktree mode uses the existing per-task worktree preparation on explicit start, not one shared sprint checkout. Manual and automatic starts use those same saved task options. No checkout is created during planning, no existing checkout moves, and machine defaults are not rewritten. Older sprints without a saved choice keep their per-item/default Project folder behavior. The choice is fixed for that sprint; task execution/recovery semantics are unchanged. The service uses a separate bounded read-only/plan-mode auxiliary session in an empty temporary directory, with no project tools or runtime task. It returns a validated dependency plan or an owner question; it must not implement the description or claim project inspection. The planner must ask the owner, not decide itself, when the description explicitly requires an owner question. For a multi-item plan, the planner supplies each task's self-contained scope, acceptance criteria and relevant owner answers in plain text; only minimal shared context belongs there, never sibling work or serialized conversation records. An unanswered owner-question requirement belongs only to its own item. The service does not append the whole sprint to every item. A sole planned task retains the original owner requirements and plain-text follow-ups as a safeguard against a shortened summary; oversized combined descriptions refuse rather than truncate. Scope decomposition remains model-generated, not a filesystem permission boundary. Create tasks materializes the plan as unstarted user tasks. Only Run sprint or an explicit task Start begins execution. The auxiliary turn explicitly requests the task-plan JSON as well as supplying session instructions. An invalid reply is first corrected once: the service starts one more planning pass (its own deadline) that repeats the request with the exact validation error and the required schema. The parser accepts a missing or single-string `dependsOn`, truncates a title over 200 characters and extracts exactly one JSON object from surrounding prose or a code fence; duplicate keys, unknown dependency keys and cycles are always errors. If the second reply is also invalid, planning is cancelled with a stable code and the failing task (1-based index and key) and rule, for example "task 4 (t4): description is empty". Invalid prose, task/dependency validation errors, incomplete output and engine-stage failures add a service-owned readable explanation to the planning chat; raw model output and engine errors are not displayed. The cancelled banner offers Resume planning and the chat retains the failure note. Invalid output or interrupted planning never produces a ready state with a null plan. Cancellation fences late output and closes the auxiliary session; older hidden planning runs are stopped through their execution control. Materialized tasks inherit its settings and target; changing a task target makes that target explicit. Sprint-target changes propagate to inherited task targets, not explicit overrides. Once tasks are materialized, change their routes individually rather than silently rewriting them.
+Sprint creation first checks that the chosen model exists in the current selectable catalogue. A missing/unavailable model refuses with a connect/select-model explanation, keeps the description in the form and creates no sprint or planning task. A preset name alone is not a connected model. Sprint creation offers the same **Where it works** choice as a single task: **Project folder** (the currently open local branch) or **Separate worktree**. The machine default fills the form until the owner chooses; unsupported worktrees and non-Git folders use Project folder with an explanation. Creation saves its chosen checkout kind, route and target before starting the planning task, which always studies the project folder. Planning and Summary show the saved checkout choice. Every task materialized from the plan inherits the sprint checkout kind, overriding per-item plan hints; worktree mode uses the existing per-task worktree preparation on explicit start, not one shared sprint checkout. Manual, Hybrid and Automatic starts use those same saved task options; an Automatic sprint starts only in the project folder (see [sprint run modes](#sprint-run-modes)). No checkout is created during planning, no existing checkout moves, and machine defaults are not rewritten. Older sprints without a saved choice keep their per-item/default Project folder behavior. The choice is fixed for that sprint; task execution/recovery semantics are unchanged. Planning runs in the sprint's read-only planning task (see [Sprint planning limits](#sprint-planning-limits)): it studies the project and proposes a validated, independently reviewed dependency plan; it never implements the description. The planning task must ask the owner, not decide itself, when the description explicitly requires an owner question. For a multi-item plan, the planner supplies each task's self-contained scope, acceptance criteria and relevant owner answers in plain text; only minimal shared context belongs there, never sibling work or serialized conversation records. An unanswered owner-question requirement belongs only to its own item. The service does not append the whole sprint to every item. A sole planned task retains the original owner requirements and plain-text follow-ups as a safeguard against a shortened summary; oversized combined descriptions refuse rather than truncate. Scope decomposition remains model-generated, not a filesystem permission boundary. Create tasks materializes the plan as unstarted user tasks. Only Run sprint or an explicit task Start begins execution. The plan arrives only through the runtime-validated `sprint_plan_submit` tool, never parsed from prose. A refused plan names the failing task (1-based index and key) and rule, for example "task 4 (t4): description is empty"; duplicate keys, unknown dependency keys and cycles are always errors. Planning failures add a service-owned readable explanation to the planning conversation; raw model output and engine errors are not displayed. The cancelled banner offers Resume planning and the conversation retains the failure note. A failed or interrupted planning task never produces a ready state with a null plan. Materialized tasks inherit its settings and target; changing a task target makes that target explicit. Sprint-target changes propagate to inherited task targets, not explicit overrides. Once tasks are materialized, change their routes individually rather than silently rewriting them.
 
-The activated service child advances automatic sprints without a window.
+The activated service child advances Hybrid and Automatic sprints without a window.
 It reads bounded runtime projections, pauses for questions, unknown outcomes,
 conflicts or missing/unsuccessful checks, and uses a stable explicit start identity.
 A question pause records the waiting execution identities and clears when those
@@ -1466,7 +1628,7 @@ Native delivery: the draft's files are decoded and checked once more inside the 
 not filesystem paths, are delivered. Neither saving a draft nor attaching a file
 starts a model call.
 
-The data contract also accepts optional attachments for sprint creation, planning answers/messages, review comments and conflict-resolution guidance. Sprint descriptions and conversation entries list their saved files by reference; a file's bytes are read when it is opened. Planning uses the same ACP image/resource representation as task inputs, through the existing auxiliary planner (no project tools), and never places base64 in prompt text or diagnostics. A sprint's initial files and all planning follow-ups share eight files/4 MiB in total because a retry resends that input; excess is refused before saving. Omitted attachment fields on older records remain valid. The private product-state response has a bounded aggregate size below the 8-MiB local frame cap; a full state refuses new content rather than saving an unreadable record. A task's creation files are listed on demand through `readTaskAttachments` on the real port, backed by the owner-only targeted `product.read` selector, as references (their bodies are saved privately on that read), rather than copied into every board snapshot.
+The data contract also accepts optional attachments for sprint creation, planning answers/messages, review comments and conflict-resolution guidance. Sprint descriptions and conversation entries list their saved files by reference; a file's bytes are read when it is opened. The planning task receives them as its own draft attachments, the same ACP image/resource representation as task inputs, and never places base64 in prompt text or diagnostics. A sprint's initial files and all planning follow-ups share eight files/4 MiB in total because a retry resends that input; excess is refused before saving. Omitted attachment fields on older records remain valid. The private product-state response has a bounded aggregate size below the 8-MiB local frame cap; a full state refuses new content rather than saving an unreadable record. A task's creation files are listed on demand through `readTaskAttachments` on the real port, backed by the owner-only targeted `product.read` selector, as references (their bodies are saved privately on that read), rather than copied into every board snapshot.
 
 ## Task Stop and Resume
 

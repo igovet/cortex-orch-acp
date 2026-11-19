@@ -1,6 +1,6 @@
 import type { WorkspaceState } from "@cortex/workspace-domain";
 import { hrefOf, type Route, type Router } from "./router";
-import { sprintRoute } from "./selectors";
+import { planningPlace, sprintRoute } from "./selectors";
 
 /**
  * Where a desktop notification leads. It names things, never an address: the place is worked out from what the window knows
@@ -67,6 +67,12 @@ export function targetPlace(state: WorkspaceState, target: NotificationTarget, f
   const waiting = (taskId: string, decision: string) => state.sessions.find(s => s.taskId === taskId)?.decisions
     .some(d => d.id === decision && !d.answer && !d.withdrawn) ?? false;
   if (target.kind === "question" || target.kind === "result" || target.kind === "task") {
+    // A sprint's planning task has no page of its own: what it asks or ends with opens its sprint's conversation.
+    const planned = state.sprints.find(s => s.planningTaskId === target.task);
+    if (planned) {
+      const machine = state.projects.find(p => p.id === planned.projectId)?.machineId ?? project?.machineId ?? fallbackMachine;
+      return { route: planningPlace(machine, planned, {}), reveal: target.kind === "question" && waiting(target.task, target.decision) ? decisionCard(target.decision) : null };
+    }
     const task = state.tasks.find(t => t.id === target.task);
     const machine = state.projects.find(p => p.id === task?.projectId)?.machineId ?? project?.machineId ?? fallbackMachine;
     const reveal = target.kind === "question" ? (task && waiting(task.id, target.decision) ? decisionCard(target.decision) : null)
@@ -76,6 +82,8 @@ export function targetPlace(state: WorkspaceState, target: NotificationTarget, f
     const sprint = state.sprints.find(s => s.id === target.sprint && !s.archivedAt);
     const machine = state.projects.find(p => p.id === sprint?.projectId)?.machineId ?? project?.machineId ?? fallbackMachine;
     const reveal = target.kind === "planning" && sprint?.planningTaskId && waiting(sprint.planningTaskId, target.decision) ? decisionCard(target.decision) : null;
+    // A planning question still waiting is answered in the sprint's conversation, even once its tasks exist.
+    if (sprint && reveal) return { route: planningPlace(machine, sprint, {}), reveal };
     if (sprint) return { route: sprintRoute(machine, sprint), reveal };
   }
   if (project) return { route: { name: "project", machine: project.machineId, project: project.id, view: "board", scope: { kind: "all" } }, reveal: null };

@@ -3,7 +3,7 @@ import { engineLabel, ENGINE_KEYS } from "./catalog";
 import { pathMissing } from "./mcp";
 import { modelLabel, notOffered, type PreviewContext } from "./routing-rules";
 
-export const SURFACE_LABELS: Record<SurfaceKey | "connections", string> = { routing: "routing rules", user_defaults: "coordinator and limits", project_ceiling: "project limits", mcp_servers: "MCP servers", connections: "connections" };
+export const SURFACE_LABELS: Record<SurfaceKey | "connections", string> = { routing: "routing rules", user_defaults: "defaults", project_ceiling: "project ceiling", mcp_servers: "MCP servers", connections: "connections" };
 export const PROFILE_SECTION_LABELS: Record<ProfileSection, string> = { routing: "routing", defaults: "defaults and ceiling", mcp: "MCP usage policy", sessions: "session limits" };
 export const PROFILE_SECTIONS = Object.keys(PROFILE_SECTION_LABELS) as ProfileSection[];
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);

@@ -447,9 +447,9 @@ fn engine_command(cmdline: &[u8]) -> bool {
 /// other), and its relays and App Server inherit it. A process whose command line or
 /// working directory cannot be read is counted (fail-closed); a process that exited
 /// or is a zombie cannot act and is not. An unreadable process table counts.
-fn engine_process_in(roots: &[std::path::PathBuf]) -> bool {
+fn engine_process_in(proc_root: &std::path::Path, roots: &[std::path::PathBuf]) -> bool {
     use std::os::unix::fs::MetadataExt;
-    let Ok(entries) = std::fs::read_dir("/proc") else {
+    let Ok(entries) = std::fs::read_dir(proc_root) else {
         return true;
     };
     let me = std::process::id();
@@ -474,7 +474,7 @@ fn engine_process_in(roots: &[std::path::PathBuf]) -> bool {
             Err(e) if gone(&e) => continue,
             Err(_) => return true,
         }
-        let cmdline = match std::fs::read(format!("/proc/{pid}/cmdline")) {
+        let cmdline = match std::fs::read(entry.path().join("cmdline")) {
             Ok(c) => c,
             Err(e) if gone(&e) => continue,
             Err(_) => return true,
@@ -483,7 +483,7 @@ fn engine_process_in(roots: &[std::path::PathBuf]) -> bool {
         if cmdline.is_empty() || !engine_command(&cmdline) {
             continue;
         }
-        match std::fs::read_link(format!("/proc/{pid}/cwd")) {
+        match std::fs::read_link(entry.path().join("cwd")) {
             Ok(cwd) if !roots.iter().any(|r| cwd.starts_with(r)) => continue,
             Err(e) if gone(&e) => continue,
             _ => return true,
@@ -533,9 +533,9 @@ fn engine_roots_tx(
 fn settle_without_engine_tx(
     db: &rusqlite::Transaction<'_>,
     root: &std::path::Path,
+    engine_proc: &std::path::Path,
     failures: &mut Vec<(String, String)>,
 ) -> CoreResult<std::collections::BTreeSet<String>> {
-    let mut settled_tasks = std::collections::BTreeSet::new();
     let open = db
         .prepare(
             "SELECT task_id,attempt_id FROM (
@@ -548,9 +548,39 @@ fn settle_without_engine_tx(
         )?
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
         .collect::<Result<Vec<_>, _>>()?;
-    if open.is_empty() || engine_process_in(&engine_roots_tx(db, root)?) {
-        return Ok(settled_tasks);
+    if open.is_empty() || !no_engine_process_tx(db, root, engine_proc)? {
+        return Ok(Default::default());
     }
+    settle_without_engine_attempts_tx(
+        db,
+        open,
+        "service_gone_and_no_engine_process_in_project",
+        failures,
+    )
+}
+
+/// The process evidence both settlements of an attempt without a process record rely
+/// on: no engine process ([`engine_process_in`]) works in the project or any task's
+/// root. Fail-closed: anything unreadable counts as such a process.
+fn no_engine_process_tx(
+    db: &rusqlite::Transaction<'_>,
+    root: &std::path::Path,
+    engine_proc: &std::path::Path,
+) -> CoreResult<bool> {
+    Ok(!engine_process_in(engine_proc, &engine_roots_tx(db, root)?))
+}
+
+/// Settles each `(task, attempt)` once [`no_engine_process_tx`] holds: the delegation
+/// becomes `terminated`, the reservation `released` with observation
+/// `no_engine_process`, and each task gets one `NATIVE_PROCESS_SETTLED` event naming
+/// `evidence`. One task's failed writes roll back alone. Returns the settled tasks.
+fn settle_without_engine_attempts_tx(
+    db: &rusqlite::Transaction<'_>,
+    open: Vec<(String, String)>,
+    evidence: &str,
+    failures: &mut Vec<(String, String)>,
+) -> CoreResult<std::collections::BTreeSet<String>> {
+    let mut settled_tasks = std::collections::BTreeSet::new();
     let mut per_task: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (task, attempt) in open {
         per_task.entry(task).or_default().push(attempt);
@@ -566,8 +596,7 @@ fn settle_without_engine_tx(
                 db,
                 &task,
                 "NATIVE_PROCESS_SETTLED",
-                json!({"count":settled.len(),"delegations":settled,
-                    "evidence":"service_gone_and_no_engine_process_in_project"}),
+                json!({"count":settled.len(),"delegations":settled,"evidence":evidence}),
             )?;
             Ok(())
         });
@@ -580,6 +609,48 @@ fn settle_without_engine_tx(
     }
     Ok(settled_tasks)
 }
+
+/// The attempts a running service may settle by itself: each one's every unsettled
+/// row is a recorded unconfirmed exit (`ambiguous`, so nothing of it is still being
+/// started or stopped), it has no process record (those are the registry rules',
+/// at startup), its task has a runtime record, and it is bound to its task's current
+/// owner epoch (a provisioning row or channel exists, and none names another epoch).
+fn unconfirmed_attempts(db: &rusqlite::Connection) -> CoreResult<Vec<(String, String)>> {
+    Ok(db
+        .prepare(
+            "SELECT o.task_id,o.attempt_id FROM (
+                SELECT task_id,attempt_id FROM delegation_provisioning
+                    WHERE status='ambiguous' AND attempt_id IS NOT NULL
+                UNION SELECT task_id,attempt_id FROM capacity_reservations WHERE state='ambiguous') o
+             JOIN task_owners w ON w.task_id=o.task_id
+             WHERE EXISTS(SELECT 1 FROM runtime_tasks t WHERE t.task_id=o.task_id)
+             AND NOT EXISTS(SELECT 1 FROM attempt_process_registry a WHERE a.attempt_id=o.attempt_id)
+             AND NOT EXISTS(SELECT 1 FROM delegation_provisioning p WHERE p.attempt_id=o.attempt_id
+                AND p.status NOT IN ('terminated','ambiguous'))
+             AND NOT EXISTS(SELECT 1 FROM capacity_reservations r WHERE r.attempt_id=o.attempt_id
+                AND r.state NOT IN ('released','ambiguous'))
+             AND (EXISTS(SELECT 1 FROM delegation_provisioning p WHERE p.attempt_id=o.attempt_id AND p.task_id=o.task_id)
+                OR EXISTS(SELECT 1 FROM trusted_channels c WHERE c.attempt_id=o.attempt_id AND c.task_id=o.task_id))
+             AND NOT EXISTS(SELECT 1 FROM delegation_provisioning p WHERE p.attempt_id=o.attempt_id
+                AND p.owner_epoch!=w.epoch)
+             AND NOT EXISTS(SELECT 1 FROM trusted_channels c WHERE c.attempt_id=o.attempt_id
+                AND c.owner_epoch!=w.epoch)
+             ORDER BY 1,2",
+        )?
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Backoff of the live re-check while its evidence stays inconclusive. A changed set
+/// of unconfirmed attempts is looked at at once.
+#[derive(Default, Debug)]
+pub(crate) struct ExitRecheck {
+    attempts: Vec<(String, String)>,
+    next: Option<std::time::Instant>,
+    delay: std::time::Duration,
+}
+const RECHECK_FIRST: std::time::Duration = std::time::Duration::from_secs(15);
+const RECHECK_MAX: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// A broker directory (`cortex-mcp-` and 24 hex digits) of a service that died is
 /// never removed by that service. One no socket of this system is bound in (as
@@ -866,12 +937,15 @@ fn recover_task_tx(
         Some("native_verification_outcome_unknown")
     } else if control_unknown {
         Some("native_control_outcome_unknown")
-    } else if unknown || interrupted {
+    } else if unknown || (interrupted && !lifecycle::automatic::enabled(db, task)?) {
         Some("native_session_outcome_unknown")
     } else {
         None
     };
     if let Some(reason) = reason {
+        if lifecycle::automatic::pause_unsettled_tx(db, task, reason)? {
+            return Ok(None);
+        }
         // Already held for exactly this (the effective) reason in the state it
         // would be held in: an earlier restart recorded it; record nothing again.
         let held: Option<String> = db.query_row(
@@ -897,6 +971,11 @@ fn recover_task_tx(
             )?;
             domain::native_recovery_required_tx(db, &task, reason)?;
         }
+    } else if interrupted
+        && !matches!(state, TaskState::Paused | TaskState::WaitingUser)
+        && lifecycle::automatic::enabled(db, task)?
+    {
+        domain::stop_tx(db, task, "native_service_interrupted")?;
     } else if matches!(
         state,
         TaskState::Planning
@@ -974,9 +1053,18 @@ fn descriptive_command_hold_tx(db: &rusqlite::Transaction<'_>, task: &str) -> Co
     .unwrap_or(false))
 }
 
+pub(super) const SYSTEM_PROC: &str = "/proc";
+
 impl Runtime {
-    /// Called once after acquiring the project scheduler lease, before publication.
     pub(crate) async fn recover(self: &Arc<Self>) -> CoreResult<()> {
+        self.recover_from(std::path::Path::new(SYSTEM_PROC)).await
+    }
+
+    /// Called once after acquiring the project scheduler lease, before publication.
+    pub(super) async fn recover_from(
+        self: &Arc<Self>,
+        engine_proc: &std::path::Path,
+    ) -> CoreResult<()> {
         self.host
             .executor
             .publication(|store| {
@@ -990,6 +1078,7 @@ impl Runtime {
             remove_stale_brokers(&key.directory());
         }
         let root = self.host.root.clone();
+        let engine_proc = engine_proc.to_owned();
         // The retired Python host could leave a desktop start as `unknown` after its runtime
         // task had been created. Native starts are written atomically as `claimed` and never
         // `unknown`. When the execution is validly bound to an existing runtime task (same
@@ -1023,7 +1112,7 @@ impl Runtime {
                 }
                 settle_released_unstarted_tx(db, &mut failures)?;
                 settle_unlaunched_tx(db, &mut failures)?;
-                let interrupted = settle_without_engine_tx(db, &root, &mut failures)?;
+                let interrupted = settle_without_engine_tx(db, &root, &engine_proc, &mut failures)?;
                 if !boot.is_empty() {
                     settle_previous_boot_tx(db, &boot, &mut failures)?;
                 }
@@ -1132,9 +1221,18 @@ impl Runtime {
                     // A completion gap is not an unknown outcome: nothing was lost and
                     // nothing is running. It takes the same path as on a live driver, so
                     // the coordinator (then the owner) decides, never an "interrupted" hold.
+                    let t = task.clone();
+                    let automatic = match runtime
+                        .host
+                        .executor
+                        .read(move |db| lifecycle::automatic::enabled(db, &t))
+                    {
+                        Ok(reply) => matches!(reply.await, Ok(Ok(true))),
+                        Err(_) => false,
+                    };
                     if !*cancelled.borrow()
                         && !*runtime.stop.borrow()
-                        && error.code().starts_with("completion_")
+                        && (automatic || error.code().starts_with("completion_"))
                     {
                         runtime
                             .stop_after_error(&task, &owner, error, cancelled.clone())
@@ -1162,9 +1260,166 @@ impl Runtime {
     }
 }
 
+/// Live re-check of unconfirmed exits. A session whose shutdown this service could
+/// not confirm leaves its rows `ambiguous` ([`crate::native_sessions`]); startup
+/// recovery is no longer the only place that settles them.
+impl Runtime {
+    /// Called on the sprint scheduler's passes (its safety tick and wake-ups). Returns
+    /// whether unconfirmed attempts remain to be looked at again.
+    pub(crate) async fn resettle_unconfirmed_exits(self: &Arc<Self>) -> CoreResult<bool> {
+        self.resettle_unconfirmed_exits_from(std::path::Path::new(SYSTEM_PROC))
+            .await
+    }
+
+    /// Whether any attempt qualifies for the live re-check (one read, no process scan).
+    pub(crate) async fn unconfirmed_exits_pending(&self) -> CoreResult<bool> {
+        let attempts = self
+            .host
+            .executor
+            .read(|db| unconfirmed_attempts(db))?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        Ok(!attempts.is_empty())
+    }
+
+    /// Settles [`unconfirmed_attempts`] with the same process evidence, writes and
+    /// event as startup recovery's settlement without an engine
+    /// ([`no_engine_process_tx`], [`settle_without_engine_attempts_tx`]; evidence
+    /// `unconfirmed_exit_and_no_engine_process_in_project`), in one transaction that
+    /// re-reads the rows. It never signals, kills or relaunches anything. While an
+    /// engine process may still work in the project nothing changes and the check
+    /// backs off (15 s, doubling to 10 min; a changed set of attempts is looked at at
+    /// once). A settled task that no driver runs and that only that exit held, in
+    /// Automatic, continues like any automatic stop
+    /// ([`lifecycle::automatic::exit_settled_tx`]); any other task keeps its state and
+    /// is an ordinary interrupted turn for its owner, and an answered stop question
+    /// owed a relaunch gets it.
+    pub(super) async fn resettle_unconfirmed_exits_from(
+        self: &Arc<Self>,
+        engine_proc: &std::path::Path,
+    ) -> CoreResult<bool> {
+        if *self.stop.borrow() {
+            return Ok(false);
+        }
+        let attempts = self
+            .host
+            .executor
+            .read(|db| unconfirmed_attempts(db))?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        {
+            let mut recheck = self.exit_recheck.lock().unwrap_or_else(|e| e.into_inner());
+            if attempts.is_empty() {
+                *recheck = ExitRecheck::default();
+                return Ok(false);
+            }
+            if recheck.attempts != attempts {
+                *recheck = ExitRecheck {
+                    attempts: attempts.clone(),
+                    ..ExitRecheck::default()
+                };
+            }
+            if recheck
+                .next
+                .is_some_and(|at| std::time::Instant::now() < at)
+            {
+                return Ok(true);
+            }
+        }
+        // The serial lane of automatic continuation and owner controls: no driver of
+        // these tasks is started by them while this pass decides.
+        let serial = self.controls.lock().await;
+        let mut driven = std::collections::BTreeSet::new();
+        for (task, _) in &attempts {
+            if self.driven(task).await {
+                driven.insert(task.clone());
+            }
+        }
+        let root = self.host.root.clone();
+        let engine_proc = engine_proc.to_owned();
+        // The attempts still unconfirmed after this pass, and whether any was settled.
+        let (remaining, settled) = self
+            .host
+            .executor
+            .write(move |db| {
+                let open = unconfirmed_attempts(db)?;
+                if open.is_empty() || !no_engine_process_tx(db, &root, &engine_proc)? {
+                    return Ok((open, false));
+                }
+                let mut failures = Vec::new();
+                let settled = settle_without_engine_attempts_tx(
+                    db,
+                    open,
+                    "unconfirmed_exit_and_no_engine_process_in_project",
+                    &mut failures,
+                )?;
+                for task in settled.iter().filter(|t| !driven.contains(*t)) {
+                    // A refusal keeps the task exactly as it was, for its owner.
+                    let _ = isolated(db, || lifecycle::automatic::exit_settled_tx(db, task));
+                }
+                Ok((unconfirmed_attempts(db)?, !settled.is_empty()))
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        drop(serial);
+        let pending = !remaining.is_empty();
+        {
+            let mut recheck = self.exit_recheck.lock().unwrap_or_else(|e| e.into_inner());
+            if pending {
+                recheck.attempts = remaining;
+                recheck.delay = if recheck.delay.is_zero() {
+                    RECHECK_FIRST
+                } else {
+                    (recheck.delay * 2).min(RECHECK_MAX)
+                };
+                recheck.next = Some(std::time::Instant::now() + recheck.delay);
+            } else {
+                *recheck = ExitRecheck::default();
+            }
+        }
+        if settled {
+            let _ = self.continue_owed_tasks().await;
+        }
+        Ok(pending)
+    }
+}
+
 #[cfg(test)]
 #[path = "native_recovery_legacy_tests.rs"]
 mod legacy_tests;
+
+// Recovery unit tests exercise the same scanner against per-project proc entries.
+#[cfg(test)]
+pub(super) mod fixture {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    pub(super) fn engine_proc(project: &Path) -> PathBuf {
+        let proc_root = project.join("fixture-proc");
+        std::fs::create_dir_all(&proc_root).unwrap();
+        proc_root
+    }
+
+    pub(crate) fn engine(project: &Path, cwd: &Path) -> PathBuf {
+        let pid = if std::process::id() == 1 { "2" } else { "1" };
+        let entry = engine_proc(project).join(pid);
+        std::fs::create_dir(&entry).unwrap();
+        std::fs::write(entry.join("cmdline"), b"codex-acp\0").unwrap();
+        std::os::unix::fs::symlink(cwd, entry.join("cwd")).unwrap();
+        entry
+    }
+
+    impl Runtime {
+        pub(crate) async fn recover_fixture(self: &Arc<Self>) -> CoreResult<()> {
+            self.recover_from(&engine_proc(&self.host.root)).await
+        }
+        /// One scheduler pass's re-check of unconfirmed exits, against the fixture table.
+        pub(crate) async fn resettle_fixture(self: &Arc<Self>) -> CoreResult<bool> {
+            self.resettle_unconfirmed_exits_from(&engine_proc(&self.host.root))
+                .await
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1176,6 +1431,24 @@ mod tests {
         task::{Context, Poll, Waker},
         time::Duration,
     };
+
+    #[test]
+    fn engine_process_probe_excludes_unrelated_roots_but_not_unreadable_cwd() {
+        let scratch =
+            std::env::temp_dir().join(format!("engine-probe-{}", crate::identity().unwrap()));
+        let root = scratch.join("project");
+        let entry = fixture::engine(&root, &scratch);
+        let proc_root = fixture::engine_proc(&root);
+        assert!(!engine_process_in(&proc_root, std::slice::from_ref(&root)));
+
+        // A non-symlink cwd yields EINVAL, not process-disappeared evidence.
+        let cwd = entry.join("cwd");
+        std::fs::remove_file(&cwd).unwrap();
+        std::fs::write(&cwd, b"not a symlink").unwrap();
+        assert!(engine_process_in(&proc_root, std::slice::from_ref(&root)));
+        assert!(engine_process_in(&proc_root.join("missing"), &[root]));
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
 
     #[tokio::test]
     async fn legacy_adoption_is_fenced_and_never_replays_unknown_effects() {
@@ -1247,8 +1520,13 @@ mod tests {
         let registered = service.register(&project, "Legacy").await.unwrap();
         let id = registered["projectId"].as_str().unwrap();
         let lease = SchedulerOwner::acquire(&key).unwrap();
+        let engine_proc = fixture::engine_proc(&project);
         assert_eq!(
-            service.activate(id).await.unwrap_err().to_string(),
+            service
+                .activate_inner(id, &engine_proc)
+                .await
+                .unwrap_err()
+                .to_string(),
             "scheduler_owner_busy"
         );
         store
@@ -1265,7 +1543,10 @@ mod tests {
             })
             .unwrap();
         drop(lease);
-        assert_eq!(service.activate(id).await.unwrap()["executionHost"], "rust");
+        assert_eq!(
+            service.activate_inner(id, &engine_proc).await.unwrap()["executionHost"],
+            "rust"
+        );
         service.stop().await.unwrap();
         store.read(|db| {
             for (task,reason) in [("planning","native_session_outcome_unknown"),("worker","native_session_outcome_unknown"),
@@ -1297,7 +1578,7 @@ mod tests {
             .native
             .get(id)
             .unwrap()
-            .recover()
+            .recover_fixture()
             .await
             .unwrap();
         store.read(|db| {

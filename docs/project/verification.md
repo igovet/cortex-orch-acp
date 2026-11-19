@@ -39,6 +39,16 @@ remain unverified on `result_submit`, while safe `echo`/`tail` wrappers retain s
 propagation and exact-rerun coverage.
 See [check closure](../features/orchestration/index.md#check-history-and-current-outcome).
 
+A writing execution worker that submits a failed assignment with an open, verified
+failed check receives one repair opportunity in that attempt. Read-only workers retain the failure and
+evidence for the coordinator, which schedules a writing repair or changes the
+plan. A retry reply does not close the assignment. Ordinary repair plans carry
+every unresolved final-verification argv into the next revision. Only an exact
+later passing runtime receipt closes that argv, or an explicit removal through
+`verification_submit` followed by an owner answer to a task-global question opened after the removal. A worker-local answer or ordinary retry never
+waives the obligation. Automatic continuation follows stricter rules and never
+waives a failed, missing, truncated or unobservable check.
+
 
 ## Targeted tests for a task
 

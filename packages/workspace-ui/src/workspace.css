@@ -483,6 +483,44 @@ textarea[data-grow] { max-height: 40vh; }
 
 /* Orchestration settings. Columns are fixed so a value changing never moves its neighbours. */
 .set-in.wide { max-width: 1120px; }
+/* The profile bar: one line under the context bar, with a hairline below; two lines below 720 px. Its controls keep the row size. */
+.set-prof { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-height: 40px; padding: 6px 24px; border-bottom: 1px solid var(--line); font-size: var(--t-cap); color: var(--fg-2); }
+.set-prof-r { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.set-prof-a { margin-left: auto; }
+.set-prof-note { flex: 1 1 100%; }
+.set-prof .chip { gap: 4px; }
+/* One control height across the bar: the picker, the Modified chip and the actions (taller in the phone shell, as its buttons are). */
+.set-prof { --prof-h: 28px; }
+html[data-shell="phone"] .set-prof { --prof-h: 32px; }
+.set-prof :is(.pick, .chip, .btn) { height: var(--prof-h); }
+/* Connections: the row's actions take the width their words need, so they never run under the More button. */
+.crow { --cols: minmax(150px, 1fr) 120px 188px 40px; }
+/* A settings state line may need two lines on a phone: it grows instead of touching its edges. */
+.set-wrap .ws-empty { height: auto; min-height: 44px; padding-block: 8px; line-height: 18px; }
+/* A group of one section: its heading, a one-line lead and a recommendation, then its rows. */
+.set-grp { display: grid; gap: 8px; min-width: 0; scroll-margin-top: 12px; }
+.set-grp-lead { margin: -2px 0 0; font-size: var(--t-cap); line-height: 17px; color: var(--fg-2); }
+.set-rec, .srow .d.rec { font-size: var(--t-cap); line-height: 16px; color: var(--fg-3); }
+.set-rec { margin: -2px 0 0; }
+.srow .d.rec { margin-top: 2px; }
+.set-sub { margin: 4px 0 0; font-size: var(--t-sec); font-weight: 500; line-height: 20px; color: var(--fg); }
+.set-title:focus, .set-h .l-sect-t:focus { outline: none; }
+.set-title:focus-visible, .set-h .l-sect-t:focus-visible { outline: var(--focus-line); outline-offset: 2px; }
+.ws-back { display: inline-flex; align-items: center; gap: 4px; }
+.ws-head-acts { flex-wrap: wrap; }
+.ws-legend { display: grid; gap: 4px; font-size: var(--t-cap); line-height: 17px; color: var(--fg-2); }
+.ws-block { display: block; color: var(--warn, var(--fg-2)); }
+.ws-row2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; }
+.ws-kinds .ws-check > span { display: grid; min-width: 0; }
+.ws-kind-t { color: var(--fg); }
+.ws-kind-d { font-size: 11px; line-height: 15px; color: var(--fg-3); }
+.ws-mdetail { display: grid; gap: 10px; padding: 10px 12px 12px 24px; border-top: 1px solid var(--line); background: var(--bg-input); }
+.ws-mdetail .srow { padding-inline: 0; border-top: 0; min-height: 0; }
+.ws-pol-eng { display: grid; gap: 6px; }
+.ws-pol { padding: 2px 12px; }
+.ws-pol > .ws-adv > .ws-adv-h { height: 34px; color: var(--fg); font-weight: 500; }
+.ws-pol .ws-detail-b { padding: 0 0 10px; }
+.oerow { --cols: minmax(170px, 1.2fr) 92px minmax(236px, auto) minmax(130px, 1fr) 28px; }
 .ws-title-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 12px; }
 .ws-title-row > :first-child { flex: 1 1 320px; min-width: 0; }
 .ws-tabs { padding: 0; }
@@ -521,8 +559,9 @@ textarea[data-grow] { max-height: 40vh; }
 input.chk { margin: 0; }
 .ws-check { display: inline-flex; align-items: flex-start; gap: 6px; min-width: 0; font-size: var(--t-cap); color: var(--fg-2); }
 .ws-checks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px 10px; }
-.tier { display: inline-flex; gap: 2px; }
-.tier button { width: 20px; height: 20px; border: 1px solid var(--line-ctl); border-radius: 4px; font-size: 11px; color: var(--fg-3); }
+/* Tier toggles read in words, so they keep one height and wrap inside their cell when it is narrow. */
+.tier { display: inline-flex; flex-wrap: wrap; gap: 3px; }
+.tier button { height: 24px; padding: 0 7px; border: 1px solid var(--line-ctl); border-radius: 4px; font-size: var(--t-cap); color: var(--fg-3); white-space: nowrap; }
 .tier button:hover { color: var(--fg); }
 .tier button[aria-pressed="true"] { background: var(--bg-selected); border-color: var(--line-strong); color: var(--fg); }
 .ws-split { display: grid; grid-template-columns: minmax(0, 1fr) 360px; align-items: start; gap: 14px; }
@@ -568,7 +607,7 @@ input.chk { margin: 0; }
 .okrow { --cols: minmax(190px, 1.2fr) 170px minmax(220px, 1.6fr) 130px; }
 .oqrow { --cols: minmax(170px, 1fr) minmax(300px, 1.6fr) 130px 24px; }
 .olrow { --cols: minmax(150px, .9fr) minmax(130px, 1fr) minmax(220px, 1.4fr) minmax(130px, 1fr); }
-.osrow { --cols: minmax(170px, 1.2fr) 150px 140px 64px 60px 44px 24px; }
+.osrow { --cols: minmax(170px, 1.2fr) 150px 140px 64px 60px 44px 84px; }
 .omxrow { --cols: 24px minmax(220px, 1fr) 76px 76px 64px 76px 76px 120px; }
 .oprow { --cols: 20px minmax(200px, 1.6fr) 80px 80px 60px minmax(120px, 1fr); }
 .oxrow { --cols: minmax(200px, 1fr) minmax(220px, 1.2fr); }
@@ -580,7 +619,8 @@ input.chk { margin: 0; }
   .lrow { grid-template-columns: 18px minmax(160px, 2fr) 112px minmax(120px, 1.2fr) minmax(140px, 1.4fr) 56px; }
   .orrow { --cols: minmax(120px, 1fr) 150px 140px minmax(120px, 1fr) 24px; }
   .ofrow { --cols: 110px minmax(110px, 1fr) minmax(120px, 1.2fr) 60px 70px 100px; }
-  .osrow { --cols: minmax(130px, 1.2fr) 130px 120px 64px 60px 44px 24px; }
+  .osrow { --cols: minmax(130px, 1.2fr) 130px 120px 64px 60px 44px 84px; }
+  .oerow { --cols: minmax(130px, 1fr) 84px minmax(150px, 1.2fr) minmax(100px, .8fr) 28px; }
   .okrow { --cols: minmax(140px, 1.2fr) 140px minmax(160px, 1.6fr) 110px; }
 }
 /* A settings table narrower than its columns (a phone) shows each row as labelled lines: the first cell is the row's name, each
@@ -630,6 +670,13 @@ input, textarea, [contenteditable="true"] { -webkit-user-select: text; user-sele
 /* Rows keep the same inner gap on both sides. */
 .gr { padding-right: 12px; }
 .proj, .task-row { padding-right: 8px; }
+.task-row > .trunc { flex: 1 1 0; min-width: 0; }
+.task-row .sig { max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The sidebar never scrolls sideways: a long title or status is cut with an ellipsis inside its row. */
+.sb-scroll { overflow-x: hidden; }
+.proj, .task-row { min-width: 0; max-width: 100%; }
+.proj > .trunc { flex: 1 1 0; min-width: 0; }
+.proj .sig { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sb-foot { padding: 0 8px; }
 
 /* A path or a name is one piece: it is cut, never broken across lines. */
@@ -681,6 +728,7 @@ input.chk { margin-top: 1px; }
 .rv-checks { padding-bottom: 6px; border-top: 1px solid var(--line); }
 .rv-checks .l-sect-t { font-size: var(--t-sec); }
 .rv-checks .l-row, .rv-stale { padding-block: 5px; font-size: var(--t-sec); line-height: 20px; }
+.rv-pr { --row-detail-column: 2 / -1; --row-detail-display: block; }
 .rv-checks .l-row + .l-row, .rv-checks .rv-cmd + .l-row { border-top: 1px solid var(--line); }
 .rv-checks .l-row-end { line-height: 20px; }
 .rv-cmd { margin: 0 12px 6px 36px; font-size: var(--t-cap); color: var(--fg-2); }
@@ -1078,6 +1126,13 @@ button.step-t { text-align: left; font: inherit; }
 .sp-h .tt { font-size: var(--t-ui); font-weight: 500; }
 .set-ctx.l-toolbar { padding-inline: 24px; font-size: var(--t-cap); color: var(--fg-2); }
 .set-ctx b { font-weight: 500; color: var(--fg); }
+.set-ctx .ws-ctx-state { flex: none; }
+/* Section choice, state and Project picker share one phone-width line: the state keeps its icon (its word is still read out, from
+   its unseen copy), and the Project picker narrows to what "Machine only" needs, cutting a long project name rather than the bar. */
+@container page (max-width: 559.98px) {
+  .set-ctx:has([popovertarget="m-scope-project"]) .ws-ctx-word { display: none; }
+  .set-ctx [popovertarget="m-scope-project"] { min-width: 120px !important; max-width: 150px; }
+}
 .set-wrap > .l-page { flex: 1 1 auto; height: auto; min-height: 0; }
 .set-in { --inset: 0px; max-width: 860px; margin: 0 auto; display: grid; gap: 12px; }
 .set-h { margin-top: 6px; }
@@ -1221,3 +1276,16 @@ button.step-t { text-align: left; font: inherit; }
 .mine.ws-sent-bad { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 40%, transparent); background: var(--danger-tint); }
 .ws-sent-meta .act { display: inline-flex; gap: 8px; }
 .qrow[data-sent] .qrow-end .cap { white-space: nowrap; }
+
+.chat-review-hold { flex: 0 0 auto; width: 100%; max-width: 830px; margin-inline: auto; padding: 0 35px 8px; }
+.chat-review-hold .rv-why { white-space: normal; overflow-wrap: anywhere; }
+/* One box holds the decision and its buttons, so the buttons read as part of it and never float beside the message box. */
+.chat-review-box { border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel); min-width: 0; }
+.chat-review-box > .l-bar { background: transparent; border-top: 1px solid var(--line); }
+.chat-review-decision { margin: 0; padding: 10px 14px; max-height: 38vh; overflow-y: auto; overflow-wrap: anywhere; }
+.chat-review-decision h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; }
+.chat-review-decision p { margin: 4px 0 0; line-height: 1.4; }
+.chat-review-asks { margin: 2px 0 0; padding-left: 20px; list-style: disc; }
+.chat-review-asks li { margin: 2px 0; line-height: 1.4; }
+.chat-review-decision .chat-review-reason { font-weight: 500; }
+.ws-hold-quiet { flex: 0 0 auto; width: 100%; max-width: 830px; margin-inline: auto; padding: 0 35px 8px; box-sizing: border-box; }

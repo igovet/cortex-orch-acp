@@ -107,7 +107,17 @@ pub fn replay_native_start(
     actor: &str,
     command: &Value,
 ) -> CoreResult<Option<Value>> {
-    let digest = crate::digest(&serde_json::to_vec(command)?);
+    replay_native_start_with_policy(store, project, actor, command, None)
+}
+
+pub fn replay_native_start_with_policy(
+    store: &Store,
+    project: &str,
+    actor: &str,
+    command: &Value,
+    policy: Option<NativeExecutionPolicy>,
+) -> CoreResult<Option<Value>> {
+    let digest = start_digest(command, None, None, policy)?;
     store.read(|db| {
         let binding: Option<(String,String)> = db.query_row(
             "SELECT project_root,activated_by FROM workspace_projects WHERE project_id=?",
@@ -205,6 +215,35 @@ pub fn draft_settings(
     })
 }
 
+/// Trusted host option; deliberately not deserializable from commands, plans or tools.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeExecutionPolicy {
+    AutomaticContinuation,
+    /// A read-only sprint planning task (see `lifecycle::sprint_planning`).
+    SprintPlanning,
+}
+
+fn start_digest(
+    command: &Value,
+    client: Option<(&str, &Value)>,
+    capture: Option<&crate::input::Capture>,
+    policy: Option<NativeExecutionPolicy>,
+) -> CoreResult<String> {
+    let mut input = match client {
+        Some((session, settings)) => {
+            json!({"command":command,"session":session,"settings":settings,"capture":capture.map(|c|c.fingerprint())})
+        }
+        None => command.clone(),
+    };
+    if policy == Some(NativeExecutionPolicy::AutomaticContinuation) {
+        input = json!({"start":input, "policy":crate::lifecycle::automatic::POLICY});
+    }
+    if policy == Some(NativeExecutionPolicy::SprintPlanning) {
+        input = json!({"start":input, "policy":crate::lifecycle::sprint_planning::POLICY});
+    }
+    Ok(crate::digest(&serde_json::to_vec(&input)?))
+}
+
 /// Atomic desktop admission. Provisioning occurs only after this committed receipt.
 pub fn start_native(
     store: &Store,
@@ -234,6 +273,18 @@ pub fn start_native_input(
     client: Option<(&str, &Value)>,
     capture: Option<&crate::input::Capture>,
 ) -> CoreResult<Value> {
+    start_native_input_with_policy(store, project, actor, command, client, capture, None)
+}
+
+pub fn start_native_input_with_policy(
+    store: &Store,
+    project: &str,
+    actor: &str,
+    command: &Value,
+    client: Option<(&str, &Value)>,
+    capture: Option<&crate::input::Capture>,
+    policy: Option<NativeExecutionPolicy>,
+) -> CoreResult<Value> {
     workspace_protocol::validate("Command", command)
         .map_err(|_| CoreError::Refused("invalid_workspace_request"))?;
     if command["operation"] != "tasks.start"
@@ -249,12 +300,7 @@ pub fn start_native_input(
     let draft = command["target"]
         .as_str()
         .ok_or(CoreError::Refused("invalid_target"))?;
-    let digest = crate::digest(&serde_json::to_vec(&match client {
-        Some((session, settings)) => {
-            json!({"command":command,"session":session,"settings":settings,"capture":capture.map(|c|c.fingerprint())})
-        }
-        None => command.clone(),
-    })?);
+    let digest = start_digest(command, client, capture, policy)?;
     store.write(|db| {
         let binding: Option<(String,String)> = db.query_row(
             "SELECT project_root,activated_by FROM workspace_projects WHERE project_id=?",
@@ -304,6 +350,12 @@ pub fn start_native_input(
             (&task,&goal,crate::now(),crate::now()))?;
         let owner = crate::ownership::acquire_tx(db,&task,actor,None)?;
         crate::lifecycle::event_tx(db,&task,"TASK_CREATED",json!({"execution_host":"rust"}))?;
+        if policy == Some(NativeExecutionPolicy::AutomaticContinuation) {
+            crate::lifecycle::automatic::bind_tx(db, &task)?;
+        }
+        if policy == Some(NativeExecutionPolicy::SprintPlanning) {
+            crate::lifecycle::sprint_planning::bind_tx(db, &task)?;
+        }
         crate::routing::snapshot_tx(db, &task, store.key().root())?;
         crate::lifecycle::event_tx(db,&task,"TASK_STATE_CHANGED",json!({"previous":"CREATED","state":"PLANNING"}))?;
         crate::lifecycle::event_tx(db,&task,"NATIVE_START_ADMITTED",json!({"draft":draft,"request":request,"goal":goal,"options":event_options}))?;
@@ -436,6 +488,94 @@ pub fn create_draft(
         append_public_tx(db,project,project,"unknown",version)?;
         Ok(DraftReply {receipt:result,fresh:true})
     })
+}
+
+/// One draft of a batch the service creates for a single owner action: an identity
+/// the caller derives from what the draft is for, its request text and its
+/// `tasks.create` options (no description, no attachments).
+pub struct BatchDraft<'a> {
+    pub task_id: &'a str,
+    pub description: &'a str,
+    pub options: &'a Value,
+}
+
+/// Creates every draft of one owner action inside the caller's transaction, so the
+/// caller's own record of that action commits or rolls back together with them.
+/// The project binding is checked as for `create_draft`, and each draft as a
+/// `tasks.create` payload, before anything is written. An identity that already
+/// names a draft of this project is kept as it is (a retry of the same batch); an
+/// identity held by another project refuses the whole batch. Returns how many
+/// drafts were created now.
+pub fn create_drafts_tx(
+    db: &rusqlite::Transaction<'_>,
+    root: &str,
+    project: &str,
+    actor: &str,
+    drafts: &[BatchDraft<'_>],
+) -> CoreResult<usize> {
+    let binding: Option<(String, String)> = db
+        .query_row(
+            "SELECT project_root,activated_by FROM workspace_projects WHERE project_id=?",
+            [project],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if binding != Some((root.into(), actor.into())) {
+        return refuse("unauthorized");
+    }
+    for draft in drafts {
+        let mut payload = draft.options.clone();
+        let fields = payload
+            .as_object_mut()
+            .ok_or(CoreError::Refused("invalid_workspace_request"))?;
+        if fields.contains_key("description") || fields.contains_key("attachments") {
+            return refuse("invalid_workspace_request");
+        }
+        fields.insert("description".into(), json!(draft.description));
+        workspace_protocol::validate("CreatePayload", &payload)
+            .map_err(|_| CoreError::Refused("invalid_workspace_request"))?;
+        if draft.description.trim().is_empty() || draft.task_id.is_empty() {
+            return refuse("description_required");
+        }
+    }
+    let mut created = 0;
+    for draft in drafts {
+        let held: Option<String> = db
+            .query_row(
+                "SELECT project_id FROM workspace_tasks WHERE task_id=?",
+                [draft.task_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match held {
+            Some(owner) if owner == project => continue,
+            Some(_) => return refuse("payload_conflict"),
+            None => {}
+        }
+        db.execute(
+            "INSERT INTO workspace_tasks(task_id,project_id,description,created_at) VALUES (?,?,?,?)",
+            (draft.task_id, project, draft.description, crate::now()),
+        )?;
+        db.execute(
+            "INSERT INTO workspace_task_options VALUES (?,?)",
+            (draft.task_id, serde_json::to_string(draft.options)?),
+        )?;
+        append_public_tx(db, project, draft.task_id, "task", 1)?;
+        created += 1;
+    }
+    if created > 0 {
+        db.execute(
+            "UPDATE workspace_projects SET version=version+1 WHERE project_id=?",
+            [project],
+        )?;
+        let version: i64 = db.query_row(
+            "SELECT version FROM workspace_projects WHERE project_id=?",
+            [project],
+            |r| r.get(0),
+        )?;
+        append_public_tx(db, project, project, "unknown", version)?;
+    }
+    Ok(created)
 }
 
 /// Read-only desktop report page. The report must be a published `report` edition of a runtime

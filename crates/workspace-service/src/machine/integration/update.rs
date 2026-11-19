@@ -59,6 +59,7 @@ pub(super) async fn run(
         &params["digest"],
         &record,
         "This task's workers are still running or its run did not complete. Update it once it has finished.",
+        false,
     )
     .await?;
     let path = crate::machine::retention::task_path(root, &record, git).await?;
@@ -85,7 +86,12 @@ pub(super) async fn run(
         || !git
             .success(
                 root,
-                &["show-ref", "--verify", "--quiet", &format!("refs/heads/{target}")],
+                &[
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{target}"),
+                ],
             )
             .await?
     {
@@ -107,12 +113,17 @@ pub(super) async fn run(
         ));
     }
     let behind = git
-        .out(&path, &["rev-list", "--count", &format!("{source}..{target}")])
+        .out(
+            &path,
+            &["rev-list", "--count", &format!("{source}..{target}")],
+        )
         .await?;
     if behind.trim() == "0" {
         return Err(refuse(
             "up_to_date",
-            format!("The task's branch already contains every commit of {target}. Nothing was changed."),
+            format!(
+                "The task's branch already contains every commit of {target}. Nothing was changed."
+            ),
         ));
     }
     // Abort restores the worktree exactly only when no tracked file had uncommitted
@@ -143,7 +154,10 @@ pub(super) async fn run(
         }
     };
     drop(lock);
-    let outcome = merge(state, project, task, &path, &source, &target, record, &verified, git).await;
+    let outcome = merge(
+        state, project, task, &path, &source, &target, record, &verified, git,
+    )
+    .await;
     let reply = envelope(outcome);
     intent.finish(state, &reply)?;
     drop(claim);
@@ -168,7 +182,15 @@ async fn merge(
     let merged = git
         .success(
             path,
-            &["merge", "--no-autostash", "--no-edit", "-m", &message, "--", target],
+            &[
+                "merge",
+                "--no-autostash",
+                "--no-edit",
+                "-m",
+                &message,
+                "--",
+                target,
+            ],
         )
         .await?;
     let stopped = git.operation(path).await?;

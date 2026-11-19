@@ -65,6 +65,10 @@ For additional paths or actual access refusals, a writing role follows worker to
 discipline; a read-only role already reads the whole project, writes nothing and
 reports any missing access as a limitation.
 
+Finish your assignment to the end within your role and permissions; nobody
+completes what you leave undone. Report something as not done only at a genuine
+dead end you cannot clear yourself, with its blocker and concrete reason.
+
 If your evidence shows the assignment or its plan is wrong, obsolete or cannot
 succeed as decomposed, submit the advertised replan request with that evidence
 instead of completing a plan that no longer fits the goal. Use the scope request
@@ -108,6 +112,14 @@ do not already decide it; preserve policy blockers, including paid-check limits.
 Do not run the whole suite: runtime runs final verification after review.
 Broaden checks only when assigned or justified by a specific cross-cutting
 risk; state the reason.
+
+When a focused test, lint, type check or build fails, inspect its retained
+output, fix the cause within your authority, and rerun the same command in the
+same working directory. Keep the original failure and the rerun receipts.
+Use the normal access request for additional project paths. If the repair needs
+a different assignment or is blocked, report the exact failing check, what you
+tried, and the remaining blocker so the coordinator can plan the repair.
+Never delete, weaken or skip a failing check to obtain a pass.
 
 ## Report and handoff
 

@@ -29,6 +29,8 @@ pub(super) struct Plan<'a> {
     pub verified: &'a Value,
     pub pending_paths: Vec<String>,
     pub target_tree: Option<PathBuf>,
+    pub automatic: bool,
+    pub already_landed: bool,
 }
 
 fn helper(name: &str) -> bool {
@@ -150,13 +152,33 @@ fn done(record: &mut Value, method: &str, plan: &Plan<'_>, source_head: &str) {
     record["doneAt"] = json!(now_ms());
     record["integration"] = json!({"method":method,"targetBranch":plan.target,
         "digest":plan.params["digest"],"message":plan.message,"sourceHead":source_head});
+    if plan.automatic {
+        record["integration"]["automatic"] = json!(true);
+        record["integration"]["committed"] = json!(!plan.already_landed);
+    }
 }
 fn fresh(plan: &Plan<'_>) -> Value {
     json!({"resultId":plan.verified["resultId"],"version":plan.verified["version"]})
 }
 pub(super) async fn apply(plan: &Plan<'_>, product: &mut Value, git: &mut Git) -> Result<Value> {
-    commit_source(plan, git).await?;
     let path = plan.path;
+    if plan.automatic {
+        // Do not land on a branch or checkout that changed during admission.
+        let branch = git.out(path, &["branch", "--show-current"]).await?;
+        let observed =
+            crate::machine::legacy_source::capture(path).map_err(crate::machine::context::core)?;
+        if branch.trim() != plan.target
+            || observed.as_deref() != product["tasks"][plan.task]["acceptedRevision"].as_str()
+        {
+            return Err(refuse(
+                "workspace_drift",
+                "The checkout changed before automatic finish. No commit was attempted.",
+            ));
+        }
+    }
+    if !plan.already_landed {
+        commit_source(plan, git).await?;
+    }
     let source_head = git
         .out(path, &["rev-parse", "HEAD"])
         .await?
@@ -369,7 +391,8 @@ pub(super) fn pull_request_url(text: &str, remote: &str) -> Option<String> {
     let name = |s: &str| {
         !s.is_empty()
             && !s.starts_with('.')
-            && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
     };
     let shaped = parts.len() == 4
         && name(parts[0])
@@ -392,19 +415,47 @@ mod address_tests {
             "git@github.com:owner/repo.git",
             "ssh://git@github.com/owner/repo.git",
         ] {
-            assert_eq!(pull_request_url(ok, remote).as_deref(), Some(ok), "{remote}");
+            assert_eq!(
+                pull_request_url(ok, remote).as_deref(),
+                Some(ok),
+                "{remote}"
+            );
         }
         for (url, remote) in [
-            ("http://github.com/owner/repo/pull/42", "git@github.com:o/r.git"),
-            ("https://evil.example/owner/repo/pull/42", "git@github.com:o/r.git"),
+            (
+                "http://github.com/owner/repo/pull/42",
+                "git@github.com:o/r.git",
+            ),
+            (
+                "https://evil.example/owner/repo/pull/42",
+                "git@github.com:o/r.git",
+            ),
             ("https://github.com/owner/repo/pull/42", "/srv/git/repo.git"),
             ("https://github.com/owner/repo/pull/42", ""),
-            ("https://user:pw@github.com/owner/repo/pull/42", "git@github.com:o/r.git"),
-            ("https://github.com:8443/owner/repo/pull/42", "git@github.com:o/r.git"),
-            ("https://github.com/owner/repo/issues/42", "git@github.com:o/r.git"),
-            ("https://github.com/owner/repo/pull/42?x=1", "git@github.com:o/r.git"),
-            ("https://github.com/owner/repo/pull/42 x", "git@github.com:o/r.git"),
-            ("https://github.com/../repo/pull/42", "git@github.com:o/r.git"),
+            (
+                "https://user:pw@github.com/owner/repo/pull/42",
+                "git@github.com:o/r.git",
+            ),
+            (
+                "https://github.com:8443/owner/repo/pull/42",
+                "git@github.com:o/r.git",
+            ),
+            (
+                "https://github.com/owner/repo/issues/42",
+                "git@github.com:o/r.git",
+            ),
+            (
+                "https://github.com/owner/repo/pull/42?x=1",
+                "git@github.com:o/r.git",
+            ),
+            (
+                "https://github.com/owner/repo/pull/42 x",
+                "git@github.com:o/r.git",
+            ),
+            (
+                "https://github.com/../repo/pull/42",
+                "git@github.com:o/r.git",
+            ),
             ("javascript:alert(1)", "git@github.com:o/r.git"),
         ] {
             assert_eq!(pull_request_url(url, remote), None, "{url} {remote}");

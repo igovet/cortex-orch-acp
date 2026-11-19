@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { emptyWorkspace, newMcpServer, type Sprint, type Task } from "@cortex/workspace-domain";
 import { WsContext, type Ws } from "../src/ctx";
 import { Pill } from "../src/worker";
-import { QueueButton } from "../src/sprint";
+import { QueueButton, RunMode } from "../src/sprint";
 import { toolCounts } from "../src/orch-mcp";
 import { buildIndex } from "../src/selectors";
 import { draftTask } from "./support";
@@ -33,12 +33,30 @@ it("stands the follow pill in its own opaque band, so it never lies over the tim
   expect(css).toMatch(/\.pill-band \{[^}]*display: flex/);
 });
 
+it("shows all three modes and dispatches the exact selected mode", () => {
+  const run = vi.fn();
+  const sprint = { id: "s", runMode: "hybrid" } as Sprint;
+  const ws = { gate: () => undefined, needs: () => ({}), run } as unknown as Ws;
+  const root = mount(() => <RunMode sprint={sprint} />, ws);
+  const buttons = [...root.querySelectorAll("button")];
+  expect(buttons.map(b => b.textContent)).toEqual(["Manual", "Hybrid", "Automatic"]);
+  expect(buttons.map(b => b.getAttribute("aria-current"))).toEqual(["false", "true", "false"]);
+  buttons[1].click();
+  expect(run).not.toHaveBeenCalled();
+  buttons[0].click();
+  buttons[2].click();
+  expect(run.mock.calls.map(([command]) => command)).toEqual([
+    { type: "set_run_mode", sprintId: "s", runMode: "manual" },
+    { type: "set_run_mode", sprintId: "s", runMode: "automatic" },
+  ]);
+});
+
 // Live run: a disabled "Continue queue" on the board looked like an enabled one.
 it("gives a blocked Continue queue the shared disabled look of a main action, and an open one its outlined look", () => {
   const state = emptyWorkspace(), machine = state.machines[0];
   machine.connection = "connected";
   state.projects = [{ id: "p", machineId: machine.id, name: "Project", repository: "/p", openBranch: "main", defaultBranch: "main" }];
-  const sprint: Sprint = { id: "s", projectId: "p", title: "Sprint", description: "Scope", runMode: "automatic", planning: "created", conversation: [], plan: null, materializedVersion: 1, taskIds: ["t"], queueState: "paused", pauseReason: null, targetBranch: null };
+  const sprint: Sprint = { id: "s", projectId: "p", title: "Sprint", description: "Scope", runMode: "hybrid", planning: "created", conversation: [], plan: null, materializedVersion: 1, taskIds: ["t"], queueState: "paused", pauseReason: null, targetBranch: null };
   const ws = (task: Task) => {
     const held = { ...state, tasks: [task], sprints: [sprint] };
     return { store: { state: () => held, index: () => buildIndex(held, 1), clock: () => 1 }, gate: () => undefined, needs: () => ({}), run: vi.fn() } as unknown as Ws;

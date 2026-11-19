@@ -38,20 +38,28 @@ export function placeOf(command: WorkspaceCommand): SendPlace | null {
 }
 
 type Candidate = { id: string; text: string; ref?: string; index?: number };
+/** The task whose conversation a place reads in: the task itself, or the runtime task planning a sprint. A sprint that plans
+ *  without one (an earlier version's planning chat) reads in its own conversation. */
+function conversationTask(place: SendPlace, state: WorkspaceState): string | null {
+  if (place.kind === "task") return place.taskId;
+  if (place.kind !== "sprint") return null;
+  const id = state.sprints.find(s => s.id === place.sprintId)?.planningTaskId;
+  return id && state.tasks.some(t => t.id === id) ? id : null;
+}
+const timelineCandidates = (taskId: string, state: WorkspaceState) => (state.sessions.find(s => s.taskId === taskId)?.timeline ?? []).flatMap((e, index): Candidate[] => {
+  if (e.kind === "said") return [{ id: e.id, text: e.text, index }];
+  if (e.kind === "message") { const m = state.messages.find(x => x.id === e.messageId); return [{ id: e.id, text: m?.text ?? "", ref: e.messageId, index }]; }
+  return [];
+});
 /** The owner's lines that already read in a place, each with a stable id; `ref` is the saved message's own id, when it has one. */
 function candidates(place: SendPlace, state: WorkspaceState): Candidate[] {
   switch (place.kind) {
-    case "task": {
-      const session = state.sessions.find(s => s.taskId === place.taskId);
-      return (session?.timeline ?? []).flatMap((e, index): Candidate[] => {
-        if (e.kind === "said") return [{ id: e.id, text: e.text, index }];
-        if (e.kind === "message") { const m = state.messages.find(x => x.id === e.messageId); return [{ id: e.id, text: m?.text ?? "", ref: e.messageId, index }]; }
-        return [];
-      });
-    }
+    case "task": return timelineCandidates(place.taskId, state);
     case "queue": return state.messages.filter(m => m.taskId === place.taskId && m.workerId === null).map(m => ({ id: m.id, text: m.text, ref: m.id }));
     case "worker": return state.messages.filter(m => m.taskId === place.taskId && m.workerId === place.workerId).map(m => ({ id: m.id, text: m.text, ref: m.id }));
-    case "sprint": return (state.sprints.find(s => s.id === place.sprintId)?.conversation ?? []).flatMap((e, i): Candidate[] => e.kind === "message" ? [{ id: String(i), text: e.text }] : []);
+    // A message to a sprint's planning task reads once it is in that task's conversation, not when its sprint's copy is saved.
+    case "sprint": { const task = conversationTask(place, state); if (task) return timelineCandidates(task, state); }
+      return (state.sprints.find(s => s.id === place.sprintId)?.conversation ?? []).flatMap((e, i): Candidate[] => e.kind === "message" ? [{ id: String(i), text: e.text }] : []);
   }
 }
 
@@ -77,7 +85,8 @@ export function createSends(state: Accessor<WorkspaceState>, dispatch: (command:
     for (const [k, list] of byPlace) {
       const all = candidates(list[0].place, s), used = new Set(claimed.get(k));
       for (const e of list) {
-        const from = e.after === undefined ? -1 : (s.sessions.find(x => e.place.kind === "task" && x.taskId === e.place.taskId)?.timeline ?? []).findIndex(x => x.id === e.after);
+        const task = e.after === undefined ? null : conversationTask(e.place, s);
+        const from = task === null ? -1 : (s.sessions.find(x => x.taskId === task)?.timeline ?? []).findIndex(x => x.id === e.after);
         const free = all.filter(c => !used.has(c.id) && !e.known.includes(c.id) && (from < 0 || (c.index ?? Infinity) > from));
         const hit = free.find(c => c.ref === e.requestId) ?? free.find(c => c.text.trim() === e.text.trim());
         if (hit) { used.add(hit.id); hits.set(e.key, hit.id); }
@@ -106,7 +115,8 @@ export function createSends(state: Accessor<WorkspaceState>, dispatch: (command:
       const text = "text" in command ? command.text : "", attachments = "attachments" in command ? command.attachments : undefined;
       const known = candidates(place, state()).map(c => c.id);
       // The last line the runtime recorded (the window's own lines come and go with the facts).
-      const after = place.kind === "task" ? [...(state().sessions.find(x => x.taskId === place.taskId)?.timeline ?? [])].reverse().find(x => !x.id.startsWith("facts:"))?.id : undefined;
+      const task = conversationTask(place, state());
+      const after = task !== null ? [...(state().sessions.find(x => x.taskId === task)?.timeline ?? [])].reverse().find(x => !x.id.startsWith("facts:"))?.id : undefined;
       if (again?.command === command) {
         const key = again.key; again = null;
         update(key, { requestId, state: "sending", reason: undefined, known, after });

@@ -50,7 +50,7 @@ impl Options {
             local_release: false,
             ci_dev: false,
             engine: "docker".into(),
-            jobs: 2,
+            jobs: std::thread::available_parallelism().map_or(2, |n| n.get().min(6) as u32),
             test_workspace: false,
             check_install: false,
             check_installed: false,
@@ -512,6 +512,25 @@ fn sha256_file(path: &Path) -> Res<String> {
     )))
 }
 
+fn prepare_cache(path: &Path) -> Res<()> {
+    let parent = path.parent().ok_or("invalid build cache path")?;
+    if fs::symlink_metadata(parent)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err("build cache parent must not be a symlink".into());
+    }
+    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    if fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err("build cache must not be a symlink".into());
+    }
+    fs::create_dir_all(path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn new_build_dir(parent: &Path) -> Res<()> {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_";
     use std::io::Read;
@@ -600,6 +619,7 @@ pub fn build_deb(root: &Path, o: &Options) -> Res<()> {
     let with_env = |c: &mut Command| {
         c.env_clear().envs(env.iter().cloned());
     };
+    let image_file = out.join("builder-image.id");
     let mut build = Command::new(engine);
     build
         .args([
@@ -609,9 +629,23 @@ pub fn build_deb(root: &Path, o: &Options) -> Res<()> {
             "--tag",
             IMAGE,
         ])
+        .arg("--iidfile")
+        .arg(&image_file)
         .arg(&context);
     with_env(&mut build);
     run(&mut build, Duration::from_secs(6 * 3600))?;
+    let image = read_text(&image_file)?.trim().to_owned();
+    let image_digest = Some(image.strip_prefix("sha256:").unwrap_or(&image))
+        .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or("invalid builder image digest")?;
+    let cache = if o.release || o.ci_dev {
+        out.join("cache")
+    } else {
+        output_root
+            .join(".cache")
+            .join(format!("{channel}-{image_digest}"))
+    };
+    prepare_cache(&cache)?;
     let mut container = Command::new(engine);
     container
         .args(["run", "--rm", "--cidfile"])
@@ -634,6 +668,10 @@ pub fn build_deb(root: &Path, o: &Options) -> Res<()> {
             "--mount",
             &format!("type=bind,source={},target=/build", out.display()),
         ])
+        .args([
+            "--mount",
+            &format!("type=bind,source={},target=/build/cache", cache.display()),
+        ])
         .args(["--env", &format!("CORTEX_WORKSPACE_BUILD_STAMP={stamp}")])
         .args([
             "--env",
@@ -652,7 +690,7 @@ pub fn build_deb(root: &Path, o: &Options) -> Res<()> {
             &format!("CORTEX_WORKSPACE_RELEASE_AUTHORIZED={authorization}"),
         ]);
     }
-    container.arg(IMAGE).arg(o.jobs.to_string());
+    container.arg(&image).arg(o.jobs.to_string());
     if o.test_workspace {
         container.arg("test");
     }
@@ -708,10 +746,6 @@ pub fn build_deb(root: &Path, o: &Options) -> Res<()> {
             return Err("installed acceptance did not bind to this archive".into());
         }
     }
-    let mut inspect = Command::new(engine);
-    inspect.args(["image", "inspect", IMAGE, "--format", "{{.Id}}"]);
-    with_env(&mut inspect);
-    let image = output(&mut inspect)?.trim().to_string();
     let mut artifacts = Vec::new();
     let mut files: Vec<PathBuf> = fs::read_dir(out.join("artifacts"))
         .map_err(|e| e.to_string())?

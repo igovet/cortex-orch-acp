@@ -1,10 +1,11 @@
-import { createMemo, createSignal, For, Match, Show, Switch } from "solid-js";
-import { ACCESS_LABELS, effortLabel, engineLabel, ENGINE_KEYS, ENGINES, HOT_PERCENT, kindLabel, modelLabel, orphanTokens, policyOf, RESERVED_ROLE, ROLE_CATALOG, setAffinity, setDeny, setPin, setPreferred, setStretch, tierFor, unmappedWindows, WORK_KINDS, type EngineKey, type QuotaWindow, type RoutePin, type RoutingRules } from "@cortex/workspace-domain";
+import { createMemo, createSignal, For, onMount, Show } from "solid-js";
+import { ACCESS_LABELS, EFFORT_BY_TIER, effortLabel, engineLabel, ENGINE_KEYS, ENGINES, FALLBACK_ORDER, HOT_PERCENT, kindLabel, modelLabel, orphanTokens, policyOf, projectsWithRouting, RANK_ORDER, RESERVED_ROLE, ROLE_CATALOG, routingSource, setAffinity, setDeny, setPin, setPreferred, setStretch, TIER_LABELS, TIERS, tierFor, unmappedWindows, WORK_KINDS, type EngineKey, type QuotaWindow, type RoutePin, type RoutingRules } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { A, I, MenuItem, Pop } from "./kit";
 import { HELP } from "./orch-help";
-import { Bar, orchTo, Shell, slug, SourceStrips, useRouting, useRoutingOff } from "./orch-shared";
-import { Err, Hint, Lock, Pick, Seg, SetH, Tabs, Tags } from "./settings-kit";
+import { ModelPolicyFields } from "./orch-models";
+import { Bar, orchTo, Shell, slug, SourceStrips, useProjectName, useRouting, useRoutingOff } from "./orch-shared";
+import { Adv, Err, Hint, Lock, Pick, Rec, Seg, SetH, Srow, Tags, tierWords } from "./settings-kit";
 import { share } from "./stable";
 
 type Ctx = { rules: () => RoutingRules; set: (r: RoutingRules) => void; off: () => string | undefined; problems: () => { path: string; message: string }[] };
@@ -33,19 +34,24 @@ function PinEditor(props: { role: string; label: string; c: Ctx; done: () => voi
   </div>;
 }
 
+/** The built-in ladder in words: the tier at low, normal and high complexity, from the same rule the router uses. */
+export function ladderWords(role: string) {
+  const at = (["low", "normal", "high"] as const).map(c => TIER_LABELS[tierFor(role, false, c)]);
+  return at.every(t => t === at[0]) ? `${at[0]} at every complexity` : `Low: ${at[0]}, normal: ${at[1]}, high: ${at[2]}`;
+}
 function Roles(props: { c: Ctx }) {
   const ws = useWs();
   const [open, setOpen] = createSignal<string | null>(null);
-  const row = (id: string, name: string, sub: string, kind: string | null, tier: string | null, title?: string) => {
+  const row = (id: string, name: string, sub: string, kind: string | null, tier: string | null) => {
     const pin = () => props.c.rules().pins[id], reserved = id === RESERVED_ROLE;
     return <>
       <div class="gr orrow">
         <span class="trunc"><span class="w500">{name}</span><span class="sub trunc">{sub}</span></span>
         <span class="cap muted trunc">{kind ?? ""}</span>
-        <span class="cap muted trunc">{tier ?? ""}</span>
+        <span class="cap muted ws-wrap">{tier ?? ""}</span>
         <span class="trunc"><Show when={!reserved} fallback={<span class="cap muted">Built in</span>}><span class={pin() ? "cap" : "cap muted"}>{pin() ? pinText(pin()!, modelLabel(ws.machine().config.catalogue, pin()!.engine, pin()!.model)) : "Automatic"}</span></Show>
           <Err problems={props.c.problems()} path={`pin.${id}`} /></span>
-        <Show when={!reserved} fallback={<span></span>}><button class="ib ws-ib" aria-label={`Edit pin: ${name}`} aria-expanded={open() === id} aria-disabled={props.c.off() ? "true" : undefined} data-why={props.c.off()} onClick={() => { if (!props.c.off()) setOpen(open() === id ? null : id); }}><I n="pencil" s={14} /></button></Show>
+        <Show when={!reserved} fallback={<span></span>}><button class="btn btn-line btn-sm" aria-label={`${pin() ? "Edit pin" : "Pin"}: ${name}`} aria-expanded={open() === id} aria-disabled={props.c.off() ? "true" : undefined} data-why={props.c.off()} onClick={() => { if (!props.c.off()) setOpen(open() === id ? null : id); }}>{pin() ? "Edit pin" : "Pin…"}</button></Show>
       </div>
       <Show when={open() === id}><PinEditor role={id} label={name} c={props.c} done={() => setOpen(null)} /></Show>
     </>;
@@ -53,9 +59,7 @@ function Roles(props: { c: Ctx }) {
   const group = (title: string, access: "writing" | "read_only" | "consultant") => <>
     <div class="gr orrow th ws-group"><span>{title}</span><span></span><span></span><span></span><span></span></div>
     <For each={ROLE_CATALOG.filter(r => r.access === access)}>{r => {
-      const first = tierFor(r.id, false), next = tierFor(r.id, true);
-      const by = (["low", "normal", "high"] as const).map(c => `${c}: ${tierFor(r.id, false, c)}, escalated ${tierFor(r.id, true, c)}`).join("\n");
-      return row(r.id, r.label, ACCESS_LABELS[r.access], kindLabel(r.kind), first === next ? first : `${first} / escalates to ${next}`, by);
+      return row(r.id, r.label, ACCESS_LABELS[r.access], kindLabel(r.kind), ladderWords(r.id));
     }}</For>
   </>;
   return <>
@@ -74,11 +78,11 @@ function WorkKinds(props: { c: Ctx }) {
   // One list for every reader, held as the old objects while it reads the same: the chips and the open Add menu are not drawn
   // again at each machine read, and `preferred().includes(x)` compares the same objects.
   const models = createMemo<{ engine: EngineKey; id: string; label: string }[]>(prev => share(prev, ENGINE_KEYS.flatMap(e => r().engines[e].enabled.map(id => ({ engine: e, id, label: modelLabel(cat(), e, id) })))), []);
-  const lean = (kind: string, builtIn: EngineKey | null) => <Pick id={`m-lean-${slug(kind)}`} label={`${kind} engine lean`} width="160px" value={kind in r().affinity ? r().affinity[kind] ?? "none" : "builtin"} disabled={props.c.off()}
+  const lean = (kind: string, builtIn: EngineKey | null) => <Pick id={`m-lean-${slug(kind)}`} label={`Lean to engine for ${kind === "*" ? "all kinds" : kindLabel(kind)}`} width="160px" value={kind in r().affinity ? r().affinity[kind] ?? "none" : "builtin"} disabled={props.c.off()}
     options={[{ id: "builtin", label: builtIn ? `Built in (${engineLabel(builtIn)})` : "Built in (no lean)" }, ...ENGINES.map(e => ({ id: e.id as string, label: e.label })), { id: "none", label: "No lean" }]} onPick={x => props.c.set(setAffinity(r(), kind, x === "builtin" ? "builtin" : x === "none" ? null : x as EngineKey))} />;
   return <>
     <div class="surface"><div class="gt">
-      <div class="gr okrow th"><span>Work kind</span><span>Engine lean<Hint text={HELP.affinity} label="engine lean" /></span><span>Preferred models</span><span>Stretch</span></div>
+      <div class="gr okrow th"><span>Work kind</span><span>Lean to engine<Hint text={HELP.affinity} label="lean to engine" /></span><span>Preferred models</span><span>Light models also standard</span></div>
       <div class="gr okrow"><span class="w500">All kinds</span><span>{lean("*", null)}</span><span></span><span></span></div>
       <For each={WORK_KINDS}>{k => {
         const roles = () => ROLE_CATALOG.filter(x => x.kind === k.id);
@@ -150,7 +154,6 @@ function Rules(props: { c: Ctx }) {
   const [bad, setBad] = createSignal<string | null>(null);
   const setTokens = (deny: string[]) => { const wrong = deny.find(t => !TOKEN.test(t)); setBad(wrong ? `"${wrong}": use a model id, engine/model or engine/*. A wildcard needs an engine.` : null); if (!wrong) props.c.set(setDeny(r(), deny)); };
   return <>
-    <SetH title="Deny"><Hint text={HELP.deny} label="deny rules" /></SetH>
     <div class="surface ws-pad"><Tags label="Deny token" mono hint="model, engine/model or engine/*" items={r().deny} disabled={props.c.off()} onChange={setTokens} /><Show when={bad()}><span class="ws-err" data-problem="">{bad()}</span></Show></div>
     <Show when={orphans().length > 0}>
       <SetH title="Other entries" />
@@ -158,29 +161,94 @@ function Rules(props: { c: Ctx }) {
     </Show>
     <Show when={r().autoAllow.length > 0}>
       <SetH title="Auto-allow"><Hint text={HELP.autoAllow} label="auto-allow" /></SetH>
-      <div class="surface ws-pad"><p class="cap muted">Stored, has no effect under current routing. Use Auto in Models.</p><Tags label="Auto-allow token" mono items={r().autoAllow} disabled={props.c.off()} onChange={autoAllow => props.c.set({ ...r(), autoAllow })} /></div>
+      <div class="surface ws-pad"><p class="cap muted">Exact routes that automatic routing may use although they are left out by default, such as OpenCode routes. Each OpenCode model also has its own switch under Engines and models.</p><Tags label="Auto-allow token" mono items={r().autoAllow} disabled={props.c.off()} onChange={autoAllow => props.c.set({ ...r(), autoAllow })} /></div>
     </Show>
     <Show when={r().legacyTiers.length > 0}>
       <SetH title="Legacy tiers"><Hint text={HELP.tiers} label="legacy tiers" /></SetH>
-      <div class="surface"><div class="srow"><span><span class="t mono">{r().legacyTiers.join(", ")}</span><span class="d">Refused under model policy 2. Migrate to move them into Models.</span></span><span class="ctl"><A class="btn btn-line btn-sm" to={orchTo(m().id, "files")}>Migrate…</A></span></div></div>
+      <div class="surface"><div class="srow"><span><span class="t mono">{r().legacyTiers.join(", ")}</span><span class="d">Refused under model policy 2. Migrate to move them into the per-model tiers.</span></span><span class="ctl"><A class="btn btn-line btn-sm" to={orchTo(m().id, "files")}>Migrate…</A></span></div></div>
     </Show>
   </>;
 }
 
-const TABS = [{ id: "roles", label: "Roles" }, { id: "kinds", label: "Work kinds" }, { id: "quota", label: "Quota" }, { id: "rules", label: "Rules" }];
+const SOURCE_WORDS = { project: "Project routing file", environment: "Environment routing file", machine: "User routing file" } as const;
+/** Routing › Routing files: which file is in use and where a save goes, read-only. */
+function RoutingFiles() {
+  const ws = useWs(), name = useProjectName();
+  const m = () => ws.machine(), scope = () => ws.settings.scope(), r = () => m().config.surfaces.routing;
+  const source = () => routingSource(m(), scope());
+  const saving = () => scope() ? `${name(scope())}'s own routing file` : source().kind === "environment" ? "Nothing: the environment file is read-only here" : "Your user routing file";
+  return <div class="surface">
+    <Srow t={<>Rules in use<Hint text={HELP.routingFile} label="routing files" /></>} d={`${SOURCE_WORDS[source().kind]}${m().config.files.invalidRouting && source().kind !== "project" ? " (invalid)" : ""}${!scope() && projectsWithRouting(m()).length ? `. Projects with their own file: ${projectsWithRouting(m()).map(id => name(id)).join(", ")}` : ""}`}><Lock text="Read-only" /></Srow>
+    <Srow t="Precedence" d="Project, then environment, then user. Files never merge."><Lock /></Srow>
+    <Srow t="Model policy version" d={r().version === 2 && !m().config.files.migration ? "2, the current format." : `${r().version}: it needs migration before work can run.`}><Show when={r().version !== 2 || m().config.files.migration}><A class="btn btn-line btn-sm" to={orchTo(m().id, "files")}>Migrate…</A></Show></Srow>
+    <Srow t="Saving to" d={saving()} />
+  </div>;
+}
+/** Routing › Model policy: one closed block per model, grouped by engine. A deep link opens and scrolls to one. */
+function ModelPolicies(props: { c: Ctx }) {
+  const ws = useWs();
+  const cat = () => ws.machine().config.catalogue;
+  return <For each={ENGINES.filter(e => cat()[e.id].models.length > 0)}>{e => <div class="ws-pol-eng">
+    <h3 class="set-sub">{e.label}</h3>
+    <For each={cat()[e.id].models}>{x => {
+      const key = `${e.id}:${x.id}`, tiers = () => props.c.rules().engines[e.id].tiers[x.id] ?? [];
+      const errors = () => props.c.problems().some(p => p.path.startsWith(`models.${e.id}.policy.${x.id}.`) || p.path === `models.${e.id}.tiers.${x.id}`);
+      return <div class="surface ws-pol" id={`set-policy-${slug(key)}`}>
+        <Adv id={`policy-${key}`} label={`${x.label}${tiers().length ? `: ${tierWords(tiers())}` : ": no tier"}`} force={errors()}>
+          <ModelPolicyFields engine={e.id} model={x} rules={props.c.rules()} set={props.c.set} off={props.c.off()} problems={props.c.problems()} />
+        </Adv>
+      </div>;
+    }}</For>
+  </div>}</For>;
+}
+/** Locked rows: what the router always does. Route preview shows the same. */
+export function RouterRules() {
+  return <div class="surface">
+    <Srow t="Tier fallback order" d={[...TIERS].reverse().map(t => `${TIER_LABELS[t]}: ${FALLBACK_ORDER[t].map(x => TIER_LABELS[x as keyof typeof TIER_LABELS] ?? x).join(", ")}`).join(". ")}><Lock /></Srow>
+    <Srow t="Effort by tier" d={[...TIERS].reverse().map(t => `${TIER_LABELS[t]}: ${effortLabel(EFFORT_BY_TIER[t])}`).join(", ")}><Lock /></Srow>
+    <Srow t="Rank order" d={RANK_ORDER.join(", ")}><Lock /></Srow>
+    <Srow t="Hot band" d={`At ${HOT_PERCENT}% of a quota window a route ranks behind cooler ones; at 100% it is left out.`}><Lock /></Srow>
+    <Srow t="Flagship" d="Reached only by escalation, a confirmed request of yours, or a pin. Ordinary work tops out at deep, and low complexity moves a role one tier lighter."><Lock /></Srow>
+  </div>;
+}
+
+/** Old tab links land on the group they named. */
+const GROUP_OF: Record<string, string> = { roles: "set-roles", kinds: "set-kinds", quota: "set-quota", rules: "set-deny", policy: "set-policy" };
+/** Section 5: who runs what, in the order of the Cortex settings panel. */
 export function Routing(props: { tab?: string }) {
   const ws = useWs();
   const d = useRouting(), off = useRoutingOff();
   const c: Ctx = { rules: () => d.value(), set: r => d.set(r), off, problems: () => d.problems() };
-  const tab = () => TABS.some(t => t.id === props.tab) ? props.tab! : "roles";
-  return <Shell scoped wide title="Routing" lead="Who runs what. Pins are strict, leans and preferences only rank what is eligible." bar={<Bar d={d} />}>
+  const m = () => ws.machine(), r = () => d.value();
+  const focus = () => props.tab?.startsWith("policy:") ? props.tab.slice(7) : null;
+  const windows = () => ENGINES.some(e => e.usage && (r().engines[e.id].quota.length > 0 || unmappedWindows(m(), e.id, r()).length > 0));
+  onMount(() => {
+    const key = focus(), id = key ? `set-policy-${slug(key)}` : props.tab ? GROUP_OF[props.tab] : undefined;
+    if (key) ws.panels.setAdvanced(`policy-${key}`, true);
+    if (id) queueMicrotask(() => document.getElementById(id)?.scrollIntoView?.({ block: "start" }));
+  });
+  const Group = (p: { id: string; title: string; hint?: [string, string]; children: import("solid-js").JSX.Element }) => <section class="set-grp" id={p.id} aria-labelledby={`${p.id}-h`}>
+    <SetH title={<span id={`${p.id}-h`}>{p.title}</span>}><Show when={p.hint}>{h => <Hint text={h()[0]} label={h()[1]} />}</Show></SetH>
+    {p.children}
+  </section>;
+  return <Shell section="routing" wide title="Routing" lead="Who runs what. Pins are strict; leans and preferences only rank what is eligible." bar={<Bar d={d} />}
+    head={<div class="row ws-gap4 ws-head-acts"><A class="btn btn-line btn-sm" to={orchTo(m().id, "effective")}><I n="eye" s={12} />Preview routes</A><A class="btn btn-line btn-sm" to={orchTo(m().id, "files")}><I n="file" s={12} />Files and sources</A></div>}>
     <SourceStrips />
-    <Tabs label="Routing" tabs={TABS} current={tab()} route={id => orchTo(ws.machine().id, "routing", { tab: id })} />
-    <Switch>
-      <Match when={tab() === "roles"}><Roles c={c} /></Match>
-      <Match when={tab() === "kinds"}><WorkKinds c={c} /></Match>
-      <Match when={tab() === "quota"}><Quota c={c} /></Match>
-      <Match when={tab() === "rules"}><Rules c={c} /></Match>
-    </Switch>
+    <Group id="set-files" title="Routing files"><RoutingFiles /></Group>
+    <Group id="set-policy" title="Model policy" hint={[HELP.modelPolicy, "model policy"]}>
+      <Rec>Most owners only need Engines and models; set these for models that work badly at low effort or that you call by a short name.</Rec>
+      <Show when={ENGINES.some(e => m().config.catalogue[e.id].models.length > 0)} fallback={<div class="surface ws-empty">No models known yet: refresh the model lists under Models.</div>}><ModelPolicies c={c} /></Show>
+    </Group>
+    <Group id="set-roles" title="Roles and pins" hint={[HELP.pins, "role pins"]}>
+      <Rec>No pins: automatic routing balances cost, quota and quality.</Rec>
+      <Roles c={c} />
+    </Group>
+    <Group id="set-kinds" title="Work kinds" hint={[HELP.affinity, "work kinds"]}>
+      <Rec>Leave every lean on Built in.</Rec>
+      <WorkKinds c={c} />
+    </Group>
+    <section class="set-grp" id="set-quota" aria-label="Quota windows"><Adv id="routing-quota" label="Quota windows" force={windows() || props.tab === "quota"}><Quota c={c} /></Adv></section>
+    <section class="set-grp" id="set-deny" aria-label="Deny list"><Adv id="routing-deny" label="Deny list" force={r().deny.length > 0 || r().autoAllow.length > 0 || r().legacyTiers.length > 0 || props.tab === "rules"}><p class="set-grp-lead">Models or engines never to use: hidden from the model selector, refused when chosen or pinned, never routed.<Hint text={HELP.deny} label="deny rules" /></p><Rules c={c} /></Adv></section>
+    <Group id="set-router" title="How the router decides"><RouterRules /></Group>
   </Shell>;
 }

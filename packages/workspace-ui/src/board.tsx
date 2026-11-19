@@ -9,7 +9,7 @@ import { A, Count, FactLine, I, MenuItem, Pop, RowList } from "./kit";
 import { Page, StatusLane, Toolbar, type StripItem } from "./layout";
 import { defaultCheckout, repoOf, taskCheckout } from "./review-model";
 import type { ProjectView, Route, Scope } from "./router";
-import { age, awaitsOwner, bySprint, cardFact, clock, columnsOf, COLUMNS, decisionRoute, inScope, nothingToCommit, rowIcon, sameBranch, sprintRoute, sprintTitle, sprintView, type ColumnId, type GroupedRow, type ProjectSummary, type TaskView } from "./selectors";
+import { age, automaticAcceptanceHold, awaitsOwner, bySprint, cardFact, clock, columnsOf, COLUMNS, decisionRoute, inScope, nothingToCommit, planningNeedsOwner, rowIcon, sameBranch, sprintRoute, sprintTitle, sprintView, type ColumnId, type GroupedRow, type ProjectSummary, type TaskView } from "./selectors";
 import { archiveBlocked } from "./git-actions-model";
 import { closeBlocked, sessionModel } from "./session-model";
 import { KnowledgePage, ProjectSettingsPage } from "./project-pages";
@@ -21,7 +21,8 @@ const SECONDARY: { id: ProjectView; label: string }[] = [
   { id: "knowledge", label: "Knowledge and skills" }, { id: "settings", label: "Settings" },
 ];
 
-export const taskRoute = (v: TaskView): Route => ({ name: "task", machine: v.machine.id, task: v.id });
+/** Open a task at the panel that owns its next decision. */
+export const taskRoute = (v: TaskView): Route => automaticAcceptanceHold(v) ? decisionRoute(v) : { name: "task", machine: v.machine.id, task: v.id };
 
 /**
  * The card's one next action, in the order of the Conversation's attention rules: answer or resolve what waits, start a draft,
@@ -31,7 +32,7 @@ export const taskRoute = (v: TaskView): Route => ({ name: "task", machine: v.mac
 function primaryAction(v: TaskView, startable: boolean): { label: string; kind: "go" | "start" | "resume"; line?: boolean } | null {
   if (v.unknown) return null;
   switch (v.column) {
-    case "needs": return v.task.status === "paused" ? { label: "Resume", kind: "resume" } : { label: v.task.conflict !== "none" ? "Resolve" : /permission/i.test(v.task.issue ?? "") ? "Review" : v.task.status === "failed" || v.task.status === "cancelled" ? "Open" : "Answer", kind: "go" };
+    case "needs": return automaticAcceptanceHold(v) ? { label: "Review result", kind: "go" } : v.task.status === "paused" ? { label: "Resume", kind: "resume" } : { label: v.task.conflict !== "none" ? "Resolve" : /permission/i.test(v.task.issue ?? "") ? "Review" : v.task.status === "failed" || v.task.status === "cancelled" ? "Open" : "Answer", kind: "go" };
     case "todo": return startable ? { label: "Start", kind: "start" } : null;
     case "work": return v.task.status === "paused" ? { label: "Resume", kind: "resume" } : v.task.status === "working" ? { label: "Open", kind: "go", line: true } : null;
     case "review": return { label: "Review", kind: "go" };
@@ -278,7 +279,7 @@ export function ProjectPage(props: { summary: ProjectSummary; route: Extract<Rou
   const offline: StripItem = { id: "offline", tone: "info", icon: <I n="help" s={14} />, get text() { return `Last known state. ${props.summary.machine.name} is offline, last confirmed ${clock(props.summary.machine.lastConfirmedAt)}. Actions are unavailable until it reconnects.`; } };
   const planning = mapArray(() => isWork() && props.route.scope.kind === "all" ? props.summary.sprints.filter(s => s.planning !== "created" && s.planning !== "cancelled") : [], (s): StripItem => ({
     id: `planning:${s.id}`, tone: "info", icon: <I n="layers" s={14} />,
-    text: `Sprint: ${sprintTitle(s)} · ${s.planning === "question" ? "Question waiting" : s.planning === "ready" ? "Plan ready" : "Planning"} · No tasks created yet`,
+    get text() { return `Sprint: ${sprintTitle(s)} · ${planningNeedsOwner(ws.store.state(), s) ? "Question waiting" : s.planning === "ready" ? "Plan ready" : "Planning"} · No tasks created yet`; },
     action: <A class="lnk" to={sprintRoute(props.summary.machine.id, s)}>Open planning</A>,
   }));
   // A sprint deletion that stopped part-way is said where its tasks are, with the way to its retry.

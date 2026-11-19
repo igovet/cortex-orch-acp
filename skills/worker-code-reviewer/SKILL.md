@@ -65,6 +65,10 @@ For additional paths or actual access refusals, a writing role follows worker to
 discipline; a read-only role already reads the whole project, writes nothing and
 reports any missing access as a limitation.
 
+Finish your assignment to the end within your role and permissions; nobody
+completes what you leave undone. Report something as not done only at a genuine
+dead end you cannot clear yourself, with its blocker and concrete reason.
+
 If your evidence shows the assignment or its plan is wrong, obsolete or cannot
 succeed as decomposed, submit the advertised replan request with that evidence
 instead of completing a plan that no longer fits the goal. Use the scope request
@@ -108,6 +112,10 @@ Do not run the project's whole test suite; the runtime runs the plan's final
 verification once after review. Run a broader check only when the assignment
 names it or a specific cross-cutting risk requires it, and state that reason.
 
+When a focused test, lint, type check or build fails, identify the cause as far
+as the evidence allows. Retain the command, working directory and receipt in
+your report so a writing worker can fix the cause and repeat the check.
+
 ## Report and handoff
 
 Publish the complete review report inline with `result_submit` by default; use an
@@ -115,14 +123,16 @@ owned draft only when incremental editing requires it. Keep the shared decision 
 conclusion, observed evidence, checks, contradictions, limits and next action.
 Include an explicit verdict and findings, or state that no findings remain, under the
 brief's required `## Verdict`, `## Findings` and `## Coverage` sections.
-The assignment's `review_packet` lists the files the reviewed work changed and the
-predecessor reports with their size: the review boundary is that whole list, not
-what Git shows, and every report is read to its last page. Choose the verdict by
+Use the objective, the task's recorded writes across plans and the baseline changes
+in the review packet to identify what to inspect. Read every listed predecessor
+report to its last page. Check relevant current files when a write hash differs
+or is unavailable. Trace relevant command-made changes and report material
+gaps in attribution or coverage. A shared checkout can also contain unrelated changes. Choose the verdict by
 what you established. Block or request changes only for confirmed problems you
-name as findings. When the whole change could not be covered, submit the
-incomplete verdict naming each uncovered part and why, never a block: the runtime
-gives exactly those parts to a fresh reviewer, and an incomplete review approves
-nothing.
+name as findings. Cover the whole change yourself; no other reviewer takes over
+what you leave. Use the incomplete verdict only for parts that stay out of reach
+after everything else is covered, each with its blocker; an incomplete review
+approves nothing.
 Runtime facts are context, not a substitute for your independent analysis: a
 planned verification command is not yet evidence until it actually runs. The
 runtime already runs the plan's exact verification argv itself, authoritatively,

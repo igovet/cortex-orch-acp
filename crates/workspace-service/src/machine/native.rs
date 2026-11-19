@@ -151,10 +151,31 @@ pub fn product_path(state: &Path, project: &str) -> Result<PathBuf> {
     Ok(state.join("product").join(format!("{project}.json")))
 }
 pub fn product(state: &Path, project: &str) -> Result<Value> {
+    // Unmarked files predate Hybrid: their "automatic" meant queueing and
+    // acceptance, never automatic integration. The next product write persists
+    // the migrated values and marker together in the same atomic replacement.
     let mut value = json!({"tasks":{},"sprints":[],"drafts":{},"messages":[],"comments":{}});
     let mut saved = settings::read_json(&product_path(state, project)?, json!({}))?;
     // Inline bodies saved by an earlier version move to private files once.
     super::attachment_files::migrate(state, project, &mut saved)?;
+    if saved.get("sprintRunModeVersion").is_none() {
+        let mut migrated = false;
+        for sprint in saved
+            .get_mut("sprints")
+            .and_then(Value::as_array_mut)
+            .into_iter()
+            .flatten()
+        {
+            if sprint["runMode"] == "automatic" {
+                sprint["runMode"] = json!("hybrid");
+                migrated = true;
+            }
+        }
+        // Products that have never used the ambiguous spelling need no marker.
+        if migrated {
+            saved["sprintRunModeVersion"] = json!(1);
+        }
+    }
     if let Some(map) = saved.as_object() {
         for (k, v) in map {
             value[k] = v.clone();
@@ -162,6 +183,13 @@ pub fn product(state: &Path, project: &str) -> Result<Value> {
     }
     Ok(value)
 }
+/// Both queued modes share conservative result acceptance; only Automatic
+/// may subsequently finish in the same branch without confirmation.
+pub(crate) fn queue_driven_mode(sprint: &Value) -> bool {
+    matches!(sprint["runMode"].as_str(), Some("hybrid" | "automatic"))
+        && sprint["archivedAt"].is_null()
+}
+
 pub fn supported(op: &str) -> bool {
     matches!(
         op,
@@ -251,7 +279,17 @@ pub async fn run(
             )
             .await
         }
+        // Create tasks from a plan: every task and the sprint's transition commit together.
+        "product.sprint" if params["action"] == "materialize" => {
+            super::sprint_materialize::materialize(
+                root.ok_or_else(|| refuse("project_required", "Unknown project."))?,
+                project,
+                state,
+                params,
+            )
+        }
         "product.sprint" => private_product::sprint(state, project, params),
+        "automatic.queue" => private_product::automatic_queue(state, project, params),
         _ => {
             let root = root.ok_or_else(|| refuse("project_required", "Unknown project."))?;
             let mut git = git::Git::for_service(config);
@@ -261,6 +299,9 @@ pub async fn run(
                 }
                 "project.config.read" => super::project_config::read(root, config),
                 "project.config.save" => super::project_config_save::save(root, config, params),
+                "automatic.finish" => {
+                    super::integration::automatic(root, project, state, params, &mut git).await
+                }
                 "product.integrate" => {
                     super::integration::run(root, project, state, params, &mut git).await
                 }

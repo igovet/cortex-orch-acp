@@ -1,8 +1,24 @@
 import { describe, expect, it } from "vitest";
 import type { Check as WireCheck, Decision as WireDecision, Result as WireResult, Task as WireTask } from "@cortex/workspace-contract";
 import { readableCheckReason, mapCheckOutcome, mapDecision, mapProjectSlice, mapResult, mapTask, statusOfRuntime } from "../src/mapping";
+import { overlayTask } from "../src/port";
+import { dependencyReady, isAutomaticQueue, runBlockerOf } from "../src/invariants";
+import type { Sprint } from "../src/types";
 import { boardPhase } from "../src/projections";
 import { emptyWorkspace, LOCAL_MACHINE_ID } from "../src/empty";
+
+it("distinguishes recheckable Automatic holds from holds with a task action", () => {
+  const state = emptyWorkspace();
+  const sprint: Sprint = {id:"s",projectId:"p",description:"Sprint",runMode:"automatic",targetBranch:null,
+    planning:"created",conversation:[],plan:null,materializedVersion:null,taskIds:["t"],queueState:"paused",pauseReason:null};
+  sprint.automaticQueue = {kind:"settlement_blocked",taskId:"t",code:"dependencies_blocked",reason:"Check dependencies",needsOwner:true};
+  expect(isAutomaticQueue(sprint.automaticQueue)).toBe(true);
+  expect(runBlockerOf(state, sprint)).toBeNull();
+  sprint.automaticQueue = {kind:"continuation",taskId:"t",code:"continuation_cap",reason:"Resume the task",needsOwner:true};
+  expect(runBlockerOf(state, sprint)).toEqual({reason:"Resume the task",taskId:"t"});
+  sprint.automaticQueue = {kind:"settlement_blocked",taskId:"t",code:"outcome_unknown",reason:"Inspect the outcome",needsOwner:true};
+  expect(runBlockerOf(state, sprint)).toEqual({reason:"Inspect the outcome",taskId:"t"});
+});
 
 const wireTask = (patch: Partial<WireTask> = {}): WireTask => ({
   taskId: "t", description: "Fix the login race\nSecond line", title: null, titleAvailability: "not_connected", version: "3", executionId: "e",
@@ -18,6 +34,31 @@ const wireDecision = (patch: Partial<WireDecision> = {}): WireDecision => ({
 const ctx = { projectId: "p" };
 
 describe("task mapping", () => {
+  it("keeps a policy-bound continuation and its recorded pauses out of the owner-wait state", () => {
+    const recovery = wireTask({ phase:"recovery", runtimeState:"RECOVERING", executionState:"recovering", waitReason:"automatic_continuation_pending" });
+    const automaticContinuation = { policy:"automatic_continuation", continuationCount:2, lastContinuationReason:"Verification did not pass", pause:null };
+    expect(mapTask({...recovery, automaticContinuation}, ctx)).toMatchObject({ status:"working", automaticContinuation });
+    for (const kind of ["external_blocker", "continuation_cap", "outcome_unknown"]) {
+      const pause = { eventId:"evt", kind, reason:"Recorded pause" };
+      expect(mapTask({...recovery, phase:"paused", executionState:"paused", waitReason:pause.reason,
+        automaticContinuation:{...automaticContinuation, pause}}, ctx))
+        .toMatchObject({ status:"paused", process:"stopped", issue:pause.reason, automaticContinuation:{ pause } });
+    }
+    expect(mapTask({...recovery, automaticContinuation:{...automaticContinuation, continuationCount:-1}}, ctx).automaticContinuation).toBeUndefined();
+    expect(mapTask(recovery, ctx).status).toBe("needs_you");
+  });
+  it("keeps automatic acceptance separate from a recorded automatic finish", () => {
+    const native = mapTask(wireTask({phase:"result", runtimeState:"COMPLETED", executionState:"finished"}), ctx, wireResult({observedWorkspaceDigest:"digest"}));
+    const acceptance = { automatic:true, version:47, digest:"digest" };
+    const accepted = overlayTask(native, {status:"ready_to_merge", acceptance}, "dev");
+    expect(accepted).toMatchObject({status:"ready_to_merge", acceptance:{automatic:true,version:2}});
+    expect(dependencyReady(accepted, "automatic")).toBe(false);
+    expect(dependencyReady(accepted, "hybrid")).toBe(true);
+    const integration = { method:"commit" as const, targetBranch:"dev", digest:"digest", automatic:true, committed:false };
+    const done = overlayTask(native, {status:"done", acceptance, integration}, "dev");
+    expect(done).toMatchObject({status:"done", process:"stopped", integration});
+    expect(dependencyReady(done, "automatic")).toBe(true);
+  });
   it("shows an explicit native owner resolution as done without certifying the work", () => {
     const resolved = wireTask({phase:"stopped",runtimeState:"CANCELLED",executionState:"stopped",warnings:["owner_resolved_without_certification"]});
     expect(mapTask(resolved,ctx)).toMatchObject({status:"done",closedAs:"as_is",notVerifiedByCortex:true,acceptance:null,result:null});
@@ -202,5 +243,11 @@ describe("permission decisions", () => {
     const slice = mapProjectSlice({id:"p",machineId:LOCAL_MACHINE_ID,name:"P",repository:"/p",openBranch:"",defaultBranch:""}, [wireTask()], [decision]);
     expect(slice.tasks[0]).toMatchObject({ status: "needs_you", issue: "Owner decision: worker-backend-dev wants to write /srv/a", process: "live" });
     expect(mapDecision(wireDecision()).kind).toBe("question");
+  });
+});
+
+describe("check reasons carry no internal codes", () => {
+  it.each(["check_preflight_unavailable", "task_files_changed", "workspace_drift", "stale_result", "some_unlisted_code", "Not run: check_preflight_unavailable"])("%s", raw => {
+    expect(readableCheckReason(raw)).not.toMatch(/[a-z]+_[a-z]+/);
   });
 });

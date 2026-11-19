@@ -326,13 +326,81 @@ mod stop_continuation_tests {
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn automatic_host_tick_resumes_only_after_the_route_qualifies() {
+        use cortex_core::lifecycle::automatic;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct RouteSwitch(AtomicBool);
+        impl NativeRoutes for RouteSwitch {
+            fn route(&self, root: &Path, role: &str) -> CoreResult<SessionRoute> {
+                if self.0.load(Ordering::SeqCst) {
+                    FailingStart.route(root, role)
+                } else {
+                    Err(CoreError::Refused("native_task_route_unavailable"))
+                }
+            }
+        }
+        let root =
+            std::env::temp_dir().join(format!("automatic-tick-{}", crate::identity().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.clone();
+        let routes = Arc::new(RouteSwitch(AtomicBool::new(false)));
+        let opener = routes.clone();
+        let runtime = Arc::new(
+            tokio::task::spawn_blocking(move || Runtime::open(&path, "project", opener))
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        let task = runtime.host.executor.publication(|store| {
+            use cortex_core::workspace::{self, NativeExecutionPolicy};
+            let draft = workspace::create_draft(store, "project", &actor(),
+                &json!({"protocol":{"major":1,"minor":8},"requestId":"draft","projectId":"project",
+                    "actorId":actor(),"operation":"tasks.create","target":"project","expectedVersion":"0",
+                    "ownerEpoch":null,"payload":{"description":"Route hold fixture","checkout":{"kind":"main"}}}),
+            )?.receipt;
+            let start = json!({"protocol":{"major":1,"minor":8},"requestId":"start","projectId":"project",
+                "actorId":actor(),"operation":"tasks.start","target":draft["target"],
+                "expectedVersion":draft["entityVersion"],"ownerEpoch":null,"payload":{}});
+            let started = workspace::start_native_input_with_policy(store, "project", &actor(), &start,
+                None, None, Some(NativeExecutionPolicy::AutomaticContinuation))?;
+            let task = started["task"].as_str().unwrap().to_owned();
+            store.write(|db| domain::stop_tx(db, &task, "native_task_route_unavailable"))?;
+            Ok(task)
+        }).unwrap().await.unwrap().unwrap();
+        let before = facts(&runtime).await;
+        assert_eq!(before, ("RECOVERING".into(), 0, 0, false));
+        for _ in 0..2 {
+            assert!(runtime.continue_automatic_tasks().await.unwrap());
+            assert_eq!(facts(&runtime).await, before);
+        }
+        routes.0.store(true, Ordering::SeqCst);
+        runtime.continue_automatic_tasks().await.unwrap();
+        until(&runtime, |(_, failures, _, _)| *failures == 1).await;
+        runtime.settle_task(&task).await.unwrap();
+        runtime.host.executor.read(move |db| {
+            let resumed: i64 = db.query_row("SELECT count(*) FROM runtime_events WHERE task_id=? AND type='AUTOMATIC_RESUMED'",
+                [&task], |r| r.get(0))?;
+            assert_eq!(resumed, 1);
+            let pause = automatic::projection(db, &task)?.unwrap()["pause"].clone();
+            assert_ne!(pause["reason"], "native_task_route_unavailable");
+            Ok(())
+        }).unwrap().await.unwrap().unwrap();
+        assert_eq!(facts(&runtime).await.2, 0);
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// Pause/Resume, bounded unknown outcomes and route ownership, without a paid engine.
 #[cfg(test)]
 mod resume_tests {
     use super::*;
-    use crate::{native_runtime::NativeRoutes, native_sessions::SessionRoute};
+    use crate::{
+        native_recovery::fixture, native_runtime::NativeRoutes, native_sessions::SessionRoute,
+    };
     use cortex_core::workspace;
     use cortex_engine::environment::{EngineKind, LaunchSpec};
     use std::{
@@ -667,7 +735,7 @@ mod resume_tests {
             db.execute("INSERT INTO capacity_reservations VALUES ('lost-r','fixture',?,NULL,'lost-attempt','coordinator','ambiguous','0','0','termination_unconfirmed')", [&t])?;
             Ok(())
         }).unwrap().await.unwrap().unwrap();
-        runtime.recover().await.unwrap();
+        runtime.recover_fixture().await.unwrap();
         assert_eq!(
             sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await,
             "PAUSED:native_session_outcome_unknown"
@@ -679,7 +747,7 @@ mod resume_tests {
         assert_eq!(error.to_string(), "task_paused");
         // The attempt was settled by that recovery (its host is gone and no engine works
         // in the project), while the task stays held; a later recovery keeps it settled.
-        runtime.recover().await.unwrap();
+        runtime.recover_fixture().await.unwrap();
         assert_eq!(
             sql(&runtime, "SELECT state FROM capacity_reservations").await,
             "released"
@@ -707,7 +775,7 @@ mod resume_tests {
             cortex_core::workspace::control::admit_input(store, "project", &actor(), &request, None)?;
             Ok(())
         }).unwrap().await.unwrap().unwrap();
-        runtime.recover().await.unwrap();
+        runtime.recover_fixture().await.unwrap();
         let reasons = "SELECT count(*) FROM runtime_events WHERE type='NATIVE_RECOVERY_REQUIRED' AND json_extract(payload_json,'$.reason')='native_control_outcome_unknown'";
         assert_eq!(sql(&runtime, reasons).await, "1");
         assert_eq!(
@@ -721,8 +789,8 @@ mod resume_tests {
             .unwrap_err();
         assert_eq!(error.to_string(), "native_control_outcome_unknown");
         // Later restarts do not force another barrier for it.
-        runtime.recover().await.unwrap();
-        runtime.recover().await.unwrap();
+        runtime.recover_fixture().await.unwrap();
+        runtime.recover_fixture().await.unwrap();
         assert_eq!(sql(&runtime, reasons).await, "1");
         let _ = task;
         close(root, runtime).await;
@@ -988,7 +1056,7 @@ mod resume_tests {
         .await;
         legacy_unlaunched_worker(&runtime, &task, "external_mcp", "authority_refused").await;
         // Service start: the durable start failure proves no engine was ever launched.
-        runtime.recover().await.unwrap();
+        runtime.recover_fixture().await.unwrap();
         assert_eq!(sql(&runtime, "SELECT status FROM delegation_provisioning WHERE idempotency_key='legacy-assignment'").await, "terminated");
         assert_eq!(sql(&runtime, "SELECT state||':'||release_observation FROM capacity_reservations WHERE reservation_id='legacy-reservation'").await, "released:never_launched");
         assert_eq!(sql(&runtime, "SELECT json_extract(payload_json,'$.evidence') FROM runtime_events WHERE type='NATIVE_PROCESS_SETTLED'").await,
@@ -1018,7 +1086,7 @@ mod resume_tests {
             "0"
         );
         // Recovery is idempotent: a later restart records nothing new for the attempt.
-        runtime.recover().await.unwrap();
+        runtime.recover_fixture().await.unwrap();
         assert_eq!(
             sql(
                 &runtime,
@@ -1040,8 +1108,8 @@ mod resume_tests {
         // `session_new` is after the engine launch: its process may still run, and an
         // engine process does work in the project.
         legacy_unlaunched_worker(&runtime, &task, "session_new", "io_error").await;
-        let mut engine = fake_engine(&root);
-        runtime.recover().await.unwrap();
+        let engine = fixture::engine(&root, &root);
+        runtime.recover_fixture().await.unwrap();
         assert_eq!(sql(&runtime, "SELECT status FROM delegation_provisioning WHERE idempotency_key='legacy-assignment'").await, "ambiguous");
         assert_eq!(
             sql(
@@ -1060,7 +1128,7 @@ mod resume_tests {
             "0"
         );
         // The attempt is stamped once with this boot; restarts in the same boot do not settle it.
-        runtime.recover().await.unwrap();
+        runtime.recover_fixture().await.unwrap();
         assert_eq!(
             sql(
                 &runtime,
@@ -1077,46 +1145,18 @@ mod resume_tests {
         assert_eq!(sql(&runtime, "SELECT status FROM delegation_provisioning WHERE idempotency_key='legacy-assignment'").await, "ambiguous");
         // A recovery in a later boot: no process of that boot can still run.
         exec(&runtime, "UPDATE runtime_events SET payload_json=json_set(payload_json,'$.boot_id','an-earlier-boot') WHERE type='NATIVE_PROCESS_UNCONFIRMED'").await;
-        runtime.recover().await.unwrap();
+        runtime.recover_fixture().await.unwrap();
         assert_eq!(sql(&runtime, "SELECT state||':'||release_observation FROM capacity_reservations WHERE reservation_id='legacy-reservation'").await, "released:previous_boot");
         assert_eq!(sql(&runtime, "SELECT status FROM delegation_provisioning WHERE idempotency_key='legacy-assignment'").await, "terminated");
         assert_eq!(sql(&runtime, "SELECT json_extract(payload_json,'$.evidence') FROM runtime_events WHERE type='NATIVE_PROCESS_SETTLED'").await,
             "unconfirmed_attempt_from_previous_boot");
-        stop_fake_engine(&mut engine);
+        std::fs::remove_dir_all(engine).unwrap();
         runtime
             .control("project".into(), message(&execution, "next-boot"))
             .await
             .unwrap();
         coordinator_relaunched(&runtime).await;
         close(root, runtime).await;
-    }
-
-    /// A process of this user whose command line names an engine adapter and whose
-    /// working directory is `root` (`sh -c` keeps the marker as its own argument).
-    fn fake_engine(root: &std::path::Path) -> std::process::Child {
-        use std::os::unix::process::CommandExt;
-        let child = std::process::Command::new("/bin/sh")
-            .args(["-c", "sleep 60; :", "codex-acp"])
-            .current_dir(root)
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        // The scan reads it from the process table: wait until it shows its marker.
-        for _ in 0..200 {
-            if std::fs::read(format!("/proc/{}/cmdline", child.id()))
-                .is_ok_and(|c| c.windows(9).any(|w| w == b"codex-acp"))
-            {
-                return child;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        panic!("the fake engine did not start");
-    }
-    fn stop_fake_engine(child: &mut std::process::Child) {
-        unsafe {
-            libc::kill(-(child.id() as i32), libc::SIGKILL);
-        }
-        child.wait().unwrap();
     }
 
     /// The service was killed (SIGKILL) while a worker ran: its delegation and
@@ -1154,7 +1194,7 @@ mod resume_tests {
             conflict().await.unwrap().unwrap().unwrap()["holder_task"],
             json!(task)
         );
-        runtime.recover().await.unwrap();
+        runtime.recover_fixture().await.unwrap();
         assert_eq!(sql(&runtime, "SELECT status FROM delegation_provisioning WHERE idempotency_key='killed-assignment'").await, "terminated");
         assert_eq!(sql(&runtime, "SELECT state||':'||release_observation FROM capacity_reservations WHERE reservation_id='killed-reservation'").await,
             "released:no_engine_process");
@@ -1174,7 +1214,7 @@ mod resume_tests {
         assert!(conflict().await.unwrap().unwrap().is_none());
         // A later restart records nothing new for it.
         let counted = sql(&runtime, "SELECT count(*) FROM runtime_events").await;
-        runtime.recover().await.unwrap();
+        runtime.recover_fixture().await.unwrap();
         assert_eq!(
             sql(&runtime, "SELECT count(*) FROM runtime_events").await,
             counted
@@ -1205,7 +1245,7 @@ mod resume_tests {
         })
         .await;
         killed_worker(&runtime, &task).await;
-        runtime.recover().await.unwrap();
+        runtime.recover_fixture().await.unwrap();
         // Stop is confirmed (no unknown outcome), and so is Resume.
         pause(&runtime, &execution).await;
         assert_eq!(
@@ -1255,8 +1295,8 @@ mod resume_tests {
         })
         .await;
         killed_worker(&runtime, &task).await;
-        let mut engine = fake_engine(&root);
-        runtime.recover().await.unwrap();
+        let engine = fixture::engine(&root, &root);
+        runtime.recover_fixture().await.unwrap();
         assert_eq!(
             sql(
                 &runtime,
@@ -1278,9 +1318,213 @@ mod resume_tests {
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), "native_shutdown_unconfirmed");
-        stop_fake_engine(&mut engine);
-        runtime.recover().await.unwrap();
+        std::fs::remove_dir_all(engine).unwrap();
+        runtime.recover_fixture().await.unwrap();
         assert_eq!(sql(&runtime, "SELECT state||':'||release_observation FROM capacity_reservations WHERE reservation_id='killed-reservation'").await,
+            "released:no_engine_process");
+        close(root, runtime).await;
+    }
+
+    /// The rows this running service writes when a session's shutdown is not
+    /// confirmed (`native_sessions::settle`): delegation and reservation `ambiguous`,
+    /// no process record, the channel revoked. `epoch` is relative to the task's
+    /// current owner epoch; `reservation` is the reservation's state.
+    async fn unconfirmed_worker(
+        runtime: &Runtime,
+        task: &str,
+        name: &'static str,
+        epoch: i64,
+        reservation: &'static str,
+    ) {
+        let t = task.to_owned();
+        runtime.host.executor.write(move |db| {
+            let current: i64 = db.query_row("SELECT epoch FROM task_owners WHERE task_id=?", [&t], |r| r.get(0))?;
+            db.execute("INSERT INTO delegation_provisioning VALUES (?,?,NULL,?,'worker-backend-dev','ready','ambiguous',NULL,?,NULL,NULL,'es-gone',NULL,NULL,?,'0','0')",
+                (format!("{name}-assignment"), &t, format!("{name}-attempt"), format!("ch_{name}"), current + epoch))?;
+            db.execute("INSERT INTO capacity_reservations VALUES (?,'fixture',?,?,?,'worker',?,'0','0',?)",
+                (format!("{name}-reservation"), &t, format!("{name}-assignment"), format!("{name}-attempt"), reservation,
+                    (reservation == "ambiguous").then_some("termination_unconfirmed")))?;
+            Ok(())
+        }).unwrap().await.unwrap().unwrap();
+    }
+
+    /// A worker of this running service did not confirm its exit, and its process is
+    /// in fact gone. The next scheduler pass settles it, without a restart, exactly as
+    /// startup recovery would; the task becomes an ordinary interrupted turn and the
+    /// owner's message continues it. Rows of another owner epoch, and an attempt whose
+    /// reservation is still being stopped, are never touched.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unconfirmed_worker_exit_is_settled_without_a_restart_once_its_process_is_gone() {
+        let (root, runtime, execution, task) = seeded(Routes {
+            generation: AtomicUsize::new(0),
+            default_available: true,
+        })
+        .await;
+        unconfirmed_worker(&runtime, &task, "gone", 0, "ambiguous").await;
+        unconfirmed_worker(&runtime, &task, "foreign", 1, "ambiguous").await;
+        unconfirmed_worker(&runtime, &task, "stopping", 0, "reserved").await;
+        exec(
+            &runtime,
+            "UPDATE runtime_tasks SET state='RECOVERING',blocker=NULL",
+        )
+        .await;
+        // One pass, against a process table in which no engine works in the project.
+        assert!(!runtime.resettle_fixture().await.unwrap());
+        assert_eq!(sql(&runtime, "SELECT status FROM delegation_provisioning WHERE idempotency_key='gone-assignment'").await, "terminated");
+        assert_eq!(sql(&runtime, "SELECT state||':'||release_observation FROM capacity_reservations WHERE reservation_id='gone-reservation'").await,
+            "released:no_engine_process");
+        assert_eq!(sql(&runtime, "SELECT json_extract(payload_json,'$.evidence')||':'||json_extract(payload_json,'$.delegations[0].attempt') FROM runtime_events WHERE type='NATIVE_PROCESS_SETTLED'").await,
+            "unconfirmed_exit_and_no_engine_process_in_project:gone-attempt");
+        assert_eq!(sql(&runtime, "SELECT group_concat(state,',') FROM (SELECT state FROM capacity_reservations WHERE reservation_id IN ('foreign-reservation','stopping-reservation') ORDER BY reservation_id)").await,
+            "ambiguous,reserved");
+        assert_eq!(sql(&runtime, "SELECT group_concat(status,',') FROM delegation_provisioning WHERE idempotency_key IN ('foreign-assignment','stopping-assignment')").await,
+            "ambiguous,ambiguous");
+        // Nothing qualifies any more: a later pass changes nothing.
+        let counted = sql(&runtime, "SELECT count(*) FROM runtime_events").await;
+        assert!(!runtime.resettle_fixture().await.unwrap());
+        assert_eq!(
+            sql(&runtime, "SELECT count(*) FROM runtime_events").await,
+            counted
+        );
+        // Not Automatic: the task keeps its state, an ordinary interrupted turn, and
+        // is never driven on by itself. The two rows left alone still refuse a message;
+        // once they settle too, the owner's message relaunches the coordinator.
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT state||':'||coalesce(blocker,'') FROM runtime_tasks"
+            )
+            .await,
+            "RECOVERING:"
+        );
+        assert_eq!(
+            sql(&runtime, "SELECT count(*) FROM runtime_events WHERE type IN ('AUTOMATIC_CONTINUATION','NATIVE_SESSION_START_FAILED')").await,
+            "0"
+        );
+        exec(
+            &runtime,
+            "UPDATE delegation_provisioning SET status='terminated' WHERE idempotency_key IN ('foreign-assignment','stopping-assignment');
+             UPDATE capacity_reservations SET state='released',release_observation='process_exited' WHERE reservation_id IN ('foreign-reservation','stopping-reservation')",
+        )
+        .await;
+        let receipt = runtime
+            .control("project".into(), message(&execution, "after-pass"))
+            .await
+            .unwrap();
+        assert_eq!(receipt["outcome"], "recorded");
+        coordinator_relaunched(&runtime).await;
+        close(root, runtime).await;
+    }
+
+    /// In Automatic, a task paused only because a worker's exit was unconfirmed
+    /// continues by itself in the same pass that settles that exit.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_automatic_task_held_only_by_an_unconfirmed_exit_continues_once_it_settles() {
+        let (root, runtime, _execution, task) = seeded(Routes {
+            generation: AtomicUsize::new(0),
+            default_available: true,
+        })
+        .await;
+        unconfirmed_worker(&runtime, &task, "gone", 0, "ambiguous").await;
+        let t = task.clone();
+        runtime
+            .host
+            .executor
+            .write(move |db| {
+                lifecycle::event_tx(
+                    db,
+                    &t,
+                    "AUTOMATIC_POLICY_BOUND",
+                    json!({"policy":"automatic_continuation"}),
+                )?;
+                db.execute(
+                    "UPDATE runtime_tasks SET state='EXECUTING',blocker=NULL WHERE task_id=?",
+                    [&t],
+                )?;
+                domain::stop_tx(db, &t, "native_shutdown_unconfirmed")?;
+                Ok(())
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await,
+            "RECOVERING:automatic_continuation_paused"
+        );
+        // The host tick alone never resumes an unknown outcome.
+        runtime.continue_automatic_tasks().await.unwrap();
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='AUTOMATIC_RESUMED'"
+            )
+            .await,
+            "0"
+        );
+        // One pass: the exit settles, the task is an interrupted automatic turn, and
+        // the same pass's continuation relaunches its coordinator.
+        assert!(!runtime.resettle_fixture().await.unwrap());
+        assert_eq!(sql(&runtime, "SELECT json_extract(payload_json,'$.reason') FROM runtime_events WHERE type='AUTOMATIC_CONTINUATION'").await,
+            "native_process_exit_settled");
+        runtime.continue_automatic_tasks().await.unwrap();
+        assert_eq!(
+            sql(
+                &runtime,
+                "SELECT count(*) FROM runtime_events WHERE type='AUTOMATIC_RESUMED'"
+            )
+            .await,
+            "1"
+        );
+        coordinator_relaunched(&runtime).await;
+        runtime.settle_task(&task).await.unwrap();
+        close(root, runtime).await;
+    }
+
+    /// While an engine process may still work in the project, the running service's
+    /// re-check changes nothing and backs off; the owner's card stays as it was.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unconfirmed_worker_exit_is_left_alone_while_an_engine_may_still_run() {
+        let (root, runtime, _execution, task) = seeded(Routes {
+            generation: AtomicUsize::new(0),
+            default_available: true,
+        })
+        .await;
+        unconfirmed_worker(&runtime, &task, "alive", 0, "ambiguous").await;
+        exec(
+            &runtime,
+            "UPDATE runtime_tasks SET state='RECOVERING',blocker=NULL",
+        )
+        .await;
+        let engine = fixture::engine(&root, &root);
+        let counted = sql(&runtime, "SELECT count(*) FROM runtime_events").await;
+        assert!(runtime.resettle_fixture().await.unwrap());
+        let unchanged = || async {
+            assert_eq!(sql(&runtime, "SELECT status FROM delegation_provisioning WHERE idempotency_key='alive-assignment'").await, "ambiguous");
+            assert_eq!(sql(&runtime, "SELECT state||':'||release_observation FROM capacity_reservations WHERE reservation_id='alive-reservation'").await,
+                "ambiguous:termination_unconfirmed");
+            assert_eq!(
+                sql(
+                    &runtime,
+                    "SELECT state||':'||coalesce(blocker,'') FROM runtime_tasks"
+                )
+                .await,
+                "RECOVERING:"
+            );
+            assert_eq!(
+                sql(&runtime, "SELECT count(*) FROM runtime_events").await,
+                counted
+            );
+        };
+        unchanged().await;
+        // Gone now, but the re-check backs off: the next pass does not look yet.
+        std::fs::remove_dir_all(engine).unwrap();
+        assert!(runtime.resettle_fixture().await.unwrap());
+        unchanged().await;
+        // Once the backoff elapses, the pass settles it.
+        *runtime.exit_recheck.lock().unwrap() = Default::default();
+        assert!(!runtime.resettle_fixture().await.unwrap());
+        assert_eq!(sql(&runtime, "SELECT state||':'||release_observation FROM capacity_reservations WHERE reservation_id='alive-reservation'").await,
             "released:no_engine_process");
         close(root, runtime).await;
     }
@@ -1350,7 +1594,7 @@ mod resume_tests {
             purge(draft.clone()).await.unwrap().unwrap_err().code(),
             "active_execution"
         );
-        runtime.recover().await.unwrap();
+        runtime.recover_fixture().await.unwrap();
         purge(draft).await.unwrap().unwrap();
         close(root, runtime).await;
     }
@@ -1817,6 +2061,145 @@ impl Runtime {
         reply
             .await
             .map_err(|_| failure("native_control_outcome_unknown"))?
+    }
+    /// Workspace's safety tick requalifies the exact blocked route without a model
+    /// prompt. The durable hold remains until route qualification and process
+    /// settlement are both observed under the ordinary host controls.
+    pub(super) async fn continue_automatic_tasks(self: &Arc<Self>) -> CoreResult<bool> {
+        use lifecycle::automatic;
+        let _serial = self.controls.lock().await;
+        if *self.stop.borrow() {
+            return Ok(false);
+        }
+        let (active, tasks) = self.host.executor.read(|db| {
+            let rows = db.prepare(
+                "SELECT t.task_id,o.owner_ref,o.epoch FROM runtime_tasks t
+                 JOIN task_owners o USING(task_id)
+                 WHERE t.state NOT IN ('COMPLETED','CANCELLED','FAILED','PAUSED')
+                 AND EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=t.task_id AND e.type='AUTOMATIC_POLICY_BOUND')
+                 ORDER BY t.rowid",
+            )?.query_map([], |r| Ok((r.get::<_, String>(0)?, OwnerEpoch {
+                owner:r.get(1)?, epoch:r.get(2)?,
+            })))?.collect::<Result<Vec<_>,_>>()?;
+            let mut active = false;
+            let mut tasks = Vec::new();
+            for (task, owner) in rows {
+                if let Some(owed) = automatic::owed(db, &task)? {
+                    active = true;
+                    tasks.push((task, owner, owed));
+                } else if !automatic::held(db, &task)? {
+                    active = true;
+                }
+            }
+            Ok((active, tasks))
+        })?.await.map_err(|_| CoreError::Refused("native_host_closed"))??;
+        for (task, owner, owed) in tasks {
+            if self.driven(&task).await {
+                continue;
+            }
+            // A worker-side route hold must see the same role and routing inputs
+            // qualify (with fresh task evidence), not just a usable coordinator.
+            if owed.external {
+                let reason = owed.evidence["reason"].as_str().unwrap_or_default();
+                if reason == "engine_authentication_required" {
+                    // A stale catalogue is not evidence that the account recovered.
+                    let auth = &owed.evidence["authentication"];
+                    let observed = match (auth["connection"].as_str(), auth["at"].as_str()) {
+                        (Some(connection), Some(at)) => self
+                            .routes
+                            .authentication_observed_after(&self.host.root, connection, at)
+                            .unwrap_or(false),
+                        _ => false,
+                    };
+                    if !observed {
+                        continue;
+                    }
+                }
+                let probe = owed.evidence["worker_route"].clone();
+                if let Some(role) = probe["role"].as_str() {
+                    let t = task.clone();
+                    let root = self.host.root.clone();
+                    let evidence = self
+                        .host
+                        .executor
+                        .read(move |db| cortex_core::routing::evidence(db, &t, &root))?
+                        .await
+                        .map_err(|_| CoreError::Refused("native_host_closed"))??;
+                    if self
+                        .routes
+                        .worker_selection(
+                            &self.host.root,
+                            role,
+                            &probe["node"],
+                            &evidence,
+                            probe["escalated"] == true,
+                            probe["previous"].as_str(),
+                        )
+                        .is_err()
+                    {
+                        continue;
+                    }
+                }
+            }
+            let route = match self.coordinator_route(&task, None).await.and_then(|route| {
+                self.routes
+                    .automatic_coordinator_health(&self.host.root, &route)?;
+                Ok(route)
+            }) {
+                Ok(route) => route,
+                Err(error) => {
+                    let (t, event) = (task.clone(), owed.event);
+                    let reason = error.code();
+                    self.host
+                        .executor
+                        .write(move |db| automatic::route_pause_tx(db, &t, event, reason))?
+                        .await
+                        .map_err(|_| CoreError::Refused("native_host_closed"))??;
+                    continue;
+                }
+            };
+            let (t, o, event) = (task.clone(), owner.clone(), owed.event);
+            let ready = self
+                .host
+                .executor
+                .write(move |db| {
+                    cortex_core::ownership::check_tx(db, &t, &o)?;
+                    automatic::resume_tx(db, &t, event)
+                })?
+                .await
+                .map_err(|_| CoreError::Refused("native_host_closed"))?;
+            let evidence = match ready {
+                Ok(Some(evidence)) => evidence,
+                Ok(None) | Err(CoreError::Refused("stale_owner")) => continue,
+                Err(CoreError::Refused(
+                    reason @ ("lost_worker_termination_unconfirmed"
+                    | "native_outside_outcome_unknown"),
+                )) => {
+                    let t = task.clone();
+                    let o = owner.clone();
+                    self.host
+                        .executor
+                        .write(move |db| {
+                            if cortex_core::ownership::check_tx(db, &t, &o).is_ok()
+                                && automatic::owed(db, &t)?
+                                    .is_some_and(|current| current.event == event)
+                            {
+                                automatic::pause_unsettled_tx(db, &t, reason)?;
+                            }
+                            Ok(())
+                        })?
+                        .await
+                        .map_err(|_| CoreError::Refused("native_host_closed"))??;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let refs = json!({"reason":evidence["reason"],"processReason":evidence["process_reason"],
+                "revision":evidence["revision"],"events":evidence["events"],"reports":evidence["reports"]});
+            let prompt = format!("Continue the task with a fresh plan. Repair the recorded failure and retain all mandatory checks. Read the current capsule and cited reports. Do not replay effects with unknown outcomes. Runtime evidence: {refs}");
+            self.continue_task(task, owner, prompt, route).await?;
+        }
+        Ok(active)
     }
     /// Relaunch every coordinator owed by an answered runtime stop question,
     /// after the answer commits or after a restart. A continuation that cannot

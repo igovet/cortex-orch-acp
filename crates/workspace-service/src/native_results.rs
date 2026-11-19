@@ -136,7 +136,137 @@ fn validate_result(
             return Err(CoreError::Refused("check_blocker_required"));
         }
     }
+    // The authenticated channel identifies the profile. An explicit second failure
+    // can reach the coordinator even when this worker cannot repair the project.
+    if i.stage.as_deref() == Some("execution")
+        && i.profile
+            .as_deref()
+            .is_some_and(|role| !cortex_core::scheduler::policy::read_only(role, "execution"))
+        && args["assignment_outcome"] == "failed"
+        && checks.iter().any(|c| {
+            c["outcome"] == "failed"
+                && c["evidence_strength"] == "verified"
+                && !worker_checks::resolved(c)
+        })
+    {
+        let offered = store.read(|db| Ok(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='WORKER_RESULT_REFUSED'
+             AND json_extract(payload_json,'$.attempt')=? AND json_extract(payload_json,'$.code')='failed_check_repair_required')",
+            (&i.task, &i.attempt), |r| r.get::<_, bool>(0),
+        )?))?;
+        if !offered {
+            return Err(CoreError::Refused("failed_check_repair_required"));
+        }
+    }
+    // A worker finishes its own assignment. A part it can still do, or a failure
+    // without a named dead end, is refused with exactly what is outstanding; the
+    // channel stays open and the same session continues.
+    if let Some((code, _)) = outstanding(store, c, i, args)? {
+        return Err(CoreError::Refused(code));
+    }
     Ok(checks)
+}
+
+/// A reviewer's report is not complete merely because its result mentions it.
+/// Every predecessor report of the review node must have a successful page receipt
+/// whose `next_cursor` is null on this exact channel and attempt, unless an
+/// INCOMPLETE result names it in `not_covered` with its dead end. Returns the
+/// unread report ids; refusing on them leaves the same worker session alive.
+fn unread_predecessor_reports(
+    store: &Store,
+    c: &Credential,
+    i: &Identity,
+    args: &Value,
+) -> CoreResult<Vec<String>> {
+    let Some(assignment) = i.assignment.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let blocked = lifecycle::review::blocked_items(args);
+    store.read(|db| {
+        use rusqlite::OptionalExtension;
+        let node: Option<String> = db
+            .query_row(
+                "SELECT node_id FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",
+                (&i.task, assignment),
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(node) = node else {
+            return Ok(Vec::new());
+        };
+        let reports = cortex_core::assignment_brief::predecessor_reports(db, &i.task, &node)?;
+        let mut missing = Vec::new();
+        for report in reports {
+            let Some(id) = report["report_id"].as_str() else {
+                continue;
+            };
+            // An unavailable predecessor is a genuine gap and is surfaced to the
+            // coordinator by the normal review result; it cannot be faked as read.
+            if report["availability"] == "unavailable" || blocked.contains(id) {
+                continue;
+            }
+            let read: bool = db.query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM runtime_events
+                   WHERE task_id=? AND type='REPORT_PAGE_READ'
+                     AND json_extract(payload_json,'$.channel_id')=?
+                     AND json_extract(payload_json,'$.assignment_ref')=?
+                     AND json_extract(payload_json,'$.attempt')=?
+                     AND json_extract(payload_json,'$.report_id')=?
+                     AND json_type(payload_json,'$.next_cursor')='null'
+                 )",
+                (&i.task, &c.channel_id, assignment, &i.attempt, id),
+                |r| r.get(0),
+            )?;
+            if !read {
+                missing.push(id.to_owned());
+            }
+        }
+        Ok(missing)
+    })
+}
+/// What this submission leaves undone that the worker can still do: the refusal
+/// code with the exact outstanding items, checked before anything is published.
+/// The same rule binds the recorded result (`completion::outstanding_tx`).
+pub(super) fn outstanding(
+    store: &Store,
+    c: &Credential,
+    i: &Identity,
+    args: &Value,
+) -> CoreResult<Option<(&'static str, Vec<String>)>> {
+    // Without an assignment binding nothing can be recorded anyway; the failure
+    // blocker rule still applies to the arguments alone.
+    let assignment = i.assignment.as_deref().unwrap_or("");
+    let stage = i.stage.as_deref().unwrap_or("execution");
+    if let Some(found) =
+        store.read(|db| completion::outstanding_tx(db, &i.task, assignment, stage, args))?
+    {
+        return Ok(Some(found));
+    }
+    if stage == "review" {
+        let unread = unread_predecessor_reports(store, c, i, args)?;
+        if !unread.is_empty() {
+            return Ok(Some(("review_predecessor_reports_required", unread)));
+        }
+    }
+    Ok(None)
+}
+/// The items a refusal names in its `missing` field, recomputed from the refused
+/// arguments: report sections, or what the worker has still to do.
+pub(super) fn refusal_missing(
+    store: &Store,
+    c: &Credential,
+    i: &Identity,
+    args: &Value,
+    code: &str,
+) -> Option<Vec<String>> {
+    if code == cortex_core::assignment_brief::SECTIONS_MISSING {
+        return Some(missing_sections(store, i, args));
+    }
+    match outstanding(store, c, i, args) {
+        Ok(Some((found, items))) if found == code && !items.is_empty() => Some(items),
+        _ => None,
+    }
 }
 #[cfg(test)]
 mod evidence_tests {
@@ -190,7 +320,7 @@ mod evidence_tests {
             session: None,
         };
         for code in ["open_failed_check", "omitted_failed_check"] {
-            record_refusal(&store, &c, &i, code).unwrap();
+            record_refusal(&store, &c, &i, code, None).unwrap();
         }
         let rows: Vec<String> = store
             .read(|db| {
@@ -226,6 +356,12 @@ mod evidence_tests {
             "review_resubmit_required",
             "review_project_revision_changed",
             "review_project_revision_unstable",
+            "review_predecessor_reports_required",
+            "review_coverage_unfinished",
+            "review_file_coverage_required",
+            "review_block_findings_required",
+            "review_not_covered_required",
+            "assignment_blocker_required",
         ] {
             assert!(correctable(code), "{code}");
             assert!(
@@ -378,6 +514,24 @@ mod evidence_tests {
                 .code(),
             "open_failed_check"
         );
+        let mut explicit_failure = failed_args.clone();
+        explicit_failure["assignment_outcome"] = json!("failed");
+        let mut reader = i.clone();
+        reader.profile = Some("worker-explorer".into());
+        // A failure is only a named dead end: without its blocker it is refused,
+        // correctably, and the assignment stays active.
+        let unnamed =
+            validate_result(&store, &c, &reader, &explicit_failure, &evidence).unwrap_err();
+        assert_eq!(unnamed.code(), "assignment_blocker_required");
+        assert!(correctable(unnamed.code()));
+        explicit_failure["blocker"] = json!({"kind":"other_role_work",
+            "detail":"The failing test is in a module only the backend developer may change."});
+        assert!(validate_result(&store, &c, &reader, &explicit_failure, &evidence).is_ok());
+        let refusal = validate_result(&store, &c, &i, &explicit_failure, &evidence).unwrap_err();
+        assert_eq!(refusal.code(), "failed_check_repair_required");
+        record_refusal(&store, &c, &i, refusal.code(), None).unwrap();
+        let honest_failure = validate_result(&store, &c, &i, &explicit_failure, &evidence).unwrap();
+        assert_eq!(honest_failure[0]["outcome"], "failed");
         drop(store);
         let store = Store::open(
             ProjectKey::new(&root, StoreChannel::Dev).unwrap(),
@@ -441,6 +595,7 @@ pub(super) fn correctable(code: &str) -> bool {
     matches!(
         code,
         "command_not_settled"
+            | "failed_check_repair_required"
             | "open_failed_check"
             | "omitted_failed_check"
             | "check_blocker_required"
@@ -458,6 +613,12 @@ pub(super) fn correctable(code: &str) -> bool {
             | "review_project_revision_changed"
             | "review_project_revision_unstable"
             | "review_resubmit_required"
+            | "review_predecessor_reports_required"
+            | "review_coverage_unfinished"
+            | "review_file_coverage_required"
+            | "review_block_findings_required"
+            | "review_not_covered_required"
+            | "assignment_blocker_required"
     )
 }
 /// The report text a submission names: the inline Markdown, or the complete body of
@@ -544,13 +705,20 @@ pub(super) fn refusal_reply_with(code: &str, missing: Option<Vec<String>>) -> Va
         "review_project_revision_changed" => "The project changed while you reviewed it; the review is now bound to the current state. Re-read what changed, then submit with a fresh request_key.",
         "review_project_revision_unstable" => "The project kept changing during the review. Re-read the current state and submit with a fresh request_key once it is stable, or report the instability.",
         "review_resubmit_required" => "This request_key belongs to a refused submission of this review. Submit again with a fresh request_key.",
-        "open_failed_check" => "A cited check failed and is still open. Fix the cause and rerun the exact same command so a later passing run closes it, or submit with assignment_outcome \"failed\".",
-        "omitted_failed_check" => "A failed check run that an earlier submission cited is missing. Cite it again as passed (after an exact passing rerun) or failed, or submit with assignment_outcome \"failed\".",
+        "review_predecessor_reports_required" => "Read each predecessor report listed in missing through its final page with read_report (or, if one is genuinely unreachable, name it in not_covered with its blocker under verdict INCOMPLETE). This review stays active in this session; then submit again.",
+        "review_coverage_unfinished" => "The not_covered parts listed in missing name no dead end, so you can still cover them. Review each one now in this session, then submit again; keep in not_covered only parts you cannot reach yourself, each with its blocker.",
+        "review_file_coverage_required" => "The changed files listed in missing were not read completely in their current state. Read each one with project_read in this session and submit again; a part you genuinely cannot reach goes in not_covered with its blocker under verdict INCOMPLETE.",
+        "review_block_findings_required" => "A BLOCK must name each confirmed problem in findings. Name them, or finish the review and choose the verdict your evidence supports.",
+        "review_not_covered_required" => "not_covered goes with verdict INCOMPLETE only, and INCOMPLETE needs at least one not_covered part with its blocker.",
+        "assignment_blocker_required" => "A failed assignment needs blocker: the dead end (kind and concrete detail) you cannot clear within your role and permissions. If you can still finish the work, finish it and submit the completed result instead.",
+        "open_failed_check" => "A cited check failed and is still open. Fix the cause and rerun the exact same command so a later passing run closes it, or, at a genuine dead end, submit assignment_outcome \"failed\" with its blocker.",
+        "failed_check_repair_required" => "A project check failed. Repair the cause in your scope, rerun the exact same command, and submit the result again. Only a genuine dead end, submitted as a failure with its blocker, goes to the coordinator.",
+        "omitted_failed_check" => "A failed check run that an earlier submission cited is missing. Cite it again as passed (after an exact passing rerun) or failed, or, at a genuine dead end, submit assignment_outcome \"failed\" with its blocker.",
         "check_blocker_required" => "Every not_run or unverified check needs a concrete blocker.",
         "native_inline_report_required" => "The report must be the complete Markdown report, or the exact report_id of a report published by this attempt.",
         "native_summary_required" => "The summary must not be empty.",
         "invalid_publication" => "The report title must be 1 to 200 characters.",
-        "invalid_check_retraction" | "invalid_check_supersession" => "The cited correction is not eligible; cite the failed check without it, or submit with assignment_outcome \"failed\".",
+        "invalid_check_retraction" | "invalid_check_supersession" => "The cited correction is not eligible; cite the failed check without it, or, at a genuine dead end, submit assignment_outcome \"failed\" with its blocker.",
         "result_report_not_owned" => "The report_id must name a report this attempt published.",
         "request_key_reused" => "Use a new request_key.",
         "invalid_arguments" => "The arguments do not match the advertised result_submit schema.",
@@ -567,11 +735,15 @@ pub(super) fn refusal_reply_with(code: &str, missing: Option<Vec<String>>) -> Va
         | "review_project_revision_unstable"
         | "review_resubmit_required"
         | "request_key_reused" => Some("request_key"),
+        "review_coverage_unfinished" | "review_not_covered_required" => Some("not_covered"),
+        "review_block_findings_required" => Some("findings"),
+        "assignment_blocker_required" => Some("blocker"),
         "native_summary_required" => Some("summary"),
         "invalid_publication" => Some("report_title"),
         "open_failed_check"
         | "omitted_failed_check"
         | "check_blocker_required"
+        | "failed_check_repair_required"
         | "invalid_check_retraction"
         | "invalid_check_supersession" => Some("checks"),
         _ => None,
@@ -585,20 +757,28 @@ pub(super) fn refusal_reply_with(code: &str, missing: Option<Vec<String>>) -> Va
     json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value,"isError":true})
 }
 /// Retains why an authenticated worker's `result_submit` was refused: the refusal
-/// code with the attempt binding, never arguments, report text or check output.
+/// code with the attempt binding and the outstanding items it named (paths, report
+/// ids or part names), never arguments, report text or check output.
 pub(super) fn record_refusal(
     store: &Store,
     c: &Credential,
     i: &Identity,
     code: &str,
+    missing: Option<&[String]>,
 ) -> CoreResult<()> {
     store.write(|db| {
-        lifecycle::event_tx(
-            db,
-            &i.task,
-            "WORKER_RESULT_REFUSED",
-            json!({"channel_id":c.channel_id,"attempt":i.attempt,"assignment_ref":i.assignment,"code":code}),
-        )?;
+        let mut detail=json!({"channel_id":c.channel_id,"attempt":i.attempt,"assignment_ref":i.assignment,"code":code});
+        if let Some(missing) = missing.filter(|m| !m.is_empty()) {
+            detail["missing"] = json!(missing.iter().take(32).collect::<Vec<_>>());
+        }
+        if code == "command_not_settled" {
+            let refs = db.prepare("SELECT json_extract(result_json,'$.handle.reference') FROM runtime_requests
+                WHERE task_id=? AND actor=? AND operation='command_run' AND json_type(result_json,'$.handle')='object'
+                AND json_extract(result_json,'$.settled') IS NOT 1 ORDER BY request_key")?
+                .query_map((&i.task,&c.channel_id),|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+            detail["command_refs"]=json!(refs);
+        }
+        lifecycle::event_tx(db,&i.task,"WORKER_RESULT_REFUSED",detail)?;
         Ok(())
     })
 }

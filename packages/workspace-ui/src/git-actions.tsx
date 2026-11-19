@@ -203,7 +203,9 @@ export function CommitDialog(props: { checkoutId: string; taskId?: string; onClo
   const ws = useWs();
   const found = createMemo(() => { for (const r of ws.store.state().repos) { const c = r.checkouts.find(x => x.id === props.checkoutId); if (c) return { repo: r, c }; } return null; });
   const c = () => found()?.c ?? null;
-  // A task works in this checkout: its own worktree, or the project folder that every project-folder task shares.
+  // A task works in this checkout: its own worktree, or the project folder that every project-folder task shares. A sprint's
+  // planning task is not among them (`views` leaves it out): it only reads the project, so it writes nothing to commit
+  // around, and no commit or branch action is ever offered for it.
   const writer = createMemo(() => {
     const at = c(), project = found()?.repo.projectId;
     if (!at) return null;

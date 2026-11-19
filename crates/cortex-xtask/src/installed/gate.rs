@@ -238,12 +238,19 @@ fn run_inner(cli: &Cli, channel: &Channel, close_cycles: u32) -> Res<()> {
                 &stage.join("DEBIAN/control"),
                 "Package: cortex-gate-python-shim\nVersion: 1\nArchitecture: all\nMaintainer: Cortex\nSection: misc\nPriority: optional\nProvides: python3 (= 3.14.0), python3-minimal (= 3.14.0), python3-gi (= 3.56.0)\nDescription: gate image shim, no files; image carries no Python\n",
             )?;
-            run_ok(&[
-                "dpkg-deb",
-                "--build",
-                &stage.to_string_lossy(),
-                &context.join("shim.deb").to_string_lossy(),
-            ])?;
+            // Keep the generated shim byte-stable. The gate image is keyed by the
+            // archive and harness digests, so a wall-clock member mtime would
+            // invalidate Docker's otherwise reusable image layer on every run.
+            let status = Command::new("dpkg-deb")
+                .args([
+                    "--build",
+                    &stage.to_string_lossy(),
+                    &context.join("shim.deb").to_string_lossy(),
+                ])
+                .env("SOURCE_DATE_EPOCH", "0")
+                .status()
+                .map_err(|e| format!("dpkg-deb: {e}"))?;
+            require(status.success(), "dpkg-deb failed to build gate shim")?;
             "COPY shim.deb /shim.deb\nRUN dpkg -i /shim.deb && printf 'Package: python3 python3-minimal python3-gi python3.* libpython3*\\nPin: release *\\nPin-Priority: -1\\n' > /etc/apt/preferences.d/no-python\n".to_string()
         };
         let dockerfile = format!(

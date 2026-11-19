@@ -231,7 +231,7 @@ function AddServer(props: { tab?: string }) {
     } else d.set(d.value().filter(x => x.name !== name));
   };
   const blocked = () => off() ?? problems()[0]?.message;
-  return <Shell wide title="Add a server" lead="Define it, connect once to list its tools, then decide who may use each one.">
+  return <Shell section="tools" wide back={{ to: orchTo(m().id, "tools"), label: "MCP servers" }} title="Add a server" lead="Define it, connect once to list its tools, then decide who may use each one.">
     <Tabs label="Add a server" tabs={ADD_TABS.map(t => ({ ...t, off: t.id !== "define" && !defined() ? "Name the server and its command first" : undefined }))} current={tab()} route={id => orchTo(m().id, "tools", { server: "new", tab: id })} />
     <Switch>
       <Match when={tab() === "define"}>
@@ -302,14 +302,13 @@ function EditServer(props: { name: string; tab?: string }) {
   createEffect(on(serverName, () => { setObserved(null); setDiff(null); setFailed(null); }, { defer: true }));
   const remove = () => ws.open({ kind: "confirm", title: `Remove ${props.name}?`, danger: true, action: "Remove", note: "It leaves the draft. Save to write that. Running tasks keep their tools.", go() { d.set(d.value().filter(x => x.name !== props.name)); ws.go(orchTo(m().id, "tools")); return true; } });
   const duplicate = () => ws.open({ kind: "prompt", title: `Duplicate ${props.name}`, label: "New server name", action: "Duplicate", hint: "Use this to give the same server different engines.", go(name) { const copy = { ...structuredClone(s()!), name, enabled: false, env: [] }; if (mcpProblems(copy, d.value(), true).some(p => p.path === "name")) return false; d.set([...d.value(), copy]); ws.go(orchTo(m().id, "tools", { server: name, tab: "tools" })); return true; } });
-  return <Show when={s()} fallback={<Shell wide title="No such server" lead={`${props.name} is not on this machine.`}><div><A class="btn btn-line" to={orchTo(m().id, "tools")}>Back to Tools and MCP</A></div></Shell>}>
-    {server => <Shell wide title={server().name} lead={server().command} bar={<Bar d={d} />} head={<div class="row ws-gap4">
+  return <Show when={s()} fallback={<Shell section="tools" wide back={{ to: orchTo(m().id, "tools"), label: "MCP servers" }} title="No such server" lead={`${props.name} is not on this machine.`}><span></span></Shell>}>
+    {server => <Shell section="tools" wide back={{ to: orchTo(m().id, "tools"), label: "MCP servers" }} title={server().name} lead={server().command} bar={<Bar d={d} />} head={<div class="row ws-gap4">
       <span class={`st ${serverStatus(server()).tone}`}>{serverStatus(server()).text}</span>
       <Sw label={`${server().name} enabled`} checked={server().enabled} disabled={off()} onChange={enabled => set({ ...server(), enabled })} />
       <button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) duplicate(); }}>Duplicate…</button>
       <button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) remove(); }}>Remove…</button>
     </div>}>
-      <div class="row"><A class="lnk" to={orchTo(m().id, "tools")}><I n="arrow-left" s={12} />All servers</A></div>
       <Tabs label={server().name} tabs={EDIT_TABS} current={tab()} route={id => orchTo(m().id, "tools", { server: props.name, tab: id })} />
       <Show when={locked() && !off()}><div class="note-box"><I n="lock" s={14} /><span>{locked()} Unsupported: {server().unsupportedKeys.join(", ")}.</span></div></Show>
       <Switch>
@@ -343,8 +342,10 @@ function ServerList() {
   const remove = (s: McpServer) => ws.open({ kind: "confirm", title: `Remove ${s.name}?`, danger: true, action: "Remove", note: "It leaves the draft. Save to write that. Running tasks keep their tools.", go() { d.set(d.value().filter(x => x.name !== s.name)); return true; } });
   const duplicate = (s: McpServer) => ws.open({ kind: "prompt", title: `Duplicate ${s.name}`, label: "New server name", action: "Duplicate", hint: "Use this to give the same server different engines.", go(name) { const copy = { ...structuredClone(s), name, enabled: false, env: [] }; if (mcpProblems(copy, d.value(), true).some(p => p.path === "name")) return false; d.set([...d.value(), copy]); return true; } });
   const add = () => { if (!off()) ws.go(orchTo(m().id, "tools", { server: "new" })); };
-  return <Shell wide title="Tools and MCP" lead="External tools available on this machine, and who may use each one. Servers are per machine: a project cannot add its own." bar={<Bar d={d} />}>
-    <SetH title="Servers"><Hint text={HELP.mcpIntro} label="MCP servers" /><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={add}><I n="plus" s={12} />Add server</button></SetH>
+  return <Shell section="tools" wide title="MCP servers" lead="External tools for agents on this machine, and who may use each one. Servers are per machine; a project cannot add its own." bar={<Bar d={d} />}
+    head={<button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={add}><I n="plus" s={12} />Add server</button>}>
+    <SetH title="Servers" count={d.value().length || undefined}><Hint text={HELP.mcpIntro} label="MCP servers" /></SetH>
+    <p class="set-grp-lead">Switching a server on or off is a draft change: it is written when you save.</p>
     <Show when={d.value().length > 0} fallback={<div class="surface ws-empty">No servers. Add one to give workers extra tools.</div>}>
       <div class="surface"><div class="gt">
         <div class="gr osrow th"><span>Server</span><span>Tools</span><span>Engines</span><span>Network</span><span>Checked</span><span>Enabled</span><span></span></div>
@@ -358,9 +359,8 @@ function ServerList() {
             <span class="cap muted">{s().containment === "none" ? "No sandbox" : s().network ? "On" : "Off"}</span>
             <span class="cap muted tnum">{seen() ? clock(seen()!.at) : ""}</span>
             <span onClick={e => e.stopPropagation()}><Sw label={`${s().name} enabled`} checked={s().enabled} disabled={off()} onChange={enabled => d.set(patchServer(d.value(), s().name, x => ({ ...x, enabled })))} /></span>
-            <span onClick={e => e.stopPropagation()}><button class="ib ws-ib" popovertarget={off() ? undefined : `m-srv-${slug(s().name)}`} aria-label={`More for ${s().name}`} aria-disabled={off() ? "true" : undefined} data-why={off()}><I n="more" s={14} /></button>
+            <span class="row ws-gap4" onClick={e => e.stopPropagation()}><A class="btn btn-line btn-sm" to={orchTo(m().id, "tools", { server: s().name, tab: "tools" })} aria-label={`Edit ${s().name}`}>Edit</A><button class="ib ws-ib" popovertarget={off() ? undefined : `m-srv-${slug(s().name)}`} aria-label={`More for ${s().name}`} aria-disabled={off() ? "true" : undefined} data-why={off()}><I n="more" s={14} /></button>
               <Pop id={`m-srv-${slug(s().name)}`} class="pop-right" align="right" label={s().name}>
-                <MenuItem icon="pencil" label="Edit" onSelect={() => open(s().name)} />
                 <MenuItem icon="refresh" label="Check tools" needs="record_mcp_tools" onSelect={() => check(s())} />
                 <MenuItem icon="copy" label="Duplicate…" onSelect={() => duplicate(s())} />
                 <MenuItem icon="trash" label="Remove…" danger onSelect={() => remove(s())} />

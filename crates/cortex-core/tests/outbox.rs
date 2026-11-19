@@ -75,7 +75,7 @@ fn unbound_writes_do_not_publish_and_connection_hooks_are_not_persistent() {
     assert_eq!(count(&s, "workspace_outbox"), 0);
     s.read(|db|{
         assert_eq!(db.query_row("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'workspace_outbox_%'",[],|r|r.get::<_,i64>(0))?,0);
-        assert_eq!(db.query_row("SELECT count(*) FROM sqlite_temp_master WHERE type='trigger' AND name LIKE 'workspace_outbox_%'",[],|r|r.get::<_,i64>(0))?,45);
+        assert_eq!(db.query_row("SELECT count(*) FROM sqlite_temp_master WHERE type='trigger' AND name LIKE 'workspace_outbox_%'",[],|r|r.get::<_,i64>(0))?,48);
         Ok(())
     }).unwrap();
 }

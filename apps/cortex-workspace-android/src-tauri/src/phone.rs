@@ -112,7 +112,9 @@ impl Phone {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn publish(&self) {
@@ -182,7 +184,10 @@ impl Phone {
                 let (emit, id) = (emit.clone(), id.clone());
                 bridge
                     .subscribe(move |event| {
-                        emit("workspace-transport", json!({"machineId": id, "event": event}))
+                        emit(
+                            "workspace-transport",
+                            json!({"machineId": id, "event": event}),
+                        )
                     })
                     .await;
                 tokio::time::sleep(RESUBSCRIBE).await;
@@ -239,7 +244,12 @@ impl Phone {
 
     /// One request of the interface to the open machine, checked against the phone's allowlist
     /// before anything is sent.
-    pub async fn request(&self, machine_id: &str, operation: String, message: Value) -> Result<Value, String> {
+    pub async fn request(
+        &self,
+        machine_id: &str,
+        operation: String,
+        message: Value,
+    ) -> Result<Value, String> {
         let bridge = {
             let inner = self.lock();
             if inner.active.as_deref() != Some(machine_id) {
@@ -260,7 +270,8 @@ impl Phone {
             .pair_begin(link, &self.device_name)
             .await
             .map_err(|error| pair_code(&error, true).to_string())?;
-        let reply = json!({"machineName": attempt.machine_name, "fingerprint": attempt.fingerprint});
+        let reply =
+            json!({"machineName": attempt.machine_name, "fingerprint": attempt.fingerprint});
         self.lock().attempt = Some(attempt);
         Ok(reply)
     }
@@ -269,7 +280,10 @@ impl Phone {
     pub async fn pair_finish(&self, name: &str) -> Result<Value, String> {
         let (attempt, cancelled) = {
             let mut inner = self.lock();
-            let attempt = inner.attempt.take().ok_or_else(|| "cancelled".to_string())?;
+            let attempt = inner
+                .attempt
+                .take()
+                .ok_or_else(|| "cancelled".to_string())?;
             let (stop, cancelled) = oneshot::channel();
             inner.waiting = Some(stop);
             (attempt, cancelled)
@@ -310,7 +324,12 @@ impl Phone {
     }
 
     pub fn select(&self, machine_id: &str) -> Result<(), String> {
-        if !self.client.machines().iter().any(|m| m.machine_id == machine_id) {
+        if !self
+            .client
+            .machines()
+            .iter()
+            .any(|m| m.machine_id == machine_id)
+        {
             return Err("unknown_machine".into());
         }
         self.open_machine(machine_id)?;
@@ -319,7 +338,8 @@ impl Phone {
     }
 
     pub fn rename(&self, machine_id: &str, name: &str) -> Result<(), String> {
-        let name = workspace_remote::link::validate_name(name).ok_or_else(|| "invalid_name".to_string())?;
+        let name = workspace_remote::link::validate_name(name)
+            .ok_or_else(|| "invalid_name".to_string())?;
         self.client
             .rename(machine_id, &name)
             .map_err(|_| "unknown_machine".to_string())?;

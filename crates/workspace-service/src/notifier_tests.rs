@@ -43,7 +43,7 @@ fn each_owner_moment_maps_to_its_kind_and_target() {
             {"id":"s2","title":"Queue","planning":"created","queueState":"paused","pauseReason":"A task needs attention or has an unknown outcome."},
             {"id":"s3","planning":"created","queueState":"paused","pauseReason":"This sprint is in manual mode."},
             {"id":"s4","planning":"created","queueState":"paused","pauseReason":"x","archivedAt":5},
-            {"id":"s5","planning":"created","runMode":"automatic","taskIds":["auto"],"queueState":"running"}]});
+            {"id":"s5","planning":"created","runMode":"hybrid","taskIds":["auto"],"queueState":"running"}]});
     let decisions = HashMap::from([
         (
             "q".to_owned(),
@@ -102,6 +102,64 @@ fn each_owner_moment_maps_to_its_kind_and_target() {
     }
     // The question body never reaches a notification.
     assert!(found.iter().all(|i| !i.body().contains("Never shown")));
+}
+
+#[test]
+fn a_sprint_planning_task_notifies_only_as_its_sprint() {
+    let tasks = [task("plan", "waiting"), task("done-plan", "result")];
+    let product = json!({"tasks":{}, "sprints":[
+        {"id":"s1","title":"Sprint","planning":"planning","planningTaskId":"plan","queueState":"idle"},
+        {"id":"s2","title":"Approved","planning":"created","planningTaskId":"done-plan","queueState":"idle"}]});
+    let decisions = HashMap::from([("plan".into(), vec![question("ask", false)])]);
+    let found = items("p", &tasks, &product, &decisions);
+    assert_eq!(
+        found.len(),
+        1,
+        "{:?}",
+        found.iter().map(|i| &i.place.id).collect::<Vec<_>>()
+    );
+    assert_eq!(found[0].kind, Kind::Planning);
+    assert_eq!(found[0].place.id, "s1");
+    assert!(found[0].place.sprint);
+    assert_eq!(found[0].decision.as_deref(), Some("ask"));
+}
+
+#[test]
+fn automatic_sprint_notifies_only_actual_owner_moments() {
+    let failed = task("failed", "failed");
+    let mut stopped = task("stopped", "waiting");
+    stopped["automaticContinuation"] = json!({"policy":"automatic_continuation"});
+    let tasks = [failed, stopped, task("question", "waiting")];
+    let product = json!({"tasks":{}, "sprints":[
+        {"id":"held","runMode":"automatic","taskIds":["failed","stopped","question"],
+            "queueState":"paused","pauseReason":"Route unavailable",
+            "automaticQueue":{"kind":"continuation","needsOwner":false}},
+        {"id":"merge","runMode":"automatic","taskIds":[],"queueState":"paused",
+            "pauseReason":"Confirm integration","automaticQueue":{"kind":"owner_integration","needsOwner":true}},
+        {"id":"cap","runMode":"automatic","taskIds":[],"queueState":"paused",
+            "automaticQueue":{"kind":"continuation","code":"continuation_cap","taskId":"stopped",
+                "reason":"Open the task to resume","needsOwner":true}},
+        {"id":"deps","runMode":"automatic","taskIds":[],"queueState":"paused",
+            "automaticQueue":{"kind":"settlement_blocked","code":"dependencies_blocked","taskId":null,
+                "reason":"Review dependencies","needsOwner":true}}
+    ]});
+    let decisions = HashMap::from([
+        ("stopped".into(), vec![question("stop", true)]),
+        ("question".into(), vec![question("work", false)]),
+    ]);
+    let found = items("p", &tasks, &product, &decisions);
+    assert_eq!(found.len(), 4);
+    for id in ["cap", "deps"] {
+        assert!(found
+            .iter()
+            .any(|item| item.place.id == id && item.kind == Kind::Paused));
+    }
+    assert!(found
+        .iter()
+        .any(|item| item.place.id == "question" && item.kind == Kind::Question));
+    assert!(found
+        .iter()
+        .any(|item| item.place.id == "merge" && item.kind == Kind::Paused));
 }
 
 #[test]
@@ -503,4 +561,54 @@ fn the_service_raises_and_receives_the_click_on_a_private_bus() {
         (close.member.as_str(), close.body.clone()),
         ("CloseNotification", vec![Arg::U32(41)])
     );
+}
+
+#[test]
+fn notification_details_never_show_internal_codes() {
+    assert_eq!(
+        plain_detail("continuation_cap"),
+        "Open it to see what is needed."
+    );
+    assert_eq!(
+        plain_detail("Queue paused: review_cycle_limit."),
+        "Queue paused: review cycle limit."
+    );
+    // Paths and file names are kept as written.
+    assert_eq!(
+        plain_detail("Changed src/task_facts.rs and notes_v2.md"),
+        "Changed src/task_facts.rs and notes_v2.md"
+    );
+    assert_eq!(
+        plain_detail("Resolve the task conflict first."),
+        "Resolve the task conflict first."
+    );
+}
+
+/// L4: a Hybrid queue notifies only when the owner acts next, and never for the
+/// owner's own pause.
+#[test]
+fn hybrid_sprint_notifies_only_owner_holds_and_never_the_owners_own_pause() {
+    let product = json!({"tasks":{}, "sprints":[
+        {"id":"mine","runMode":"hybrid","taskIds":[],"queueState":"paused","pauseReason":"Paused by you"},
+        {"id":"route","runMode":"hybrid","taskIds":[],"queueState":"paused",
+            "pauseReason":"The engine is not available right now.",
+            "automaticQueue":{"kind":"continuation","code":"external_blocker","taskId":"t",
+                "reason":"The engine is not available right now.","needsOwner":false,"nextActor":"runtime"}},
+        {"id":"missing","runMode":"hybrid","taskIds":[],"queueState":"paused",
+            "pauseReason":"A sprint task could not be read.",
+            "automaticQueue":{"kind":"settlement_blocked","code":"task_missing","taskId":null,
+                "reason":"A sprint task could not be read.","needsOwner":false,"nextActor":"runtime"}},
+        {"id":"owner","runMode":"hybrid","taskIds":[],"queueState":"paused",
+            "pauseReason":"The last run of this task ended as failed.",
+            "automaticQueue":{"kind":"settlement_blocked","code":"task_failed","taskId":"t",
+                "reason":"The last run of this task ended as failed.","needsOwner":true,"nextActor":"owner"}},
+        {"id":"automatic-mine","runMode":"automatic","taskIds":[],"queueState":"paused","pauseReason":"Paused by you"}
+    ]});
+    let found = items("p", &[], &product, &HashMap::new());
+    let paused: Vec<&str> = found
+        .iter()
+        .filter(|item| item.kind == Kind::Paused)
+        .map(|item| item.place.id.as_str())
+        .collect();
+    assert_eq!(paused, ["owner"], "{found:?}");
 }

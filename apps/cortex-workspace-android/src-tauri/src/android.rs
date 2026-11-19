@@ -64,61 +64,107 @@ async fn workspace_request(
     message: Value,
 ) -> Result<Value, String> {
     bundled(&window)?;
-    phone(&app, &native).await?.request(&machine_id, operation, message).await
+    phone(&app, &native)
+        .await?
+        .request(&machine_id, operation, message)
+        .await
 }
 
 #[tauri::command]
-async fn phone_info(window: WebviewWindow, app: AppHandle, native: State<'_, Native>) -> Result<Value, String> {
+async fn phone_info(
+    window: WebviewWindow,
+    app: AppHandle,
+    native: State<'_, Native>,
+) -> Result<Value, String> {
     bundled(&window)?;
     let phone = phone(&app, &native).await?;
     Ok(json!({"version": env!("CARGO_PKG_VERSION"), "deviceName": phone.device_name()}))
 }
 
 #[tauri::command]
-async fn phone_state(window: WebviewWindow, app: AppHandle, native: State<'_, Native>) -> Result<Value, String> {
+async fn phone_state(
+    window: WebviewWindow,
+    app: AppHandle,
+    native: State<'_, Native>,
+) -> Result<Value, String> {
     bundled(&window)?;
     Ok(phone(&app, &native).await?.state())
 }
 
 #[tauri::command]
-async fn phone_pair_begin(window: WebviewWindow, app: AppHandle, native: State<'_, Native>, link: String) -> Result<Value, String> {
+async fn phone_pair_begin(
+    window: WebviewWindow,
+    app: AppHandle,
+    native: State<'_, Native>,
+    link: String,
+) -> Result<Value, String> {
     bundled(&window)?;
     phone(&app, &native).await?.pair_begin(&link).await
 }
 
 #[tauri::command]
-async fn phone_pair_finish(window: WebviewWindow, app: AppHandle, native: State<'_, Native>, name: String) -> Result<Value, String> {
+async fn phone_pair_finish(
+    window: WebviewWindow,
+    app: AppHandle,
+    native: State<'_, Native>,
+    name: String,
+) -> Result<Value, String> {
     bundled(&window)?;
     phone(&app, &native).await?.pair_finish(&name).await
 }
 
 #[tauri::command]
-async fn phone_pair_cancel(window: WebviewWindow, app: AppHandle, native: State<'_, Native>) -> Result<(), String> {
+async fn phone_pair_cancel(
+    window: WebviewWindow,
+    app: AppHandle,
+    native: State<'_, Native>,
+) -> Result<(), String> {
     bundled(&window)?;
     phone(&app, &native).await?.pair_cancel().await;
     Ok(())
 }
 
 #[tauri::command]
-async fn phone_select(window: WebviewWindow, app: AppHandle, native: State<'_, Native>, machine_id: String) -> Result<(), String> {
+async fn phone_select(
+    window: WebviewWindow,
+    app: AppHandle,
+    native: State<'_, Native>,
+    machine_id: String,
+) -> Result<(), String> {
     bundled(&window)?;
     phone(&app, &native).await?.select(&machine_id)
 }
 
 #[tauri::command]
-async fn phone_rename(window: WebviewWindow, app: AppHandle, native: State<'_, Native>, machine_id: String, name: String) -> Result<(), String> {
+async fn phone_rename(
+    window: WebviewWindow,
+    app: AppHandle,
+    native: State<'_, Native>,
+    machine_id: String,
+    name: String,
+) -> Result<(), String> {
     bundled(&window)?;
     phone(&app, &native).await?.rename(&machine_id, &name)
 }
 
 #[tauri::command]
-async fn phone_forget(window: WebviewWindow, app: AppHandle, native: State<'_, Native>, machine_id: String) -> Result<(), String> {
+async fn phone_forget(
+    window: WebviewWindow,
+    app: AppHandle,
+    native: State<'_, Native>,
+    machine_id: String,
+) -> Result<(), String> {
     bundled(&window)?;
     phone(&app, &native).await?.forget(&machine_id).await
 }
 
 #[tauri::command]
-async fn phone_retry(window: WebviewWindow, app: AppHandle, native: State<'_, Native>, machine_id: String) -> Result<(), String> {
+async fn phone_retry(
+    window: WebviewWindow,
+    app: AppHandle,
+    native: State<'_, Native>,
+    machine_id: String,
+) -> Result<(), String> {
     bundled(&window)?;
     phone(&app, &native).await?.retry(&machine_id)
 }
@@ -155,7 +201,8 @@ pub fn run() {
         .plugin(
             tauri::plugin::Builder::<Wry>::new("speech")
                 .setup(|app, api| {
-                    let handle = api.register_android_plugin("dev.cortex.workspace.speech", "SpeechPlugin")?;
+                    let handle =
+                        api.register_android_plugin("dev.cortex.workspace.speech", "SpeechPlugin")?;
                     app.manage(Speech(handle));
                     Ok(())
                 })

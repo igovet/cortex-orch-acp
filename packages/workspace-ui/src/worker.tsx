@@ -9,11 +9,12 @@ import { ActionBar, Toolbar } from "./layout";
 import type { Route } from "./router";
 import { clock, refusalReason } from "./selectors";
 import { displayStep, feedOf, isHiddenActivity, oneRowPerCall, stepFailed, viewOfActivity, type FeedItem, type FeedRun } from "./tool-names";
-import { contextLine, duration, elapsedOf, isFinished, recordedCoordinatorRoute, tokens, verificationFace, workerModel, workerState, type SessionModel } from "./session-model";
+import { contextLine, duration, elapsedOf, isFinished, recordedCoordinatorRoute, reviewLine, tokens, verificationFace, workerModel, workerState, type SessionModel } from "./session-model";
 
 import { ResultText } from "./result-text";
 import { CopySource, MessageTools } from "./message-copy";
 import { SentMessages } from "./sent";
+import { useTaskRoutes } from "./task-place";
 
 export const CORTEX = "cortex", VERIFICATION = "verification";
 
@@ -419,7 +420,6 @@ export const Pill = (props: { follow: ReturnType<typeof createFollow> }) => <Sho
   <div class="pill-band"><button class="new-pill ws-pill" onClick={() => props.follow.jump()}><I n="arrow-down" s={12} />{props.follow.missed() ? `${props.follow.missed()} new` : "Latest"}</button></div>
 </Show>;
 
-type TaskRoute = Extract<Route, { name: "task" }>;
 /** A goal longer than this shows its first lines with a way to read the rest, so the activity below keeps its room. */
 const GOAL_FOLD_CHARS = 280, GOAL_FOLD_LINES = 4;
 export const longGoal = (goal: string) => goal.length > GOAL_FOLD_CHARS || goal.split("\n").length > GOAL_FOLD_LINES;
@@ -438,6 +438,7 @@ export function Head(props: { w: Worker; now: number; onStop: () => void }) {
     <div class={`d-goal${folds() ? goalOpen() ? " ws-goal-open" : " ws-goal-folded" : ""}`} id={`goal-${props.w.id}`}><ResultText breaks text={props.w.goal} /></div>
     <Show when={folds()}><button class="lnk ws-goal-toggle" aria-expanded={goalOpen() ? "true" : "false"} aria-controls={`goal-${props.w.id}`} onClick={() => setGoalOpen(!goalOpen())}>{goalOpen() ? "Show less of the goal" : "Show the whole goal"}</button></Show>
     <Grid w={props.w} now={props.now} />
+    <ReviewDetails w={props.w} />
   </div>;
 }
 
@@ -446,6 +447,15 @@ const noResult = (ended: Worker["endedReason"]) => ended === "stopped_by_owner" 
   : ended === "cancelled_by_coordinator" ? "The coordinator cancelled this worker (the plan changed) before it reported a result."
   : ended === "worker_lost" ? "This worker was lost (the service restarted or its engine session ended) before it reported a result."
   : "This worker reported no result.";
+
+function ReviewDetails(props: { w: Worker }) {
+  const review = () => props.w.review;
+  return <Show when={review() && reviewLine(props.w)}><div class="res-sec ws-worker-review" role="status">
+    <div class="res-h">Review</div><div>{reviewLine(props.w)}</div>
+    <Show when={review()?.notCovered?.length}><ul class="cap muted">{review()!.notCovered!.map(item => <li>{item.item}: {item.reason}</li>)}</ul></Show>
+    <Show when={review()?.rerun?.reason}><div class="cap muted">{review()!.rerun!.reason}</div></Show>
+  </div></Show>;
+}
 
 function Finished(props: { w: Worker; onAsk?: () => void }) {
   const ws = useWs();
@@ -554,10 +564,11 @@ export function WorkerPane(props: { model: Accessor<SessionModel>; pick: string;
   const m = () => props.model();
   const [stopping, setStopping] = createSignal<Worker | null>(null);
   const worker = () => m().workers.find(w => w.id === props.pick) ?? null;
-  const route = (): TaskRoute => ({ name: "task", machine: m().view.machine.id, task: m().view.id });
+  // The coordinator is messaged from its conversation: the task's page, or the sprint's for the task planning a sprint.
+  const routes = useTaskRoutes(() => ({ machine: m().view.machine.id, id: m().view.id }));
   const ask = (w: Worker) => {
     ws.drafts.set(m().view.id, `About ${w.role}: `);
-    ws.go(route());
+    ws.go(routes.conversation());
   };
   const session = () => m().session;
   const w = () => worker()!;

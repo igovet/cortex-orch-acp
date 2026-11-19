@@ -1,4 +1,4 @@
-import { emptySession, emptyWorkspace, type Activity, type Check, type FileDiff, type Task, type Worker, type WorkspaceState } from "@cortex/workspace-domain";
+import { emptySession, emptyWorkspace, type Activity, type Check, type Sprint, type FileDiff, type Task, type Worker, type WorkspaceState } from "@cortex/workspace-domain";
 import { STEP_PREFIX } from "../src/tool-names";
 import { draftTask } from "./support";
 
@@ -56,6 +56,14 @@ const FILES: FileDiff[] = ["apps/dashboard/src/components/layout/sidebar-navigat
 export function reviewWorld(): WorkspaceState {
   const s = emptyWorkspace();
   s.machines[0].connection = "connected";
+  // Keep the review fixture's composer controls usable so rendered checks exercise
+  // the owner actions instead of reporting missing engine-catalogue reasons.
+  s.options = {
+    models: [{ id: "fixture-route", label: "Fixture route", engine: "codex", efforts: ["medium"] }],
+    efforts: [{ id: "medium", label: "Medium" }],
+    modes: [{ id: "guarded", label: "Guarded" }],
+    languages: [{ id: "auto", label: "Automatic" }],
+  };
   const machineId = s.machines[0].id;
   s.projects = [
     { id: "nogit", machineId, name: "Business-sell-data", repository: "/home/owner/projects/business-sell-data", openBranch: "", defaultBranch: "", hasGit: false },
@@ -69,7 +77,96 @@ export function reviewWorld(): WorkspaceState {
     task("rg", "p", { status: "review", checkout: worktree, result: result([...manual(), ...passed(19), failing(), ...technical()]) }),
     task("rm", "p", { status: "ready_to_merge", checkout: worktree, result: { ...result([...manual(), ...passed(22)]), automaticReady: true } }),
     task("rn", "nogit", { status: "ready_to_merge", result: { ...result([...manual(), ...passed(22)]), automaticReady: true } }),
+    // Automatic queue hold with an explicit owner decision.  The rendered gate keeps this
+    // state on the same long result as the ordinary review screens so the linked task must
+    // expose both the recovery action and the close-as-is escape hatch.
+    task("auto-hold", "nogit", {
+      sprintId: "auto-sprint",
+      status: "review",
+      result: { ...result([...passed(22), ...technical()]), automaticReady: true, acceptanceAvailable: false },
+      reviewActions: {
+        accept: false,
+        reason: "Automatic acceptance is waiting for the required check: Paid browser task on the staging host.",
+        unblockAction: "rerun_checks",
+        acknowledgeOpenChecks: true,
+      },
+      issue: "Automatic acceptance is waiting for an owner decision",
+    }),
+    // Automatic acceptance was recorded for v2, then the worktree changed. The owner
+    // must still have an explicit recovery action and a close-as-is escape hatch.
+    task("auto-stale", "nogit", {
+      sprintId: "auto-stale-sprint",
+      status: "ready_to_merge",
+      workspaceDigest: "workspace-after-acceptance",
+      result: { ...result([...passed(20), failing(), ...technical()]), version: 2, digest: "result-before-workspace-change", automaticReady: true, acceptanceAvailable: false },
+      acceptance: { automatic: true, version: 2, digest: "result-before-workspace-change", at: Date.UTC(2026, 10, 19, 10, 0), open: null },
+      reviewActions: {
+        accept: false,
+        reason: "This result is stale because the workspace changed after automatic acceptance.",
+        unblockAction: "request_changes",
+      },
+      issue: "Automatic acceptance became stale after the workspace changed",
+    }),
+    // The result is already accepted and still matches the workspace. Automatic
+    // settlement nevertheless pauses on an owner hold before the queue can continue.
+    task("auto-owner-hold", "nogit", {
+      sprintId: "auto-owner-hold-sprint",
+      status: "ready_to_merge",
+      workspaceDigest: "accepted-digest",
+      result: { ...result([...passed(22), ...technical()]), version: 2, digest: "accepted-digest", automaticReady: true, acceptanceAvailable: false },
+      acceptance: { automatic: true, version: 2, digest: "accepted-digest", at: Date.UTC(2026, 10, 19, 9, 45), open: null },
+      reviewActions: { accept: false, reason: "Automatic acceptance is waiting for an owner decision before the queue can settle.", unblockAction: "request_changes" },
+      issue: "Automatic acceptance is waiting for an owner decision",
+    }),
+    // A previously accepted result on the exact target branch still needs the
+    // owner's recorded check acknowledgement before Automatic may finish it.
+    task("auto-finish-hold", "p", {
+      sprintId: "auto-finish-hold-sprint",
+      status: "ready_to_merge",
+      checkout: { kind: "main", branch: "main" },
+      result: { ...result([...passed(22), { name: "Staging check", kind: "policy", outcome: "not_run", detail: "Requires access to staging." }]), sourceVersion: "47", digest: "digest", automaticReady: true },
+      acceptance: { version: 1, digest: "digest", at: 1 },
+      reviewActions: { accept: true, reason: null, unblockAction: null, acknowledgeOpenChecks: true },
+    }),
   ];
+  s.sprints = [{
+    id: "auto-sprint", projectId: "nogit", description: "Automatic queue with an owner decision",
+    title: "Automatic queue with an owner decision", runMode: "automatic", targetBranch: null,
+    planning: "created", materializedVersion: 1,
+    plan: { version: 1, items: [{ key: "auto-hold", title: TITLE, description: TITLE, dependsOn: [] }] },
+    taskIds: ["auto-hold"], queueState: "paused", pauseReason: "Automatic acceptance is waiting for the required check.",
+    automaticQueue: {
+      kind: "settlement_blocked", taskId: "auto-hold", code: "automatic_acceptance_blocked",
+      reason: "Automatic acceptance is waiting for the required check: Paid browser task on the staging host.",
+      needsOwner: true,
+    }, conversation: [],
+  }, {
+    id: "auto-stale-sprint", projectId: "nogit", description: "Automatic queue with a stale accepted result",
+    title: "Automatic queue with a stale accepted result", runMode: "automatic", targetBranch: null,
+    planning: "created", materializedVersion: 1,
+    plan: { version: 1, items: [{ key: "auto-stale", title: TITLE, description: TITLE, dependsOn: [] }] },
+    taskIds: ["auto-stale"], queueState: "paused", pauseReason: "The accepted result is stale because the workspace changed.",
+    automaticQueue: {
+      kind: "settlement_blocked", taskId: "auto-stale", code: "stale_result",
+      reason: "The accepted result is stale because the workspace changed.", needsOwner: true,
+    }, conversation: [],
+  }, {
+    id: "auto-owner-hold-sprint", projectId: "nogit", description: "Automatic queue with an owner hold",
+    title: "Automatic queue with an owner hold", runMode: "automatic", targetBranch: null,
+    planning: "created", materializedVersion: 1,
+    plan: { version: 1, items: [{ key: "auto-owner-hold", title: TITLE, description: TITLE, dependsOn: [] }] },
+    taskIds: ["auto-owner-hold"], queueState: "paused", pauseReason: "Automatic acceptance is waiting for an owner decision.",
+    automaticQueue: { kind: "settlement_blocked", taskId: "auto-owner-hold", code: "task_content_unknown", reason: "Automatic acceptance is waiting for an owner decision before the queue can settle. The runtime could not confirm the task content after the worker result.", needsOwner: true },
+    conversation: [],
+  }, {
+    id: "auto-finish-hold-sprint", projectId: "p", description: "Automatic finish awaiting owner check acknowledgement",
+    title: "Automatic finish awaiting owner check acknowledgement", runMode: "automatic", targetBranch: "main",
+    planning: "created", materializedVersion: 1,
+    plan: { version: 1, items: [{ key: "auto-finish-hold", title: TITLE, description: TITLE, dependsOn: [] }] },
+    taskIds: ["auto-finish-hold"], queueState: "paused", pauseReason: "The staging check requires owner acknowledgement.",
+    automaticQueue: { kind: "owner_integration", taskId: "auto-finish-hold", code: "owner_accepted", reason: "The staging check requires owner acknowledgement.", needsOwner: true },
+    conversation: [],
+  }];
   s.sessions = [{ ...emptySession("rg"), changes: { files: FILES.length, add: FILES.reduce((n, f) => n + f.add, 0), del: FILES.reduce((n, f) => n + f.del, 0) } }];
   s.repos = [{ projectId: "p", hasGit: true, remote: "", tree: FILES.map(f => f.path), sources: {}, commits: [], branches: [], fetchedAt: null,
     checkouts: [
@@ -78,6 +175,33 @@ export function reviewWorld(): WorkspaceState {
       { id: "p:rm", projectId: "p", kind: "worktree", branch: BRANCH, path: worktree.path, taskId: "rm", label: null, base: "main", ahead: 3, behind: 0, behindOf: {}, files: [], draft: "", sources: {}, updateConflict: null },
     ] }];
   s.reviews = [{ taskId: "rg", sha: "abc1234", files: FILES, scopes: [], comments: [] }, { taskId: "rm", sha: "abc1234", files: FILES, scopes: [], comments: [] }];
+  // Owner decision cards (the pinned card above the message box): one task per hold the service can decide. `-nores` has no result loaded.
+  const ASKS = ["Accept the recorded review with the check “Paid browser task on the staging host” not run", "Let Automatic commit the result to main without asking again", "Mark the staging verification as checked by you"];
+  const holdTask = (id: string, patch: Partial<Task>) => task(id, "p", { sprintId: id + "-sprint", checkout: { kind: "main", branch: "main" }, ...patch });
+  const holdSprint = (id: string, runMode: "automatic" | "hybrid" | "manual", queue: Sprint["automaticQueue"] | undefined, queueState: Sprint["queueState"] = "paused"): Sprint => ({
+    id: id + "-sprint", projectId: "p", description: "Queue with a held task", title: "Queue with a held task", runMode, targetBranch: "main",
+    planning: "created", materializedVersion: 1, plan: { version: 1, items: [{ key: id, title: TITLE, description: TITLE, dependsOn: [] }] },
+    taskIds: [id], queueState, pauseReason: null, automaticQueue: queue, conversation: [] });
+  const readyResult = { ...result([...passed(6), { name: "Staging check", kind: "policy" as const, outcome: "not_run" as const, detail: "Requires access to staging." }]), sourceVersion: "47", automaticReady: true };
+  const FAILED_FACTS = { accept: false, reason: null, unblockAction: "request_changes" as const };
+  s.tasks.push(
+    holdTask("oh-allow", { status: "review", result: readyResult }),
+    holdTask("oh-allow-nores", { status: "review", result: null }),
+    holdTask("oh-repair", { status: "failed", issue: "The agent stopped after the repair limit" }),
+    holdTask("oh-unknown", { status: "review", result: readyResult }),
+    holdTask("oh-agent", { status: "review", result: readyResult }),
+    holdTask("oh-manual", { status: "failed", reviewActions: { ...FAILED_FACTS, nextActor: "owner", ownerActions: ["ask_agent", "close_as_is"],
+      reason: "The last run of this task ended as failed. It stopped before the review of the changed files was finished.", asks: ["Let the agent finish the unfinished review and publish a new result"] } }),
+  );
+  const q = (id: string, patch: Partial<NonNullable<Sprint["automaticQueue"]>>): Sprint["automaticQueue"] => ({ kind: "settlement_blocked", taskId: id, code: "automatic_acceptance_blocked", reason: "", needsOwner: true, ...patch });
+  s.sprints.push(
+    holdSprint("oh-allow", "automatic", q("oh-allow", { reason: "Automatic is waiting for your approval before it can close this task.", nextActor: "owner", ownerActions: ["allow_finish", "close_as_is"], asks: ASKS })),
+    holdSprint("oh-allow-nores", "automatic", q("oh-allow-nores", { reason: "Automatic is waiting for your approval before it can close this task.", nextActor: "owner", ownerActions: ["allow_finish", "close_as_is"], asks: ASKS })),
+    holdSprint("oh-repair", "automatic", q("oh-repair", { kind: "continuation", code: "continuation_cap", reason: "The agent used all of its automatic repair attempts and the task still failed.", nextActor: "owner", ownerActions: ["allow_repair", "close_as_is"], asks: ["Allow the agent to make more repair attempts on this task"] })),
+    holdSprint("oh-unknown", "automatic", q("oh-unknown", { kind: "continuation", code: "outcome_unknown", reason: "The last step may have changed files, but Cortex could not confirm what happened, so it cannot safely repeat it. Check the project folder yourself or close the task as it is.", nextActor: "owner", ownerActions: ["close_as_is"], asks: ["Close this task as it is, or check the project folder yourself first"] })),
+    holdSprint("oh-agent", "automatic", q("oh-agent", { needsOwner: false, reason: "The reviewer found two unchecked items and the agent is fixing them.", nextActor: "agent", ownerActions: [], asks: [] })),
+    holdSprint("oh-manual", "manual", undefined),
+  );
   // A working task whose steps recorded grep output far wider than any column, as the owner saw it clipped on the right.
   s.tasks.push(task("out", "nogit", { status: "working", process: "live" }));
   s.workers = [outputWorker()];

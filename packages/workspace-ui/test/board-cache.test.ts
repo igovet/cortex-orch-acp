@@ -10,6 +10,42 @@ const saved: CachedBoard = {project,items,product:{tasks:{},sprints:[{
   id:"sprint",projectId:"p",description:"Saved sprint",runMode:"automatic",planning:"created",
   targetBranch:null,conversation:[],plan:null,materializedVersion:1,taskIds:items.map(t=>t.taskId),queueState:"running",pauseReason:null,
 }]}};
+it.each(["manual", "hybrid", "automatic"] as const)("round-trips %s without relabeling a newly cached board", mode => {
+  const storage = memory();
+  writeBoards(storage, "owner", [{ ...saved, product: { ...saved.product, sprints: [{ ...saved.product.sprints[0], runMode: mode }] } }]);
+  expect(readBoards(storage, "owner")[0].product.sprints[0].runMode).toBe(mode);
+});
+
+it("shows an unversioned cached Automatic sprint as Hybrid and rejects malformed modes", () => {
+  const storage = memory();
+  storage.setItem("", JSON.stringify({ actor: "owner", boards: [saved] }));
+  expect(readBoards(storage, "owner")[0].product.sprints[0].runMode).toBe("hybrid");
+  const bad = { ...saved, product: { ...saved.product, sprints: [{ ...saved.product.sprints[0], runMode: ["hybrid"] }] } };
+  storage.setItem("", JSON.stringify({ actor: "owner", boards: [bad] }));
+  expect(readBoards(storage, "owner")).toEqual([]);
+});
+
+it("round-trips an Automatic hold, native continuation and an already-landed finish without caching results", () => {
+  const storage = memory(), board = structuredClone(saved), first = items[0].taskId, second = items[1].taskId;
+  const hold = { kind:"continuation" as const, taskId:first, code:"outcome_unknown", reason:"Commit not confirmed", needsOwner:false };
+  board.product.sprints[0] = {...board.product.sprints[0], automaticQueue:hold, queueState:"paused", pauseReason:hold.reason};
+  board.items[0].automaticContinuation = {policy:"automatic_continuation",continuationCount:2,lastContinuationReason:null,
+    pause:{eventId:"evt",kind:"outcome_unknown",reason:hold.reason}};
+  board.product.tasks[second] = { status:"done", acceptance:{automatic:true,version:1,digest:"d"},
+    integration:{method:"commit",targetBranch:"dev",digest:"d",automatic:true,committed:false} };
+  writeBoards(storage,"owner",[board]);
+  const cached = readBoards(storage,"owner")[0];
+  expect(cached.product.sprints[0].automaticQueue).toEqual(hold);
+  expect(cached.items[0].automaticContinuation).toEqual(board.items[0].automaticContinuation);
+  expect(cached.product.tasks[second]).toEqual({status:"done",integration:board.product.tasks[second].integration});
+  board.product.sprints[0].automaticQueue = {...hold, needsOwner:true};
+  writeBoards(storage,"owner",[board]);
+  expect(readBoards(storage,"owner")[0].product.sprints[0].automaticQueue).toEqual({...hold, needsOwner:true});
+  board.product.sprints[0].automaticQueue = {...hold, code:"external_blocker", needsOwner:true};
+  storage.setItem("", JSON.stringify({actor:"owner",sprintRunModeVersion:1,boards:[board]}));
+  expect(readBoards(storage,"owner")).toEqual([]);
+});
+
 const memory = () => {let raw:string|null=null;return {getItem:()=>raw,setItem:(_key:string,value:string)=>{raw=value;}};};
 describe("confirmed board cache",()=>{
   it("paints 31 real saved tasks synchronously before a cold service read without granting actions",()=>{

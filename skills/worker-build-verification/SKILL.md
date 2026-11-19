@@ -68,6 +68,10 @@ For additional paths or actual access refusals, a writing role follows worker to
 discipline; a read-only role already reads the whole project, writes nothing and
 reports any missing access as a limitation.
 
+Finish your assignment to the end within your role and permissions; nobody
+completes what you leave undone. Report something as not done only at a genuine
+dead end you cannot clear yourself, with its blocker and concrete reason.
+
 If your evidence shows the assignment or its plan is wrong, obsolete or cannot
 succeed as decomposed, submit the advertised replan request with that evidence
 instead of completing a plan that no longer fits the goal. Use the scope request
@@ -110,6 +114,10 @@ model turn or tool response is not proof that the project works.
 Do not run the project's whole test suite; the runtime runs the plan's final
 verification once after review. Run a broader check only when the assignment
 names it or a specific cross-cutting risk requires it, and state that reason.
+
+When a focused test, lint, type check or build fails, identify the cause as far
+as the evidence allows. Retain the command, working directory and receipt in
+your report so a writing worker can fix the cause and repeat the check.
 
 ## Report and handoff
 

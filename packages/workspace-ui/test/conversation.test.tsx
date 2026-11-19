@@ -1,6 +1,6 @@
 import { render } from "solid-js/web";
 import { afterEach, expect, it } from "vitest";
-import { emptySession, emptyWorkspace, LOCAL_MACHINE_ID, type Decision, type Task, type WorkspaceCommand } from "@cortex/workspace-domain";
+import { emptySession, emptyWorkspace, LOCAL_MACHINE_ID, type Decision, type Sprint, type Task, type WorkspaceCommand } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
 import { flush, projection, scriptedPort, withTask } from "./support";
 
@@ -49,6 +49,18 @@ it("shows the result inline once nothing is pending", async () => {
   await mount(world({ status: "review", result, workspaceDigest: "d" }));
   expect($(".timeline .rcard")?.textContent).toContain("Result v1");
   expect($(".ws-prev-result")).toBeNull();
+});
+
+it("shows the actual integration action beside the composer for an Automatic different-target hold", async () => {
+  const state = world({ status: "ready_to_merge", process: "stopped", checkout: { kind: "main", branch: "feature" }, result, workspaceDigest: "d" });
+  const sprint: Sprint = { id: "sp", projectId: "p", title: "Automatic delivery", description: "Automatic delivery", runMode: "automatic", targetBranch: "main", planning: "created", conversation: [], plan: null, materializedVersion: 1, taskIds: ["t"], queueState: "paused", pauseReason: "Confirm the target", automaticQueue: { kind: "owner_integration", taskId: "t", code: "different_target", reason: "Confirm another target", needsOwner: true,
+    nextActor: "owner", ownerActions: ["confirm_integration", "close_as_is"], asks: ["Confirm how to bring this result into the target branch."] } };
+  state.tasks[0].sprintId = "sp"; state.sprints = [sprint];
+  await mount(state);
+  const hold = document.querySelector(".chat-review-hold");
+  expect(hold?.textContent).toContain("Confirm another target");
+  expect(hold?.textContent).toContain("Review and confirm integration");
+  expect(hold?.querySelector("a")?.getAttribute("href")).toContain("/changes");
 });
 
 it("folds the general composer while a question waits, and opening it says it is not an answer", async () => {

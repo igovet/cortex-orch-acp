@@ -8,15 +8,18 @@ use crate::{
 use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
+pub mod automatic;
 pub mod completion;
 pub mod domain;
 pub mod plan;
 mod probe_correction;
 pub mod progress;
 pub mod reconciliation;
+pub mod repair_checks;
 pub mod review;
 pub mod runtime;
 pub mod skill_proposals;
+pub mod sprint_planning;
 pub mod steering;
 pub mod stop_notice;
 pub mod waits;
@@ -43,7 +46,11 @@ pub fn allowed(source: TaskState, target: TaskState) -> bool {
     }
     match source {
         Created => target == Planning,
-        Planning => matches!(target, PlanReady | AnswerReady | WaitingUser | Verifying),
+        // Reviewing: the runtime review of a submitted sprint plan (`sprint_planning`).
+        Planning => matches!(
+            target,
+            PlanReady | AnswerReady | WaitingUser | Verifying | Reviewing
+        ),
         AnswerReady => target == Completed,
         PlanReady => target == Executing,
         Executing => matches!(target, Reviewing | Verifying | WaitingUser),

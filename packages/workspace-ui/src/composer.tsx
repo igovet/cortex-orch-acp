@@ -10,6 +10,7 @@ import { I, MenuItem, Pop } from "./kit";
 import { Action, Whole } from "./layout";
 import { createSuggest, SUGGEST_HINT, SuggestList, type SlashCommand, type SuggestOptions } from "./suggest";
 import { duration, stopLabel, taskSettings, workingNow, type ComposerMode, type SessionModel } from "./session-model";
+import { usePlanningSprint, useTaskRoutes } from "./task-place";
 
 /** Attached files are uploaded once, as they are added; the draft holds their references until an explicit send or queue action. */
 export function createAttachments() {
@@ -376,7 +377,7 @@ export function MessageComposer(props: MessageComposerProps) {
       <div class="c-end">
         {props.delivery}
         {props.extra}
-        <Show when={props.send}>{s => <SendButton label={s().label} why={sendWhy()} needs={s().needs} onClick={submit} describedBy={s().run ? undefined : said()} icon={s().run?.icon} />}</Show>
+        <Show when={props.send}>{s => <SendButton label={s().label} why={sendWhy()} needs={s().needs} onClick={submit} describedBy={s().run ? undefined : (sendWhy() ? fieldId : undefined)} icon={s().run?.icon} />}</Show>
       </div>
     </CBar>
   </div>;
@@ -420,6 +421,8 @@ const CLOSED_TEXT: Partial<Record<ComposerMode, string>> = {
 };
 
 const STOPPING = "Available once every worker is confirmed as stopped";
+/** The composer's action button with an empty field: a run control instead of sending, or null. */
+type RunControl = { label: string; icon: string; needs?: WorkspaceCommand["type"]; why?: string; go: () => void; effect: string } | null;
 
 /**
  * Queue, beside the plane: off, a message is sent now; on, it waits in the queue. This one visible control, and no hidden key,
@@ -455,16 +458,31 @@ export function Composer(props: { model: Accessor<SessionModel>; pill?: JSX.Elem
   const now = () => ws.store.clock();
   const [delivery, setDelivery] = createSignal<"send_now" | "queue">("send_now");
   const [opened, setOpened] = createSignal(false);
+  // The task planning a sprint is written to through its sprint's planning: a message asks for changes to the plan and
+  // continues the same task, Stop pauses planning and Resume continues it. Sending stays open while the plan waits for
+  // approval, and closes once its tasks are created.
+  const planning = usePlanningSprint();
+  const routes = useTaskRoutes(() => ({ machine: m().view.machine.id, id: id() }));
+  const planningOff = () => {
+    const s = planning();
+    if (!s) return undefined;
+    if (s.planning === "created") return "Tasks are created. Edit them on the Board.";
+    if (s.planning === "cancelled") return "Planning is cancelled. Resume it to continue.";
+    if (mode() === "offline" || mode() === "unconfirmed") return CLOSED_TEXT[mode()];
+    return mode() === "draft" ? "Planning is starting." : undefined;
+  };
   const queueIds = createMemo(() => m().queue.map(q => q.id));
-  const showQueue = () => ["live", "paused", "stopping"].includes(mode()) && queueIds().length + queueSending().length > 0;
+  const showQueue = () => !planning() && ["live", "paused", "stopping"].includes(mode()) && queueIds().length + queueSending().length > 0;
   // The message leaves the field as it is sent and reads at once where it went; a send that does not arrive keeps it there,
   // with Retry and Edit, so its text and files are never lost.
   const done = () => { write(""); files.clear(); };
   const send = (value: string) => {
     if (!value.trim() || files.busy()) return;
     const attachments = files.files();
+    const sprint = planning();
     // A finished result has nobody to steer: a message sends it back and reopens the task.
-    const command: WorkspaceCommand = mode() === "review" ? { type: "request_changes", taskId: id(), text: value, attachments, now: now() }
+    const command: WorkspaceCommand = sprint ? { type: "plan_message", sprintId: sprint.id, text: value, attachments, now: now() }
+      : mode() === "review" ? { type: "request_changes", taskId: id(), text: value, attachments, now: now() }
       : { type: "send_message", taskId: id(), text: value, mode: mode() === "live" ? delivery() : "send_now", resume: mode() === "paused", now: now(), attachments };
     done();
     void ws.run(command);
@@ -473,32 +491,48 @@ export function Composer(props: { model: Accessor<SessionModel>; pill?: JSX.Elem
   const queueSending = () => ws.store.sends.shown(queuePlace());
   // A message taken back from a send that did not arrive returns to this field, beside whatever is written there now.
   createEffect(() => {
-    const back = ws.store.sends.returned({ kind: "task", taskId: id() }) ?? ws.store.sends.returned(queuePlace());
+    const s = planning();
+    const back = (s ? ws.store.sends.returned({ kind: "sprint", sprintId: s.id }) : null) ?? ws.store.sends.returned({ kind: "task", taskId: id() }) ?? ws.store.sends.returned(queuePlace());
     if (!back) return;
     ws.store.sends.take();
     write(text().trim() ? `${text().trimEnd()}\n${back.text}` : back.text); files.add(back.attachments ?? []);
     queueMicrotask(() => input?.focus());
   });
-  const readOnly = () => CLOSED_TEXT[mode()];
+  const readOnly = () => planning() ? planningOff() : CLOSED_TEXT[mode()];
   const empty = () => !text().trim() && files.files().length === 0;
   // Something of this task runs now: its coordinator works or a worker does. A task waiting for the owner, or held after an
   // interruption, runs nothing, so it has no Stop here.
   const running = () => mode() === "live" && !props.folded && workingNow(m()) && m().view.task.status !== "needs_you" && m().view.task.observedPhase !== "recovery";
   const resumable = () => ws.can(capabilityOf("continue_task"));
+  const stopPlanning = () => { const s = planning(); if (s) void ws.run({ type: "cancel_planning", sprintId: s.id }); };
+  const resumePlanning = () => { const s = planning(); if (s) void ws.run({ type: "resume_planning", sprintId: s.id }); };
+  /** The planning task's run control: Stop while it works, Resume once stopped, nothing once its tasks are created. */
+  const planningControl = (): RunControl => {
+    const s = planning()!;
+    if (s.planning === "created") return null;
+    if (mode() === "stopping" && empty()) return { label: "Stopping", icon: "loader", why: STOPPING, go: () => undefined, effect: "Stopping planning. Messages can be sent once the stop is confirmed." };
+    if (s.planning === "cancelled" || (mode() === "paused" && empty())) return { label: "Resume", icon: "play", needs: "resume_planning", go: resumePlanning, effect: "Resume continues planning." };
+    if (running() && empty()) return { label: "Stop", icon: "stop", needs: "cancel_planning", go: stopPlanning, effect: "Stop pauses planning and keeps the conversation; Resume continues it. Write a message to send it instead." };
+    return null;
+  };
   /** The run control the action button is with an empty field, or none: then it sends. */
-  const control = (): { label: string; icon: string; needs?: WorkspaceCommand["type"]; why?: string; go: () => void; effect: string } | null =>
-    mode() === "draft" ? { label: "Start", icon: "play", needs: "start_task", go: () => void ws.run({ type: "start_task", taskId: id(), now: now() }), effect: "Start runs this task." }
+  const control = (): RunControl =>
+    planning() ? planningControl()
+    : mode() === "draft" ? { label: "Start", icon: "play", needs: "start_task", go: () => void ws.run({ type: "start_task", taskId: id(), now: now() }), effect: "Start runs this task." }
     : mode() === "stopping" && empty() ? { label: "Stopping", icon: "loader", why: STOPPING, go: () => undefined, effect: "Stopping the task. Messages can be sent once the stop is confirmed." }
     : running() && empty() ? { label: stopLabel(resumable()), icon: "stop", needs: "stop_task", go: () => ws.stopTask(id()),
       effect: resumable() ? "Stop pauses the task and keeps everything; Resume continues it. Write a message to send it instead." : "End run stops this task. Write a message to send it instead." }
     : mode() === "paused" && empty() ? { label: "Resume", icon: "play", needs: "continue_task", go: () => void ws.run({ type: "continue_task", taskId: id(), now: now() }), effect: "Resume continues the task. Write a message to send it and resume." }
     : null;
-  const plane = () => mode() === "review" ? { label: "Send and reopen", needs: "request_changes" as const }
-    : mode() === "paused" ? { label: "Send and resume", needs: "send_message" as const }
-    : delivery() === "queue" && mode() === "live" ? { label: "Queue message", needs: "send_message" as const }
-    : { label: "Send message now", needs: "send_message" as const };
+  const plane = (): { label: string; needs: WorkspaceCommand["type"] } => planning() ? { label: "Send message now", needs: "plan_message" }
+    : mode() === "review" ? { label: "Send and reopen", needs: "request_changes" }
+    : mode() === "paused" ? { label: "Send and resume", needs: "send_message" }
+    : delivery() === "queue" && mode() === "live" ? { label: "Queue message", needs: "send_message" }
+    : { label: "Send message now", needs: "send_message" };
   const sendWhy = () => mode() === "stopping" ? STOPPING : files.busy() ? "Attachments are still loading" : text().trim() ? undefined : "Write a message first";
-  const effect = () => control()?.effect ?? (mode() === "review" ? "Sending requests changes and reopens this task. Acceptance of this result is cleared."
+  const planningEffect = () => control()?.effect ?? (props.folded ? "To the planner, not an answer to the question."
+    : planning()!.planning === "ready" ? "Sending asks for changes to the plan. Create tasks waits for the revised plan." : undefined);
+  const effect = () => planning() ? planningEffect() : control()?.effect ?? (mode() === "review" ? "Sending requests changes and reopens this task. Acceptance of this result is cleared."
     : mode() === "paused" ? "Sending resumes the task."
     : props.folded ? "To the coordinator, not an answer to the question." : undefined);
   const placeholder = () => mode() === "stopping" ? "Sending returns once the stop is confirmed" : SUGGEST_HINT;
@@ -506,6 +540,14 @@ export function Composer(props: { model: Accessor<SessionModel>; pill?: JSX.Elem
   const commands = (): SlashCommand[] => {
     const v = m().view, at = (tab: "workers" | "changes" | "code") => () => ws.go({ name: "task", machine: v.machine.id, task: id(), tab });
     const demo = ws.store.mode === "demo";
+    const s = planning();
+    // The planning task reads only on its sprint: its Work details are the sprint's Workers tab, and it has no Changes or Code.
+    if (s) return [
+      ...(s.planning !== "created" && s.planning !== "cancelled" && mode() === "live" ? [{ name: "stop", label: "Stop planning", why: ws.gate("cancel_planning"), run: stopPlanning }] : []),
+      ...(s.planning === "cancelled" ? [{ name: "resume", label: "Resume planning", why: ws.gate("resume_planning"), run: resumePlanning }] : []),
+      { name: "details", label: "Open Workers", run: () => ws.go(routes.workers()) },
+      { name: "new", label: "New task in this project", run: () => ws.go({ name: "new", machine: v.machine.id, kind: "task", project: v.project.id }) },
+    ];
     return [
       ...(mode() === "live" ? [{ name: "stop", label: `${stopLabel(ws.can(capabilityOf("continue_task")))} this task`, why: ws.gate("stop_task"), run: () => ws.stopTask(id()) },
         { name: "queue", label: "Queue messages until the coordinator is free", why: ws.gate("send_message"), run: () => setDelivery("queue") },
@@ -521,7 +563,7 @@ export function Composer(props: { model: Accessor<SessionModel>; pill?: JSX.Elem
   const folded = () => props.folded && !opened() && !text().trim() && files.files().length === 0;
   createEffect(() => { if (!props.folded) setOpened(false); });
   let input: HTMLTextAreaElement | undefined;
-  createEffect(() => { if (mode() !== "live" && mode() !== "paused") mic.stop(); });
+  createEffect(() => { if (planning() ? readOnly() : mode() !== "live" && mode() !== "paused") mic.stop(); });
   return <div class="dock">
     {props.pill}
     <Show when={showQueue()}>
@@ -548,11 +590,14 @@ export function Composer(props: { model: Accessor<SessionModel>; pill?: JSX.Elem
         suggest={{ projectId: m().view.project.id, taskId: id(), commands, skills: true }}
         effect={effect()} off={readOnly()} attachOff={mode() === "stopping" ? STOPPING : undefined} voiceOff={mode() === "stopping" ? STOPPING : undefined}
         inputRef={el => { input = el; }}
-        route={<RouteBar id="task" up needs="set_task_settings" settings={taskSettings(m())} disabled={readOnly() || mode() === "stopping" ? "Unavailable for this task now" : undefined}
-          onChange={settings => ws.run({ type: "set_task_settings", taskId: id(), settings: { ...taskSettings(m()), ...settings } })} />}
-        delivery={<Show when={mode() === "live"}><Delivery value={delivery()} onChange={setDelivery} off={ws.gate("send_message")} /></Show>}
+        route={<Show when={planning()} fallback={<RouteBar id="task" up needs="set_task_settings" settings={taskSettings(m())} disabled={readOnly() || mode() === "stopping" ? "Unavailable for this task now" : undefined}
+          onChange={settings => ws.run({ type: "set_task_settings", taskId: id(), settings: { ...taskSettings(m()), ...settings } })} />}>{s =>
+          // The planner's model is the sprint's, changed for the planning task and every later planning pass at once.
+          <RouteBar id="task" up needs="set_sprint_settings" settings={taskSettings(m())} disabled={readOnly() || mode() === "stopping" ? "Unavailable for planning now" : undefined}
+            onChange={settings => ws.run({ type: "set_sprint_settings", sprintId: s().id, settings })} />}</Show>}
+        delivery={<Show when={mode() === "live" && !planning()}><Delivery value={delivery()} onChange={setDelivery} off={ws.gate("send_message")} /></Show>}
         send={control() ? { label: control()!.label, needs: control()!.needs, why: control()!.why, go: control()!.go, run: { icon: control()!.icon } }
-          : { label: plane().label, needs: plane().needs, why: sendWhy(), go: () => send(text()), insertAndSend: mode() === "live" || mode() === "review" || mode() === "paused" ? send : undefined }} />
+          : { label: plane().label, needs: plane().needs, why: sendWhy(), go: () => send(text()), insertAndSend: planning() || mode() === "live" || mode() === "review" || mode() === "paused" ? send : undefined }} />
     </Show>
   </div>;
 }

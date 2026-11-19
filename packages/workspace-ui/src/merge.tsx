@@ -1,10 +1,11 @@
 import { createMemo, createSignal, createUniqueId, For, Show } from "solid-js";
-import type { BlockChoice, CodeSide, ConflictBlock, ConflictFile, MergeState } from "@cortex/workspace-domain";
+import { capabilityOf, type BlockChoice, type CodeSide, type ConflictBlock, type ConflictFile, type MergeState, type Task } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { Code, GitLetter } from "./diff";
 import { createTicker } from "./freshness";
+import { PR_UNKNOWN, viewPrItem } from "./git-actions-model";
 import { A, Count, I, Keyed, useWantOverview } from "./kit";
-import { ActionBar, Row, Strip, Whole } from "./layout";
+import { Action, ActionBar, Row, Strip, Whole } from "./layout";
 import { AcceptBlocker, AcceptButton, OpenChecks, Outcomes } from "./review";
 import { ResultText } from "./result-text";
 import { acceptBlocked, behindTarget, conflictFacts, repoOf, cxOf, blockWord, fileName, fileResolved, finishBlocked, noCommitReason, RESOLVE_STEPS, taskCheckout, type Cx } from "./review-model";
@@ -46,6 +47,23 @@ function PrButton(props: { m: SessionModel }) {
   const view = () => props.m.view, t = () => view().task;
   useWantOverview();
   return <button class="btn btn-sm" aria-disabled={view().machine.ghAvailable === false || t().integration?.method === "pr" ? "true" : undefined} data-why={view().machine.ghAvailable === false ? "Install and sign in to GitHub CLI (gh) to create a pull request" : t().integration?.method === "pr" ? "A pull request is already open for this version" : undefined} {...ws.needs("integrate")} onClick={() => { if (view().machine.ghAvailable !== false && t().integration?.method !== "pr") ws.open({ kind: "merge", taskId: t().id, how: "pr" }); }}>Create PR…</button>;
+}
+
+function CreatedPrRow(props: { task: Task }) {
+  const ws = useWs();
+  const pr = () => props.task.integration!;
+  const item = createMemo(() => viewPrItem(props.task, { offered: type => ws.can(capabilityOf(type)), gate: ws.gate }));
+  const open = () => {
+    const action = item();
+    if (action && !action.why) void ws.run({ type: "open_pull_request", projectId: props.task.projectId, taskId: props.task.id });
+  };
+  return <Row class="rv-stale rv-pr" lead={<I n="merge" s={14} class="faint" />}
+    title={<>Pull request created into <span class="mono">{pr().targetBranch}</span></>}
+    detail={<><Show when={pr().url} fallback={<div>{PR_UNKNOWN}</div>}>{url => <div><Whole class="mono" text={url()} /></div>}</Show>
+      <div>{pr().draft ? "Draft. " : ""}{ws.t("prNote")}</div></>}
+    end={<><span>{ws.store.mode === "demo" ? "Mock" : "GitHub CLI"}</span>
+      <Show when={pr().url ? item() : undefined}>{action => <Action kind="line" class="btn-sm" why={action().why} onClick={open}>{action().label}</Action>}</Show></>}
+  />;
 }
 
 export function ReadyPanel(props: { m: SessionModel; route: TaskRoute }) {
@@ -112,7 +130,7 @@ export function ReadyPanel(props: { m: SessionModel; route: TaskRoute }) {
           <Show when={t().integrationFacts?.commitAvailable}><button class="btn btn-primary btn-sm" aria-disabled={finish() ? "true" : undefined} data-why={finish()} {...ws.needs("integrate")} onClick={() => { if (!finish()) ws.open({ kind: "merge", taskId: t().id, how: "squash" }); }}>Commit to <span class="l-branch">{view().target}</span>…</button></Show>
         </ActionBar></div>
     </Show>
-    <Show when={t().integration?.method === "commit"}><div class="rcard"><div class="rcard-h"><I n="check" s={14} />Committed to {t().integration!.targetBranch}</div><div class="rcard-b"><ResultText text={t().result?.summary} /></div></div></Show>
+    <Show when={t().integration?.method === "commit"}><div class="rcard"><div class="rcard-h"><I n="check" s={14} />{t().integration?.automatic ? view().fact.text : `Committed to ${t().integration!.targetBranch}`}</div><div class="rcard-b"><ResultText text={t().result?.summary} /></div></div></Show>
     <Show when={t().status === "ready_to_merge" && contained()}>
       <div class="rcard"><div class="rcard-h"><I n="check" s={14} />Already in {t().integrationFacts!.targetBranch}</div>
         <div class="rcard-b">The task's recorded content landed in the local target branch. No Git operation is needed. Close it when you are ready; this records your closing decision only.</div>
@@ -142,7 +160,7 @@ export function ReadyPanel(props: { m: SessionModel; route: TaskRoute }) {
       <div class="rcard-h"><I n="merge" s={14} class="st-merge" />Ready to merge<span class="r">Accepted v{a().version} {a().automatic ? "automatically" : "by you"}{a().at != null ? `, ${clock(a().at!)}` : ""}</span></div>
       <div class="rcard-b"><ResultText text={t().result?.summary} /><Show when={view().sprint && dependents().length > 0}> This task is part of the {view().sprint!.description} sprint, and <A class="lnk" to={{ name: "task", machine: view().machine.id, task: dependents()[0].id }}>{dependents()[0].title}</A> depends on its checked result. The queue does not wait for a merge.</Show></div>
       <Outcomes checks={t().result?.checks ?? []} />
-      <Show when={t().integration?.method === "pr"}><Row class="rv-stale" lead={<I n="merge" s={14} class="faint" />} title={<>Pull request created into <span class="mono">{t().integration!.targetBranch}</span></>} detail={<>{t().integration!.draft ? "Draft. " : ""}{ws.t("prNote")}</>} end={<span>{ws.store.mode === "demo" ? "Mock" : "GitHub CLI"}</span>} /></Show>
+      <Show when={t().integration?.method === "pr"}><CreatedPrRow task={t()} /></Show>
       <Show when={!noGit()} fallback={<ActionBar place="card" class="rv-card-f"><SetUpGit /><CloseAsIs /></ActionBar>}>
       <ActionBar place="card" class="rv-card-f" start={<Flow from={t().checkout.branch} to={view().target} behind={behind()} />}>
         <Show when={remote()}><PrButton m={props.m} /></Show>

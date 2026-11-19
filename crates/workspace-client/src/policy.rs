@@ -783,7 +783,10 @@ mod tests {
             json!({"projectId":"p"}),
             json!({"projectId":"p","taskId":"../t"}),
         ] {
-            assert!(!desktop("native.open_pull_request", message.clone()), "{message}");
+            assert!(
+                !desktop("native.open_pull_request", message.clone()),
+                "{message}"
+            );
         }
         assert!(desktop(
             "native.engine_login",

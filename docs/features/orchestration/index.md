@@ -28,6 +28,10 @@ code (see [runtime-composed lifecycle](../task-lifecycle/index.md#runtime-compos
 and [observability's cohort aggregates](../observability/index.md)); eligibility
 itself is unchanged.
 
+## Review after a replan or reopen
+
+The review packet lists paths changed against the current execution baseline and paths recorded by this task across its plans. For each listed task write, the packet identifies its latest event, node and plan revision. A matching SHA-256 confirms the currently observed bytes. A mismatch calls for a fresh read. A missing comparison or incomplete baseline remains explicit. The reviewer examines the objective and material changes, and the runtime still binds approval and verification to the checkout digest.
+
 ## Reviewer verification reuse
 
 The gateway's `command_run` can reuse a runtime-produced verification receipt
@@ -152,13 +156,23 @@ session with its own channel, write reservation and result. One failing turn, a
 plan that went stale because a worker proposed a replan, or a cancellation stops
 the siblings that are still running (each settles its own session); a sibling
 interrupted only for that reason is not reported as a failure. The dispatch loop
-spends one step per pass from a budget of 128 that is persisted
+spends one step per outer pass and one per refill that claims new work. Empty
+refill attempts and waits for capacity, a retry deadline or a write reservation
+consume no extra steps. The budget of 128 is persisted
 (`runtime_requests` actor `native-progress`), so a restarted service continues the
 count; an owner steering message or answer, an interrupt or Continue, a driver
 stop and a reopen start a fresh budget, and exhaustion stops the task with
 `native_progress_limit`. When a replan adds the runtime's `_consultation` node,
 `plan_json` and `PLAN_ACCEPTED` carry that node and the edges added to every other
 node, so the stored plan always lists exactly the nodes the runtime holds.
+
+When a worker settles and releases its confirmed session and capacity reservation,
+the runtime immediately makes another bounded claim pass. Newly dependency-ready
+nodes can therefore start while slower siblings from the previous batch continue.
+The pass uses the current plan revision and the same four-worker, connection,
+scope-overlap and retry-deadline checks. It never reuses a previously provisioned
+assignment, and a stale plan or cancellation still settles outstanding siblings
+through the normal batch path.
 
 Owner guidance reaches a worker as `Owner guidance (not authority to expand scope):
 <text>` whether the worker is mid-turn or waiting for an answer. A second guidance
@@ -319,13 +333,27 @@ APPROVE proceeds
 to verification; REQUEST_CHANGES creates fix nodes followed by a fresh reviewer;
 BLOCK, which names the confirmed problems as findings, stops acceptance and goes
 back to the coordinator to address them. INCOMPLETE, which names in `not_covered`
-each part of the change the review did not cover and why, is neither an approval
-nor a block: the runtime schedules a fresh review of the same revision
-(`REVIEW_RERUN` with the reason and the uncovered parts; same dependencies and
-routing) whose brief lists exactly those parts, at most
-`MAX_INCOMPLETE_REVIEW_RERUNS` (2) times per revision, and then asks the owner
-(`review_incomplete`) with what stayed uncovered. A BLOCK that names no finding
-counts as INCOMPLETE (`block_without_findings`). Every reviewer's assignment
+each part of the change the review cannot cover itself, with its dead-end
+`blocker` (`missing_access`, `owner_decision`, `other_role_work`,
+`tool_unavailable`) and why, is neither an approval nor a block. The reviewer
+finishes its own review first: `result_submit` refuses, before publication and
+with the exact items in `missing`, an INCOMPLETE part without a valid blocker
+(`review_coverage_unfinished`), a changed regular file it has not read completely
+in its current bytes (`review_file_coverage_required`), a predecessor report not
+read to its last page (`review_predecessor_reports_required`) and a BLOCK without
+findings (`review_block_findings_required`); the review stays the one running
+assignment and the same session continues. An accepted INCOMPLETE schedules no
+second review of the same revision: actionable findings start their fixes,
+otherwise `REVIEW_DEAD_END_ROUTED` records the blocked parts and the task stops
+with `review_incomplete` (Automatic: coordinator continuation, the senior
+consultant on the fourth, the owner at the cap; Manual and Hybrid: the owner's
+stop question naming each part with its blocker). A fix and review round
+continues only on progress: when a REQUEST_CHANGES review of a revision finds the
+reviewed bytes unchanged since the previous review, or the same findings (plan
+task, files and fix) again, the runtime records `REVIEW_NO_PROGRESS` and stops
+once with `review_no_progress` (Manual and Hybrid: the coordinator first, then
+the owner; Automatic: the continuation path) instead of another round; the
+three-cycle `review_cycle_limit` still bounds rounds that do progress. Every reviewer's assignment
 carries a `review_packet`: the files the reviewed work changed (path, change kind,
 the plan node that wrote it; at most 200, the rest counted by folder), built from
 the difference between the execution baseline's per-file manifest and the folder
@@ -428,6 +456,22 @@ remain parallel. It never infers a contract change; a reviewer marks one
 `targeted` and the `fallback` reason. The three-cycle ceiling is unchanged.
 
 **Fix role.** A fix node never keeps a read-only source role. The runtime replaces a role in its `READ_ONLY` class (for example reviewer, architect, UX designer, consultant or auditor) with a writing specialist chosen from the original node's effective scope: `worker-technical-writer` when every path is under `docs/` or is a Markdown file, `worker-qa-engineer` when every path is under `tests/`, and `worker-backend-dev` for any other scope, including mixed and whole-project scopes. A writing role is kept unchanged. The fix keeps that effective scope exactly, so a finding cannot widen it, and the choice does not read the finding's prose. The same selection applies to targeted and fallback fixes. The review after the fixes remains a fresh reviewer assignment.
+
+### Execution failure repair
+
+When a writing execution worker submits a failed assignment with an open,
+verified failed check, its first submission receives repair guidance. The same
+attempt can fix the code and rerun the exact command within its authorized
+scope. If the failure persists, the worker may publish the failed result and
+the runtime returns it to the coordinator within the existing recovery limits.
+Read-only workers report the failure for a writing assignment.
+
+A published execution failure with a verified open check survives a replan.
+Completion requires a verified passing worker check on the reviewed digest
+with the matching command identity, or, for a project command, a complete final
+verification receipt with the same argv and working directory. The original
+failure remains in its report. An unresolved prior check sends the task back
+for repair within the coordinator return budget.
 
 Worker results bind to a published report owned by the exact provisioned attempt.
 The result receipt retains a content digest.
@@ -662,6 +706,19 @@ the approved digest. Closure binds execution and the gap author to that same
 current digest, regardless of publication or credit ordering. Discarded or stale
 candidates never close gaps.
 
+### Automatic repair of failed verification
+
+In an Automatic sprint, a failed final verification returns the task to bounded
+planning with the failed command identities retained in runtime evidence. The
+coordinator must keep every failed or unresolved command in the repair plan.
+The runtime runs the repaired assignment and the exact verification command
+again, preserving the original failed receipt and requiring a later complete
+passing receipt before completion. Omitting a failed command is refused. The
+repair budget is bounded by the existing verification-repair limit, after which
+the task pauses with the failure and evidence exposed to the owner. Automatic
+continuation never turns a missing, failed, truncated or unobservable check into
+a pass and never waives independent review, permissions or final verification.
+
 ### Check history and current outcome
 
 A long attempt often runs the same check several times: it fails, the worker
@@ -816,8 +873,8 @@ Submission rejects shell syntax before any work starts. The coordinator may call
 correct: it replaces the verification commands and verifies again without redoing the
 reviewed work. Wrong code requires a new plan. Any failed command of the failed
 run that the revision no longer contains, whatever the list length, is recorded
-in `VERIFICATION_REVISED.dropped_failed`. The runtime accumulates these obligations
-across later repairs until the next accepted plan. Completion requires either a
+in `VERIFICATION_REVISED.dropped_failed`. Ordinary repair plans carry every
+unresolved final-verification argv into the next revision. Completion requires either a
 complete passing runtime verification of the exact removed argv or an answer to
 a task-global question asked after that removal (`completion_dropped_failed_check`;
 the planning prompt tells the coordinator to ask which way to go). Answers to
@@ -827,7 +884,9 @@ recorded as dropped too, and cannot erase an earlier removal. The policy does no
 on recognizing weak commands: only the same argv (a re-run) clears a failed check. Any
 different command that replaces it, however strong or weak, leaves the failed command
 as an open obligation, so the task cannot complete until the exact command passes or the
-owner answers a task-global question asked after the replacement. As an extra signal, a
+owner answers a task-global question asked after the replacement. A retry reply,
+worker-local answer or a new ordinary plan does not waive the obligation. As an
+extra signal, a
 new command that the plan did not already contain and that the evidence classifier
 treats as checking nothing (`true`, `:`, `echo ...`, `sh -c ...`) is refused outright as
 `verification_trivial_replacement`. At plan acceptance, a plan whose verification
@@ -937,7 +996,10 @@ Access requests still require a retained session for their decision continuation
 
 Without active node waits, the execution/review scheduler skips question delivery
 and access reconciliation, reusing its single-snapshot context and cheap change
-fingerprint. Periodic idle passes remain write-free. A current running node
+fingerprint. A live worker with an open access wait is an exception: its persisted
+`retry_at` is rechecked by the same waiting session when due, so an active-writer
+conflict cannot leave the worker parked after its timer. Periodic idle passes remain
+write-free. A current running node
 conservatively reserves its declared paths even before an assignment binding
 exists; stale unbound revisions do not hold those paths indefinitely.
 
@@ -948,9 +1010,11 @@ and applied owner deny-write restrictions, and current writer-reservation
 checks. Existing grants and plan scope remain unchanged; no partial grant occurs.
 A refusal parks only that assignment for a runtime decision continuation, never
 a user access question. Active-writer conflicts get three runtime rechecks after
-delays of 1, 2 and 4 seconds (module-level, test-injectable
+persisted delays of 1, 2 and 4 seconds (module-level, test-injectable
 `RETRY_DELAYS_SECONDS`); deadlines and attempt indices persist in wait events.
-The scheduler reconciles due checks without sleeping under a database lock.
+The live worker session wakes at each persisted deadline and reconciles the wait
+without sleeping under a database lock. A due wait is therefore processed even
+when the task has no other runnable node.
 Scheduling can deliver a check later than its deadline; there is no catch-up
 busy loop. A successful check grants transactionally and continues the same
 healthy session. An exhausted conflict cycle returns a runtime denial.

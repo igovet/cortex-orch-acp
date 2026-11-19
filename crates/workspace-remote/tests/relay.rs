@@ -23,8 +23,13 @@ async fn frame_in<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> std::io::R
     serde_json::from_slice(&body).map_err(std::io::Error::other)
 }
 
-async fn frame_out<W: tokio::io::AsyncWrite + Unpin>(writer: &mut W, value: &Value) -> std::io::Result<()> {
-    writer.write_all(&workspace_protocol::encode_frame(value).unwrap()).await?;
+async fn frame_out<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    value: &Value,
+) -> std::io::Result<()> {
+    writer
+        .write_all(&workspace_protocol::encode_frame(value).unwrap())
+        .await?;
     writer.flush().await
 }
 
@@ -53,7 +58,8 @@ async fn scenario(relay: String) {
             let (near, mut far) = tokio::io::duplex(64 * 1024);
             tokio::spawn(async move {
                 while let Ok(request) = frame_in(&mut far).await {
-                    let reply = json!({"jsonrpc":"2.0","id":request["id"],"result":request["params"]});
+                    let reply =
+                        json!({"jsonrpc":"2.0","id":request["id"],"result":request["params"]});
                     if frame_out(&mut far, &reply).await.is_err() {
                         break;
                     }
@@ -70,15 +76,23 @@ async fn scenario(relay: String) {
 
     // The phone gets the link without any direct address: only the relay can carry it.
     let mut link = PairingLink::decode(&offer.link).unwrap();
-    assert_eq!(link.relay.as_ref().map(|url| url.to_string().trim_end_matches('/').to_owned()),
-        Some(relay.trim_end_matches('/').to_owned()), "the link names the relay");
+    assert_eq!(
+        link.relay
+            .as_ref()
+            .map(|url| url.to_string().trim_end_matches('/').to_owned()),
+        Some(relay.trim_end_matches('/').to_owned()),
+        "the link names the relay"
+    );
     link.addrs.clear();
     let link = link.encode().unwrap();
 
     let mut phone = ClientConfig::new(root.join("phone"));
     phone.connect_timeout = Duration::from_secs(30);
     let client = Client::new(phone).unwrap();
-    let attempt = client.pair_begin(&link, "Relay check phone").await.expect("pairing reaches the machine through the relay");
+    let attempt = client
+        .pair_begin(&link, "Relay check phone")
+        .await
+        .expect("pairing reaches the machine through the relay");
     let request = loop {
         if let Some(request) = host.status().pending.first().cloned() {
             break request;
@@ -91,13 +105,24 @@ async fn scenario(relay: String) {
     assert!(machine.addrs.is_empty() || machine.relay_url.is_some());
 
     let connection = client.connection(&machine.machine_id).unwrap();
-    let mut stream = connection.open().await.expect("the paired phone connects through the relay");
-    frame_out(&mut stream, &json!({"jsonrpc":"2.0","id":"1","method":"echo","params":{"through":"relay"}})).await.unwrap();
+    let mut stream = connection
+        .open()
+        .await
+        .expect("the paired phone connects through the relay");
+    frame_out(
+        &mut stream,
+        &json!({"jsonrpc":"2.0","id":"1","method":"echo","params":{"through":"relay"}}),
+    )
+    .await
+    .unwrap();
     let reply = frame_in(&mut stream).await.unwrap();
     assert_eq!(reply["result"], json!({"through":"relay"}), "{reply}");
     let state = connection.state().borrow().clone();
     eprintln!("relay {relay}: request answered; connection state {state:?}");
-    assert!(matches!(state, ConnectionState::Connected { .. }), "{state:?}");
+    assert!(
+        matches!(state, ConnectionState::Connected { .. }),
+        "{state:?}"
+    );
 
     connection.close().await;
     host.shutdown().await;

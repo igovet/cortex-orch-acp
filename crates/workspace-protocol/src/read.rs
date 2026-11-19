@@ -17,6 +17,8 @@ pub struct TaskProjection {
     pub wait_reason: Option<String>,
     pub last_confirmed_at: Option<String>,
     pub coordinator_route: Option<RouteLabel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automatic_continuation: Option<serde_json::Value>,
     pub warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description_availability: Option<String>,

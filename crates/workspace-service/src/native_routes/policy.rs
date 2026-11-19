@@ -166,13 +166,14 @@ fn review_candidates<'a>(
 fn base_tier(role: &str) -> usize {
     match role.trim_start_matches("worker-") {
         "architect" | "database-architect" | "security-auditor" | "senior-consultant" => 1,
-        "explorer" | "general" | "planner" | "technical-writer" => 3,
+        "explorer" => 3,
         _ => 2,
     }
 }
 fn role_tier(role: &str, complexity: &str, escalated: bool) -> usize {
-    if role == "worker-explorer" {
-        return 3;
+    if role.trim_start_matches("worker-") == "explorer" {
+        // Escalation increases effort, not the explorer's complexity tier.
+        return if complexity == "high" { 2 } else { 3 };
     }
     let shift = match complexity {
         "low" => 1,

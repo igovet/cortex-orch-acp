@@ -1,4 +1,4 @@
-import type { Check, PlanItem, ProjectRepo, RepoCheckout, Sprint, SprintEntry, Task, TaskSession, WorkspaceState } from "./types";
+import type { AutomaticContinuation, AutomaticQueue, Check, HoldActor, OwnerHoldAction, PlanItem, ProjectRepo, RepoCheckout, Sprint, SprintEntry, SprintRunMode, Task, TaskSession, WorkspaceState } from "./types";
 import { DomainError, entity, machineFor, nonempty, projectFor, requireFact } from "./core";
 
 /**
@@ -90,6 +90,47 @@ export function dependencyProblem(items: PlanItem[], key: string, dependency: st
   };
   return reaches(dependency) ? `Not applied: ${no(key)} after ${no(dependency)} makes a cycle, because ${no(dependency)} already waits for ${no(key)}.` : null;
 }
+export const SPRINT_RUN_MODES = ["manual", "hybrid", "automatic"] as const satisfies readonly SprintRunMode[];
+export const isSprintRunMode = (mode: unknown): mode is SprintRunMode => SPRINT_RUN_MODES.some(value => value === mode);
+export const queueDrivenMode = (mode: SprintRunMode): boolean => mode === "hybrid" || mode === "automatic";
+
+const record = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+const recordedText = (value: unknown): value is string => typeof value === "string" && value.length <= 32000;
+export function isAutomaticContinuation(value: unknown): value is AutomaticContinuation {
+  if (!record(value) || value.policy !== "automatic_continuation" || typeof value.continuationCount !== "number"
+    || !Number.isSafeInteger(value.continuationCount) || value.continuationCount < 0
+    || !(value.lastContinuationReason === null || recordedText(value.lastContinuationReason))) return false;
+  const pause = value.pause;
+  return pause === null || (record(pause) && recordedText(pause.eventId) && recordedText(pause.reason)
+    && (pause.kind === "external_blocker" || pause.kind === "continuation_cap" || pause.kind === "outcome_unknown"));
+}
+const HOLD_ACTORS: readonly HoldActor[] = ["runtime", "agent", "owner"];
+export const OWNER_HOLD_ACTIONS: readonly OwnerHoldAction[] = ["allow_finish", "accept_result", "allow_repair", "allow_retries", "confirm_and_continue", "resume_task", "retry",
+  "confirm_integration", "resolve_conflict", "change_run_mode", "ask_agent", "close_as_is"];
+/** A hold's decision, when the service recorded one: one actor; an owner decision always offers an action and says what it asks. */
+function holdDecision(value: Record<string, unknown>) {
+  if (value.nextActor === undefined && value.ownerActions === undefined && value.asks === undefined) return true;
+  const actions = value.ownerActions, asks = value.asks;
+  return HOLD_ACTORS.includes(value.nextActor as HoldActor) && Array.isArray(actions) && Array.isArray(asks)
+    && actions.every(a => OWNER_HOLD_ACTIONS.includes(a as OwnerHoldAction)) && asks.every(recordedText)
+    && (value.nextActor === "owner") === (value.needsOwner === true)
+    && (value.nextActor !== "owner" || (actions.length > 0 && asks.length > 0))
+    && (value.allowedAt === undefined || typeof value.allowedAt === "number");
+}
+export function isAutomaticQueue(value: unknown): value is AutomaticQueue {
+  return record(value) && recordedText(value.code) && recordedText(value.reason)
+    && (value.taskId === null || recordedText(value.taskId))
+    && (value.kind === "owner_integration" ? value.needsOwner === true && !!value.taskId
+      : value.kind === "continuation" ? value.needsOwner === false
+        || (value.needsOwner === true && !!value.taskId && ["continuation_cap", "outcome_unknown"].includes(value.code))
+      : (value.kind === "start_refused" || value.kind === "settlement_blocked") && typeof value.needsOwner === "boolean")
+    && holdDecision(value);
+}
+/** The hold of a queue-driven sprint (Hybrid or Automatic). Both modes keep system holds in the same record. */
+export const automaticQueueOf = (sprint: Sprint | null | undefined) =>
+  (sprint?.runMode === "automatic" || sprint?.runMode === "hybrid") && isAutomaticQueue(sprint.automaticQueue) ? sprint.automaticQueue : null;
+
 /** Dependency order, with plan order breaking ties: the order an automatic run would use, one task at a time. */
 export function runOrder(items: PlanItem[]): string[] {
   const done = new Set<string>(), out: string[] = [];
@@ -107,10 +148,29 @@ export const openPlanningQuestion = (sprint: Sprint): SprintEntry | null => {
 /** Why the queue cannot run right now, and the task that holds it when one does. Null means Run sprint would succeed. */
 export function runBlockerOf(state: WorkspaceState, sprint: Sprint): { reason: string; taskId: string | null } | null {
   if (sprint.planning !== "created") return { reason: "Create the plan tasks first", taskId: null };
-  if (sprint.runMode !== "automatic") return { reason: "Select Automatic to run the queue", taskId: null };
+  if (!queueDrivenMode(sprint.runMode)) return { reason: "Select Hybrid or Automatic to run the queue", taskId: null };
+  const decided = automaticQueueOf(sprint);
+  // A hold decided by the service: Continue queue is offered exactly when it offers Try again.
+  if (decided?.nextActor) return decided.ownerActions?.includes("retry") || decided.nextActor !== "owner" && decided.taskId === null
+    ? null : { reason: decided.reason, taskId: decided.taskId };
+  if (sprint.runMode === "automatic") {
+    const hold = decided;
+    if (!hold || hold.kind === "start_refused") return null;
+    // With no task link, Continue rechecks the queue. For other recoverable
+    // finish refusals it retries through the same durable integration guard.
+    if (hold.kind === "settlement_blocked" && hold.needsOwner) {
+      if (hold.code === "dependencies_blocked" || (hold.code === "queue_blocked" && !hold.taskId)) return null;
+      const taskOnly = ["queue_blocked", "automatic_acceptance_blocked", "outcome_unknown", "integration_outcome_unknown", "integration_failed"];
+      if (hold.taskId && !taskOnly.includes(hold.code)) return null;
+    }
+    return { reason: hold.reason, taskId: hold.taskId };
+  }
   for (const id of sprint.taskIds) {
     const task = entity(state.tasks, id);
     if (task.status === "done" && (task.closedAs === "external" || task.closedAs === "as_is")) continue;
+    // The service skips a cancelled or archived member, as Automatic does; only its dependents wait, and the service
+    // holds them with a decision that names the task. Continue queue must not be refused for the skipped member itself.
+    if (task.closedAs === "cancel" || task.archive) continue;
     if (task.closedAs) return { reason: `${task.title} was closed, so the queue cannot go on`, taskId: id };
     if (task.status === "needs_you") return { reason: `${task.title} needs you first`, taskId: id };
     if (task.status === "review") return { reason: task.reviewActions?.reason ? `${task.title}: ${task.reviewActions.reason}` : `Review ${task.title} first`, taskId: id };
@@ -126,8 +186,9 @@ export function checkAcceptanceBlocker(checks: Check[]): string | null {
   if (checks.some(c => c.kind !== "manual" && c.outcome !== "passed" && !c.technicalReason?.trim())) return "Run the unpassed checks first. Only a recorded technical blocker permits acceptance";
   return null;
 }
-export function dependencyReady(task: Task) {
+export function dependencyReady(task: Task, mode?: SprintRunMode) {
   if (task.closedAs === "cancel") return false;
+  if (mode === "automatic") return task.status === "done";
   return (task.status === "done" && (task.closedAs === "external" || task.closedAs === "as_is")) || task.work === "merged" || (task.status === "ready_to_merge" && task.result !== null &&
     (task.acceptance?.digest === task.workspaceDigest || (task.result.automaticReady === true && checksPassed(task.result.checks))) && task.result.digest === task.workspaceDigest && task.conflict === "none");
 }

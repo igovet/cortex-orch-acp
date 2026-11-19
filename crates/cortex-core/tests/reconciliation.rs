@@ -403,6 +403,104 @@ fn equal_length_trivial_replacement_of_a_failed_check_is_refused() {
         .unwrap();
     assert_eq!((state.as_str(), revised), ("PLANNING", 0));
 }
+
+#[test]
+fn failed_verification_survives_multiple_plan_revisions_until_exact_pass() {
+    let (_p, s, _owner, _e) = setup();
+    let argv = json!(["cargo", "test", "-p", "fixture"]);
+    let plan_with = json!({
+        "tasks":[{"id":"repair","role":"backend-dev","objective":"Repair the failing check","dependencies":[],"scope":["src"]}],
+        "verification":[argv.clone()]
+    });
+    let plan_without = json!({
+        "tasks":[{"id":"repair-again","role":"backend-dev","objective":"Continue the repair","dependencies":[],"scope":["src"]}],
+        "verification":[["cargo","test","-p","fixture-unit"]]
+    });
+
+    // The first revision records a real failed command.
+    s.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='PLANNING',revision=1", [])?;
+        lifecycle::event_tx(
+            db,
+            "t",
+            "VERIFICATION_FAILED",
+            json!({
+                "revision":1,
+                "checks":[{"argv":argv,"exit_code":101,"complete":true,"receipt_ref":"failed-r1"}]
+            }),
+        )?;
+        Ok(())
+    })
+    .unwrap();
+
+    // A repair plan that keeps the exact command is accepted.
+    s.write(|db| lifecycle::plan::accept_tx(db, "t", "coordinator", "repair-r1", &plan_with))
+        .unwrap();
+
+    // Another replan before verification cannot make the previous revision's failure disappear.
+    s.write(|db| {
+        db.execute(
+            "UPDATE runtime_tasks SET state='PLANNING' WHERE task_id='t'",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let err = s
+        .write(|db| lifecycle::plan::accept_tx(db, "t", "coordinator", "drop-r2", &plan_without))
+        .unwrap_err();
+    assert_eq!(err.code(), "verification_failed_check_missing");
+
+    // The exact command later passes, allowing a subsequent plan to remove it.
+    s.write(|db| {
+        let revision: i64 = db.query_row(
+            "SELECT revision FROM runtime_tasks WHERE task_id='t'",
+            [],
+            |r| r.get(0),
+        )?;
+        lifecycle::event_tx(
+            db,
+            "t",
+            "VERIFICATION_PASSED",
+            json!({
+                "revision":revision,
+                "checks":[{"argv":argv,"exit_code":0,"complete":true,"receipt_ref":"passed-r2"}]
+            }),
+        )?;
+        db.execute("UPDATE runtime_tasks SET state='PLANNING'", [])?;
+        Ok(())
+    })
+    .unwrap();
+    s.write(|db| {
+        lifecycle::plan::accept_tx(db, "t", "coordinator", "drop-after-pass", &plan_without)
+    })
+    .unwrap();
+}
+#[test]
+fn a_legacy_failed_run_keeps_commands_without_receipts() {
+    let (_project, store, _, _) = setup();
+    let plan = json!({"tasks":[{"id":"repair","role":"backend-dev","objective":"Repair","dependencies":[],"scope":["src"]}],
+        "verification":[["cargo","check"],["cargo","test"]]});
+    store.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id='t'", [])?;
+        let accepted = lifecycle::plan::accept_tx(db,"t","coordinator","initial",&plan)?;
+        let revision = &accepted["revision"];
+        lifecycle::event_tx(db,"t","VERIFICATION_FAILED",json!({"revision":revision,"revision_digest":"d","review_event":7,
+            "checks":[{"argv":["cargo","check"],"exit_code":0,"complete":true,"revision":revision,"revision_digest":"d","review_event":7}]}))?;
+        db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id='t'", [])?;
+        Ok(())
+    }).unwrap();
+    let mut shortened = plan.clone();
+    shortened["verification"] = json!([["cargo", "check"]]);
+    let error = store
+        .write(|db| lifecycle::plan::accept_tx(db, "t", "coordinator", "drop", &shortened))
+        .unwrap_err();
+    assert_eq!(error.code(), "verification_failed_check_missing");
+    store
+        .write(|db| lifecycle::plan::accept_tx(db, "t", "coordinator", "keep", &plan))
+        .unwrap();
+}
+
 #[test]
 fn equal_length_nontrivial_replacement_records_the_dropped_failure() {
     let (_p, s, _, _) = setup();

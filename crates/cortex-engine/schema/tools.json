@@ -1,6 +1,7 @@
 {
   "catalogues": {
     "coordinator||": [
+      "93eab39832b98623897dc0c764dd5ef1e0ba34525e85cae0092a893b27ab3083",
       "d62e099b8daac17e7b0a5f7b1abd253865dd4234ea1888309980da6871576409",
       "002f5461eeb64b5407bdcde5f9c67b9c3c7d14d8b4659b403df88f00fc20f985",
       "7fbccf25bb97cfc27d88d1d90da98aad395cad8c7b9d6e0848950b439f7d92a3",
@@ -1259,6 +1260,94 @@
   },
   "origin": "Python schema parity snapshot; no Python runtime dependency",
   "tools": {
+    "93eab39832b98623897dc0c764dd5ef1e0ba34525e85cae0092a893b27ab3083": {
+      "_meta": {
+        "anthropic/alwaysLoad": true
+      },
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Submit the sprint plan of a read-only sprint planning task; refused in every other task. Study the project first (read files, run read-only discovery, plan only read-only specialists when useful); never change files. Each task is one unit of future work the owner can create and run on its own. A plan may have any number of tasks: send it in one call, or in ordered parts (part 1, 2, ...; final true on the last) when it exceeds one call's limits. Part 1 starts a new plan and discards an unfinished earlier one. Every part is checked with the parts before it, and the final part checks the whole plan: unique keys, dependsOn naming only keys of the whole plan, no dependency cycles, non-empty descriptions and a whole plan within 512 KiB of UTF-8 JSON; a refusal names the failing task (1-based index over the whole plan, and key) and rule, so correct it and submit again. That validation is the plan's runtime verification: name no verification commands for it. A recorded plan goes to a mandatory independent review against the request and the studied evidence; end the turn after the final part. Review findings return the task to you for a revised plan (an unchanged plan is refused); after approval finish with synthesis_submit. Ask the owner with user_question_request when an essential decision is missing, and always when the sprint description explicitly requires a question. The owner reviews the approved plan in the sprint and creates the tasks; this tool creates or starts none.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "description": "Structured fields; use the exact advertised properties.",
+        "properties": {
+          "final": {
+            "description": "Optional: true when this call completes the plan (the default); false when more parts follow.",
+            "type": "boolean"
+          },
+          "part": {
+            "description": "Optional: 1-based number of this part of the plan; omitted means 1. Part 1 starts a new plan; each further part must be the next number.",
+            "maximum": 10000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "request_key": {
+            "description": "Unique plan delivery key; exact retries return the same receipt.",
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "tasks": {
+            "description": "The planned tasks of this call, in a sensible run order: 1 to 50 items and at most 128 KiB of UTF-8 JSON per call. A larger plan continues in further parts.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "dependsOn": {
+                  "description": "Keys of tasks of this plan that must finish first; [] when none.",
+                  "items": {
+                    "maxLength": 100,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "maxItems": 50,
+                  "minItems": 0,
+                  "type": "array"
+                },
+                "description": {
+                  "description": "Self-contained plain owner-readable text for only this task, in the selected language: its own work, acceptance criteria, relevant facts found in the project and relevant owner answers, with only minimal shared context. Never sibling work, the whole sprint description or serialized conversation records. Aim for about 500 characters.",
+                  "maxLength": 8000,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "key": {
+                  "description": "Unique short key of this task within the plan, for example t1.",
+                  "maxLength": 100,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "title": {
+                  "description": "Short task title shown on the board.",
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "key",
+                "title",
+                "description",
+                "dependsOn"
+              ],
+              "type": "object"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "tasks",
+          "request_key"
+        ],
+        "type": "object"
+      },
+      "name": "sprint_plan_submit",
+      "title": "Sprint plan submit"
+    },
     "002f5461eeb64b5407bdcde5f9c67b9c3c7d14d8b4659b403df88f00fc20f985": {
       "_meta": {
         "anthropic/alwaysLoad": true
@@ -2674,7 +2763,7 @@
                 "type": "array"
               },
               "verification": {
-                "description": "Required: 1 to 16 items; [] is rejected. Verification commands the runtime runs after the work. Required for every plan, including an investigation-only or trivial one: verification runs even when nothing changed. The runtime runs these commands once after review, each until it exits; this is where the project's whole documented suite belongs. Copy each command exactly from the project's documented verification (docs/project/verification.md, AGENTS.md, CLAUDE.md, Makefile or package.json scripts), interpreter included, e.g. [[\"python3\",\"-B\",\"-m\",\"pytest\",\"-q\"]]. When the project documents no verification, send the smallest command that exits nonzero if the requested result is wrong, using only the project's files and standard tools, e.g. [[\"node\",\"--check\",\"src/app.js\"]] for a script; for an investigation-only plan, one that checks the investigated files. A command that only prints, reads, lists or searches (echo, cat, ls, grep, rg, find, test, true, read-only git and the like) is refused, because its exit status does not prove the work. Each command is an argv array of literal strings: no shell operators, pipes, redirection or substitution; environment variables as [\"env\",\"NAME=value\",...]. Availability is probed before accepting the plan. If a tool is missing, arrange project-private installation or another executable approach; if neither is possible, ask the owner immediately through the existing question route.",
+                "description": "Required: 1 to 16 items; [] is rejected, except in a read-only sprint planning task, whose plan the runtime verifies itself (send [] there). Verification commands the runtime runs after the work. Required for every other plan, including an investigation-only or trivial one: verification runs even when nothing changed. The runtime runs these commands once after review, each until it exits; this is where the project's whole documented suite belongs. Copy each command exactly from the project's documented verification (docs/project/verification.md, AGENTS.md, CLAUDE.md, Makefile or package.json scripts), interpreter included, e.g. [[\"python3\",\"-B\",\"-m\",\"pytest\",\"-q\"]]. When the project documents no verification, send the smallest command that exits nonzero if the requested result is wrong, using only the project's files and standard tools, e.g. [[\"node\",\"--check\",\"src/app.js\"]] for a script; for an investigation-only plan, one that checks the investigated files. A command that only prints, reads, lists or searches (echo, cat, ls, grep, rg, find, test, true, read-only git and the like) is refused, because its exit status does not prove the work. Each command is an argv array of literal strings: no shell operators, pipes, redirection or substitution; environment variables as [\"env\",\"NAME=value\",...]. Availability is probed before accepting the plan. If a tool is missing, arrange project-private installation or another executable approach; if neither is possible, ask the owner immediately through the existing question route.",
                 "items": {
                   "description": "Required: 1 to 64 items; [] is rejected. One verification command as argv: literal string arguments, no shell.",
                   "items": {
@@ -2688,7 +2777,7 @@
                   "type": "array"
                 },
                 "maxItems": 16,
-                "minItems": 1,
+                "minItems": 0,
                 "type": "array"
               }
             },
@@ -2782,17 +2871,45 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Submit this worker attempt's report, summary and observed checks. A check that failed, was then fixed, and whose later identical rerun passed is `passed`: cite the passing rerun's tool_call_ref and describe the failure-then-fix history in the report. An identical rerun repeats the exact argv and cwd, either on the same operation and profile or across command_run and outside_command in either direction. An explicit supported command_correction can supersede a mistaken invocation with a same-name later passing correction of this attempt, never pass the original argv. Complete whole-worktree git diff --check failures confined to sibling writers' reserved paths are not attributable to this worker; the failed evidence remains visible. Scope diff/whitespace checks to owned paths. `assignment_outcome=failed` is reserved for when the delivered work itself does not reach the assignment's goal, never merely because an earlier attempt failed before being fixed. summary is a short plain-language paragraph -- what was done and the current state -- without internal jargon (runtime codes, route names, revisions, receipts) unless the user asked about them. report is required in every call, a review included, and is one plain string, never an object: the complete report Markdown (optionally titled with report_title), which the runtime publishes; or, after create_draft, draft_write and write_report, only that write_report's report_id. summary, verdict and findings never replace it. Decision-brief items (conclusion, evidence, checks, contradictions, limits, next action) are Markdown sections inside the report, never separate fields. If the engine reports that the call could not be parsed, nothing reached Cortex: resend the same arguments with valid serialization and the same request_key. Use checks=[] only if no automated command ran. Each checks item has name (a stable check name) and outcome (passed|failed|not_run|unverified; there is no status field). passed needs the tool_call_ref, cited by one check only, of a complete exit-0 command_run (or user-confirmed outside_command) of this attempt; failed cites its nonzero receipt; not_run or unverified needs a concrete blocker; command is an optional argv array of strings, descriptive only for passed or failed. Engine-native shell calls, report ids and project_git (context only) are never check receipts. Do not send closed_by; the runtime derives it. Use a fresh request_key for a new result; retry an uncertain call only with the identical key and payload. This is an execution assignment: there is no verdict, findings or not_covered field; those belong to review assignments. An open failed check is otherwise refused with open_failed_check before recording or publishing, leaving the channel active; the refusal names the failed receipt, the relevant rerun and its evidence gap, and says when no exact rerun can close it. A failed receipt that any result_submit of this attempt already presented (even a refused one) must be cited again by every later submission, failed outcome included, or it is refused with omitted_failed_check. A mistake in your own bounded standalone python/python3 -c probe (a syntax error, one wrong regex literal or one wrong literal-data expectation) may instead be retracted with checks[].invocation_error bound to the corrected passing run: both receipts stay visible and the failure is retracted, not passed. Runtime verification and actual project test/lint/build failures are never retracted. A mistyped command line whose own output shows the check never started (usage, unrecognized-flag or file-not-found error for the command itself) is not a failed check: do not cite it; cite the corrected command's receipt and describe the mistyped run in the report. The receipt carries node_status (completed or failed), not task acceptance. Top-level write_report-only fields such as artifacts are ignored.",
+      "description": "Submit this worker attempt's report, summary and observed checks. A check that failed, was then fixed, and whose later identical rerun passed is `passed`: cite the passing rerun's tool_call_ref and describe the failure-then-fix history in the report. An identical rerun repeats the exact argv and cwd, either on the same operation and profile or across command_run and outside_command in either direction. An explicit supported command_correction can supersede a mistaken invocation with a same-name later passing correction of this attempt, never pass the original argv. Complete whole-worktree git diff --check failures confined to sibling writers' reserved paths are not attributable to this worker; the failed evidence remains visible. Scope diff/whitespace checks to owned paths. `assignment_outcome=failed` is reserved for when the delivered work itself does not reach the assignment's goal, never merely because an earlier attempt failed before being fixed. summary is a short plain-language paragraph -- what was done and the current state -- without internal jargon (runtime codes, route names, revisions, receipts) unless the user asked about them. report is required in every call, a review included, and is one plain string, never an object: the complete report Markdown (optionally titled with report_title), which the runtime publishes; or, after create_draft, draft_write and write_report, only that write_report's report_id. summary, verdict and findings never replace it. Decision-brief items (conclusion, evidence, checks, contradictions, limits, next action) are Markdown sections inside the report, never separate fields. If the engine reports that the call could not be parsed, nothing reached Cortex: resend the same arguments with valid serialization and the same request_key. Use checks=[] only if no automated command ran. Each checks item has name (a stable check name) and outcome (passed|failed|not_run|unverified; there is no status field). passed needs the tool_call_ref, cited by one check only, of a complete exit-0 command_run (or user-confirmed outside_command) of this attempt; failed cites its nonzero receipt; not_run or unverified needs a concrete blocker; command is an optional argv array of strings, descriptive only for passed or failed. Engine-native shell calls, report ids and project_git (context only) are never check receipts. Do not send closed_by; the runtime derives it. Use a fresh request_key for a new result; retry an uncertain call only with the identical key and payload. This is an execution assignment: there is no verdict, findings or not_covered field; those belong to review assignments. An open failed check is otherwise refused with open_failed_check before recording or publishing, leaving the channel active; the refusal names the failed receipt, the relevant rerun and its evidence gap, and says when no exact rerun can close it. A failed receipt that any result_submit of this attempt already presented (even a refused one) must be cited again by every later submission, failed outcome included, or it is refused with omitted_failed_check. A mistake in your own bounded standalone python/python3 -c probe (a syntax error, one wrong regex literal or one wrong literal-data expectation) may instead be retracted with checks[].invocation_error bound to the corrected passing run: both receipts stay visible and the failure is retracted, not passed. Runtime verification and actual project test/lint/build failures are never retracted. A mistyped command line whose own output shows the check never started (usage, unrecognized-flag or file-not-found error for the command itself) is not a failed check: do not cite it; cite the corrected command's receipt and describe the mistyped run in the report. The receipt carries node_status (completed or failed), not task acceptance. Top-level write_report-only fields such as artifacts are ignored. Finish the assignment before submitting: a refusal that names outstanding items (in missing) leaves this assignment active in the same session; complete them and submit again.",
       "inputSchema": {
         "additionalProperties": false,
         "description": "Structured fields; use the exact advertised properties.",
         "properties": {
           "assignment_outcome": {
-            "description": "Optional: send failed only to intentionally submit a failed assignment, when the delivered work itself does not reach the assignment's goal -- never merely because a check failed before being fixed. Otherwise an open failed check is refused with open_failed_check before recording or revoking the channel; rerun exactly the receipt argv at the same cwd (on the same operation, or across command_run and outside_command) and cite the later passed receipt. Never silently omit a real failed check (a mistyped command line that never started the check is not one; see checks[].outcome). Even with failed, every failed receipt an earlier result_submit of this attempt presented must be cited again, or the result is refused with omitted_failed_check.",
+            "description": "Optional: send failed only to intentionally submit a failed assignment, when the delivered work itself does not reach the assignment's goal -- never merely because a check failed before being fixed. Otherwise an open failed check is refused with open_failed_check before recording or revoking the channel; rerun exactly the receipt argv at the same cwd (on the same operation, or across command_run and outside_command) and cite the later passed receipt. Never silently omit a real failed check (a mistyped command line that never started the check is not one; see checks[].outcome). Even with failed, every failed receipt an earlier result_submit of this attempt presented must be cited again, or the result is refused with omitted_failed_check. It requires blocker naming the dead end; without one it is refused with assignment_blocker_required.",
             "enum": [
               "failed"
             ],
             "type": "string"
+          },
+          "blocker": {
+            "additionalProperties": false,
+            "description": "Required with assignment_outcome failed, ignored otherwise: the dead end that stops this assignment and that you cannot clear yourself within your role and permissions. Finish everything you still can first. A failed submission without a valid blocker is refused with assignment_blocker_required and the assignment stays active in this session. A recorded blocker goes to the coordinator, which clears it, consults the senior consultant or asks the owner according to the task's run mode.",
+            "properties": {
+              "detail": {
+                "description": "The concrete obstacle in plain words: exactly which access, decision, other role's work or tool is needed, and what you already tried.",
+                "maxLength": 1000,
+                "minLength": 1,
+                "pattern": "[\\s\\S]*\\S[\\s\\S]*",
+                "type": "string"
+              },
+              "kind": {
+                "description": "Dead-end category: missing_access (the work needs access or a permission your role does not have and cannot obtain through an access route it is offered), owner_decision (a decision only the owner can make; when ask_question is offered, ask it first and continue with the answer), other_role_work (work another role must do first, such as a change a read-only role may not make), or tool_unavailable (a tool or host capability the work needs is unavailable). Lack of time, effort or attention is never a dead end.",
+                "enum": [
+                  "missing_access",
+                  "owner_decision",
+                  "other_role_work",
+                  "tool_unavailable"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
           },
           "checks": {
             "description": "Declare planned automated checks early through check_preflight before work depends on them. A missing executable must be installed project-privately or replaced with an executable approach; if neither is possible, ask the owner immediately. Qualitative human-only judgements are separate manual items: report them with no command and a concrete blocker; Workspace labels them Check manually, never a pass/fail or acceptance blocker. Policy-prohibited checks remain explicitly not_run with their named policy, never failed or automatically executed. Automated command checks, up to 20; [] when no command ran and no check was blocked. Each item needs name and outcome (passed, failed, not_run, unverified). A passed check needs tool_call_ref copied from an exit-0 command_run or confirmed outside_command of this attempt; command argv alone never verifies it. A failed check may cite its nonzero receipt. not_run or unverified require a concrete blocker; command argv is retained only for these gap checks and may identify the exact blocked command. A supplied command on passed/failed is ignored as evidence; the runtime derives the command from the receipt. Do not send closed_by: the runtime calculates it. project_git is context only, not a check receipt: describe its status/diff observations in the report, never cite or invent a receipt from large_output_id. These are not qualitative review remarks: read files and inspected code belong in the report body, not checks.",
@@ -5151,7 +5268,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Submit this worker attempt's report, summary and observed checks. A check that failed, was then fixed, and whose later identical rerun passed is `passed`: cite the passing rerun's tool_call_ref and describe the failure-then-fix history in the report. An identical rerun repeats the exact argv and cwd, either on the same operation and profile or across command_run and outside_command in either direction. An explicit supported command_correction can supersede a mistaken invocation with a same-name later passing correction of this attempt, never pass the original argv. Complete whole-worktree git diff --check failures confined to sibling writers' reserved paths are not attributable to this worker; the failed evidence remains visible. Scope diff/whitespace checks to owned paths. `assignment_outcome=failed` is reserved for when the delivered work itself does not reach the assignment's goal, never merely because an earlier attempt failed before being fixed. summary is a short plain-language paragraph -- what was done and the current state -- without internal jargon (runtime codes, route names, revisions, receipts) unless the user asked about them. report is required in every call, a review included, and is one plain string, never an object: the complete report Markdown (optionally titled with report_title), which the runtime publishes; or, after create_draft, draft_write and write_report, only that write_report's report_id. summary, verdict and findings never replace it. Decision-brief items (conclusion, evidence, checks, contradictions, limits, next action) are Markdown sections inside the report, never separate fields. If the engine reports that the call could not be parsed, nothing reached Cortex: resend the same arguments with valid serialization and the same request_key. Use checks=[] only if no automated command ran. Each checks item has name (a stable check name) and outcome (passed|failed|not_run|unverified; there is no status field). passed needs the tool_call_ref, cited by one check only, of a complete exit-0 command_run (or user-confirmed outside_command) of this attempt; failed cites its nonzero receipt; not_run or unverified needs a concrete blocker; command is an optional argv array of strings, descriptive only for passed or failed. Engine-native shell calls, report ids and project_git (context only) are never check receipts. Do not send closed_by; the runtime derives it. Use a fresh request_key for a new result; retry an uncertain call only with the identical key and payload. A review must include verdict=APPROVE, REQUEST_CHANGES, BLOCK or INCOMPLETE (INCOMPLETE with not_covered). An open failed check is otherwise refused with open_failed_check before recording or publishing (a review whose verdict is REQUEST_CHANGES, BLOCK or INCOMPLETE may cite a failed check as evidence for it: that review is recorded as completed and its verdict routes the task; only APPROVE cannot carry an open failed check), leaving the channel active; the refusal names the failed receipt, the relevant rerun and its evidence gap, and says when no exact rerun can close it. A failed receipt that any result_submit of this attempt already presented (even a refused one) must be cited again by every later submission, failed outcome included, or it is refused with omitted_failed_check. A mistake in your own bounded standalone python/python3 -c probe (a syntax error, one wrong regex literal or one wrong literal-data expectation) may instead be retracted with checks[].invocation_error bound to the corrected passing run: both receipts stay visible and the failure is retracted, not passed. Runtime verification and actual project test/lint/build failures are never retracted. A mistyped command line whose own output shows the check never started (usage, unrecognized-flag or file-not-found error for the command itself) is not a failed check: do not cite it; cite the corrected command's receipt and describe the mistyped run in the report. The receipt carries node_status (completed or failed), not task acceptance. Top-level write_report-only fields such as artifacts are ignored.",
+      "description": "Submit this worker attempt's report, summary and observed checks. A check that failed, was then fixed, and whose later identical rerun passed is `passed`: cite the passing rerun's tool_call_ref and describe the failure-then-fix history in the report. An identical rerun repeats the exact argv and cwd, either on the same operation and profile or across command_run and outside_command in either direction. An explicit supported command_correction can supersede a mistaken invocation with a same-name later passing correction of this attempt, never pass the original argv. Complete whole-worktree git diff --check failures confined to sibling writers' reserved paths are not attributable to this worker; the failed evidence remains visible. Scope diff/whitespace checks to owned paths. `assignment_outcome=failed` is reserved for when the delivered work itself does not reach the assignment's goal, never merely because an earlier attempt failed before being fixed. summary is a short plain-language paragraph -- what was done and the current state -- without internal jargon (runtime codes, route names, revisions, receipts) unless the user asked about them. report is required in every call, a review included, and is one plain string, never an object: the complete report Markdown (optionally titled with report_title), which the runtime publishes; or, after create_draft, draft_write and write_report, only that write_report's report_id. summary, verdict and findings never replace it. Decision-brief items (conclusion, evidence, checks, contradictions, limits, next action) are Markdown sections inside the report, never separate fields. If the engine reports that the call could not be parsed, nothing reached Cortex: resend the same arguments with valid serialization and the same request_key. Use checks=[] only if no automated command ran. Each checks item has name (a stable check name) and outcome (passed|failed|not_run|unverified; there is no status field). passed needs the tool_call_ref, cited by one check only, of a complete exit-0 command_run (or user-confirmed outside_command) of this attempt; failed cites its nonzero receipt; not_run or unverified needs a concrete blocker; command is an optional argv array of strings, descriptive only for passed or failed. Engine-native shell calls, report ids and project_git (context only) are never check receipts. Do not send closed_by; the runtime derives it. Use a fresh request_key for a new result; retry an uncertain call only with the identical key and payload. A review must include verdict=APPROVE, REQUEST_CHANGES, BLOCK or INCOMPLETE (INCOMPLETE with not_covered, each item with its blocker). Every predecessor report in the review packet is read to its last page, and every changed file is read completely, unless an INCOMPLETE review names it in not_covered with its blocker; otherwise the submission is refused with review_predecessor_reports_required or review_file_coverage_required, listing what is outstanding in missing. An open failed check is otherwise refused with open_failed_check before recording or publishing (a review whose verdict is REQUEST_CHANGES, BLOCK or INCOMPLETE may cite a failed check as evidence for it: that review is recorded as completed and its verdict routes the task; only APPROVE cannot carry an open failed check), leaving the channel active; the refusal names the failed receipt, the relevant rerun and its evidence gap, and says when no exact rerun can close it. A failed receipt that any result_submit of this attempt already presented (even a refused one) must be cited again by every later submission, failed outcome included, or it is refused with omitted_failed_check. A mistake in your own bounded standalone python/python3 -c probe (a syntax error, one wrong regex literal or one wrong literal-data expectation) may instead be retracted with checks[].invocation_error bound to the corrected passing run: both receipts stay visible and the failure is retracted, not passed. Runtime verification and actual project test/lint/build failures are never retracted. A mistyped command line whose own output shows the check never started (usage, unrecognized-flag or file-not-found error for the command itself) is not a failed check: do not cite it; cite the corrected command's receipt and describe the mistyped run in the report. The receipt carries node_status (completed or failed), not task acceptance. Top-level write_report-only fields such as artifacts are ignored. Finish the assignment before submitting: a refusal that names outstanding items (in missing) leaves this assignment active in the same session; complete them and submit again.",
       "inputSchema": {
         "additionalProperties": false,
         "description": "Structured fields; use the exact advertised properties.",
@@ -5177,11 +5294,39 @@
         },
         "properties": {
           "assignment_outcome": {
-            "description": "Optional: send failed only to intentionally submit a failed assignment, when the delivered work itself does not reach the assignment's goal -- never merely because a check failed before being fixed. Otherwise an open failed check is refused with open_failed_check before recording or revoking the channel; rerun exactly the receipt argv at the same cwd (on the same operation, or across command_run and outside_command) and cite the later passed receipt. Never silently omit a real failed check (a mistyped command line that never started the check is not one; see checks[].outcome). Even with failed, every failed receipt an earlier result_submit of this attempt presented must be cited again, or the result is refused with omitted_failed_check.",
+            "description": "Optional: send failed only to intentionally submit a failed assignment, when the delivered work itself does not reach the assignment's goal -- never merely because a check failed before being fixed. Otherwise an open failed check is refused with open_failed_check before recording or revoking the channel; rerun exactly the receipt argv at the same cwd (on the same operation, or across command_run and outside_command) and cite the later passed receipt. Never silently omit a real failed check (a mistyped command line that never started the check is not one; see checks[].outcome). Even with failed, every failed receipt an earlier result_submit of this attempt presented must be cited again, or the result is refused with omitted_failed_check. It requires blocker naming the dead end; without one it is refused with assignment_blocker_required.",
             "enum": [
               "failed"
             ],
             "type": "string"
+          },
+          "blocker": {
+            "additionalProperties": false,
+            "description": "Required with assignment_outcome failed, ignored otherwise: the dead end that stops this assignment and that you cannot clear yourself within your role and permissions. Finish everything you still can first. A failed submission without a valid blocker is refused with assignment_blocker_required and the assignment stays active in this session. A recorded blocker goes to the coordinator, which clears it, consults the senior consultant or asks the owner according to the task's run mode.",
+            "properties": {
+              "detail": {
+                "description": "The concrete obstacle in plain words: exactly which access, decision, other role's work or tool is needed, and what you already tried.",
+                "maxLength": 1000,
+                "minLength": 1,
+                "pattern": "[\\s\\S]*\\S[\\s\\S]*",
+                "type": "string"
+              },
+              "kind": {
+                "description": "Dead-end category: missing_access (the work needs access or a permission your role does not have and cannot obtain through an access route it is offered), owner_decision (a decision only the owner can make; when ask_question is offered, ask it first and continue with the answer), other_role_work (work another role must do first, such as a change a read-only role may not make), or tool_unavailable (a tool or host capability the work needs is unavailable). Lack of time, effort or attention is never a dead end.",
+                "enum": [
+                  "missing_access",
+                  "owner_decision",
+                  "other_role_work",
+                  "tool_unavailable"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
           },
           "checks": {
             "description": "Declare planned automated checks early through check_preflight before work depends on them. A missing executable must be installed project-privately or replaced with an executable approach; if neither is possible, ask the owner immediately. Qualitative human-only judgements are separate manual items: report them with no command and a concrete blocker; Workspace labels them Check manually, never a pass/fail or acceptance blocker. Policy-prohibited checks remain explicitly not_run with their named policy, never failed or automatically executed. Automated command checks, up to 20; [] when no command ran and no check was blocked. Each item needs name and outcome (passed, failed, not_run, unverified). A passed check needs tool_call_ref copied from an exit-0 command_run or confirmed outside_command of this attempt; command argv alone never verifies it. A failed check may cite its nonzero receipt. not_run or unverified require a concrete blocker; command argv is retained only for these gap checks and may identify the exact blocked command. A supplied command on passed/failed is ignored as evidence; the runtime derives the command from the receipt. Do not send closed_by: the runtime calculates it. project_git is context only, not a check receipt: describe its status/diff observations in the report, never cite or invent a receipt from large_output_id. These are not qualitative review remarks: read files and inspected code belong in the report body, not checks.",
@@ -5320,7 +5465,7 @@
             "type": "array"
           },
           "findings": {
-            "description": "Review only, optional, used with verdict REQUEST_CHANGES and BLOCK (with BLOCK, the confirmed problems that block) and ignored with APPROVE and INCOMPLETE. One entry per problem, each naming the original plan task that must fix it. When every finding names a task of the accepted plan, is not cross_cutting and lists only files inside that task's scope, the runtime creates fixes only for the named tasks, each receiving only its own findings and this review's report_ref, ordered as in the plan. Unconfinable findings give every original plan task a fix with this summary. When findings are omitted or empty and the plan has multiple implementers, the runtime returns to the coordinator to plan the remedy while its return budget remains; otherwise every original plan task receives a fix. At most 16 items; [] when none.",
+            "description": "Review only, optional, used with verdict REQUEST_CHANGES and BLOCK (with BLOCK, the confirmed problems that block) and ignored with APPROVE. With INCOMPLETE, findings that each name a plan task, are not cross_cutting and list files start those fixes first; other INCOMPLETE findings are ignored. One entry per problem, each naming the original plan task that must fix it. When every finding names a task of the accepted plan, is not cross_cutting and lists only files inside that task's scope, the runtime creates fixes only for the named tasks, each receiving only its own findings and this review's report_ref, ordered as in the plan. Unconfinable findings give every original plan task a fix with this summary. When findings are omitted or empty and the plan has multiple implementers, the runtime returns to the coordinator to plan the remedy while its return budget remains; otherwise every original plan task receives a fix. At most 16 items; [] when none.",
             "items": {
               "additionalProperties": false,
               "description": "Structured fields; use the exact advertised properties.",
@@ -5368,11 +5513,21 @@
             "type": "array"
           },
           "not_covered": {
-            "description": "Required with verdict INCOMPLETE and rejected with any other verdict: each part of the change this review did not cover, and why. At most 32 items.",
+            "description": "Required with verdict INCOMPLETE and rejected with any other verdict: each part of the change this review cannot cover itself, with its blocker and why. Cover everything you still can before submitting. An item without a valid blocker is one you can still cover: the submission is refused with review_coverage_unfinished, missing lists each such item, and this review stays active in the same session. At most 32 items.",
             "items": {
               "additionalProperties": false,
               "description": "Structured fields; use the exact advertised properties.",
               "properties": {
+                "blocker": {
+                  "description": "Dead-end category: missing_access (covering this part needs access or a permission your role does not have and cannot obtain through an access route it is offered), owner_decision (a decision only the owner can make; when ask_question is offered, ask it first and continue with the answer), other_role_work (work another role must do first, such as a change a read-only role may not make), or tool_unavailable (a tool or host capability covering this part needs is unavailable). Lack of time, effort or attention is never a dead end. Omit it only to learn which items you still have to cover: such an item is refused, not recorded.",
+                  "enum": [
+                    "missing_access",
+                    "owner_decision",
+                    "other_role_work",
+                    "tool_unavailable"
+                  ],
+                  "type": "string"
+                },
                 "item": {
                   "description": "Project-relative path, report id or behaviour this review did not cover.",
                   "maxLength": 512,
@@ -5380,7 +5535,7 @@
                   "type": "string"
                 },
                 "reason": {
-                  "description": "Why it was not covered, in plain words.",
+                  "description": "The concrete obstacle in plain words: what exactly blocks covering this part and what you already tried.",
                   "maxLength": 1000,
                   "minLength": 1,
                   "type": "string"
@@ -5421,7 +5576,7 @@
             "type": "string"
           },
           "verdict": {
-            "description": "Required for a review-stage worker, omitted for other workers. Send APPROVE (or approve) when correct, REQUEST_CHANGES (or request_changes) for fixable problems, BLOCK (or block) when confirmed problems, each named in findings, mean the task must not proceed, and INCOMPLETE (or incomplete) when your review could not cover the whole change, with every uncovered part in not_covered. INCOMPLETE is neither an approval nor a block: the runtime reruns the review with a fresh reviewer whose brief lists exactly those parts. A BLOCK with no findings counts as INCOMPLETE. Lowercase forms normalize to the uppercase decision.",
+            "description": "Required for a review-stage worker, omitted for other workers. Send APPROVE (or approve) when correct, REQUEST_CHANGES (or request_changes) for fixable problems, BLOCK (or block) when confirmed problems, each named in findings, mean the task must not proceed, and INCOMPLETE (or incomplete) only when, after covering everything you can, some parts stay blocked by a dead end, each listed in not_covered with its blocker. INCOMPLETE is neither an approval nor a block, and no second reviewer is scheduled for the same revision: actionable findings are fixed first, otherwise the named dead ends go to the coordinator, the senior consultant or the owner according to the task's run mode. A BLOCK with no findings is refused with review_block_findings_required. Lowercase forms normalize to the uppercase decision.",
             "enum": [
               "APPROVE",
               "REQUEST_CHANGES",
@@ -5550,17 +5705,45 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Submit this consultation's report and summary. report is required in every call and is one plain string, never an object: the complete report Markdown (optionally titled with report_title), which the runtime publishes; or, after create_draft, draft_write and write_report, only that write_report's report_id. summary is a short plain-language paragraph -- what was concluded and how certain it is -- without internal jargon. This role runs no commands and has no command receipts: send checks=[] or list each check you could not run as not_run (or unverified) with a concrete blocker. There is no verdict, findings or not_covered field. Use a fresh request_key for a new result; retry an uncertain call only with the identical key and payload. If the engine reports that the call could not be parsed, nothing reached Cortex: resend the same arguments with valid serialization and the same request_key. Top-level write_report-only fields such as artifacts are ignored.",
+      "description": "Submit this consultation's report and summary. report is required in every call and is one plain string, never an object: the complete report Markdown (optionally titled with report_title), which the runtime publishes; or, after create_draft, draft_write and write_report, only that write_report's report_id. summary is a short plain-language paragraph -- what was concluded and how certain it is -- without internal jargon. This role runs no commands and has no command receipts: send checks=[] or list each check you could not run as not_run (or unverified) with a concrete blocker. There is no verdict, findings or not_covered field. Use a fresh request_key for a new result; retry an uncertain call only with the identical key and payload. If the engine reports that the call could not be parsed, nothing reached Cortex: resend the same arguments with valid serialization and the same request_key. Top-level write_report-only fields such as artifacts are ignored. Finish the assignment before submitting: a refusal that names outstanding items (in missing) leaves this assignment active in the same session; complete them and submit again.",
       "inputSchema": {
         "additionalProperties": false,
         "description": "Structured fields; use the exact advertised properties.",
         "properties": {
           "assignment_outcome": {
-            "description": "Optional: send failed only when this consultation cannot answer its question at all; otherwise omit it.",
+            "description": "Optional: send failed only when this consultation cannot answer its question at all; otherwise omit it. It requires blocker naming the dead end; without one it is refused with assignment_blocker_required.",
             "enum": [
               "failed"
             ],
             "type": "string"
+          },
+          "blocker": {
+            "additionalProperties": false,
+            "description": "Required with assignment_outcome failed, ignored otherwise: the dead end that stops this assignment and that you cannot clear yourself within your role and permissions. Finish everything you still can first. A failed submission without a valid blocker is refused with assignment_blocker_required and the assignment stays active in this session. A recorded blocker goes to the coordinator, which clears it, consults the senior consultant or asks the owner according to the task's run mode.",
+            "properties": {
+              "detail": {
+                "description": "The concrete obstacle in plain words: exactly which access, decision, other role's work or tool is needed, and what you already tried.",
+                "maxLength": 1000,
+                "minLength": 1,
+                "pattern": "[\\s\\S]*\\S[\\s\\S]*",
+                "type": "string"
+              },
+              "kind": {
+                "description": "Dead-end category: missing_access (the work needs access or a permission your role does not have and cannot obtain through an access route it is offered), owner_decision (a decision only the owner can make; when ask_question is offered, ask it first and continue with the answer), other_role_work (work another role must do first, such as a change a read-only role may not make), or tool_unavailable (a tool or host capability the work needs is unavailable). Lack of time, effort or attention is never a dead end.",
+                "enum": [
+                  "missing_access",
+                  "owner_decision",
+                  "other_role_work",
+                  "tool_unavailable"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
           },
           "checks": {
             "description": "Checks this consultation could not run, up to 20; [] when there are none. Each item needs name and outcome (not_run or unverified) and a concrete blocker. passed and failed need a command receipt, which this role cannot produce. Qualitative judgements belong in the report body, not checks.",

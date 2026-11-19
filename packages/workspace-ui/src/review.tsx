@@ -5,9 +5,9 @@ import { Counts, Diff, GitLetter, type HunkActions } from "./diff";
 import { A, I, Keyed, MenuItem, Pop } from "./kit";
 import { ActionBar, Page, Region, Row, SectionHead, Strip, Toolbar, Whole } from "./layout";
 import type { Route } from "./router";
-import { checkCounts, clock, readyStep, sameBranch } from "./selectors";
+import { automaticAcceptanceHold, automaticFinishOffer, automaticStaleResultHold, checkCounts, clock, humanStatus, ownerHold, readyStep, sameBranch } from "./selectors";
 import { acceptBlocked, acceptOffered, changesOffered, checksLine, firstChanged, mergeBlocked, openChecks, reviewFor, sentence, stale, taskCheckout } from "./review-model";
-import type { SessionModel } from "./session-model";
+import { closeBlocked, type SessionModel } from "./session-model";
 import { CHECK_ICON } from "./worker";
 import { ResultText } from "./result-text";
 import { CopySource } from "./message-copy";
@@ -15,10 +15,15 @@ import { CopySource } from "./message-copy";
 type TaskRoute = Extract<Route, { name: "task" }>;
 const sourceLabel = (c: Check, none: string) => c.source === "runtime" ? "Recorded by runtime" : c.source === "worker" ? "Reported by worker" : none;
 const OUTCOME_WORD = { passed: "Passed", failed: "Failed", not_run: "Not run", unverified: "Unverified" } as const;
+/** Skipped worker/policy observations are advisory after Automatic already accepted the result. */
+const advisoryAcceptedCheck = (c: Check, automaticAccepted: boolean) => automaticAccepted
+  && c.outcome === "not_run" && c.kind === "policy" &&
+  (c.technicalReason?.trim().toLowerCase() === "paid live check not requested by the owner" || c.detail?.trim().toLowerCase() === "paid live check not requested by the owner");
+const visibleChecks = (checks: Check[], automaticAccepted: boolean) => checks.filter(c => !advisoryAcceptedCheck(c, automaticAccepted));
 
 /** One line of counts. Only reported outcomes are named, so absent ones never read as zeros. */
-export function Outcomes(props: { checks: Check[] }) {
-  const c = () => checkCounts(props.checks);
+export function Outcomes(props: { checks: Check[]; automaticAccepted?: boolean }) {
+  const c = () => checkCounts(visibleChecks(props.checks, props.automaticAccepted === true));
   const cell = (n: number, tone: string, icon: string, label: string) => <Show when={n > 0}><span class={`st ${tone}`}><I n={icon} s={12} />{n} {label}</span></Show>;
   return <div class="rv-outc">
     {cell(c().passed, "st-ok", "check-circle", "passed")}
@@ -44,8 +49,14 @@ const CommandOutput = (props: { c: Check }) => <Show when={props.c.command?.leng
  */
 export function CheckRows(props: { checks: Check[]; taskId?: string; all?: boolean; onAsk?: (c: Check) => void }) {
   const ws = useWs();
+  const automaticAccepted = () => {
+    const view = props.taskId ? ws.store.index().byId.get(props.taskId) : undefined;
+    const task = view?.task;
+    return !!task && (task.acceptance?.automatic === true || (task.status === "ready_to_merge" && task.result?.automaticReady === true) || /accepted/i.test(view.automaticFact?.text ?? ""));
+  };
+  const advisory = () => props.checks.filter(c => advisoryAcceptedCheck(c, automaticAccepted()));
   const manual = () => props.checks.filter(c => c.kind === "manual");
-  const open = () => [...openChecks(props.checks)].sort((a, b) => (a.outcome === "failed" ? 0 : 1) - (b.outcome === "failed" ? 0 : 1));
+  const open = () => [...openChecks(props.checks).filter(c => !advisoryAcceptedCheck(c, automaticAccepted()))].sort((a, b) => (a.outcome === "failed" ? 0 : 1) - (b.outcome === "failed" ? 0 : 1));
   const passed = () => props.checks.filter(c => c.kind !== "manual" && c.outcome === "passed" && (props.all || !!c.output));
   // A check has no id: its name, numbered when two share one, names it across reads, so a background read that changes a check
   // updates its row in place and an opened output or detail stays open.
@@ -55,6 +66,9 @@ export function CheckRows(props: { checks: Check[]; taskId?: string; all?: boole
   const detail = (c: Check) => c.detail || c.technicalReason ? <>{c.detail}<Show when={c.technicalReason}>{c.detail ? " " : ""}{c.kind === "policy" ? "Not run: " : "Could not check: "}{c.technicalReason}</Show></> : undefined;
   const source = (c: Check) => `${OUTCOME_WORD[c.outcome]}, ${sourceLabel(c, ws.t("unsourcedCheck")).toLowerCase()}`;
   return <>
+    <Show when={advisory().length > 0}><details class="rv-checks rv-advisory"><summary><SectionHead title="Informational evidence" count={advisory().length} /></summary>
+      <Keyed each={advisory()} by={key}>{c => <Row lead={icon(c())} title={c().name} detail={detail(c()) || "Recorded as advisory evidence; it does not block the accepted result."} end={<span>{source(c())}</span>} />}</Keyed>
+    </details></Show>
     <Show when={manual().length > 0}><section class="rv-checks" aria-label="Check manually"><SectionHead title="Check manually" count={manual().length} />
       <Keyed each={manual()} by={key}>{c => <Row lead={<I n="eye" s={14} class="faint" />} title={c().name} detail={c().detail || "Needs a person’s judgement. Not counted as passed or failed; does not block Accept."} />}</Keyed>
     </section></Show>
@@ -78,16 +92,36 @@ export function OpenChecks(props: { checks: Check[]; taskId?: string }) {
 }
 
 /** Whether the strip that says why Accept is off is on screen, so Accept can point at it. */
-const acceptStripShown = (m: SessionModel) => { const t = m.view.task; return ["review", "ready_to_merge"].includes(t.status) && !t.acceptance && !!acceptBlocked(t); };
+// An automatic acceptance is only provisional until the recorded result still
+// matches the checkout.  A later file change must return the task to an owner
+// decision surface, otherwise the accepted-result presentation hides both the
+// request-a-fresh-result and close-as-is controls.
+const staleAutomaticAcceptance = (m: SessionModel) => automaticStaleResultHold(m.view) ||
+  (!m.view.sprint && !!m.view.task.acceptance?.automatic && stale(m.view.task));
+const reviewActionsShown = (m: SessionModel) => !m.view.automaticFact || automaticAcceptanceHold(m.view) || staleAutomaticAcceptance(m);
+const acceptStripShown = (m: SessionModel) => { const t = m.view.task; return reviewActionsShown(m) && ["review", "ready_to_merge"].includes(t.status) && (!t.acceptance || staleAutomaticAcceptance(m) || automaticAcceptanceHold(m.view)) && !!acceptBlocked(t); };
 
 /**
  * When Accept is off, the reason is written out beside it with the one action that clears it, so a result never sits in
  * Review with no way forward. Nothing here accepts for the owner: each action only asks for what the reason names.
  */
 export function AcceptBlocker(props: { m: SessionModel; id?: string }) {
+  // A queue hold carries its own decision, pinned above the message box. It is not offered a second time here.
+  return <Show when={ownerHold(props.m.view)?.source !== "queue"} fallback={
+    <p class="cap muted" id={props.id} role="note">{ownerHold(props.m.view)?.nextActor === "owner"
+      ? "Your decision for this task is pinned in its conversation, above the message box."
+      : "Nothing is needed from you: the work continues by itself."}</p>}>
+    <AcceptBlockerBody m={props.m} id={props.id} />
+  </Show>;
+}
+
+function AcceptBlockerBody(props: { m: SessionModel; id?: string }) {
   const ws = useWs();
   const t = () => props.m.view.task;
-  const reason = () => acceptStripShown(props.m) ? acceptBlocked(t()) : null;
+  const [repairPending, setRepairPending] = createSignal(false);
+  const [repairError, setRepairError] = createSignal<string | null>(null);
+  const holdReason = () => automaticAcceptanceHold(props.m.view) ? humanStatus(props.m.view.sprint?.automaticQueue?.reason) || null : null;
+  const reason = () => holdReason() ?? (acceptStripShown(props.m) ? acceptBlocked(t()) : null);
   const checks = () => t().result?.checks ?? [];
   const rerunnable = () => checks().filter(c => c.kind !== "manual" && c.kind !== "policy" && c.rerunnable === true && !!c.command?.length && c.outcome !== "passed" && !c.running);
   const canRerun = () => !stale(t()) && !t().integration && t().conflict === "none" && rerunnable().length > 0;
@@ -95,30 +129,55 @@ export function AcceptBlocker(props: { m: SessionModel; id?: string }) {
     const r = t().result!;
     for (const c of rerunnable()) { const sent = await ws.run({ type: "rerun_check", taskId: t().id, digest: r.digest, checkIndex: r.checks.indexOf(c) }); if (!sent.ok) return; }
   };
-  const ask = (text: string) => ws.run({ type: "request_changes", taskId: t().id, text, now: ws.store.clock() });
+  const repairableChecks = () => checks().filter(c => c.kind !== "manual" && c.kind !== "policy" && c.outcome !== "passed");
+  const canRepair = () => (holdReason() || t().reviewActions?.pending !== true) && t().conflict === "none" && !t().integration &&
+    (automaticAcceptanceHold(props.m.view) ||
+    t().reviewActions?.unblockAction !== "refresh" && (stale(t()) || !checks().length || repairableChecks().length > 0 ||
+    t().reviewActions?.unblockAction === "request_changes" && !checks().some(c => c.kind === "policy" && c.outcome !== "passed")));
+  const askAgentToFix = (control: HTMLElement) => {
+    const r = t().result;
+    if ((!r && !holdReason()) || repairPending()) return;
+    const names = repairableChecks().map(c => c.name.slice(0, 160)).slice(0, 20);
+    const text = [
+      r ? `Review result v${r.version} (${r.digest}) against the current workspace.` : "Review the blocked result of this task against the current workspace.",
+      reason(), automaticStaleResultHold(props.m.view) ? "Reconcile the recorded task files with the current checkout. Preserve unrelated and staged edits. Leave Git staging, commit and task closure to the runtime." : "", names.length ? `Outstanding checks: ${names.join(", ")}.` : "",
+      "Fix the underlying issue within this task, run the applicable checks with existing permissions, and publish a fresh result.",
+    ].filter(Boolean).join(" ");
+    setRepairPending(true);
+    setRepairError(null);
+    void ws.busy(ws.run({ type: "request_changes", taskId: t().id, text, now: ws.store.clock() }), control)
+      .then(receipt => { if (!receipt.ok) setRepairError(receipt.message); })
+      .catch(error => setRepairError(error instanceof Error ? error.message : "The repair request could not be sent."))
+      .finally(() => setRepairPending(false));
+  };
   const conflict = (): Route => ({ name: "task", machine: props.m.view.machine.id, task: t().id, tab: "changes", sub: "conflict" });
-  const closableAsIs = () => !!reason() && t().status === "review" && t().result?.acceptanceAvailable === false && t().reviewActions?.pending !== true
+  const closableAsIs = () => staleAutomaticAcceptance(props.m) || automaticAcceptanceHold(props.m.view) || !!reason() && ["review", "ready_to_merge"].includes(t().status) && t().result?.acceptanceAvailable === false && t().reviewActions?.pending !== true
     && t().conflict === "none" && props.m.mode === "review";
+  const finish = () => automaticFinishOffer(props.m.view);
+  const allowAutomaticFinish = () => {
+    const offer = finish();
+    if (offer) ws.open({ kind: "accept", taskId: t().id, automaticFinish: offer });
+  };
   return <>
     <Show when={ws.store.acceptanceIssue()?.taskId === t().id && !t().acceptance && ws.store.acceptanceIssue()}>{issue => <Strip class="rv-accept-error" tone="fail" role="alert" icon={<I n="alert" s={14} class="st-bad" />}
       action={<button class="btn btn-line btn-sm" onClick={() => void ws.store.reload()}>Refresh result</button>}>{issue().message} Acceptance was not confirmed. Refresh the result before trying again.</Strip>}</Show>
-    <Show when={reason()}>{why => <Strip id={props.id} class="rv-why" tone="warn" role="status" icon={<I n="alert" s={14} class="st-warn" />} action={<Switch>
-      {/* Still being checked against the project: nothing to do yet, and nothing is offered. */}
-      <Match when={t().reviewActions?.pending === true}>{null}</Match>
-      <Match when={stale(t())}><button class="btn btn-line btn-sm" {...ws.needs("request_changes")} onClick={() => ws.open({ kind: "changes", taskId: t().id, text: "The files changed after this version. Please check the work again and publish a fresh result." })}>Request a new result…</button></Match>
-      <Match when={t().conflict !== "none"}><A class="btn btn-line btn-sm" to={conflict()}>Open the conflict</A></Match>
-      <Match when={checks().length === 0}><button class="btn btn-line btn-sm" {...ws.needs("request_changes")} onClick={() => void ask("No checks were reported for this result. Run the checks this work needs and publish the result again.")}>Ask to run checks</button></Match>
-      <Match when={canRerun()}>
-        <button class="btn btn-line btn-sm" {...ws.needs("rerun_check")} onClick={e => void ws.busy(rerun(), e.currentTarget)}>{rerunnable().some(c => c.outcome === "failed") ? (rerunnable().length === 1 ? "Rerun the failed check" : "Rerun failed checks") : (rerunnable().length === 1 ? "Run the missing check" : "Run the missing checks")}</button>
-        <Show when={rerunnable().some(c => c.outcome === "failed")}><button class="btn btn-line btn-sm" {...ws.needs("request_changes")} onClick={() => void ask(`Fix the failing checks: ${rerunnable().filter(c => c.outcome === "failed").map(c => c.name).join(", ")}.`)}>Ask to fix</button></Show>
-      </Match>
-      <Match when={t().reviewActions?.unblockAction === "request_changes" || t().result?.acceptanceAvailable === false}><button class="btn btn-line btn-sm" {...ws.needs("request_changes")} onClick={() => ws.open({ kind: "changes", taskId: t().id, text: "Please complete the missing review and checks, then publish a fresh result." })}>Request a new result…</button></Match>
-      <Match when={t().reviewActions?.unblockAction === "refresh"}><button class="btn btn-line btn-sm" onClick={() => void ws.store.reload()}>Refresh result</button></Match>
-    </Switch>}>{sentence(why())}</Strip>}</Show>
+    <Show when={reason()}>{why => <Strip id={props.id} class="rv-why" tone="warn" role="status" icon={<I n="alert" s={14} class="st-warn" />} action={<>
+      <Show when={canRepair()}><button class="btn btn-primary btn-sm" {...ws.needs("request_changes")} aria-busy={repairPending()} disabled={repairPending()} data-why={repairPending() ? "Sending repair request to the agent…" : undefined} onClick={e => askAgentToFix(e.currentTarget)}>Ask agent to fix</button></Show>
+      <Show when={t().reviewActions?.pending !== true}><Switch>
+        <Match when={t().conflict !== "none"}><A class="btn btn-line btn-sm" to={conflict()}>Open the conflict</A></Match>
+        <Match when={t().reviewActions?.unblockAction === "refresh"}><button class="btn btn-line btn-sm" onClick={() => void ws.store.reload()}>Refresh result</button></Match>
+        <Match when={canRerun()}><button class="btn btn-line btn-sm" {...ws.needs("rerun_check")} onClick={e => void ws.busy(rerun(), e.currentTarget)}>{rerunnable().some(c => c.outcome === "failed") ? (rerunnable().length === 1 ? "Rerun the failed check" : "Rerun failed checks") : (rerunnable().length === 1 ? "Run the missing check" : "Run the missing checks")}</button></Match>
+      </Switch></Show>
+    </>}>{sentence(why())}</Strip>}</Show>
     {/* A runtime result that can never be accepted (its evidence is unavailable, or it comes from an earlier version) still has
         a way to finish: the owner can close it as is, marked not verified. */}
+    <Show when={repairPending()}><div class="cap muted" role="status">Sending repair request to the agent…</div></Show>
+    <Show when={repairError()}>{error => <div class="cap st-bad" role="alert">{error()}</div>}</Show>
     <Show when={closableAsIs()}><Strip class="rv-close" tone="info" role="status" icon={<I n="circle" s={14} class="faint" />}
-      action={<button class="btn btn-line btn-sm" {...ws.needs("close_task")} onClick={() => ws.closeTask(t().id)}>Close as is…</button>}>Or keep what was done without accepting it.</Strip></Show></>;
+      action={<>
+        <Show when={finish()}><button class="btn btn-primary btn-sm" {...ws.needs("accept_result")} onClick={allowAutomaticFinish}>Allow Automatic to finish…</button></Show>
+        <button class="btn btn-line btn-sm" {...ws.needs("close_task")} aria-disabled={closeBlocked(props.m) ? "true" : undefined} data-why={closeBlocked(props.m) ?? undefined} onClick={() => { if (!closeBlocked(props.m)) ws.closeTask(t().id); }}>Close as is…</button>
+      </>}>{!automaticStaleResultHold(props.m.view) && automaticAcceptanceHold(props.m.view) && checks().some(c => c.kind === "policy" && c.outcome === "not_run") ? "Restricted checks cannot be run from this task. You can close the result with its recorded checks." : "Or keep what was done without accepting it."}</Strip></Show></>;
 }
 
 /** The decision on a result, at the top of Changes: the version, its checks, Request changes and Accept, in one row. */
@@ -133,14 +192,14 @@ export function ReviewBar(props: { m: SessionModel }) {
   const reviewing = () => changesOffered(t());
   // The same step the header names: a project-folder task (or one without Git) is finished in place, never merged.
   const step = () => readyStep(t(), props.m.view.target, props.m.view.project.hasGit);
-  const hint = () => t().status === "ready_to_merge" ? `${t().acceptance ? `${t().acceptance!.automatic ? "Automatically accepted" : "You accepted"} v${t().acceptance!.version}.` : "Checks passed."} ${step() === "Ready to finish" ? "The task waits for your confirmation." : "The task waits in Ready to merge."}`
-    : t().status === "done" ? "This task is closed." : `Accept moves the task to ${step()}. Request changes reopens it.`;
+  const hint = () => props.m.view.automaticFact?.text ?? (t().status === "ready_to_merge" ? `${t().acceptance ? `${t().acceptance!.automatic ? "Automatically accepted" : "You accepted"} v${t().acceptance!.version}.` : "Checks passed."} ${step() === "Ready to finish" ? "The task waits for your confirmation." : "The task waits in Ready to merge."}`
+    : t().status === "done" ? "This task is closed." : `Accept moves the task to ${step()}. Request changes reopens it.`);
   const describedBy = () => acceptStripShown(props.m) ? why : undefined;
   return <section class="rv-bar" aria-label="Review this result">
     <ActionBar start={<><I n={t().status === "done" ? "check-circle" : "eye"} s={14} class="faint" /><span class="w500">Result v{r().version}</span>
       <span class={`st ${failed() ? "st-bad" : allPassed() ? "st-ok" : "st-idle"}`}><I n={failed() ? "x-circle" : allPassed() ? "check-circle" : "circle"} s={12} />{checksLine(r().checks)}</span></>} hint={hint()}>
-      <Show when={reviewing()}><button class="btn btn-line" {...ws.needs("request_changes")} onClick={() => ws.open({ kind: "changes", taskId: t().id })}>Request changes…</button></Show>
-      <Show when={t().status === "ready_to_merge"} fallback={<Show when={acceptOffered(t())}><AcceptButton m={props.m} describedBy={describedBy()} /></Show>}><Show when={!t().acceptance}><AcceptButton m={props.m} line describedBy={describedBy()} /></Show><A class="btn btn-primary" to={ready()}>{sameBranch(t(), props.m.view.target) ? "Finish task" : "Open Ready to merge"}</A></Show>
+      <Show when={reviewActionsShown(props.m) && reviewing() && !stale(t())}><button class="btn btn-line" {...ws.needs("request_changes")} onClick={() => ws.open({ kind: "changes", taskId: t().id })}>Request changes…</button></Show>
+      <Show when={reviewActionsShown(props.m) && !stale(t())}><Show when={t().status === "ready_to_merge"} fallback={<Show when={acceptOffered(t())}><AcceptButton m={props.m} describedBy={describedBy()} /></Show>}><Show when={!t().acceptance}><AcceptButton m={props.m} line describedBy={describedBy()} /></Show><A class="btn btn-primary" to={ready()}>{sameBranch(t(), props.m.view.target) ? "Finish task" : "Open Ready to merge"}</A></Show></Show>
     </ActionBar>
     <AcceptBlocker m={props.m} id={why} />
   </section>;
@@ -176,18 +235,20 @@ export function ResultCard(props: { m: SessionModel }) {
   const changes = (): Route => ({ name: "task", machine: props.m.view.machine.id, task: t().id, tab: "changes", sub: "diff" });
   const ready = (): Route => ({ name: "task", machine: props.m.view.machine.id, task: t().id, tab: "changes" });
   const describedBy = () => acceptStripShown(props.m) ? why : undefined;
+  const noteStart = () => t().acceptance?.automatic ? (r().warnings ?? []).findIndex(w => w.startsWith("The runtime's own verification of this version passed.") && w.includes("shown for information")) : -1;
   return <div class="rcard">
     <div class="rcard-h"><I n={t().status === "done" ? "check-circle" : "eye"} s={14} class="faint" />Result v{r().version}<span class="r">{r().at != null ? `${clock(r().at!)}, ` : ""}{t().acceptance ? `accepted ${t().acceptance!.automatic ? "automatically" : "by you"}${t().acceptance!.at != null ? ` ${clock(t().acceptance!.at!)}` : ""}` : ws.store.mode === "real" ? "Runtime result" : "reviewed and checked"}</span><Show when={r().summary}><CopySource text={r().summary} label="Copy the result as Markdown" /></Show></div>
     <div class="rcard-b"><ResultText text={r().summary} /></div>
-    <Show when={r().checks.length} fallback={<div class="rcard-note cap muted">No checks reported</div>}><Outcomes checks={r().checks} /></Show>
-    <For each={r().warnings}>{warning => <div class="rcard-note cap st-warn">{warning}</div>}</For>
+    <Show when={r().checks.length} fallback={<div class="rcard-note cap muted">No checks reported</div>}><Outcomes checks={r().checks} automaticAccepted={t().acceptance?.automatic === true || (t().status === "ready_to_merge" && r().automaticReady === true) || /accepted/i.test(props.m.view.automaticFact?.text ?? "")} /></Show>
+    <For each={noteStart() < 0 ? r().warnings : r().warnings?.slice(0, noteStart())}>{warning => <div class="rcard-note cap st-warn">{humanStatus(warning)}</div>}</For>
+    <Show when={noteStart() >= 0}><details class="rcard-note cap"><summary>Verification notes</summary><For each={r().warnings?.slice(noteStart())}>{warning => <p>{humanStatus(warning)}</p>}</For></details></Show>
     <OpenChecks checks={r().checks} taskId={t().id} />
-    <Show when={stale(t())}><Row class="rv-stale" lead={<I n="alert" s={14} class="st-warn" />} title="Stale result" detail="The worktree changed after this version, so it cannot be accepted. Request a new result." end={<span>Recorded by runtime</span>} /></Show>
+    <Show when={stale(t())}><Row class="rv-stale" lead={<I n="alert" s={14} class="st-warn" />} title="Stale result" detail="The worktree has changed since this result was checked." end={<span>Recorded by runtime</span>} /></Show>
     <Show when={props.m.view.project.hasGit === false}><div class="rcard-note cap muted">{ws.t("changesWithoutGit")}</div></Show>
-    <AcceptBlocker m={props.m} id={why} />
+    <Show when={!automaticAcceptanceHold(props.m.view)}><AcceptBlocker m={props.m} id={why} /></Show>
     <ActionBar place="card" class="rv-card-f" label="Result actions" start={<><A class="lnk" to={changes()}>Review changes</A><Show when={c()}>{x => <span class="cap muted tnum">{x().files} files, <Counts add={x().add} del={x().del} /></span>}</Show></>}>
-      <Show when={changesOffered(t())}><button class="btn btn-sm" {...ws.needs("request_changes")} onClick={() => ws.open({ kind: "changes", taskId: t().id })}>Request changes…</button></Show>
-      <Show when={t().status === "ready_to_merge"} fallback={<Show when={acceptOffered(t())}><AcceptButton m={props.m} small describedBy={describedBy()} /></Show>}><Show when={!t().acceptance}><AcceptButton m={props.m} small line describedBy={describedBy()} /></Show><A class="btn btn-primary btn-sm" to={ready()}>{sameBranch(t(), props.m.view.target) ? "Finish task" : "Open Ready to merge"}</A></Show>
+      <Show when={reviewActionsShown(props.m) && changesOffered(t()) && !stale(t())}><button class="btn btn-sm" {...ws.needs("request_changes")} onClick={() => ws.open({ kind: "changes", taskId: t().id })}>Request changes…</button></Show>
+      <Show when={reviewActionsShown(props.m) && !stale(t()) && !automaticAcceptanceHold(props.m.view)}><Show when={t().status === "ready_to_merge"} fallback={<Show when={acceptOffered(t())}><AcceptButton m={props.m} small describedBy={describedBy()} /></Show>}><Show when={!t().acceptance}><AcceptButton m={props.m} small line describedBy={describedBy()} /></Show><A class="btn btn-primary btn-sm" to={ready()}>{sameBranch(t(), props.m.view.target) ? "Finish task" : "Open Ready to merge"}</A></Show></Show>
     </ActionBar>
   </div>;
 }
@@ -208,8 +269,8 @@ function FileHead(props: { file: FileDiff; working: GitFile | null; onOpen: () =
 function Evidence(props: { m: SessionModel; onAsk: (c: Check) => void }) {
   const t = () => props.m.view.task;
   const checks = () => t().result?.checks ?? [];
-  const counts = () => checkCounts(checks());
-  const canAsk = () => t().status === "review" || (t().status === "ready_to_merge" && !t().integration);
+  const counts = () => checkCounts(visibleChecks(checks(), t().acceptance?.automatic === true || (t().status === "ready_to_merge" && t().result?.automaticReady === true) || /accepted/i.test(props.m.view.automaticFact?.text ?? "")));
+  const canAsk = () => reviewActionsShown(props.m) && (t().status === "review" || (t().status === "ready_to_merge" && !t().integration));
   const settled = () => checks().every(c => c.kind !== "manual" && c.outcome === "passed");
   return <details class="evid" open={!settled()}>
     <summary class="evid-h"><I n="chevron-right" s={12} class="faint" /><span class="w500">Evidence</span><span class="grow"></span>
@@ -279,7 +340,7 @@ export function ChangesPanel(props: { m: SessionModel; route: TaskRoute }) {
   </>} />;
   return <section class="task-panel rv-panel" aria-label="Changes" onKeyDown={e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } }}>
     <Page class={bounded() ? "l-work" : undefined} scroll={bounded() ? "none" : "vertical"}
-      head={<Show when={t().result}><ReviewBar m={props.m} /></Show>}
+      head={<Show when={t().result} fallback={<Show when={automaticAcceptanceHold(props.m.view)}><AcceptBlocker m={props.m} /></Show>}><ReviewBar m={props.m} /></Show>}
       foot={<Show when={!noGit()}><ActionBar class="rv-foot" label="Review comments" start={<>
         <span class="cap muted">{drafts() ? `${drafts()} comment${drafts() === 1 ? "" : "s"}` : "No comments"}</span>
         <button class="btn btn-line" aria-disabled={drafts() ? undefined : "true"} data-why={drafts() ? undefined : "Add a comment on a line first"} {...ws.needs("send_comments")} onClick={send}>Send<Show when={ws.keys("Ctrl+Enter")}>{k => <span class="key">{k()}</span>}</Show></button>

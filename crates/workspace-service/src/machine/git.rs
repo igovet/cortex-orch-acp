@@ -107,7 +107,10 @@ pub(super) fn failure(verb: &str, stderr: &str) -> Refused {
     {
         return refuse(
             "dirty_checkout",
-            next("Pulling would overwrite files in this checkout that are not committed.", "Commit them, or move them out of the way, then pull again. Cortex does not stash."),
+            next(
+                "Pulling would overwrite files in this checkout that are not committed.",
+                "Commit them, or move them out of the way, then pull again. Cortex does not stash.",
+            ),
         );
     }
     if has(&[
@@ -177,11 +180,16 @@ pub(super) fn failure(verb: &str, stderr: &str) -> Refused {
 }
 /// A pull or another merge or rebase is stopped in the checkout.
 const OPERATION_OPEN: &str = "A merge or rebase is stopped in this checkout. Continue or abort it first; nothing was pulled.";
-const NO_OPERATION: &str = "No merge or rebase is in progress in this checkout. Refresh Git status.";
+const NO_OPERATION: &str =
+    "No merge or rebase is in progress in this checkout. Refresh Git status.";
 /// A merge or rebase that stopped at conflicts, as the owner reads it.
 fn stopped_at(operation: &Value) -> Refused {
     let n = operation["conflicts"].as_array().map_or(0, Vec::len);
-    let kind = if operation["kind"] == "rebase" { "rebase" } else { "merge" };
+    let kind = if operation["kind"] == "rebase" {
+        "rebase"
+    } else {
+        "merge"
+    };
     refuse(
         "pull_conflict",
         format!("The {kind} stopped at {n} conflicting file{}. Nothing was stashed or reset. Resolve {}, mark {} resolved and Continue, or Abort to return to where the checkout was before the pull.", if n == 1 { "" } else { "s" }, if n == 1 { "it" } else { "them" }, if n == 1 { "it" } else { "them" }),
@@ -1651,7 +1659,10 @@ impl Git {
             .success(path, &["rev-parse", "--verify", "--quiet", "@{u}"])
             .await?
         {
-            return Err(refuse("upstream_required","No upstream is configured. Configure a remote and tracking branch before pulling."));
+            return Err(refuse(
+                "upstream_required",
+                "No upstream is configured. Configure a remote and tracking branch before pulling.",
+            ));
         }
         if mode == "ff" {
             return self.checked(path, args(&["pull", "--ff-only"])).await;
@@ -1690,7 +1701,11 @@ impl Git {
         let saved = product(state, project)?;
         let here = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        for record in saved["tasks"].as_object().into_iter().flat_map(|m| m.values()) {
+        for record in saved["tasks"]
+            .as_object()
+            .into_iter()
+            .flat_map(|m| m.values())
+        {
             let retained = record["merge"].is_object()
                 && record["merge"]["finished"] != true
                 && matches!(
@@ -1706,7 +1721,10 @@ impl Git {
             if retained && at.as_deref() == Some(here.as_path()) {
                 return Err(refuse(
                     "task_merge",
-                    format!("This merge belongs to the task “{}”. Finish or abort it from the task.", record["title"].as_str().unwrap_or("")),
+                    format!(
+                        "This merge belongs to the task “{}”. Finish or abort it from the task.",
+                        record["title"].as_str().unwrap_or("")
+                    ),
                 ));
             }
         }
@@ -1761,7 +1779,12 @@ impl Git {
         if left > 0 {
             return Err(refuse(
                 "unresolved_conflict",
-                format!("{left} file{} still in conflict. Resolve {}, mark {} resolved, then continue.", if left == 1 { " is" } else { "s are" }, if left == 1 { "it" } else { "them" }, if left == 1 { "it" } else { "them" }),
+                format!(
+                    "{left} file{} still in conflict. Resolve {}, mark {} resolved, then continue.",
+                    if left == 1 { " is" } else { "s are" },
+                    if left == 1 { "it" } else { "them" },
+                    if left == 1 { "it" } else { "them" }
+                ),
             ));
         }
         // Only leftover markers block; whitespace that the remote commits brought is theirs.
@@ -1783,7 +1806,8 @@ impl Git {
                 .out(path, &["show", "-s", "--format=%P", "HEAD"])
                 .await?;
             // Hooks stay active; success alone cannot show a hook did not replace HEAD.
-            if parents.split_whitespace().collect::<Vec<_>>() != vec![head.trim(), merge_head.trim()]
+            if parents.split_whitespace().collect::<Vec<_>>()
+                != vec![head.trim(), merge_head.trim()]
                 || !self.operation(path).await?.is_null()
             {
                 return Err(refuse("git_state_unknown", "Git made the merge commit, but it is not the commit Cortex expected. Inspect the checkout in the terminal (Ctrl+J); nothing was retried."));
@@ -2490,7 +2514,10 @@ mod tests {
             }
             rows
         };
-        assert_eq!(timeless(g.commits(&root).await.unwrap()), timeless(first.clone()));
+        assert_eq!(
+            timeless(g.commits(&root).await.unwrap()),
+            timeless(first.clone())
+        );
         assert_eq!(
             stat_reads().len(),
             before,
@@ -2513,6 +2540,10 @@ mod tests {
     /// diffs, the tree or the log; the owner's own action through the service ends reuse at once.
     #[tokio::test]
     async fn an_unchanged_snapshot_is_reused_until_an_owner_action() {
+        snapshot_reuse::isolated(check_snapshot_reuse()).await;
+    }
+
+    async fn check_snapshot_reuse() {
         let (base, root, state) = fixture("reuse");
         fs::write(root.join("a.txt"), "a\n").unwrap();
         git(&root, &["add", "."]);

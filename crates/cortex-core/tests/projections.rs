@@ -146,7 +146,56 @@ fn native_recovery_states_its_reason_only_with_settled_or_recorded_evidence() {
         Ok(())
     })
     .unwrap();
-    assert_eq!(get(&reader(&p)).wait_reason, None);
+    let t = get(&reader(&p));
+    assert_eq!(t.wait_reason, None);
+    // It names which case holds: a session still being stopped decides by itself.
+    assert!(
+        t.warnings.iter().any(|w| w == "process_exit_pending"),
+        "{:?}",
+        t.warnings
+    );
+    // The host recorded the exit as unconfirmed: only the owner can end it now. The
+    // reservation change republishes the task, so no screen keeps an older answer.
+    let r = reader(&p);
+    let initial = r.query(page(None)).unwrap();
+    let sub = r
+        .subscribe(&initial.generation, initial.high_watermark)
+        .unwrap();
+    s.write(|db| {
+        db.execute("UPDATE capacity_reservations SET state='ambiguous',release_observation='termination_unconfirmed'", [])?;
+        Ok(())
+    })
+    .unwrap();
+    r.poll().unwrap();
+    assert!(
+        matches!(sub.next(), Some(StreamFrame::Delta(_))),
+        "a reservation change republishes the task"
+    );
+    let t = get(&r);
+    assert_eq!(t.wait_reason, None);
+    assert!(
+        t.warnings.iter().any(|w| w == "process_exit_unconfirmed"),
+        "{:?}",
+        t.warnings
+    );
+    assert!(!t.warnings.iter().any(|w| w == "process_exit_pending"));
+    // Once the exit is confirmed, the same task is an ended turn again, with no hold.
+    s.write(|db| {
+        db.execute("UPDATE capacity_reservations SET state='released',release_observation='process_exited'", [])?;
+        Ok(())
+    })
+    .unwrap();
+    let t = get(&reader(&p));
+    assert_eq!(t.wait_reason.as_deref(), Some("turn_interrupted"));
+    assert!(!t.warnings.iter().any(|w| w.starts_with("process_exit_")));
+    s.write(|db| {
+        db.execute(
+            "UPDATE capacity_reservations SET state='reserved',release_observation=NULL",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
     // A recorded native recovery reason is always stated to the owner.
     s.write(|db| {
         db.execute(

@@ -9,7 +9,7 @@ import { capabilitiesWire, projection, scriptedPort, scriptedTransport, snapshot
 import { Primitives } from "./layout-fit-primitives";
 import { reviewWorld } from "./layout-fit-review";
 import { conversationWorld } from "./conversation-world";
-import { pagesWorld } from "./pages-world";
+import { pagesWorld, settingsWorld } from "./pages-world";
 import "../src/fonts.css";
 import "../src/mockup-styles.css";
 import "../src/workspace.css";
@@ -63,8 +63,10 @@ const boardTasks = [
   boardTask("z-now", "Единственная", "execution"),
   boardTask("d-a", "Готовая", "not_started"),
   boardTask("c-stop", "", "paused", CLAMPED),
+  boardTask("auto-cont", "Автоматическое продолжение с очень длинным названием задачи для проверки боковой панели", "execution"),
+  boardTask("auto-files", "Изменения файлов требуют решения владельца в задаче с длинным названием", "waiting"),
 ];
-const boardOverlays: Record<string, TaskOverlay> = { "r-dep": { dependencies: ["r-now"] }, "n-dep": { dependencies: ["n-ask"] }, "d-a": { status: "done" } };
+const boardOverlays: Record<string, TaskOverlay> = { "r-dep": { dependencies: ["r-now"] }, "n-dep": { dependencies: ["n-ask"] }, "d-a": { status: "done" }, "auto-cont": { sprintId: "b-auto-cont" }, "auto-files": { sprintId: "b-auto-files" } };
 const boardSprint = (id: string, taskIds: string[], patch: Record<string, unknown> = {}) => ({ ...pausedSprint, id, title: SPRINT_LONG, targetBranch: BRANCH, taskIds, queueState: "idle", pauseReason: null, ...patch });
 const boardSprints = [
   boardSprint("b-run", ["r-now", "r-next", "r-dep"], { queueState: "running" }),
@@ -75,6 +77,8 @@ const boardSprints = [
   boardSprint("b-none", ["z-now"], { runMode: "manual" }),
   boardSprint("b-done", ["d-a"], { queueState: "complete" }),
   boardSprint("b-clamp", ["c-stop"], { queueState: "paused", pauseReason: "A task stopped" }),
+  boardSprint("b-auto-cont", ["auto-cont"], { runMode: "automatic", queueState: "paused", pauseReason: "Automatic continuation is waiting after the worker stopped with a long recovery reason.", automaticQueue: { kind: "continuation", taskId: "auto-cont", code: "continuation_cap", reason: "Automatic continuation is waiting after the worker stopped with a long recovery reason.", needsOwner: true } }),
+  boardSprint("b-auto-files", ["auto-files"], { runMode: "automatic", queueState: "paused", pauseReason: "The task files changed after the accepted result and need your decision.", automaticQueue: { kind: "settlement_blocked", taskId: "auto-files", code: "task_files_changed", reason: "The task files changed after the accepted result and need your decision.", needsOwner: true } }),
 ];
 const config = structuredClone(emptyWorkspace().machines[0].config);
 const query = new URLSearchParams(location.search);
@@ -126,8 +130,9 @@ const allTasks = () => [wireTask({ executionId: "e", phase: "not_started", runti
 // With `scroll`, 30 more projects of six live tasks each, all open in the sidebar.
 const EXTRA = scroll ? Array.from({ length: 30 }, (_, i) => `x${i}`) : [];
 const extraTasks = (projectId: string) => Array.from({ length: 6 }, (_, i) => boardTask(`${projectId}-${i}`, "", i % 3 === 0 ? "execution" : i % 3 === 1 ? "waiting" : "paused", `${bigTitle(i + Number(projectId.slice(1)))} in ${projectId}`));
-const tasksOf = (projectId?: string) => !projectId || projectId === "p" ? allTasks() : extraTasks(projectId);
+const tasksOf = (projectId?: string) => !projectId || projectId === "p" ? (query.has("sidebarRows") ? boardTasks.filter(t => t.taskId === "auto-cont" || t.taskId === "auto-files") : allTasks()) : extraTasks(projectId);
 if (scroll) localStorage.setItem("cw.ws.expanded", JSON.stringify(Object.fromEntries(["p", ...EXTRA].map(id => [id, true]))));
+if (query.has("sidebarRows")) localStorage.setItem("cw.ws.expanded", JSON.stringify({ p: true }));
 const s = scriptedTransport({
   "service.capabilities": async () => { await startupGate(); return { methods: ["machine.call", "native.open_editor"], machine: true }; },
   "projects.list": () => [{ projectId: "p", displayName: "A project with a rather long display name", canonicalRoot: "/home/owner/projects/a-repository-with-a-long-name", activation: {} },
@@ -140,7 +145,7 @@ const s = scriptedTransport({
   "machine.call": message => {
     const { op, params } = message as { op: string; params: { file: string } };
     if (op === "repo.snapshot") return { ok: true, result: repoFacts };
-    if (op === "product.read") { refusedRead(); return { ok: true, result: structuredClone({ tasks: Object.assign({ "task-1": { planning: true }, ...boardOverlays }, ...graphs.map(x => x.overlays)), sprints: [sprint, pausedSprint, ...boardSprints, ...graphs.map(x => x.sprint)], messages: queued }) }; }
+    if (op === "product.read") { refusedRead(); const allSprints = [sprint, pausedSprint, ...boardSprints, ...graphs.map(x => x.sprint)]; const sprints = query.has("sidebarRows") ? allSprints.filter(s => s.id === "b-auto-cont" || s.id === "b-auto-files") : allSprints; return { ok: true, result: structuredClone({ tasks: Object.assign({ "task-1": { planning: true }, ...boardOverlays }, ...graphs.map(x => x.overlays)), sprints, messages: queued }) }; }
     if (op === "workers") return { ok: true, result: [] };
     if (op === "overview") return { ok: true, result: { name: "Desk", retentionDays: 30, autoArchiveDays: 7, worktreeRoot: "~/t", version: "1", diskMb: 2, storage: [], cleanup: null, diagnostics: null } };
     if (op === "config.read") return { ok: true, result: { config, connections: [], tokens: {}, usage: [] } };
@@ -155,7 +160,7 @@ if (query.get("world") === "review") {
   history.replaceState(null, "", (query.get("route") ?? "/m/<M>/t/rg/changes").replaceAll("<M>", LOCAL_MACHINE_ID));
   render(() => <Workspace port={port.port} />, document.getElementById("root")!);
   setTimeout(() => port.emit(projection("1", reviewWorld())), 0);
-} else if (query.get("world") === "conversation" || query.get("world") === "pages") {
+} else if (query.get("world") === "conversation" || query.get("world") === "pages" || query.get("world") === "settings") {
   // The task screen as a conversation: a question waiting, work running with a queued message, and a result to review.
   // `pages` adds a draft, an accepted and a closed task, a sprint being planned and the model choices, for every other page.
   const port = scriptedPort({ capabilities: { everything: true, operations: [] } });
@@ -173,7 +178,7 @@ if (query.get("world") === "review") {
   const phone = query.has("phone") ? { kind: "phone" as const, machine: () => ({ name: "Workstation", state: "connected" as const, path: "direct" as const, lastConnectedAt: null }), openMachines() {}, openSettings() {}, retry() {}, attach() {} } : undefined;
   render(() => <Workspace port={port.port} chrome={phone ? undefined : chrome} shell={phone} />, document.getElementById("root")!);
   const sprintState = query.get("sprint");
-  const world = query.get("world") === "pages" ? pagesWorld(sprintState === "running" || sprintState === "closed" ? sprintState : "planning") : scroll ? longConversation(conversationWorld()) : query.has("stopq") ? stopQuestion(conversationWorld()) : conversationWorld();
+  const world = query.get("world") === "settings" ? settingsWorld() : query.get("world") === "pages" ? pagesWorld(sprintState === "running" || sprintState === "closed" ? sprintState : "planning") : scroll ? longConversation(conversationWorld()) : query.has("stopq") ? stopQuestion(conversationWorld()) : query.has("planningSprint") ? planningSprint(conversationWorld()) : conversationWorld();
   setTimeout(() => port.emit(projection("1", world)), 0);
   // `scroll` only: one streamed update, as a working task sends them, for the scroll gate to send while it scrolls.
   let version = 1;
@@ -224,6 +229,14 @@ function stopQuestion(s: ReturnType<typeof conversationWorld>) {
       { label: "Завершить: закрыть задачу как есть, без подтверждения незавершённой работы", sub: "задача закрывается как есть: уже сделанные изменения остаются в проекте, незавершённая часть остаётся неподтверждённой", optionId: "o-finish" },
     ],
     targets: [{ kind: "report" as const, reportId: "r_0123456789ab", role: "code-reviewer" }, { kind: "task" as const, taskId: "c-work", title: "Fix token refresh race" }] }));
+  return s;
+}
+// `planningSprint`: the waiting task plans a sprint (its planning task), so its conversation and workers read on sprint `ps`,
+// headed by the sprint's own long description, with the question the planner asks.
+function planningSprint(s: ReturnType<typeof conversationWorld>) {
+  s.sprints = [{ id: "ps", projectId: "p", title: "Спринт: поля ввода, растущие вместе с текстом, во всех формах создания задач и сообщений",
+    description: OWNER, runMode: "automatic", targetBranch: null, planning: "question", planningTaskId: "c-ask", conversation: [], plan: null, materializedVersion: null,
+    taskIds: [], queueState: "idle", pauseReason: null, checkout: { kind: "main" } }];
   return s;
 }
 // The working task after a long day: 300 turns of replies with Markdown, folded tool steps and owner messages, and its

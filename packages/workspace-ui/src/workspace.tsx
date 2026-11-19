@@ -14,6 +14,12 @@ import { Home } from "./home";
 import { I, place } from "./kit";
 import { ReasonTip, Strip } from "./layout";
 import { StartupScreen } from "./startup";
+import { humanStatus, planningPlace, planningSprintOf, planningTaskOf } from "./selectors";
+
+/** The runtime task planning a sprint, when it is a task (a legacy hidden planning run is not). */
+const sprintPlanningTask = (state: WorkspaceState, sprintId: string) => { const s = state.sprints.find(x => x.id === sprintId); return s ? planningTaskOf(state, s) : null; };
+/** The sprint a runtime task plans, or null for any other task (and for a legacy hidden planning run). */
+const planningTaskSprint = (state: WorkspaceState, taskId: string) => { const s = planningSprintOf(state, taskId); return s && planningTaskOf(state, s) ? s : null; };
 import { Archive } from "./archive";
 import { MachineDialogs } from "./machine-dialogs";
 import { Inbox, NotFound } from "./pages";
@@ -73,6 +79,8 @@ function Content() {
           {_ => <Show when={asSprint()?.sprint} keyed>{__ => <SprintPage route={asSprint()!} summary={summary()!} />}</Show>}
         </Show>
       </Match>
+      {/* Opens its sprint instead (TabBody); nothing of it shows as a task page meanwhile. */}
+      <Match when={route().name === "task" && planningTaskSprint(ws.store.state(), (route() as Extract<Route, { name: "task" }>).task)}>{null}</Match>
       <Match when={route().name === "task"}>
         <Show when={task()?.id} keyed fallback={<NotFound message="This task is not on this machine" />}>{id => <TaskPage id={id} />}</Show>
       </Match>
@@ -83,7 +91,7 @@ function Content() {
 function NotLoaded() {
   const ws = useWs();
   return <div class="note-panel" role="status" aria-live="polite"><span class="w500">The workspace could not be loaded.</span>
-    <Show when={ws.store.readIssue() ?? ws.store.connection().reason}>{why => <span>{why()}</span>}</Show>
+    <Show when={ws.store.readIssue() ?? ws.store.connection().reason}>{why => <span>{humanStatus(why())}</span>}</Show>
     <button class="btn btn-line ws-mt8" onClick={() => void ws.store.reload()}>Try again</button>
   </div>;
 }
@@ -156,6 +164,8 @@ function TabBody(props: { make: () => Ws; shown: Accessor<boolean>; unsent: (che
     const r = ws.router.route();
     if (r.name === "root") ws.go({ name: "home", machine: ws.machine().id }, { replace: true });
     else if (r.name === "project" && r.view === null) ws.go({ ...r, view: "board" }, { replace: true });
+    // A sprint's planning task has no page of its own: any address of it opens its sprint, at its conversation or workers.
+    else if (r.name === "task") { const sprint = planningTaskSprint(ws.store.state(), r.task); if (sprint) ws.go(planningPlace(r.machine, sprint, r), { replace: true }); }
   });
   // What this tab shows, while it is on view: one project's facts, or its Git data too. The port reads in the background
   // only what some screen on view holds; opening one reads it once, and a parked tab shown again reads again.
@@ -165,8 +175,9 @@ function TabBody(props: { make: () => Ws; shown: Accessor<boolean>; unsent: (che
     const project = r.name === "project" || r.name === "sprint" ? r.project : r.name === "task" ? ws.store.state().tasks.find(t => t.id === r.task)?.projectId : undefined;
     if (!project) return null;
     const git = (r.name === "project" && ["code", "git", "worktrees"].includes(r.view ?? "")) || (r.name === "task" && (r.tab === "changes" || r.tab === "code"));
-    // The task on view (its page, or the one previewed on a board) is the only one whose worker rows are read.
-    const task = r.name === "task" ? r.task : r.name === "project" ? ws.selected() ?? "" : "";
+    // The task on view (its page, the one previewed on a board, or the task planning the sprint on view) is the only one
+    // whose worker rows and conversation are read.
+    const task = r.name === "task" ? r.task : r.name === "project" ? ws.selected() ?? "" : r.name === "sprint" ? sprintPlanningTask(ws.store.state(), r.sprint) ?? "" : "";
     return `${git ? "git" : "facts"}|${project}|${task}`;
   });
   createEffect(on(interest, key => {

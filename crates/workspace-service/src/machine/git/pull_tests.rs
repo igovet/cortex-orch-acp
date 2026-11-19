@@ -39,12 +39,24 @@ impl Repo {
         fs::create_dir_all(&state).unwrap();
         run(
             &base,
-            &["init", "-q", "--bare", "-b", "main", origin.to_str().unwrap()],
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                origin.to_str().unwrap(),
+            ],
         );
         for clone in [&local, &other] {
             run(
                 &base,
-                &["clone", "-q", origin.to_str().unwrap(), clone.to_str().unwrap()],
+                &[
+                    "clone",
+                    "-q",
+                    origin.to_str().unwrap(),
+                    clone.to_str().unwrap(),
+                ],
             );
             for (k, v) in [
                 ("user.name", "Fixture"),
@@ -118,7 +130,10 @@ async fn behind_only_fast_forwards_and_diverged_refuses_a_fast_forward() {
     assert!(refused.message.contains("Pull…"), "{}", refused.message);
     assert_eq!(r.head(), before);
     assert_eq!(r.status(), "");
-    assert_eq!(r.pull("squash").await.unwrap_err().code, "unsupported_action");
+    assert_eq!(
+        r.pull("squash").await.unwrap_err().code,
+        "unsupported_action"
+    );
 }
 
 #[tokio::test]
@@ -133,8 +148,14 @@ async fn diverged_pull_with_merge_makes_one_merge_commit_of_both_sides() {
         run(&r.local, &["show", "-s", "--format=%P", "HEAD"]),
         format!("{local} {remote}")
     );
-    assert_eq!(fs::read_to_string(r.local.join("b.txt")).unwrap(), "remote\n");
-    assert_eq!(fs::read_to_string(r.local.join("c.txt")).unwrap(), "local\n");
+    assert_eq!(
+        fs::read_to_string(r.local.join("b.txt")).unwrap(),
+        "remote\n"
+    );
+    assert_eq!(
+        fs::read_to_string(r.local.join("c.txt")).unwrap(),
+        "local\n"
+    );
     assert_eq!(r.status(), "");
     assert!(r.operation().await.is_null());
     // Merging never rewrote the local commit, so pushing is a fast-forward now.
@@ -164,7 +185,13 @@ async fn a_conflicted_pull_aborts_back_to_exactly_where_it_started() {
         let (head, index) = (r.head(), run(&r.local, &["write-tree"]));
         let refused = r.pull(mode).await.unwrap_err();
         assert_eq!(refused.code, "pull_conflict", "{mode}: {}", refused.message);
-        assert!(refused.message.contains(&format!("The {mode} stopped at 1 conflicting file")), "{}", refused.message);
+        assert!(
+            refused
+                .message
+                .contains(&format!("The {mode} stopped at 1 conflicting file")),
+            "{}",
+            refused.message
+        );
         let stopped = r.operation().await;
         assert_eq!(stopped["kind"], mode);
         assert_eq!(stopped["conflicts"], json!(["a.txt"]));
@@ -175,13 +202,22 @@ async fn a_conflicted_pull_aborts_back_to_exactly_where_it_started() {
             .unwrap();
         assert_eq!(snapshot["checkouts"][0]["operation"]["kind"], mode);
         // Another pull, and Continue before the conflict is resolved, are refused.
-        assert_eq!(r.pull(mode).await.unwrap_err().code, "operation_in_progress");
         assert_eq!(
-            r.act(json!({"action":"pull_continue"})).await.unwrap_err().code,
+            r.pull(mode).await.unwrap_err().code,
+            "operation_in_progress"
+        );
+        assert_eq!(
+            r.act(json!({"action":"pull_continue"}))
+                .await
+                .unwrap_err()
+                .code,
             "unresolved_conflict"
         );
         assert_eq!(
-            r.act(json!({"action":"pull_abort"})).await.unwrap_err().code,
+            r.act(json!({"action":"pull_abort"}))
+                .await
+                .unwrap_err()
+                .code,
             "confirmation_required"
         );
         r.act(json!({"action":"pull_abort","confirmed":true}))
@@ -195,10 +231,16 @@ async fn a_conflicted_pull_aborts_back_to_exactly_where_it_started() {
             fs::read_to_string(r.local.join("a.txt")).unwrap(),
             "local\ntwo\nthree\n"
         );
-        assert_eq!(fs::read_to_string(r.local.join("untracked.txt")).unwrap(), "kept\n");
+        assert_eq!(
+            fs::read_to_string(r.local.join("untracked.txt")).unwrap(),
+            "kept\n"
+        );
         assert!(r.operation().await.is_null());
         assert_eq!(
-            r.act(json!({"action":"pull_abort","confirmed":true})).await.unwrap_err().code,
+            r.act(json!({"action":"pull_abort","confirmed":true}))
+                .await
+                .unwrap_err()
+                .code,
             "no_operation"
         );
     }
@@ -214,7 +256,10 @@ async fn a_resolved_conflict_continues_to_a_merge_commit_or_the_end_of_the_rebas
         // Marked resolved with its markers still in: refused, nothing committed.
         run(&r.local, &["add", "a.txt"]);
         assert_eq!(
-            r.act(json!({"action":"pull_continue"})).await.unwrap_err().code,
+            r.act(json!({"action":"pull_continue"}))
+                .await
+                .unwrap_err()
+                .code,
             "conflict_markers"
         );
         fs::write(r.local.join("a.txt"), "both\ntwo\nthree \n").unwrap();
@@ -250,10 +295,17 @@ async fn uncommitted_changes_no_upstream_and_a_detached_head_are_refused_before_
     for mode in ["merge", "rebase"] {
         let refused = r.pull(mode).await.unwrap_err();
         assert_eq!(refused.code, "dirty_checkout", "{}", refused.message);
-        assert!(refused.message.contains("does not stash"), "{}", refused.message);
+        assert!(
+            refused.message.contains("does not stash"),
+            "{}",
+            refused.message
+        );
     }
     assert_eq!(r.head(), head);
-    assert_eq!(fs::read_to_string(r.local.join("a.txt")).unwrap(), "uncommitted\n");
+    assert_eq!(
+        fs::read_to_string(r.local.join("a.txt")).unwrap(),
+        "uncommitted\n"
+    );
     run(&r.local, &["checkout", "-q", "--", "a.txt"]);
     run(&r.local, &["checkout", "-q", "-b", "loose"]);
     assert_eq!(r.pull("merge").await.unwrap_err().code, "upstream_required");
@@ -269,10 +321,18 @@ async fn a_task_worktree_pulls_alone_and_a_task_merge_stays_with_the_task() {
     run(&r.local, &["branch", "task"]);
     run(&r.local, &["push", "-q", "-u", "origin", "task"]);
     let wt = r.base.join("task-wt");
-    run(&r.local, &["worktree", "add", "-q", wt.to_str().unwrap(), "task"]);
+    run(
+        &r.local,
+        &["worktree", "add", "-q", wt.to_str().unwrap(), "task"],
+    );
     run(&r.other, &["fetch", "-q"]);
     run(&r.other, &["checkout", "-q", "-b", "task", "origin/task"]);
-    Repo::commit(&r.other, "a.txt", "remote\ntwo\nthree\n", "Remote task change");
+    Repo::commit(
+        &r.other,
+        "a.txt",
+        "remote\ntwo\nthree\n",
+        "Remote task change",
+    );
     run(&r.other, &["push", "-q", "origin", "task"]);
     Repo::commit(&wt, "a.txt", "local\ntwo\nthree\n", "Local task change");
     let main = r.head();

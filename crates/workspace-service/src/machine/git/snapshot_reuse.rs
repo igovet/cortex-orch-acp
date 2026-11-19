@@ -17,22 +17,45 @@ const SLOTS: usize = 16;
 const REPOSITORIES: usize = 32;
 /// Commits kept per repository; more starts that repository over.
 const COMMITS: usize = 4096;
-static GENERATION: AtomicU64 = AtomicU64::new(0);
 pub(super) struct Seen {
     pub key: String,
     pub at: std::time::Instant,
     pub value: Value,
 }
 type Slot = Arc<tokio::sync::Mutex<Option<Seen>>>;
-static SNAPSHOTS: LazyLock<Mutex<HashMap<(PathBuf, String), Slot>>> =
-    LazyLock::new(Default::default);
+#[derive(Default)]
+struct SnapshotCache {
+    generation: AtomicU64,
+    slots: Mutex<HashMap<(PathBuf, String), Slot>>,
+}
+static SNAPSHOTS: LazyLock<SnapshotCache> = LazyLock::new(Default::default);
+
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_SNAPSHOTS: SnapshotCache;
+}
+
+/// Keep both generation and slot eviction private to the reuse regression:
+/// unrelated Git tests run in parallel and legitimately invalidate the shared cache.
+#[cfg(test)]
+pub(super) async fn isolated<F: std::future::Future>(test: F) -> F::Output {
+    TEST_SNAPSHOTS.scope(SnapshotCache::default(), test).await
+}
+
+fn with_cache<T>(f: impl Fn(&SnapshotCache) -> T) -> T {
+    #[cfg(test)]
+    if let Ok(value) = TEST_SNAPSHOTS.try_with(&f) {
+        return value;
+    }
+    f(&SNAPSHOTS)
+}
 type Stats = HashMap<PathBuf, HashMap<String, (u64, u64, u64)>>;
 static STATS: LazyLock<Mutex<Stats>> = LazyLock::new(Default::default);
 pub(super) fn generation() -> u64 {
-    GENERATION.load(Ordering::SeqCst)
+    with_cache(|cache| cache.generation.load(Ordering::SeqCst))
 }
 pub(super) fn invalidate() {
-    GENERATION.fetch_add(1, Ordering::SeqCst);
+    with_cache(|cache| cache.generation.fetch_add(1, Ordering::SeqCst));
 }
 /// Advances the generation when dropped: at the end of an owner action, success or not.
 pub(super) struct OnDrop;
@@ -44,14 +67,14 @@ impl Drop for OnDrop {
 /// The one reuse slot of `(root, project)`. Snapshots of one project are taken one at
 /// a time, so a burst of identical requests runs Git once and the rest reuse it.
 pub(super) fn slot(root: &Path, project: &str) -> Slot {
-    let mut slots = SNAPSHOTS.lock().unwrap_or_else(|e| e.into_inner());
-    if slots.len() >= SLOTS && !slots.contains_key(&(root.to_path_buf(), project.to_owned())) {
-        slots.retain(|_, s| Arc::strong_count(s) > 1);
-    }
-    slots
-        .entry((root.to_path_buf(), project.to_owned()))
-        .or_default()
-        .clone()
+    with_cache(|cache| {
+        let mut slots = cache.slots.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (root.to_path_buf(), project.to_owned());
+        if slots.len() >= SLOTS && !slots.contains_key(&key) {
+            slots.retain(|_, s| Arc::strong_count(s) > 1);
+        }
+        slots.entry(key).or_default().clone()
+    })
 }
 /// The known counts among `hashes`, and the hashes still to compute (in order).
 pub(super) fn known_stats(

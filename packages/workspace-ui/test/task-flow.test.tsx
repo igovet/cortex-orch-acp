@@ -663,8 +663,8 @@ describe("the Settings sidebar", () => {
     await mount(s.port, `/settings/machine/${LOCAL_MACHINE_ID}/orchestration`);
     s.emit(projection("1", at("2026-11-07T10:00:00Z")));
     await settled();
-    const link = (name: string) => all('nav[aria-label="Settings"] [role="tab"]').find(t => t.textContent?.trim() === name);
-    const before = ["Overview", "Orchestration", "Coordinator", "Engine connections", "Remote access"].map(link);
+    const link = (name: string) => all('nav[aria-label="Settings"] a.snav').find(t => t.textContent?.trim() === name);
+    const before = ["Overview", "Orchestration", "Defaults", "Connections", "Remote access"].map(link);
     expect(before.every(Boolean)).toBe(true);
     // Each machine read moves its last-seen time, and nothing else.
     s.emit(projection("2", at("2026-11-07T10:00:30Z")));
@@ -675,10 +675,11 @@ describe("the Settings sidebar", () => {
   it("keeps a project's limit field, and what is typed in it, through a machine read", async () => {
     const s = everything();
     const at = (seen: string) => { const state = world([]); state.machines[0].lastConfirmedAt = seen; return state; };
-    await mount(s.port, `/settings/machine/${LOCAL_MACHINE_ID}/orchestration/policy`);
+    await mount(s.port, `/settings/machine/${LOCAL_MACHINE_ID}/orchestration/ceiling`);
     s.emit(projection("1", at("2026-11-07T10:00:00Z")));
     await settled();
-    all(".seg button").find(b => b.textContent === "Project")!.click();
+    // The Project picker in the context bar: "Machine only" first, then the machine's projects.
+    all("#m-scope-project .mi")[1]!.click();
     await settled();
     const field = $<HTMLInputElement>('input[aria-label="Project Attempts per task"]')!;
     expect(field).toBeTruthy();

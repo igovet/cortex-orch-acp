@@ -46,7 +46,9 @@ pub async fn product(root: &Path, state: &Path, project: &str, git: &mut Git) ->
                 if let Ok(Some(_lock)) = settings::Lock::try_new(state, "machine.lock") {
                     let path = product_path(state, project)?;
                     let mut fresh = settings::read_json(&path, json!({}))?;
-                    if super::attachment_files::answer_references(&store, state, project, &mut fresh)? {
+                    if super::attachment_files::answer_references(
+                        &store, state, project, &mut fresh,
+                    )? {
                         settings::write_json(&path, &fresh)?;
                     }
                 }
@@ -159,7 +161,9 @@ fn owner_closed(store: &Store, project: &str, value: &mut Value) -> Result<()> {
         }
         record["notVerifiedByCortex"] = json!(true);
         if record["doneAt"].is_null() {
-            record["doneAt"] = json!(at.and_then(|n| u64::try_from(n).ok()).unwrap_or_else(now_ms));
+            record["doneAt"] = json!(at
+                .and_then(|n| u64::try_from(n).ok())
+                .unwrap_or_else(now_ms));
         }
     }
     Ok(())

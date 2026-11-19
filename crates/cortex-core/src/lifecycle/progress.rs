@@ -12,7 +12,7 @@ pub fn spend_tx(db: &Transaction<'_>, task: &str, budget: i64) -> CoreResult<()>
     let epoch: i64 = db.query_row(
         "SELECT coalesce(max(id),0) FROM runtime_events WHERE task_id=? AND type IN
         ('USER_STEERING','USER_ANSWER_RECEIVED','WORKER_USER_ANSWER_RECEIVED','TURN_INTERRUPTED',
-         'NATIVE_DRIVER_STOPPED','TASK_REOPENED')",
+         'NATIVE_DRIVER_STOPPED','TASK_REOPENED','AUTOMATIC_RESUMED')",
         [task],
         |r| r.get(0),
     )?;

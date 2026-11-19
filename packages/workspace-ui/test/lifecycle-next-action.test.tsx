@@ -49,7 +49,7 @@ it("a failed native plan exposes its reason beside Retry, outside the scrollable
 });
 
 it("a paused queue names the blocked review and offers its task before Continue queue", async () => {
-  const sp = sprint({runMode:"automatic", taskIds:["t"], queueState:"paused", pauseReason:"A result has missing or unsuccessful checks."});
+  const sp = sprint({runMode:"hybrid", taskIds:["t"], queueState:"paused", pauseReason:"A result has missing or unsuccessful checks."});
   const state = world({status:"review", sprintId:"sp", reviewActions:{accept:false,reason:"Run the current checks before accepting work.",unblockAction:"rerun_checks"}}, {}, [sp]);
   await mount(state, `/m/local/p/p/s/sp/summary`);
   expect(text()).toContain("Run the current checks before accepting work.");
@@ -167,15 +167,77 @@ it("Work details and Changes stay reachable when the machine offers no Git opera
 });
 
 it("a stalled automatic queue names its reason beside the sprint with a way to the blocking task", async () => {
-  await mount(world({ status: "review", sprintId: "sp" }, {}, [sprint({ runMode: "automatic", taskIds: ["t"] })]), `/m/${LOCAL_MACHINE_ID}/p/p/s/sp/planning`);
-  const strip = [...document.querySelectorAll(".l-strip")].find(s => s.textContent?.includes("Review Work first"));
+  await mount(world({ status: "review", sprintId: "sp" }, {}, [sprint({ runMode: "automatic", taskIds: ["t"], queueState:"paused", automaticQueue:{kind:"settlement_blocked",taskId:"t",code:"checks_not_passed",reason:"Checks did not pass",needsOwner:false} })]), `/m/${LOCAL_MACHINE_ID}/p/p/s/sp/planning`);
+  const strip = [...document.querySelectorAll(".l-strip")].find(s => s.textContent?.includes("Checks did not pass"));
   expect(strip).toBeTruthy();
   expect([...strip!.querySelectorAll("a")].some(a => a.textContent?.trim() === "Open task")).toBe(true);
 });
 
+it("an Automatic acceptance hold is a Needs you decision with a real task route and owner escape", async () => {
+  const reason = "Automatic acceptance needs a decision about the required check.";
+  const sp = sprint({ runMode: "automatic", taskIds: ["t"], queueState: "paused", automaticQueue: {
+    kind: "settlement_blocked", taskId: "t", code: "automatic_acceptance_blocked", reason, needsOwner: true,
+    nextActor: "owner", ownerActions: ["allow_repair", "close_as_is"], asks: ["Let the agent fix this and publish a fresh result."],
+  } });
+  const state = world({ status: "review", process: "stopped", workspaceDigest: "d1", sprintId: "sp", result: { version: 1, digest: "d1", sourceVersion: "1", summary: "Work", checks: [{ name: "Required check", detail: "", outcome: "not_run", kind: "policy" }], automaticReady: true, acceptanceAvailable: false }, reviewActions: { accept: false, reason, unblockAction: "request_changes" } }, {}, [sp]);
+  const port = await mount(state, `/m/${LOCAL_MACHINE_ID}/p/p/s/sp/board`);
+  expect(text()).toContain(reason);
+  expect(text()).toContain("Needs you");
+  const open = control("Open task")!;
+  expect(open.getAttribute("href")).toBe(taskPath);
+  open.click(); await settle();
+  expect(location.pathname).toContain("/t/t");
+  // The pinned card renders the service's decision: what is asked, the allow action, and the separate close.
+  expect(document.querySelector(".chat-review-hold")?.textContent).toContain("Let the agent fix this and publish a fresh result.");
+  expect(control("Let the agent fix it")).toBeTruthy();
+  expect(control("Ask agent to fix")).toBeUndefined();
+  expect(text()).toContain("Close as is");
+  expect(text()).not.toContain("Allow and run");
+  control("Close as is…")!.click(); await settle();
+  const dialog = document.querySelector("dialog[open]")!;
+  expect(dialog.textContent).toContain(reason);
+  expect(dialog.textContent).toContain("Required check");
+  expect(dialog.textContent).toContain("creates no commit");
+  const confirm = control("Close as is and continue")!;
+  confirm.click(); confirm.click(); await settle();
+  expect(ops(port)).toEqual(["close_task"]);
+  expect(port.commands[0].payload).toMatchObject({ choice: "as_is", confirmed: true, taskId: "t" });
+  port.receipt(true); await settle();
+  expect(document.querySelector("dialog[open]")).toBeNull();
+});
+
+it("keeps close reachable when Accept allows acknowledgement and refuses a superseded confirmation", async () => {
+  const sp = sprint({ runMode: "automatic", taskIds: ["t"], queueState: "paused", automaticQueue: {
+    kind: "settlement_blocked", taskId: "t", code: "automatic_acceptance_blocked", reason: "Deployment was not run.", needsOwner: true,
+  } });
+  const state = world({ status: "review", sprintId: "sp", workspaceDigest: "d", result: {
+    version: 1, sourceVersion: "7", digest: "d", summary: "Review", checks: [{
+      name: "Deployment", detail: "Restricted by policy", technicalReason: "Restricted by policy", kind: "policy", outcome: "not_run"
+    }], acceptanceAvailable: true }, reviewActions: { accept: true, reason: null, unblockAction: null, acknowledgeOpenChecks: true } }, {}, [sp]);
+  const port = await mount(state, taskPath + "/changes");
+  expect(control("Accept v1")?.getAttribute("aria-disabled")).toBeNull();
+  control("Close as is…")!.click(); await settle();
+  expect(control("Close as is and continue")?.getAttribute("aria-disabled")).toBeNull();
+  const changed = structuredClone(state);
+  changed.tasks[0].result!.sourceVersion = "8";
+  port.emit(projection("2", changed)); await settle();
+  const confirm = control("Close as is and continue")!;
+  expect(confirm.getAttribute("aria-disabled")).toBe("true");
+  confirm.click(); await settle();
+  expect(ops(port)).toEqual([]);
+});
+
+it("a normal Automatic result stays runtime-owned and does not invent owner controls", async () => {
+  const state = world({ status: "review", sprintId: "sp", result: { version: 1, digest: "d1", sourceVersion: "1", summary: "Work", checks: [{ name: "Tests", detail: "", outcome: "passed" }], automaticReady: true } }, {}, [sprint({ runMode: "automatic", taskIds: ["t"], queueState: "running" })]);
+  await mount(state, `/m/${LOCAL_MACHINE_ID}/p/p/s/sp/board`);
+  expect(text()).toContain("awaiting automatic acceptance");
+  expect(control("Close as is…")).toBeUndefined();
+  expect(control("Request changes…")).toBeUndefined();
+});
+
 const board = `/m/${LOCAL_MACHINE_ID}/p/p/s/sp/board`;
 it("a paused board says why once, in the strip that describes Continue queue, and keeps the words out of the button", async () => {
-  await mount(world({ status: "paused", sprintId: "sp" }, {}, [sprint({ runMode: "automatic", taskIds: ["t"], queueState: "paused", pauseReason: "A task stopped" })]), board);
+  await mount(world({ status: "paused", sprintId: "sp" }, {}, [sprint({ runMode: "hybrid", taskIds: ["t"], queueState: "paused", pauseReason: "A task stopped" })]), board);
   const go = control("Continue queue")!;
   expect(go.getAttribute("aria-disabled")).toBe("true");
   const strip = document.getElementById(go.getAttribute("aria-describedby")!)!;
@@ -185,17 +247,53 @@ it("a paused board says why once, in the strip that describes Continue queue, an
   expect(text()).not.toContain("Review this task");
 });
 
+it("a Manual sprint paused by a mode switch never points to a Continue queue button it does not show", async () => {
+  await mount(world({ sprintId: "sp" }, {}, [sprint({ runMode: "manual", taskIds: ["t"], queueState: "paused", pauseReason: "This sprint is in manual mode." })]), board);
+  expect(control("Continue queue")).toBeUndefined();
+  expect(text()).not.toContain("Continue queue when you are ready");
+  expect(text()).toContain("Start the next task when you are ready");
+});
+
 it("keeps the explanation of the automatic queue behind a question mark on the board, not in a strip", async () => {
   await mount(world({ sprintId: "sp" }, {}, [sprint({ runMode: "automatic", taskIds: ["t"] })]), board);
   const hint = document.querySelector<HTMLButtonElement>("[aria-label='Sprint queue'] .ws-hint")!;
   expect(hint.tagName).toBe("BUTTON");
   expect(hint.getAttribute("aria-label")).toBe("About the automatic queue");
-  expect(document.getElementById(hint.getAttribute("popovertarget")!)?.textContent).toContain("Passed checks leave each task ready");
-  expect([...document.querySelectorAll(".l-strip")].some(s => s.textContent?.includes("Passed checks leave"))).toBe(false);
+  expect(document.getElementById(hint.getAttribute("popovertarget")!)?.textContent).toContain("Done on their own in the current branch");
+  expect([...document.querySelectorAll(".l-strip")].some(s => s.textContent?.includes("Done on their own"))).toBe(false);
 });
 
 it("offers no explanation for a manual queue, which does not run by itself", async () => {
   await mount(world({ sprintId: "sp" }, {}, [sprint({ taskIds: ["t"] })]), board);
   expect(document.querySelector("[aria-label='Sprint queue'] .ws-hint")).toBeNull();
   expect(control("Start task 1")).toBeTruthy();
+});
+
+it("a failed run outside a queue asks the owner in plain words: try again, or close as is", async () => {
+  const reason = "This task failed before it produced a result. Request changes to try again.";
+  const ask = "Ask the agent to try again. It continues from the recorded state, and review and verification run again before the task can finish.";
+  const state = world({ status: "failed", process: "stopped", reviewActions: { accept: false, reason, unblockAction: "request_changes",
+    nextActor: "owner", ownerActions: ["ask_agent", "close_as_is"], asks: [ask] } });
+  const port = await mount(state, taskPath);
+  const card = document.querySelector<HTMLElement>(".chat-review-hold")!;
+  expect(card.textContent).toContain("This task needs your decision");
+  expect(card.textContent).toContain(ask);
+  expect([...card.querySelectorAll("button")].map(b => b.textContent?.trim())).toEqual(["Ask the agent to try again", "Close as is…"]);
+  // The run took no message before; a failed run with known effects is reopened by one.
+  expect(text()).not.toContain("This run has ended. Nothing more can be sent to it");
+  control("Ask the agent to try again")!.click(); await settle();
+  expect(port.commands.at(-1)?.payload).toMatchObject({ type: "request_changes", taskId: "t" });
+});
+
+it("a Hybrid queue hold names its task and pins the same decision card", async () => {
+  const reason = "This task depends on “Schema”, which was cancelled, so it cannot start by itself.";
+  const sp = sprint({ runMode: "hybrid", taskIds: ["t"], queueState: "paused", pauseReason: reason, automaticQueue: {
+    kind: "settlement_blocked", taskId: "t", code: "dependencies_blocked", reason, needsOwner: true,
+    nextActor: "owner", ownerActions: ["close_as_is"], asks: ["Close this task as is or cancel it, because “Schema” will not finish. The queue then continues."],
+  } });
+  await mount(world({ status: "draft", sprintId: "sp" }, {}, [sp]), taskPath);
+  const card = document.querySelector<HTMLElement>(".chat-review-hold")!;
+  expect(card.textContent).toContain("The queue needs your decision");
+  expect(card.textContent).toContain(reason);
+  expect([...card.querySelectorAll("button")].map(b => b.textContent?.trim())).toEqual(["Close as is…"]);
 });

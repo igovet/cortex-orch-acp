@@ -745,6 +745,10 @@ Accepted adapter versions: Codex exactly `1.12.0`, `1.13.0`, `2.0.1`, `2.1.1`, `
 
 An existing file is left unchanged even when it is malformed or from an older schema; Cortex does not repair it, merge MCP entries into it, or rename/overwrite saved profiles. If the profile registry is absent, `default` is captured only when routing, defaults and MCP usage policy still match the bundled preset; customized settings are never relabeled as an applied default. This also lets an interrupted first install finish on retry. Preset seeding never adds an engine connection.
 
+For technical writers, the preset prefers Haiku/Luna at low complexity,
+Sonnet/Sol/Terra at normal complexity and Sonnet/Sol at high complexity.
+These are preferences, not pins; see the [routing details](#fresh-install-owner-default-snapshot).
+
 The MCP examples are `codebase-memory-mcp`, `playwright` (Claude workers only), and `vivaldi` (workers). All start with `enabled: false`; the runtime loader excludes them before launch. Settings lists them as disabled, editable and toggleable. Commands, arguments and filesystem grants contain only `/path/to/...` examples; environment maps are empty. Registering these definitions does not install binaries or browser extensions. Install the corresponding tools, replace example paths and review grants before enabling. The named profile captures only MCP usage policy, never commands, arguments or environment values.
 
 **Reset to default preset** in Settings replaces `routing.json` and `defaults.json` together. It requires a confirmation that names the overwrite, and the machine action re-reads the combined revision of both files before confirmation and checks it again under the owner lock, so a concurrent change after that observation is refused. The machine wrapper ignores a caller-supplied revision; it does not enforce the age of the Settings card's earlier read. Before writing, it keeps a private owner-only backup of each existing file, named `<name>.json.cortex-backup-<time_ns>` in the same configuration directory. Reset overwrites all routing rules, the coordinator default, the language and the owner ceiling. Project and `$CORTEX_ROUTING` overrides are not changed. If an ordinary pre-replacement write fails, completed replacements are rolled back; uncertain durability is reported without replay. A hard process kill between the two replacements can leave the pair mixed; the backups allow manual restoration.
@@ -864,14 +868,14 @@ writing configuration or dispatching work.
 - `pin`: object mapping worker role names or `*` to `engine/model` or `engine/model:effort`. A pin is strict: unavailable or disallowed pins fail instead of silently switching routes.
 - `deny`: array of model tokens, each optionally prefixed `engine/`. A token is an exact model id; a versioned id, which also covers that version's variants (`gpt-5.5` covers `gpt-5.5[1m]`, not `gpt-5.6-luna`); or a bare family name, which covers every version and alias of that family (`haiku` covers `haiku`, `claude-haiku-4-5` and `claude-haiku-4-5-20251001`). A token with a `[...]` variant is exact only. The special `<supported-engine>/*` token disables every model for that engine, including future models. Explicit deny applies to automatic routing, pins, dispatch, and the model selector, and always wins; it does not unregister the connection.
 - `enabled`: object mapping a supported engine id to an array of exact model ids (OpenCode ids are `<provider>/<model>`). An engine it lists may use only those models in Cortex; every other model of that engine is treated exactly like a denied one (hidden from the selector, refused when chosen or pinned, never routed automatically), and `[]` switches all of its models off. An engine it does not list keeps the built-in default: every model is on, except the optional OpenCode engine, whose models stay off until listed here (OpenCode offers hundreds of provider models). `deny` still wins. Settings > Models writes this list for OpenCode and exact `deny` entries for the default-on engines.
-- `auto_allow`: tokens of the same form that may enter automatic selection despite the built-in Haiku and OpenCode exclusions (on an engine without a `models` selection list; a list replaces these exclusions). OpenCode model IDs name their provider, so an OpenCode entry is the exact route, for example `"opencode/anthropic/claude-sonnet-4-5"`. It does not override `deny`, `providers`, catalog availability, connection readiness or quota limits.
+- `auto_allow`: tokens of the same form that may enter automatic selection despite the built-in OpenCode exclusion (on an engine without a `models` selection list; a list replaces this exclusion). OpenCode model IDs name their provider, so an OpenCode entry is the exact route, for example `"opencode/anthropic/claude-sonnet-4-5"`. It does not override `deny`, `providers`, catalog availability, connection readiness or quota limits.
 - `tiers`: object mapping model names to `flagship`, `deep`, `standard`, or `light`, for every engine. Built-in known families/models are classified automatically; this key overrides that classification, and a per-engine `models` tier overrides this key. A Luna model moved out of `light` routes like any model of its new tier; only the Luna effort floor (`high`) and `max` still apply.
 - `providers`: array restricted to `codex-acp`, `claude-agent-acp` and/or `opencode`. When absent, every configured provider is considered. It restricts automatic routing, failover and pins; it does not hide models from the selector or disable manual selection. A disallowed pin is refused.
 - `engine_affinity`: object mapping a work kind or `*` to `codex-acp`, `claude-agent-acp`, `opencode`, or `null` (no lean). Work kinds are `implementation_backend`, `implementation_frontend`, `implementation_frontend_design`, `operations`, `debugging`, `testing`, `investigation`, `review`, `design`, `writing`, `planning`, and `analysis` (each worker role's kind is `ROLE_WORK_KINDS`; an unlisted role is `implementation_backend`). A kind named here wins, then `*`, then the built-in default: `implementation_backend`, `implementation_frontend` and `operations` lean to `codex-acp`; `implementation_frontend_design`, `investigation`, `review`, `design`, `writing`, `planning` and `analysis` lean to `claude-agent-acp`; `debugging` and `testing` are neutral. Affinity breaks ties only after the 95% quota band and retry diversification (rank version 15): a known route at or above 95% ranks behind any non-hot route, so affinity never overrides that band. Plan usage is only the last tie-breaker after affinity (see [usage switching](#explicit-user-model-priority-and-usage-switching)). Affinity never overrides a pin, `deny`, `providers`, availability or the 100% quota exclusion. An unknown kind or engine makes the file invalid.
 - `models`: object mapping a supported engine id to an object with any of `auto`, `tiers` and `policy`, each keyed by the exact model id the engine reports (OpenCode ids are `<provider>/<model>`). Validation reports every problem with its field path.
-  - `auto`: array of unique model ids. Present, it is the complete list of that engine's models automatic routing may use (`[]`: none), replacing the built-in Haiku/optional-engine exclusions, `auto_allow` and newest-version-only routing for that engine; absent, the built-in rules apply. `deny` and `providers` still win; a `pin` or the model selector can still use any offered model.
+  - `auto`: array of unique model ids. Present, it is the complete list of that engine's models automatic routing may use (`[]`: none), replacing the built-in OpenCode exclusion, `auto_allow` and newest-version-only routing for that engine; absent, the built-in rules apply. `deny` and `providers` still win; a `pin` or the model selector can still use any offered model.
   - `tiers`: model id to `flagship`, `deep`, `standard` or `light`, or to a non-empty list of them (for example `["standard", "deep"]`); it wins over the legacy top-level `tiers`, which wins over the built-in classification. A model given several tiers is an automatic-routing candidate of each (it is listed under each in `list_route_options`) and runs at the effort of the tier it was chosen for; a pin or explicit effort may use any effort one of its tiers permits, and it counts as flagship for a user's explicit flagship request when `flagship` is one of its tiers. Only this per-engine key takes a list; the legacy top-level `tiers` stays one tier per model. In Settings > Engines & models the tier control is a multi-select; clearing every tier removes the setting.
-  - `policy`: model id to an object of optional attributes, each overriding the model's built-in value (`null` removes it): `effort_floor` and `max_effort` (efforts `low`..`max`; without `max_effort` a flagship-tier model stops at `high`), `effort_ladder` (1-3 strictly ascending efforts a light model runs at for light work, standard work, and standard work that fell short once), `also_standard_for` (work kinds for which a light model is also a standard-tier candidate, as the built-in Luna rule does for `testing`), `preferred_for` (work kinds this model is preferred for: rank version 9 puts it ahead of new plan hints, plan usage and retry diversification within its tier; it yields for quota only when at least 95% used and more than 10 points worse than a known usable alternative; plan usage compares only the preferred models while they are honoured, and none once they are used up), `preferred_when` (optional owner-written condition, non-blank text of at most 500 characters, for example `"frontend changes without design work"`; see below) and `request_names` (1-16 lowercase extra spellings, Cyrillic stems taking Russian endings, that count as the user naming this model's family in an explicit flagship request; ordinary request, work or negation words are refused).
+  - `policy`: model id to an object of optional attributes, each overriding the model's built-in value (`null` removes it): `effort_floor` and `max_effort` (efforts `low`..`max`; without `max_effort` a flagship-tier model stops at `high`), `effort_ladder` (1-3 strictly ascending efforts a light model runs at for light work, standard work, and standard work that fell short once), `also_standard_for` (work kinds for which a light model is also a standard-tier candidate, only for explicitly configured work kinds), `preferred_for` (work kinds this model is preferred for: rank version 9 puts it ahead of new plan hints, plan usage and retry diversification within its tier; it yields for quota only when at least 95% used and more than 10 points worse than a known usable alternative; plan usage compares only the preferred models while they are honoured, and none once they are used up), `preferred_when` (optional owner-written condition, non-blank text of at most 500 characters, for example `"frontend changes without design work"`; see below) and `request_names` (1-16 lowercase extra spellings, Cyrillic stems taking Russian endings, that count as the user naming this model's family in an explicit flagship request; ordinary request, work or negation words are refused).
 
   `preferred_when` makes the preference conditional. The runtime cannot judge
   free text, so `list_route_options.preferred_when` gives the coordinator each
@@ -976,7 +980,7 @@ not a universal preset; exact model/connection identifiers must exist locally.
 | Pin | Requires an eligible exact engine/model/effort route for a worker role | User or project routing | User: yes; project: no | `{"implementation":"codex-acp/gpt-5.6-luna"}` |
 | Deny rules / whole-engine switch | Refuses routes and hides denied models; `<engine>/*` disables that engine in Cortex | User or project routing | User: yes; project: no | `["gpt-5.5"]` |
 | Model enabled switches | Selects models available in Cortex's selector and dispatch; optional OpenCode models default off | User or project routing | User: yes; project: no | `{"opencode":["provider/model-id"]}` |
-| Auto-allow | Opts an otherwise built-in-excluded exact route into automatic selection, subject to remaining policy | User or project routing | User: yes; project: no | `["claude-agent-acp/haiku"]` |
+| Auto-allow | Opts an otherwise excluded exact route (for example an OpenCode route) into automatic selection, subject to remaining policy | User or project routing | User: yes; project: no | `["opencode/anthropic/claude-sonnet-4-5"]` |
 | Model tiers | Assigns automatic-routing candidates to light, standard, deep or flagship tiers | User or project routing | User: yes; project: no | `{"gpt-5.6-luna":"light"}` |
 | Automatic-routing providers | Restricts providers considered for automatic routing, failover and pins | User or project routing | User: yes; project: no | `["opencode","claude-agent-acp"]` |
 | Engine affinity | Breaks remaining routing ties toward an engine for a work kind | User or project routing | User: yes; project: no | `{"implementation_backend":"opencode"}` |
@@ -1160,32 +1164,25 @@ Reads never rewrite the source file or profile; the policy version remains 2. Th
 
 ### Fresh-install owner default snapshot
 
-Synced from the owner's 2026-10-27 production `default` profile update,
-`codex-acp/gpt-6.1-terra` is appended to both enabled and automatic membership,
-with only the `standard` tier, `effort_floor: medium`, `max_effort: high` and
-`preferred_for: [writing, testing, debugging]`. No request labels, quota-window
-mapping, ordered per-kind lists or pin are added. The portable coordinator now
-matches production's `claude-agent-acp/opus[1m]` at medium effort; all other
-preset values remain unchanged except for the priority refinement below.
-Terra is now ranked first for standard-tier testing, debugging and writing by
-removing those competing `preferred_for` entries from Sonnet and Sol, and testing
-from Haiku and Luna (which still have `also_standard_for: [testing]`). Terra's
-own policy is unchanged; list order is not a priority mechanism. Sol retains
-review preference. No model is removed from fallback eligibility.
-Unavailable, missing-catalog or exhausted Terra can fall back to other eligible
-models; purpose preference also yields when known usage is at least 95% and
-more than 10 percentage points worse than an available alternative. Higher-priority
-provider choices and hard eligibility rules still apply. Normal-complexity
-technical writers remain light-tier; Terra's writing preference applies only at
-standard tier (for example, genuinely high-complexity writing).
-This is configuration synchronization and offline ranking, not live model qualification.
+The bundled preset lists Haiku, Luna, Sonnet, Sol and Terra as preferred for
+every work kind except frontend design implementation, whose Opus preference
+is unchanged. Preferences rank eligible models, not the tiers themselves.
+Haiku and Luna serve light work; Sonnet, Sol and Terra serve standard work;
+Sonnet and Sol serve deep work alongside conditionally preferred Opus.
+Haiku and Luna no longer count as standard candidates for testing. Normal
+testing uses the standard pool when available; fallback rules still apply.
+
+Planner, general and technical-writer roles use light, standard and deep for
+low, normal and high complexity respectively. Explorer uses light for low and
+normal, and standard for high. Deep routing targets high effort, subject to
+model-specific constraints. The portable coordinator is `claude-agent-acp/opus`
+at medium effort.
 
 The public install asset is based on the saved production `default` profile from
 2026-10-12 at 14:23 UTC, with the implementation-kind and tier refinements below. Its routing is a non-secret snapshot, including
 multi-tier memberships, effort floors/ceilings, preferences, request labels and
 quota-window associations. The portable coordinator is
-`claude-agent-acp/opus[1m]` with `thought_level: medium` (refreshed from the saved
-`default` profile); no mode override is
+`claude-agent-acp/opus` with `thought_level: medium`; no mode override is
 added. New `defaults.json` files also set `language: ru`. The install envelope
 remains schema version 1 with optional `language` (`en` or `ru`) and
 `mcp_servers` (disabled installation examples); coordinator
@@ -1203,7 +1200,7 @@ one observed selectable route. Missing or unsupported model/effort observations
 still fail closed; this snapshot is not live qualification.
 
 The preset makes `gpt-6.2-astra` flagship-only, never a deep-tier automatic candidate.
-Only `opus[1m]` lists `implementation_frontend_design` in `preferred_for`.
+Only `opus` lists `implementation_frontend_design` in `preferred_for` in the bundled preset.
 Synced from the owner's 2026-10-20 production routing update, Opus's
 `preferred_for` had narrowed to `design`, `planning`,
 `implementation_frontend_design`, `debugging` and `analysis`, dropping
@@ -1268,8 +1265,9 @@ A Cortex runtime older than that build-name ordering repoints the connection
 to the upstream install at every start; see
 [catalog refresh lifetime and deployed runtimes](features/claude-engine/index.md#catalog-refresh-lifetime-and-deployed-runtimes).
 
-Both `haiku` and `codex-acp/gpt-6-luna` have light tier, testing stretch,
-effort floor high, ladder high/xhigh/max, maximum max, identical preferred
+Both `haiku` and `codex-acp/gpt-6-luna` are light-tier only, with no
+`also_standard_for` testing override. Both have effort floor high, ladder
+high/xhigh/max, maximum max, identical preferred
 work kinds and null request names. The SDK supports all three chosen levels;
 no unsupported effort was substituted. `seven_day_haiku` associates only
 the exact new alias. The deny entry is the exact old

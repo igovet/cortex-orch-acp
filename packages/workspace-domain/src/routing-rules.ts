@@ -7,9 +7,9 @@ const without = <T,>(list: T[], item: T) => list.filter(x => x !== item);
 
 const SHIFT = { low: 1, normal: 0, high: -1 } as const;
 export type Complexity = keyof typeof SHIFT;
-/** Ordinary work moves between light and deep; flagship needs an escalation. Explorer stays light whatever happens. */
+/** Ordinary work moves between light and deep; flagship needs an escalation. Explorer escalates effort without changing its complexity tier. */
 export function tierFor(role: string, escalate: boolean, complexity: Complexity = "normal"): Tier {
-  if (role === "worker-explorer") return "light";
+  if (role === "worker-explorer") return complexity === "high" ? "standard" : "light";
   const base = ROLE_CATALOG.find(r => r.id === role)?.base ?? "standard";
   let at = TIERS.indexOf(base) + SHIFT[complexity];
   at = escalate ? at - 1 : Math.max(TIERS.indexOf("deep"), at);

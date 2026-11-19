@@ -4,7 +4,7 @@
 use super::task_facts::safe_bytes;
 use cortex_core::{CoreError, CoreResult, Store};
 use rusqlite::{Connection, OptionalExtension};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 pub(super) struct Evidence {
@@ -27,6 +27,7 @@ pub(super) struct Evidence {
     /// The open checks behind `unexplained`, named (`open_note`), in order. Native tasks
     /// only: a retained task keeps the wording its recorded projection had.
     pub blocking: Vec<String>,
+    pub not_run_checks: Vec<Value>,
 }
 /// At most this many superseded self-reported checks are named one by one.
 const NOTED_CLAIMS: usize = 10;
@@ -72,6 +73,32 @@ fn superseded_note(stage: &str, check: &Value, outcome: &str) -> String {
         None => "not confirmed by a recorded command run".to_owned(),
     };
     format!("{who} check \u{201c}{name}\u{201d}: {why}.")
+}
+/// A skipped check is display evidence only, never a rerun target or a pass.
+fn not_run_row(
+    name: &str,
+    command: Option<&Value>,
+    source: &str,
+    policy: bool,
+    manual: bool,
+    reason: &str,
+    technical: bool,
+) -> Value {
+    let mut row = json!({
+        "name": name,
+        "outcome": "not_run",
+        "source": source,
+        "kind": if policy { "policy" } else if manual { "manual" } else { "automated" },
+        "detail": reason,
+        "rerunnable": false,
+    });
+    if let Some(command) = command.filter(|argv| nonempty_command(argv)) {
+        row["command"] = command.clone();
+    }
+    if technical {
+        row["technicalReason"] = json!(reason);
+    }
+    row
 }
 fn outcome_words(outcome: &str) -> &'static str {
     match outcome {
@@ -359,9 +386,27 @@ fn policy(check: &Value) -> bool {
     .any(|word| text.contains(word))
         || paid_command(&check["command"])
 }
+/// The repository's explicit no-paid reporting convention. Only a skipped
+/// observation outside the runtime verification plan can be informational.
+fn optional_paid_observation(check: &Value, expected: &[Value]) -> bool {
+    let command = &check["command"];
+    check["outcome"] == "not_run"
+        && check["tool_call_ref"].is_null()
+        && (command.is_null() || (paid_command(command) && !expected.contains(command)))
+        && check["blocker"].as_str().is_some_and(|reason| {
+            reason
+                .trim()
+                .trim_end_matches('.')
+                .eq_ignore_ascii_case("paid live check not requested by the owner")
+        })
+}
 fn paid_command(value: &Value) -> bool {
     value.as_array().is_some_and(|a| {
-        a.iter().filter_map(Value::as_str).any(|w| {
+        a.windows(2).any(|pair| {
+            pair[0].as_str().and_then(|path| path.rsplit('/').next())
+                == Some("cortex-paseo-tools.sh")
+                && matches!(pair[1].as_str(), Some("probe-codex" | "probe-claude"))
+        }) || a.iter().filter_map(Value::as_str).any(|w| {
             w.contains("cortex_codex_probe.py")
                 || w.contains("cortex_claude_probe.py")
                 || w == "--i-authorize-paid-call"
@@ -409,6 +454,7 @@ pub(super) fn evaluate(
                 scoped: false,
                 review_warnings: vec![],
                 blocking: vec![],
+                not_run_checks: vec![],
             })
         }
         other => other,
@@ -455,10 +501,17 @@ fn evaluate_exact(
     let mut scoped = false;
     let mut review_warnings = Vec::new();
     let mut blocking = Vec::new();
+    let mut not_run_checks = Vec::new();
     let final_closures = super::task_facts_rerun::final_closures(db, store, task, revision)?;
     if let Some((id, kind, raw)) = &verification {
         let value: Value = serde_json::from_str(raw)?;
         let current = value["revision"] == revision;
+        let current_result = current
+            && db.query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='TASK_REOPENED' AND id>?)",
+                (task, *id),
+                |r| r.get::<_, bool>(0),
+            )?;
         let bound = current && valid_digest(&value["revision_digest"]);
         let checks = commands(value.get("checks").unwrap_or(&empty))?;
         let mut all_passed = true;
@@ -481,11 +534,10 @@ fn evaluate_exact(
                 Some(c) if c["exit_code"].as_i64().is_some_and(|n| n != 0) => "failed",
                 _ => "unverified",
             };
-            let outcome = attempts
+            let attempt = attempts
                 .get(Some("runtime-verification"), i)
-                .filter(|attempt| attempt.id > *id)
-                .map(|attempt| attempt.outcome)
-                .unwrap_or(outcome);
+                .filter(|attempt| attempt.id > *id);
+            let outcome = attempt.map(|a| a.outcome).unwrap_or(outcome);
             let manual = expected.get(i).is_none() && matches!(outcome, "not_run" | "unverified");
             all_passed &= outcome == "passed";
             let policy = expected.get(i).is_some_and(paid_command);
@@ -504,7 +556,37 @@ fn evaluate_exact(
                         .get(Some("runtime-verification"), i)
                         .filter(|a| a.id > *id)
                         .is_none());
-            if unaccounted && native_task {
+            if current_result && outcome == "not_run" {
+                let command = expected
+                    .get(i)
+                    .or_else(|| check.and_then(|c| c.get("argv")));
+                let name = command
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let reason = attempt
+                    .and_then(|a| a.blocker.as_deref())
+                    .or_else(|| check.and_then(|c| c["blocker"].as_str()))
+                    .filter(|reason| !reason.trim().is_empty())
+                    .unwrap_or(if policy {
+                        "This command is restricted by verification policy."
+                    } else {
+                        "No execution was recorded for this runtime check."
+                    });
+                not_run_checks.push(not_run_row(
+                    &name,
+                    command,
+                    "runtime",
+                    policy,
+                    manual,
+                    reason,
+                    !unaccounted,
+                ));
+            }
+            if open && !manual && native_task {
                 blocking.push(format!(
                     "Runtime check {} {}.",
                     i + 1,
@@ -751,8 +833,43 @@ fn evaluate_exact(
             // or not run (never a failure, never a policy-blocked one) is a visible
             // note, not an open check. Runtime verification and independent review
             // decide; a superseded claim cannot be rerun from the result anyway.
-            if settled && matches!(outcome, "not_run" | "unverified") && !policy_gap {
+            let superseded_by_verification =
+                settled && matches!(outcome, "not_run" | "unverified") && !policy_gap;
+            let attempt = attempts.get(assignment.as_deref(), index);
+            let optional_policy = settled
+                && matches
+                && attempt.is_none()
+                && !receipt_policy
+                && optional_paid_observation(check, expected);
+            if outcome == "not_run" {
+                let attempt_reason = attempt.and_then(|a| a.blocker.as_deref());
+                let reason = attempt_reason
+                    .or_else(|| check["blocker"].as_str().filter(|s| !s.trim().is_empty()))
+                    .unwrap_or(if policy_gap {
+                        "This check is restricted by verification policy."
+                    } else {
+                        "No execution was recorded for this check."
+                    });
+                not_run_checks.push(not_run_row(
+                    check["name"].as_str().unwrap_or(""),
+                    check.get("command"),
+                    if attempt_reason.is_some() {
+                        "runtime"
+                    } else {
+                        "worker"
+                    },
+                    policy_gap,
+                    manual,
+                    reason,
+                    superseded_by_verification || policy_gap || attempt_reason.is_some(),
+                ));
+            }
+            if superseded_by_verification {
                 superseded.push(superseded_note(&stage, check, outcome));
+                count += 1;
+                continue;
+            }
+            if optional_policy {
                 count += 1;
                 continue;
             }
@@ -763,7 +880,7 @@ fn evaluate_exact(
                 && !(target && policy(check))
                 && !receipt_policy
                 && (outcome != "not_run" || attempts.get(assignment.as_deref(), index).is_none());
-            if unaccounted && native_task {
+            if open && native_task {
                 blocking.push(open_note(&stage, check, outcome));
             }
             unexplained |= unaccounted;
@@ -809,5 +926,6 @@ fn evaluate_exact(
         scoped,
         review_warnings,
         blocking,
+        not_run_checks,
     })
 }

@@ -30,6 +30,7 @@ pub(crate) fn authority(code: &str) -> bool {
             | "writing_scope_required"
             | "readonly_delete_refused"
             | "write_denied"
+            | "read_only_task_writer_refused"
             | "outside_cwd_denied"
             | "deletion_not_confirmed"
             | "outside_action_not_confirmed"
@@ -82,6 +83,7 @@ fn field(code: &str) -> Option<&'static str> {
         "invalid_verification_command"
         | "verification_shell_syntax"
         | "verification_executable_unavailable" => "argv",
+        "verification_failed_check_missing" | "automatic_required_check_missing" => "verification",
         "synthesis_text_required" => "text",
         "synthesis_gaps_undisclosed" | "invalid_not_verified" | "synthesis_blocker_required" => {
             "not_verified"
@@ -124,6 +126,7 @@ fn hint(code: &str) -> &'static str {
         "synthesis_disclosure_in_text" => "Put verification-gap disclosures only in not_verified, not in text.",
         "invalid_not_verified" | "synthesis_blocker_required" => "Each not_verified entry needs the exact check name and a concrete blocker.",
         "plan_not_expected" => "A plan is accepted only while planning; end the turn and wait for the runtime.",
+        "verification_failed_check_missing" | "automatic_required_check_missing" => "Keep the unresolved verification commands in the repair plan with their exact argv. Assign the underlying code fix to a writing worker so the runtime can verify it again.",
         "verification_repair_not_expected" => "No verification repair is expected now; end the turn and wait for the runtime.",
         "unknown_model_hint" => "Use a model from list_route_options, or omit the model hint.",
         "worker_waiting_for_answer" => "A question from this assignment is still open. End the turn; the runtime resumes it with the answer.",

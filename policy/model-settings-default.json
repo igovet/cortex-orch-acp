@@ -84,17 +84,20 @@
             "preferred_for": [
               "implementation_backend",
               "implementation_frontend",
+              "operations",
+              "debugging",
+              "testing",
               "investigation",
               "review",
-              "analysis",
-              "operations"
+              "design",
+              "writing",
+              "planning",
+              "analysis"
             ],
             "request_names": null
           },
           "haiku": {
-            "also_standard_for": [
-              "testing"
-            ],
+            "also_standard_for": null,
             "effort_floor": "high",
             "effort_ladder": [
               "high",
@@ -103,13 +106,17 @@
             ],
             "max_effort": "max",
             "preferred_for": [
-              "analysis",
-              "writing",
               "implementation_backend",
               "implementation_frontend",
+              "operations",
               "debugging",
+              "testing",
               "investigation",
-              "operations"
+              "review",
+              "design",
+              "writing",
+              "planning",
+              "analysis"
             ],
             "request_names": null
           },
@@ -172,9 +179,7 @@
             ]
           },
           "gpt-6-luna": {
-            "also_standard_for": [
-              "testing"
-            ],
+            "also_standard_for": null,
             "effort_floor": "high",
             "effort_ladder": [
               "high",
@@ -183,13 +188,17 @@
             ],
             "max_effort": "max",
             "preferred_for": [
-              "analysis",
-              "writing",
               "implementation_backend",
               "implementation_frontend",
+              "operations",
               "debugging",
+              "testing",
               "investigation",
-              "operations"
+              "review",
+              "design",
+              "writing",
+              "planning",
+              "analysis"
             ],
             "request_names": null
           },
@@ -201,12 +210,15 @@
             "preferred_for": [
               "implementation_backend",
               "implementation_frontend",
-              "planning",
-              "design",
-              "review",
               "operations",
-              "analysis",
-              "investigation"
+              "debugging",
+              "testing",
+              "investigation",
+              "review",
+              "design",
+              "writing",
+              "planning",
+              "analysis"
             ],
             "preferred_when": null,
             "request_names": null
@@ -215,9 +227,17 @@
             "effort_floor": "medium",
             "max_effort": "high",
             "preferred_for": [
-              "writing",
+              "implementation_backend",
+              "implementation_frontend",
+              "operations",
+              "debugging",
               "testing",
-              "debugging"
+              "investigation",
+              "review",
+              "design",
+              "writing",
+              "planning",
+              "analysis"
             ]
           }
         }
@@ -259,7 +279,7 @@
   },
   "coordinator": {
     "engine": "claude-agent-acp",
-    "model": "fable",
+    "model": "opus",
     "parameters": {
       "thought_level": "medium"
     }

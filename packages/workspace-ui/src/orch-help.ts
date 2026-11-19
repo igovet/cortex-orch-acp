@@ -96,7 +96,7 @@ export const HELP = {
       ["effort_floor", "Lowest effort this model is ever run at. Recommended: set it for models that work badly at low effort."],
       ["max_effort", "Highest effort allowed; without it a flagship model stops at high. Recommended: unset, or xhigh/max only for a model you accept as expensive."],
       ["effort_ladder", "For a light model: 1–3 ascending efforts for light work, standard work, and a retry after falling short. Choose only this model's observed levels with Add, then reorder or remove entries. Clearing the list writes Neutral (unset)."],
-      ["also_standard_for", "Work kinds where a light model also counts as a standard candidate (for example testing)."],
+      ["also_standard_for", "Work kinds where a light model also counts as a standard candidate."],
       ["preferred_for", "Work kinds this model is preferred for within its tier; pick them from the list. The model must be an automatic member. With preferred_when set, these kinds only narrow that condition (none: any kind)."],
       ["preferred_when", "Optional free-text condition, for example \"frontend changes without design work\". The runtime cannot judge text: the coordinator reads it, and for each task step that meets it names this model, which then ranks first as preferred. Steps that do not meet it treat the model as an ordinary candidate. Retries and fixes ignore the condition. Up to 500 characters."],
       ["request_names", "Extra lowercase names (Russian stems allowed) that count as you naming this model in a request such as \"do it with …\". Recommended: the short name you actually type."],
@@ -121,8 +121,8 @@ export const HELP = {
     ],
   ),
   deny: "Models or engines never to use: hidden from the model selector, refused when chosen or pinned, never routed. Entry forms: exact model id, engine/model, or engine/* for a whole engine. Deny always wins. Recommended: let the Models and Engines & models switches write these entries.",
-  autoAllow: "Stored, has no effect under current routing. Use Auto in Models.",
-  tiers: "Legacy top-level tiers are refused by model policy version 2. Migrate them; tiers live per engine in Models.",
+  autoAllow: "Exact routes that automatic routing leaves out by default, such as OpenCode routes, written as opencode/<provider>/<model>. Each OpenCode model has its own switch in its details under Engines and models.",
+  tiers: "Legacy top-level tiers are refused by model policy version 2. Migrate them; tiers live per model under Engines and models.",
   providers: "Engines automatic worker routing, failover and pins may use. Every engine stays selectable by hand; the order does not rank them. Recommended: off (all engines), or the engines whose plans you want workers to spend.",
   affinity: helpBlock(
     "Tie-breaker: which engine to lean to for a kind of work when candidates are otherwise equal. Never overrides pins, deny, the engine list, availability or quota.",
@@ -216,18 +216,18 @@ export const ROLE_HELP: Record<string, HelpText> = {
   "worker-database-architect": "designs schemas, indexes, migrations and query plans",
   "worker-debugger": "reproduces failures, proves the root cause, fixes and verifies",
   "worker-devops-engineer": "works on CI/CD, containers and deployment safety",
-  "worker-explorer": "maps execution paths, dependencies and relevant files without changing them",
+  "worker-explorer": "maps execution paths, dependencies and relevant files without changing them; automatic model tier: light for low and normal, standard for high complexity",
   "worker-frontend-dev": "implements UI components, state, styling and UI tests",
   "worker-fullstack-dev": "makes coordinated backend and frontend changes",
-  "worker-general": "general agent for research, analysis or small implementation",
+  "worker-general": "general agent for research, analysis or small implementation; automatic model tier: light for low, standard for normal, deep for high complexity",
   "worker-mobile-dev": "implements iOS, Android, React Native or Flutter changes",
   "worker-performance-engineer": "finds bottlenecks and makes safe optimizations",
-  "worker-planner": "breaks work into steps, dependencies, risks and checks",
+  "worker-planner": "breaks work into steps, dependencies, risks and checks; automatic model tier: light for low, standard for normal, deep for high complexity",
   "worker-qa-engineer": "writes automated tests and reproduction scenarios",
   "worker-refactorer": "restructures code without changing behavior",
   "worker-security-auditor": "audits auth, secrets, cryptography, dependencies and data protection",
   "worker-senior-consultant": "gives senior decisions on the coordinator's request from published reports",
-  "worker-technical-writer": "writes project and feature documentation",
+  "worker-technical-writer": "writes project and feature documentation; automatic model tier: light for low, standard for normal, deep for high complexity",
   "worker-ux-designer": "designs layouts, interaction flows and responsive behavior",
 };
 
@@ -238,6 +238,8 @@ export function workKindHelp(kind: string, roles: readonly string[]): HelpText {
   return `${base}\n${agents}`;
 }
 
+/** The lead of the Profiles section: the first two sentences of its help. */
+export const profilesLead = () => HELP.profilesIntro.split(/(?<=\.)\s+/).slice(0, 2).join(" ");
 export const PREFERRED_WHEN_HELP = "Optional condition in your own words, for example \"frontend changes without design work\". The coordinator judges each task step against it and names this model for the steps that meet it; the model then ranks first for them. The switches above, if any, limit the condition to those kinds of work. Steps that do not meet it treat the model as an ordinary candidate. Leave empty for a plain preference by kind of work.";
 
 export const PREFERRED_WORK_HELP = "Turn a work kind on to rank this model first, within its tier, when a worker is picked for that kind. It affects only automatic worker selection (not the coordinator or models you pick by hand), never overrides availability, policy or plan usage, and needs the model selected for automatic ranking. Recommended: mark only the kinds where this model is clearly strongest; leave the rest off.";

@@ -7,6 +7,8 @@ Scope: crash/uncertain-outcome handling without duplicate mutation, hidden
 paid work, accidental rollback, or cleanup of user resources. It covers the
 permission bridge and binding registry, capacity, delivery ledger, questions and steering, process identity and recovery, isolated workspaces, and the route-profile fallback denylist.
 
+A worker that ends its turn after receiving a pending command reply or a `command_not_settled` refusal can receive up to two same-session follow-ups. Workspace waits for the supervised commands identified on that attempt and supplies their final receipts. This also covers a command that settles between the pending reply and the end of the turn. The command supervisor retains its original deadline. Missing terminal evidence blocks continuation.
+
 ## 1. Failure classification
 
 `engine.failure_classification.classify(kind, message=None, exit_code=None,

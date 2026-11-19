@@ -31,7 +31,7 @@ it.skipIf(!socket)("persisted source drift is actionable; a reviewer search is m
     if(f.drift) {
       expect(button("Accept v1")?.getAttribute("aria-disabled")).toBe("true");
       expect(root.textContent).toMatch(/files changed|source changed|worktree changed|no longer matches the worktree/i);
-      expect(button("Request a new result…")).toBeDefined();
+      expect(button("Ask agent to fix")).toBeDefined();
       button("Accept v1")!.click();
       await new Promise(r=>setTimeout(r,50));
       expect((await rpc("machine.call",{op:"product.read",projectId:f.projectId})).result.tasks[f.taskId].acceptance).toBeUndefined();

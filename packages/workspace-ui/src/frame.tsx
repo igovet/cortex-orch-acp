@@ -1,6 +1,6 @@
 import { createMemo, For, Match, Show, Switch } from "solid-js";
 import { LiveTerminal } from "./terminal";
-import { FEATURES } from "@cortex/workspace-domain";
+import { FEATURES, queueDrivenMode } from "@cortex/workspace-domain";
 import { ArchiveFacts, DeleteArchive } from "./archive";
 import { useWs, type PhoneFrame, type WindowChrome } from "./ctx";
 import { machineLine } from "./phone-words";
@@ -10,13 +10,13 @@ import { GitPanel } from "./git";
 import { A, FactLine, I, Keyed, MenuItem, OverviewShown, Pop, useWantOverview } from "./kit";
 import { revealCutIn, Strip, Whole } from "./layout";
 import { SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN } from "./prefs";
-import { APP_SECTIONS, MACHINE_SECTIONS, ORCHESTRATION_PAGES, type OrchestrationPage, type Route, type SettingsSection } from "./router";
+import { APP_SECTIONS, MACHINE_SECTIONS, ORCHESTRATION_LABELS, ORCHESTRATION_SECTIONS, orchestrationSection, type OrchestrationSection, type Route, type SettingsSection } from "./router";
 import { defaultCheckout, repoOf } from "./review-model";
-import { asOf, awaitsOwner, checkCounts, clock, dayClock, engineLimits, limitsText, newestObserved, homeView, inboxItems, projectsOn, rowIcon, sameBranch, sideRows, sideWord, sprintRoute, sprintView, type EngineLimit, type LimitWindow, type ProjectSummary, type SideRow, type TaskView } from "./selectors";
+import { asOf, awaitsOwner, humanStatus, checkCounts, clock, dayClock, engineLimits, limitsText, newestObserved, homeView, inboxItems, planningNeedsOwner, projectsOn, rowIcon, sameBranch, sideRows, sideWord, sprintModeLabel, sprintRoute, sprintView, type EngineLimit, type LimitWindow, type ProjectSummary, type SideRow, type TaskView } from "./selectors";
 import { workerFace } from "./session-model";
 import { same } from "./stable";
 import { SprintActions, SprintCrumb } from "./sprint";
-import { BranchChip, TaskActions, TaskInspector, TaskTitle, taskWhyId } from "./task-chrome";
+import { BranchChip, TaskActions, TaskInspector, TaskTitle, taskTitle, taskWhyId } from "./task-chrome";
 import { BandActions } from "./git-actions";
 
 const tile = (name: string, n: number) => ({ letter: name[0]?.toUpperCase() ?? "?", cls: `t${(n % 6) + 1}` });
@@ -27,7 +27,9 @@ function useRouteContext() {
   const ws = useWs();
   const view = createMemo(() => {
     const r = ws.router.route();
-    return r.name === "task" ? ws.store.index().byId.get(r.task) ?? null : null;
+    // A sprint's planning task has no title band of its own (no task, Git or commit actions): its address opens its sprint.
+    if (r.name !== "task" || ws.store.state().sprints.some(s => s.planningTaskId === r.task)) return null;
+    return ws.store.index().byId.get(r.task) ?? null;
   });
   const summary = createMemo(() => {
     const r = ws.router.route();
@@ -179,9 +181,11 @@ function ProjectRow(props: { summary: ProjectSummary; n: number; openByDefault: 
       <div class="tasks">
         <Keyed each={sideRows(ws.store.index(), props.summary)} by={r => r.kind === "task" ? r.view.id : `s:${r.sprint.id}`}>{r => {
           const sprint = () => r() as Extract<SideRow, { kind: "sprint" }>;
+          // A question or permission of the sprint's planning task is the sprint's: the task has no row of its own.
+          const asks = () => planningNeedsOwner(ws.store.state(), sprint().sprint);
           return r().kind === "task" ? <TaskRow view={(r() as Extract<SideRow, { kind: "task" }>).view} />
             : <A class="task-row" to={sprintRoute(props.summary.machine.id, sprint().sprint)}>
-              <I n="layers" s={14} class="faint" /><span class="trunc">Sprint: {sprintView(ws.store.index(), sprint().sprint).title}</span><span class={`sig tnum${sprint().sprint.deletion || sprint().sprint.planning === "question" ? " st-warn" : ""}`}>{sprint().sprint.deletion ? "Deleting" : sprint().sprint.planning === "created" ? sprint().sprint.queueState === "complete" ? "Done" : `${sprint().started}/${sprint().total}` : sprint().sprint.planning === "question" ? "Needs you" : "Planning"}</span>
+              <I n="layers" s={14} class="faint" /><span class="trunc">Sprint: {sprintView(ws.store.index(), sprint().sprint).title}</span><span class={`sig tnum${sprint().sprint.deletion || asks() ? " st-warn" : ""}`}>{sprint().sprint.deletion ? "Deleting" : sprint().sprint.planning === "created" ? sprint().sprint.queueState === "complete" ? "Done" : `${sprint().started}/${sprint().total}` : asks() ? "Needs you" : "Planning"}</span>
             </A>;
         }}</Keyed>
         <Show when={props.summary.views.length > 0}><A class="task-row all" to={project(props.summary.machine.id, id())}>All {props.summary.views.length}</A></Show>
@@ -194,8 +198,8 @@ function TaskRow(props: { view: TaskView }) {
   const ws = useWs();
   const route = () => ws.router.route();
   const word = () => sideWord(props.view);
-  return <A class="task-row" to={{ name: "task", machine: props.view.machine.id, task: props.view.id }} aria-current={(() => { const r = route(); return r.name === "task" && r.task === props.view.id ? "page" : undefined; })()}>
-    <I n={rowIcon(props.view)} s={14} class={awaitsOwner(props.view) ? "st-warn" : props.view.fact.tone} /><span class="trunc">{props.view.task.title}</span><span class={`sig${awaitsOwner(props.view) ? " st-warn" : ""}`}>{word()}</span>
+  return <A class="task-row" aria-label={`${taskTitle(props.view.task)} — ${word()}`} to={{ name: "task", machine: props.view.machine.id, task: props.view.id }} aria-current={(() => { const r = route(); return r.name === "task" && r.task === props.view.id ? "page" : undefined; })()}>
+    <I n={rowIcon(props.view)} s={14} class={awaitsOwner(props.view) ? "st-warn" : props.view.fact.tone} /><span class="trunc">{taskTitle(props.view.task)}</span><span class={`sig${awaitsOwner(props.view) ? " st-warn" : ""}`}>{word()}</span>
   </A>;
 }
 
@@ -302,9 +306,8 @@ function Sidebar() {
 
 const SECTION_LABEL: Record<SettingsSection, string> = {
   appearance: "Appearance", updates: "Updates", voice: "Voice input", shortcuts: "Shortcuts", machines: "All machines", overview: "Overview",
-  orchestration: "Orchestration", connections: "Engine connections", worktrees: "Worktrees", storage: "Storage and archive", diagnostics: "Diagnostics", remote: "Remote access",
+  orchestration: "Orchestration", connections: "Connections", worktrees: "Worktrees", storage: "Storage and archive", diagnostics: "Diagnostics", remote: "Remote access",
 };
-const PAGE_LABEL: Record<OrchestrationPage, string> = { defaults: "Coordinator", models: "Models", routing: "Routing", effective: "Route preview", policy: "Limits and fallback", tools: "Tools and MCP", profiles: "Profiles", files: "Files and presets" };
 const SECTION_ICON: Record<SettingsSection, string> = {
   appearance: "palette", updates: "download", voice: "mic", shortcuts: "keyboard", machines: "server", overview: "laptop",
   orchestration: "sliders", connections: "plug", worktrees: "branch", storage: "database", diagnostics: "activity", remote: "cloud",
@@ -315,11 +318,15 @@ function SettingsNav() {
   const r = () => { const x = ws.router.route(); return x.name === "settings" ? x : null; };
   // A component, so each machine read leaves the links in place: a call with the machine's id redrew all of them
   // under a resting pointer whenever the machine's record moved.
-  const Item = (p: { section: SettingsSection; machine: string | null }) => <A class="snav" role="tab" to={{ name: "settings", section: p.section, machine: p.machine }} aria-selected={r()?.section === p.section && !r()?.page ? "true" : "false"}>
+  // These are page links, not tabs: the open one says so with aria-current, and Tab moves through them like any link.
+  const Item = (p: { section: SettingsSection; machine: string | null }) => <A class="snav" to={{ name: "settings", section: p.section, machine: p.machine }} aria-current={r()?.section === p.section && !r()?.page && p.section !== "orchestration" ? "page" : undefined}>
     <I n={SECTION_ICON[p.section]} /><span class="trunc">{SECTION_LABEL[p.section]}</span>
     <Show when={p.section === "machines"}><span class="r">{ws.store.state().machines.length}</span></Show>
   </A>;
-  const page = (id: OrchestrationPage) => <A class="snav sub" role="tab" to={{ name: "settings", section: "orchestration", machine: ws.machine().id, page: id }} aria-selected={r()?.page === id ? "true" : "false"}><span class="trunc">{PAGE_LABEL[id]}</span></A>;
+  // The eight orchestration sections sit under Orchestration; a page a section opens (Route preview, Files and sources, an MCP
+  // server) keeps that section selected. Connections is the machine's own connections route.
+  const sectionOn = () => { const x = r(); return x ? orchestrationSection(x, ws.settings.scope()) : null; };
+  const page = (id: OrchestrationSection) => <A class="snav sub" to={id === "connections" ? { name: "settings", section: "connections", machine: ws.machine().id } : { name: "settings", section: "orchestration", machine: ws.machine().id, page: id }} aria-current={sectionOn() === id ? "page" : undefined}><span class="trunc">{ORCHESTRATION_LABELS[id]}</span></A>;
   const switchTo = (id: string) => { const x = r(); ws.go(x?.machine ? { ...x, machine: id } : { name: "settings", section: "overview", machine: id }); };
   const connection = (m: { connection: string; lastConfirmedAt: string | null; kind: string }) => m.connection === "connected" ? `${m.kind === "local" ? "Local" : "Remote"}, connected` : `Offline, read-only, last seen ${clock(m.lastConfirmedAt)}`;
   return <nav class="sidebar" aria-label="Settings">
@@ -338,7 +345,7 @@ function SettingsNav() {
       </Pop>
       </Show>
       {/* A phone reaches this machine's remote access only from the computer itself. */}
-      <For each={ws.shell.kind === "phone" ? MACHINE_SECTIONS.filter(s => s !== "remote") : MACHINE_SECTIONS}>{s => <><Item section={s} machine={ws.machine().id} /><Show when={s === "orchestration"}><For each={ORCHESTRATION_PAGES}>{page}</For></Show></>}</For>
+      <For each={MACHINE_SECTIONS.filter(s => s !== "connections" && (ws.shell.kind !== "phone" || s !== "remote"))}>{s => <><Item section={s} machine={ws.machine().id} /><Show when={s === "orchestration"}><For each={ORCHESTRATION_SECTIONS}>{page}</For></Show></>}</For>
     </div>
     <SidebarUsage />
     <SidebarFoot />
@@ -401,10 +408,10 @@ function SprintPanel(props: { sprintId: string }) {
     <div class="ins-sec">
       <div class="ins-h"><span>Run</span></div>
       <dl class="kv">
-        <dt>Mode</dt><dd>{v().sprint.runMode === "automatic" ? "Automatic, one task at a time" : "Manual"}</dd>
+        <dt>Mode</dt><dd>{sprintModeLabel[v().sprint.runMode]}{queueDrivenMode(v().sprint.runMode) ? ", one task at a time" : ""}</dd>
         <dt>Target branch</dt><dd class="mono">{v().sprint.targetBranch ?? ws.store.index().summaries.get(v().sprint.projectId)?.project.defaultBranch}</dd>
-        <dt>Finishing</dt><dd>Each task waits for your confirmation</dd>
-        <Show when={v().sprint.pauseReason}><dt>Paused</dt><dd>{v().sprint.pauseReason}</dd></Show>
+        <dt>Finishing</dt><dd>{v().sprint.runMode === "automatic" ? "Automatic on the current branch; another target needs confirmation" : "Each task waits for your confirmation"}</dd>
+        <Show when={v().sprint.pauseReason}><dt>Paused</dt><dd>{humanStatus(v().sprint.pauseReason)}</dd></Show>
       </dl>
     </div>
     <Show when={v().views.length > 0}>

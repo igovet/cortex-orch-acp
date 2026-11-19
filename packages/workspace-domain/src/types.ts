@@ -99,7 +99,7 @@ export type TaskStatus = "draft" | "working" | "needs_you" | "stopping" | "pause
 /** Exactly what the owner accepted. `open` keeps the checks that had not passed, so an override can never read as a clean pass. */
 export type Acceptance = { automatic?: boolean; version: number; digest: string; at?: number | null; open?: { failed: number; not_run: number; unverified: number } | null };
 /** `url`: the address GitHub CLI reported for a pull request, recorded only when it is https on the repository's remote host. */
-export type Integration = { method: "squash" | "pr" | "commit"; targetBranch: string; digest: string; mock?: true; message?: string; title?: string; draft?: boolean; url?: string };
+export type Integration = { method: "squash" | "pr" | "commit"; targetBranch: string; digest: string; automatic?: boolean; committed?: boolean; mock?: true; message?: string; title?: string; draft?: boolean; url?: string };
 /** One side of a conflict block as the three-way view shows it. `hit` lists the lines that differ. */
 export type CodeSide = { ref: string; start: number; lines: string[]; hit: number[] };
 export type BlockChoice = "ours" | "theirs" | "both" | "cortex";
@@ -115,6 +115,10 @@ export type MergeState = MergeSeed & {
   guidance: string | null; step: number; failure: string | null; finished: boolean;
   before: { status: TaskStatus; acceptance: Acceptance | null; result: Result | null; digest: string | null }; mock?: true;
 };
+export type AutomaticContinuation = {
+  policy: "automatic_continuation"; continuationCount: number; lastContinuationReason: string | null;
+  pause: { eventId: string; kind: "external_blocker" | "continuation_cap" | "outcome_unknown"; reason: string } | null;
+};
 export type Task = {
   id: string; projectId: string; sprintId: string | null; description: string;
   sourceVersion?: string;
@@ -126,7 +130,9 @@ export type Task = {
   /** `pending`: the machine had not finished checking this result against the project folder when it answered; Accept stays off with that reason until a later read settles it. */
   reviewActions?: { accept: boolean; reason: string | null; unblockAction: "wait" | "request_changes" | "rerun_checks" | "refresh" | null; pending?: boolean;
     /** The machine accepts this version only with the owner's explicit acknowledgement of its open checks. */
-    acknowledgeOpenChecks?: boolean };
+    acknowledgeOpenChecks?: boolean;
+    /** Outside a queue hold: who acts next on this task, what the owner is asked and the actions offered (a failed run). */
+    nextActor?: HoldActor; ownerActions?: OwnerHoldAction[]; asks?: string[] };
   conflict: "none" | "conflict" | "resolving" | "failed";
   merge: MergeState | null; resolvedBy: "cortex" | "you" | null;
   integration: Integration | null;
@@ -140,7 +146,7 @@ export type Task = {
   unexpectedChanges: boolean; purgeBlocker: string | null; settings: TaskSettings; mock?: true;
   /** When the machine last confirmed this record. Absent on a record the machine has not reported. */
   lastConfirmedAt?: number | null;
-  observedPhase?: string; warnings?: string[];
+  observedPhase?: string; warnings?: string[]; automaticContinuation?: AutomaticContinuation;
   /** Confirmed runtime route, separate from editable task settings. */
   coordinatorRoute?: { model: string; effort: string } | null;
   /** The owner's `deny-write` paths in force for this task (runtime facts), with when each was set; Remove lifts one. */
@@ -152,8 +158,26 @@ export type PlanItem = { key: string; description: string; dependsOn: string[]; 
 export type PlanVersion = { version: number; items: PlanItem[] };
 /** One line of the planning conversation. `event` lines record what the owner did, not what anyone said. */
 export type SprintEntry = { attachments?: AttachmentInput[]; kind: "question" | "answer" | "note" | "message" | "event"; text: string; options?: string[]; at?: number | null; mock?: true };
+export type SprintRunMode = "manual" | "hybrid" | "automatic";
+/** Who acts next on a held task: the runtime rechecks by itself, the agent repairs it, or only the owner can decide. */
+export type HoldActor = "runtime" | "agent" | "owner";
+/** The owner actions a hold offers, primary first; `close_as_is` is always the separate, confirmed way out. */
+export type OwnerHoldAction = "allow_finish" | "accept_result" | "allow_repair" | "allow_retries" | "confirm_and_continue" | "resume_task" | "retry"
+  | "confirm_integration" | "resolve_conflict" | "change_run_mode" | "ask_agent" | "close_as_is";
+/** A Hybrid or Automatic queue hold, decided by the service: `nextActor`, `ownerActions` and the plain-language `asks`.
+ *  Holds saved by earlier versions lack them until the next scheduler pass rewrites them. */
+export type AutomaticQueue = {
+  kind: "start_refused" | "continuation" | "settlement_blocked" | "owner_integration";
+  taskId: string | null; code: string; reason: string; needsOwner: boolean;
+  nextActor?: HoldActor; ownerActions?: OwnerHoldAction[]; asks?: string[];
+  /** When the owner allowed the agent repair this hold asks for; the scheduler acts on it in its next pass. */
+  allowedAt?: number;
+  /** The hold's identity: kept while the service rewrites the same condition, new for any other hold. */
+  holdId?: string;
+};
 export type Sprint = {
-  id: string; projectId: string; description: string; attachments?: AttachmentInput[]; title?: string | null; runMode: "manual" | "automatic";
+  automaticQueue?: AutomaticQueue;
+  id: string; projectId: string; description: string; attachments?: AttachmentInput[]; title?: string | null; runMode: SprintRunMode;
   /** Chosen once for all new sprint tasks. Absent on older sprints. */
   checkout?: { kind: CheckoutChoice["kind"] };
   archivedAt?: number;
@@ -189,6 +213,11 @@ export type WorkerResult = {
   edits?: { path: string; add: number; del: number }[];
   attempts?: { n: number; ok: boolean; detail: string; at: number | null }[];
 };
+export type WorkerReview = {
+  verdict?: "APPROVE" | "REQUEST_CHANGES" | "BLOCK" | "INCOMPLETE";
+  notCovered?: { item: string; reason: string }[];
+  rerun?: { reason: string; previousWorkerId: string; followUpWorkerId: string };
+};
 /** A recorded route. `engine` is the engine key (`claude-agent-acp`, `codex-acp`, `opencode`) when the machine recorded it. */
 /** `why`: for a reviewer, why it got this route, as the runtime recorded it. */
 /** `modelLabel`: the engine's own display name for the model, recorded when the session was configured (absent in older records). */
@@ -205,7 +234,7 @@ export type Worker = {
   routeAttempts?: { n: number; route: WorkerRoute | null }[];
   elapsedMs: number | null; runningSince: number | null;
   context: { used: number; window: number } | null; usage: number | null;
-  activity: Activity[]; result: WorkerResult | null; messages?: Message[]; activityPartial?: boolean; activityCursor?: string | null; mock?: true;
+  activity: Activity[]; result: WorkerResult | null; review?: WorkerReview; messages?: Message[]; activityPartial?: boolean; activityCursor?: string | null; mock?: true;
   /** A worker of an earlier version of the result (the task was reopened or replanned after it). Its checks are history. */
   superseded?: true;
   /** Set by the app, never read from the machine: the last facts showed this worker running, but the task has since ended, so its state is no longer confirmed. */
@@ -384,7 +413,7 @@ export type WorkspaceCommand =
   | { type: "set_task_settings"; taskId: string; settings: Partial<TaskSettings> }
   | { type: "close_task"; taskId: string; choice: "as_is" | "cancel" | "external" | "already_in_target"; confirmed: boolean; now: number }
   | { type: "rerun_check"; taskId: string; digest: string; checkIndex: number }
-  | { type: "accept_result"; taskId: string; digest: string; openChecks?: boolean; now?: number }
+  | { type: "accept_result"; taskId: string; digest: string; sourceVersion?: string; openChecks?: boolean; automaticFinish?: { sprintId: string; targetBranch: string }; now?: number }
   | { type: "integrate"; taskId: string; method: "squash" | "pr" | "commit"; confirmed: boolean; digest: string; targetBranch: string; now: number; message?: string; title?: string; draft?: boolean; deleteWorktree?: boolean }
   | { type: "request_changes"; taskId: string; text: string; attachments?: AttachmentInput[]; now?: number }
   | { type: "add_comment"; taskId: string; path: string; line: number; text: string; attachments?: AttachmentInput[] }
@@ -420,6 +449,8 @@ export type WorkspaceCommand =
   | { type: "delete_sprint"; projectId: string; sprintId: string; confirmed: boolean }
   | { type: "set_sprint_settings"; sprintId: string; settings: Partial<TaskSettings> }
   | { type: "run_sprint" | "pause_sprint"; sprintId: string; now?: number }
+  /** The owner allows the agent repair a queue hold asks for; the scheduler sends the task back to its agent. */
+  | { type: "allow_queue_repair"; sprintId: string; taskId: string; code: string; holdId?: string; now?: number }
   | { type: "set_run_mode"; sprintId: string; runMode: Sprint["runMode"] }
   | ({ type: "set_target"; branch: string | null } & ({ taskId: string; sprintId?: never } | { sprintId: string; taskId?: never }))
   | { type: "archive_task"; taskId: string; now: number }

@@ -197,6 +197,10 @@ fn owner_readable_blocker(blocker: &str, ru: bool) -> String {
         "verification_failed" => ("the runtime verification failed", "проверка результата не прошла"),
         "review_blocked" => ("the independent review blocked the result", "независимое ревью заблокировало результат"),
         "review_cycle_limit" => ("the review cycle limit was reached", "достигнут предел циклов ревью"),
+        "review_no_progress" => (
+            "fixes and review stopped making progress",
+            "исправления и ревью перестали давать результат",
+        ),
         "review_incomplete" => (
             "the independent review could not cover the whole change",
             "независимое ревью не смогло охватить всё изменение",
@@ -321,6 +325,9 @@ pub fn stop_tx(db: &Transaction<'_>, task: &str, blocker: &str) -> CoreResult<Ta
     if blocker.trim().is_empty() {
         return refuse("blocker_required");
     }
+    if super::automatic::enabled(db, task)? {
+        return super::automatic::stop_tx(db, task, blocker);
+    }
     let work = [
         "verification_failed",
         "worker_failed",
@@ -328,6 +335,7 @@ pub fn stop_tx(db: &Transaction<'_>, task: &str, blocker: &str) -> CoreResult<Ta
         "worker_retry_limit",
         "worker_failure_not_retryable",
         "review_cycle_limit",
+        "review_no_progress",
         "review_blocked",
         "no_runnable_nodes",
         "scheduler_capacity_timeout",
@@ -362,6 +370,15 @@ pub fn stop_tx(db: &Transaction<'_>, task: &str, blocker: &str) -> CoreResult<Ta
     revoke_tx(db, task, None)?;
     let Some(notice) = notice else {
         event_tx(db, task, "ASK_USER_REQUIRED", json!({"blocker":blocker}))?;
+        if source == TaskState::Reconciling && blocker == "completion_dropped_failed_check" {
+            // The verified revision is still current. Discard the refused synthesis
+            // so its coordinator can ask about the removed check on that revision.
+            db.execute(
+                "UPDATE runtime_tasks SET synthesis=NULL WHERE task_id=?",
+                [task],
+            )?;
+            return Ok(source);
+        }
         state_tx(db, task, TaskState::Recovering, None)?;
         return Ok(TaskState::Recovering);
     };
@@ -553,6 +570,14 @@ pub fn owner_pause_tx(
             if resume && pause_version_tx(db, task)? != expected_version {
                 return refuse("stale_version");
             }
+            if resume && before == TaskState::Recovering {
+                if let Some(event) = super::automatic::owner_cap(db, task)? {
+                    super::automatic::require_known_effects(db, task)?;
+                    // Keep the original hold until the host qualifies a route
+                    // and actually admits the fresh planning turn.
+                    return Ok(json!({"state":before,"outcome":"recorded","stopEvent":event}));
+                }
+            }
             let (target, blocker) = if resume {
                 let saved =
                     pause_saved_tx(db, task)?.ok_or(CoreError::Refused("task_not_paused"))?;
@@ -690,9 +715,22 @@ pub fn native_continue_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
     if unsettled {
         return refuse("lost_worker_termination_unconfirmed");
     }
+    let cap = super::automatic::owner_cap(db, task)?;
+    if cap.is_some() {
+        super::automatic::require_known_effects(db, task)?;
+    }
     interrupt_tx(db, task)?;
     db.execute("UPDATE pending_questions SET status=\'superseded\',answered_at=? WHERE task_id=? AND status=\'open\'", (crate::now(),task))?;
-    settle_recovery_tx(db, task, TaskState::Planning)
+    settle_recovery_tx(db, task, TaskState::Planning)?;
+    if let Some(event) = cap {
+        event_tx(
+            db,
+            task,
+            "AUTOMATIC_CAP_RENEWED",
+            json!({"stop_event":event}),
+        )?;
+    }
+    Ok(())
 }
 /// Pending captures survive restart; settled assignments are never cancelled twice.
 pub fn recovery_cancellations_tx(
@@ -791,14 +829,24 @@ pub fn propose_replan_tx(
         if state.terminal() || state == TaskState::Paused {
             return refuse("task_not_resumable");
         }
+        if super::automatic::held(db, task)? {
+            return refuse("automatic_continuation_pending");
+        }
         let count: i64 = db.query_row(
             "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='REPLAN_REQUEST_ACCEPTED'
             AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=? AND type IN
-                ('USER_STEERING','USER_ANSWER_RECEIVED','WORKER_USER_ANSWER_RECEIVED')),0)",
+                ('USER_STEERING','USER_ANSWER_RECEIVED','WORKER_USER_ANSWER_RECEIVED','AUTOMATIC_RESUMED')),0)",
             (task, task),
             |r| r.get(0),
         )?;
         if count >= 3 {
+            if super::automatic::enabled(db, task)? {
+                if stop_tx(db, task, "replan_limit")? != TaskState::Recovering {
+                    return refuse("automatic_real_decision_pending");
+                }
+                return Ok(json!({"accepted":false,"state":"RECOVERING",
+                    "decision":"automatic_continuation","scope_granted":false}));
+            }
             return refuse("replan_limit_requires_user_input");
         }
         if operation == "scope_request" {
@@ -858,7 +906,7 @@ pub fn return_to_coordinator_tx(
     task: &str,
     reason: &str,
 ) -> CoreResult<bool> {
-    let (state, _) = task_tx(db, task)?;
+    let (state, revision) = task_tx(db, task)?;
     if state.terminal() || state == TaskState::Paused {
         return refuse("task_not_resumable");
     }
@@ -873,12 +921,48 @@ pub fn return_to_coordinator_tx(
     {
         return Ok(false);
     }
-    event_tx(
-        db,
-        task,
-        "RETURNED_TO_COORDINATOR",
-        json!({"reason":reason}),
-    )?;
+    // Preserve the failed specialist's handoff at the routing boundary.  The
+    // coordinator must receive more than the generic `worker_failed` reason:
+    // role, objective, last report and the worker's exact blocker are already
+    // durable facts on the node and let it choose a repair, consultation, or
+    // owner question without blindly dispatching the same specialist again.
+    let handoff: Option<Value> = db
+        .query_row(
+            "SELECT role,objective,assignment_ref,result_json,status
+             FROM runtime_nodes
+             WHERE task_id=? AND revision=? AND stage='execution'
+             ORDER BY CASE status WHEN 'failed' THEN 0 WHEN 'cancelled' THEN 1 ELSE 2 END,
+                      rowid DESC LIMIT 1",
+            (task, revision),
+            |r| {
+                let role: String = r.get(0)?;
+                let objective: String = r.get(1)?;
+                let assignment: Option<String> = r.get(2)?;
+                let raw: Option<String> = r.get(3)?;
+                let status: String = r.get(4)?;
+                let result: Value = raw
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or(Value::Null);
+                Ok(json!({
+                    "role": role,
+                    "objective": objective,
+                    "assignment_ref": assignment,
+                    "status": status,
+                    "report_ref": result["report_ref"],
+                    "summary": result["summary"],
+                    "blocker": result.get("blocker").cloned()
+                        .or_else(|| result.get("error").cloned())
+                        .or_else(|| result.get("reason").cloned()),
+                }))
+            },
+        )
+        .optional()?;
+    let mut payload = json!({"reason":reason});
+    if let Some(handoff) = handoff {
+        payload["handoff"] = handoff;
+    }
+    event_tx(db, task, "RETURNED_TO_COORDINATOR", payload)?;
     waits::cancel_tx(db, task, None, "returned_to_coordinator", "cancelled")?;
     cancel_nodes_tx(db, task, "returned_to_coordinator")?;
     revoke_tx(db, task, None)?;

@@ -1,7 +1,7 @@
 import { wireAttachments as checkedAttachments } from "../attachments";
 import { capabilities as localCapabilities, decodeResponse, negotiate, PROTOCOL, validate } from "@cortex/workspace-contract";
 import type { Answer as WireAnswer, Decision as WireDecision, Receipt as WireReceipt, Result as WireResult, Task as WireTask, HistoryRow, WireTypes } from "@cortex/workspace-contract";
-import { ACCESS_MODES, readRemoteStatus, capabilityOf, checksPassed, DomainError, effortLabel, ENGINE_KEYS, engineLabel, FEATURES, LANGUAGES, LOCAL_MACHINE_ID, MACHINE_COMMANDS, mapProjectSlice, readableCheckReason, emptySession, overlayTask, runOrder, sprintTaskCheckout, validatePlan, WIRE_OPERATIONS } from "@cortex/workspace-domain";
+import { ACCESS_MODES, readRemoteStatus, capabilityOf, checksPassed, DomainError, effortLabel, ENGINE_KEYS, engineLabel, FEATURES, LANGUAGES, LOCAL_MACHINE_ID, MACHINE_COMMANDS, mapProjectSlice, readableCheckReason, emptySession, overlayTask, validatePlan, WIRE_OPERATIONS } from "@cortex/workspace-domain";
 import { nativeDelta, nativeVersion } from "./native";
 import { applyNativeTaskDelta, weeklyUsage } from "@cortex/workspace-domain";
 import type { NativeTaskDelta, NativeTaskSnapshot } from "@cortex/workspace-domain";
@@ -303,7 +303,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     if (!asked) return sprint;
     return { ...sprint, planning: "question", conversation: [...sprint.conversation, { kind: "question", text: asked.wire.prompt, options: asked.wire.options.map(o => o.label) }] };
   }
-  // Automatic queues are advanced by the service, never by a screen read.
+  // Hybrid and Automatic queues are advanced by the service, never by a screen read.
 
   /** Why this project cannot be worked on now. The machine can be perfectly well: this is the project's own state. */
   async function issueOf(project: ProjectLocator): Promise<string | null> {
@@ -1172,7 +1172,7 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
     if(reply.reclamation?.vacuum_status==="failed") throw new Refusal("partial_effect","Task rows were deleted, but disk-space reclamation failed. Do not repeat deletion; run maintenance after closing readers.");
     return reply;
   };
-  const sprintPatch = (projectId: string, sprintId: string, patch: unknown) => machine("product.sprint", projectId, { action: "patch", sprintId, patch });
+  const sprintPatch = (projectId: string, sprintId: string, patch: Record<string, unknown> & Pick<Partial<Sprint>, "runMode">) => machine("product.sprint", projectId, { action: "patch", sprintId, patch });
   const profileCall = (verb: string, fields: Record<string, unknown>) => machine("config.action", undefined, { action: "profile", verb, expected_revision: configTokens.routing_profiles, ...fields });
   const connectionCall = (connection_id: string, operation: string, fields: Record<string, unknown> = {}) => machine("config.action", undefined, { action: "connection_update", expected_revision: configTokens.connections, connection_id, operation, ...fields });
 
@@ -1372,8 +1372,14 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       }
       case "accept_result": {
         const result = displayedResult(command.taskId);
-        if (!result?.sourceVersion || result.digest !== command.digest) throw new Refusal("stale_result", "This result changed. Review it again.");
-        await taskCall(task(command.taskId), { action: "accept", taskId: command.taskId, digest: command.digest, version: result.sourceVersion, acknowledgeOpenChecks: command.openChecks === true });
+        if (!result?.sourceVersion || result.digest !== command.digest || (command.sourceVersion !== undefined && command.sourceVersion !== result.sourceVersion) ||
+            (command.automaticFinish && !command.sourceVersion)) throw new Refusal("stale_result", "This result changed. Review it again.");
+        await taskCall(task(command.taskId), {
+          action: "accept", taskId: command.taskId, digest: command.digest,
+          version: result.sourceVersion,
+          acknowledgeOpenChecks: command.openChecks === true,
+          ...(command.automaticFinish ? { automaticFinish: command.automaticFinish } : {}),
+        });
         return ok();
       }
       case "integrate": await machine("product.integrate", task(command.taskId), { taskId: command.taskId, method: command.method, confirmed: command.confirmed, digest: command.digest, targetBranch: command.targetBranch, message: command.method === "pr" ? command.title ?? "" : command.message ?? "", body: command.message ?? "", draft: command.draft, deleteWorktree: command.deleteWorktree }); return ok();
@@ -1440,7 +1446,8 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         if (!selected || !sessionOptions(available.config).models.some(m => m.id === selected)) throw new Refusal("model_required", "Connect an engine and select an available model before starting sprint planning. Your description is kept.");
         const { sprintId } = await machine<{ sprintId: string }>("product.sprint", command.projectId, { action: "create", description: command.description, attachments: wireAttachments(command.attachments), runMode: command.runMode, checkout: command.checkout, settings: command.settings, targetBranch: command.targetBranch });
         sprintProjects.set(sprintId, command.projectId);
-        // The service plans from descriptions without a runtime execution or project tools.
+        // The service plans the sprint: in a read-only planning task in the project folder (`planningTaskId`), or, for the
+        // description-only planner, without a runtime execution or project tools.
         return done(requestId, sprintId);
       }
       case "set_sprint_settings": {
@@ -1456,13 +1463,19 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
       case "rename_sprint": await sprintPatch(await projectOfSprint(command.sprintId), command.sprintId, { title: command.title }); return ok();
       case "set_run_mode": await sprintPatch(await projectOfSprint(command.sprintId), command.sprintId, { runMode: command.runMode }); return ok();
       case "run_sprint": await sprintPatch(await projectOfSprint(command.sprintId), command.sprintId, { queueState: "running", pauseReason: null }); return ok();
+      case "allow_queue_repair": await machine("product.sprint", await projectOfSprint(command.sprintId), { action: "allow", sprintId: command.sprintId, taskId: command.taskId, code: command.code, holdId: command.holdId ?? null, ownerAction: "allow_repair" }); return ok();
       case "pause_sprint": await sprintPatch(await projectOfSprint(command.sprintId), command.sprintId, { queueState: "paused", pauseReason: "Paused by you" }); return ok();
       case "cancel_planning": {
         const id = await projectOfSprint(command.sprintId), sprint = (await machine<Product>("product.read", id)).sprints.find(s => s.id === command.sprintId)!;
         if (sprint.planningTaskId && tasks.get(sprint.planningTaskId)?.executionId) await control(sprint.planningTaskId, {action:"pause",expectedVersion:tasks.get(sprint.planningTaskId)?.version});
         await sprintPatch(id, command.sprintId, { planning: "cancelled" }); return ok();
       }
-      case "resume_planning": await sprintPatch(await projectOfSprint(command.sprintId), command.sprintId, { planning: "planning" }); return ok();
+      case "resume_planning": {
+        const id = await projectOfSprint(command.sprintId), sprint = (await machine<Product>("product.read", id)).sprints.find(s => s.id === command.sprintId)!;
+        // Stop paused the planning task; Resume continues that same task. A task that is not paused refuses, and the service decides.
+        if (sprint.planningTaskId && tasks.get(sprint.planningTaskId)?.executionId) await control(sprint.planningTaskId, {action:"resume",expectedVersion:tasks.get(sprint.planningTaskId)?.version}).catch(() => undefined);
+        await sprintPatch(id, command.sprintId, { planning: "planning" }); return ok();
+      }
       case "edit_plan": {
         const id = await projectOfSprint(command.sprintId), sprint = (await machine<Product>("product.read", id)).sprints.find(s => s.id === command.sprintId)!;
         validatePlan(command.items);
@@ -1471,18 +1484,16 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
         return ok();
       }
       case "materialize_plan": {
-        const id = await projectOfSprint(command.sprintId), sprint = (await machine<Product>("product.read", id)).sprints.find(s => s.id === command.sprintId)!;
-        const items = sprint.plan?.items ?? [], created = new Map<string, string>();
-        for (const key of runOrder(items)) {
-          const item = items.find(i => i.key === key)!;
-          const made = await send({ requestId: `${requestId}-${key}`, operation: "create_task", expectedVersion: null, payload: { type: "create_task", projectId: id, description: item.description, settings: sprint.settings ? {mode:"guarded",language:"auto",...sprint.settings} : undefined, checkout: sprintTaskCheckout(sprint, item) } });
-          if (!made.ok || !made.entityId) return { ...made, requestId };
-          created.set(key, made.entityId);
-          // The plan's own title names the task; joining the sprint records it with the task's saved state.
-          await taskCall(id, { action: "sprint", taskId: made.entityId, sprintId: command.sprintId, dependencies: item.dependsOn.map(d => created.get(d)), ...(item.title?.trim() && item.title.trim() !== item.description.trim() ? { title: item.title.trim() } : {}) });
-        }
-        await sprintPatch(id, command.sprintId, { planning: "created", materializedVersion: command.version, taskIds: [...created.values()] });
-        return ok();
+        // One service operation creates every task of this plan version, with its route, checkout, title and
+        // dependencies, together with the sprint's own change to created; or nothing at all. A repeat answers
+        // with the tasks already created, never a second set.
+        const id = await projectOfSprint(command.sprintId);
+        const reply = await machine<{ created: number; taskIds: string[]; strayTaskIds?: string[] }>("product.sprint", id,
+          { action: "materialize", sprintId: command.sprintId, planVersion: command.version, requestId });
+        // A task just created can be started before its first projection.
+        if (reply.created > 0) for (const taskId of reply.taskIds) if (!tasks.has(taskId)) tasks.set(taskId, { projectId: id, version: "1" });
+        const strays = reply.strayTaskIds?.length ?? 0;
+        return strays ? { ...ok(), message: `Tasks created. ${strays} task${strays === 1 ? "" : "s"} left by an earlier unfinished Create tasks ${strays === 1 ? "is" : "are"} not part of the sprint; delete ${strays === 1 ? "it" : "them"} on the Board.` } : ok();
       }
       case "answer_planning": case "plan_message": {
         const id = await projectOfSprint(command.sprintId), sprint = (await machine<Product>("product.read", id)).sprints.find(s => s.id === command.sprintId)!;
@@ -1506,7 +1517,10 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
           return {...receipt,requestId};
         }
         await machine("product.sprint", id, {action:"note",sprintId:command.sprintId,kind:"message",text,attachments:wireAttachments(command.attachments)});
-        return prompt(taskId, text, requestId, command.attachments);
+        // A change request reopens the same planning task; Create tasks waits for its revised plan.
+        await prompt(taskId, text, requestId, command.attachments);
+        if (sprint.planning === "ready" || sprint.planning === "cancelled") await sprintPatch(id, command.sprintId, { planning: "planning" });
+        return ok();
       }
       default: return null;
     }

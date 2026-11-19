@@ -951,14 +951,15 @@ describe("what no screen says", () => {
       c.profiles = [{ id: "default", name: "default", description: "", updatedAt: null, sections: capture({ ...c.surfaces, routing: { ...c.surfaces.routing, engines: { ...c.surfaces.routing.engines, "claude-agent-acp": { ...c.surfaces.routing.engines["claude-agent-acp"], enabled: [] } } } }, { cn_ab12cd34ef56: 2 }) }];
       c.active = "default";
     } });
-    await open(s, settings("orchestration/models"));
+    await open(s, settings("orchestration/engines"));
     const diff = [...document.querySelectorAll(".ws-diff")].map(d => d.textContent).join(" ");
     expect(diff).toContain("Opus 5.5 turned on");
     expect(diff).toContain("Claude: 4 sessions at most, was 2");
     expect(diff).not.toMatch(ID);
     expect(document.querySelector(".chip.st-warn")?.textContent).toBe("Modified (2)");
-    expect([...document.querySelector(".tier")!.querySelectorAll("button")].map(b => b.textContent)).toEqual(["L", "S", "D", "F"]);
-    expect([...document.querySelectorAll(".sw-l")].map(l => l.textContent?.trim())).toContain("Use");
+    // Tiers read in full words, from light to flagship; no single-letter control remains.
+    expect([...document.querySelector(".tier")!.querySelectorAll("button")].map(b => b.textContent)).toEqual(["Light", "Standard", "Deep", "Flagship"]);
+    expect(document.querySelector('input[aria-label="Use Claude"]')).toBeTruthy();
   });
   it("edits a title by clicking it, with no second control beside it", async () => {
     await open(machine(), `/m/${LOCAL_MACHINE_ID}/t/task-1`);

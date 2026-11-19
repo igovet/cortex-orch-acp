@@ -73,6 +73,10 @@ pub(super) fn writable(
     {
         return Err(CoreError::Refused("writing_worker_required"));
     }
+    // A read-only sprint planning task never writes the project.
+    if cortex_core::lifecycle::sprint_planning::enabled(db, &i.task)? {
+        return Err(CoreError::Refused("read_only_task_writer_refused"));
+    }
     let a = i
         .assignment
         .as_deref()
@@ -174,8 +178,8 @@ fn read_state(
     path: &str,
 ) -> CoreResult<Option<Value>> {
     let old: Option<String> = store.read(|db| Ok(db.query_row(
-        "SELECT result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=? AND operation='native_file_read'",
-        (&i.task, &c.channel_id, coverage_key(path)), |r| r.get(0)).optional()?))?;
+        "SELECT result_json FROM runtime_requests WHERE task_id=? AND request_key=? AND actor=? AND operation='native_file_read'",
+        (&i.task, coverage_key(path), &c.channel_id), |r| r.get(0)).optional()?))?;
     old.map(|s| serde_json::from_str(&s).map_err(Into::into))
         .transpose()
 }
@@ -309,6 +313,13 @@ fn read(store: &Store, i: &Identity, c: &Credential, args: &Value) -> CoreResult
             return Err(CoreError::Refused("file_too_large"));
         }
         meta["mime"] = json!(mime);
+        save_coverage(
+            store,
+            i,
+            c,
+            path,
+            &json!({"sha256":hash,"lines":[],"complete":true}),
+        )?;
         let mut r = crate::native_sources::reply(meta);
         r["content"].as_array_mut().unwrap().push(json!({"type":"image","mimeType":mime,"data":base64::engine::general_purpose::STANDARD.encode(b)}));
         return Ok(r);
@@ -319,6 +330,13 @@ fn read(store: &Store, i: &Identity, c: &Credential, args: &Value) -> CoreResult
     };
     if text.contains('\0') {
         meta["binary"] = json!(true);
+        save_coverage(
+            store,
+            i,
+            c,
+            path,
+            &json!({"sha256":hash,"lines":[],"complete":true}),
+        )?;
         return Ok(crate::native_sources::reply(meta));
     }
     let lines = text.split_inclusive('\n').collect::<Vec<_>>();

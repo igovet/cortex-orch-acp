@@ -109,17 +109,35 @@ mod tests {
         );
         // A batchable tool keeps its own argument contract.
         assert_eq!(
-            preflight(&offered, &json!({"calls":[{"id":"g","tool":"project_git","arguments":{"kind":"log","request_key":"k"}}]})),
+            preflight(
+                &offered,
+                &json!({"calls":[{"id":"g","tool":"project_git","arguments":{"kind":"log","request_key":"k"}}]})
+            ),
             Err(("invalid_arguments", "calls[0].arguments".to_owned()))
         );
         // Every advertised read_batch enum lists only batchable tools that catalogue serves.
-        for (role, profile, stage) in [("coordinator", None, None), ("worker", Some("worker-backend-dev"), Some("review")), ("worker", Some("worker-senior-consultant"), Some("execution"))] {
+        for (role, profile, stage) in [
+            ("coordinator", None, None),
+            ("worker", Some("worker-backend-dev"), Some("review")),
+            (
+                "worker",
+                Some("worker-senior-consultant"),
+                Some("execution"),
+            ),
+        ] {
             let tools = cortex_engine::schema::catalogue(role, profile, stage).unwrap();
             let batch = tools.iter().find(|t| t["name"] == "read_batch").unwrap();
-            for name in batch["inputSchema"]["properties"]["calls"]["items"]["properties"]["tool"]["enum"].as_array().unwrap() {
+            for name in batch["inputSchema"]["properties"]["calls"]["items"]["properties"]["tool"]
+                ["enum"]
+                .as_array()
+                .unwrap()
+            {
                 let name = name.as_str().unwrap();
                 assert!(READS.contains(&name), "{name}");
-                assert!(tools.iter().any(|t| t["name"] == name), "{role} {profile:?}: {name}");
+                assert!(
+                    tools.iter().any(|t| t["name"] == name),
+                    "{role} {profile:?}: {name}"
+                );
             }
         }
         for (args, code, field) in [

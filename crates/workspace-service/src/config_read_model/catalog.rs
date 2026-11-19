@@ -320,9 +320,7 @@ mod alias_tests {
     /// A catalogue saved before aliases were dropped may still list `default`: it is never presented.
     #[test]
     fn a_saved_catalogue_listing_the_default_alias_does_not_present_it() {
-        let entry = |model: &str, description: Value| {
-            json!({"route":{"model":model},"model_name":model,"model_description":description})
-        };
+        let entry = |model: &str, description: Value| json!({"route":{"model":model},"model_name":model,"model_description":description});
         let shown = presented(&[
             entry("default", json!("claude-opus-5")),
             entry("Default", json!(null)),

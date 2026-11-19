@@ -645,25 +645,40 @@ impl Fixture {
     fn parity(&self) -> Value {
         let mut registry = json!({"schema_version":1,"connections":{}});
         let mut rules = json!({"model_policy_version":2,"enabled":{},"models":{},"pin":{}});
-        for (engine, id, models) in [
-            (
-                "codex-acp",
-                "cn_fixture",
-                vec![
-                    ("sol", json!(["standard", "deep"])),
-                    ("luna", json!("light")),
-                    ("astra", json!("flagship")),
-                ],
-            ),
-            (
-                "claude-agent-acp",
-                "cn_claude",
-                vec![
-                    ("sonnet", json!(["standard", "deep"])),
-                    ("opus", json!("flagship")),
-                ],
-            ),
-        ] {
+        self.routing_catalog(
+            &mut registry,
+            &mut rules,
+            [
+                (
+                    "codex-acp",
+                    "cn_fixture",
+                    vec![
+                        ("sol", json!(["standard", "deep"])),
+                        ("luna", json!("light")),
+                        ("astra", json!("flagship")),
+                    ],
+                ),
+                (
+                    "claude-agent-acp",
+                    "cn_claude",
+                    vec![
+                        ("sonnet", json!(["standard", "deep"])),
+                        ("opus", json!("flagship")),
+                    ],
+                ),
+            ],
+        );
+        self.write("config/cortex/routing.json", &rules);
+        rules
+    }
+
+    fn routing_catalog(
+        &self,
+        registry: &mut Value,
+        rules: &mut Value,
+        routes: [(&str, &str, Vec<(&str, Value)>); 2],
+    ) {
+        for (engine, id, models) in routes {
             let directory = self.base.join(format!("state/cortex/catalog/{id}"));
             std::fs::DirBuilder::new()
                 .mode(0o700)
@@ -712,9 +727,7 @@ impl Fixture {
                 &snapshot,
             );
         }
-        self.write("config/cortex/connections.json", &registry);
-        self.write("config/cortex/routing.json", &rules);
-        rules
+        self.write("config/cortex/connections.json", registry);
     }
     fn used(&self, id: &str, used: f64) {
         if id == "cn_fixture" {
@@ -757,6 +770,174 @@ impl Fixture {
             .unwrap()
     }
 }
+#[test]
+fn preset_preferred_work_kinds_keep_frontend_design_exclusive_to_opus() {
+    let preset: Value =
+        serde_json::from_str(include_str!("../../../policy/model-settings-default.json")).unwrap();
+    let models = preset["routing"]["models"].as_object().unwrap();
+    let expected = BTreeSet::from([
+        "analysis",
+        "debugging",
+        "design",
+        "implementation_backend",
+        "implementation_frontend",
+        "investigation",
+        "operations",
+        "planning",
+        "review",
+        "testing",
+        "writing",
+    ]);
+    for (engine, model) in [
+        ("claude-agent-acp", "haiku"),
+        ("claude-agent-acp", "claude-sonnet-5"),
+        ("codex-acp", "gpt-6-luna"),
+        ("codex-acp", "gpt-6.2-sol"),
+        ("codex-acp", "gpt-6.1-terra"),
+    ] {
+        let preferred = models[engine]["policy"][model]["preferred_for"]
+            .as_array()
+            .unwrap();
+        let kinds: BTreeSet<_> = preferred
+            .iter()
+            .map(|kind| kind.as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, expected, "{engine}/{model}");
+        assert_eq!(preferred.len(), expected.len(), "{engine}/{model}");
+    }
+
+    let mut frontend_design = Vec::new();
+    for (engine, rules) in models {
+        for (model, policy) in rules["policy"].as_object().unwrap() {
+            if policy["preferred_for"].as_array().is_some_and(|kinds| {
+                kinds
+                    .iter()
+                    .any(|kind| kind == "implementation_frontend_design")
+            }) {
+                frontend_design.push((engine.as_str(), model.as_str()));
+            }
+        }
+    }
+    assert_eq!(frontend_design, [("claude-agent-acp", "opus")]);
+}
+
+#[test]
+fn preset_routing_preferences_and_role_tiers_follow_complexity() {
+    let f = Fixture::new();
+    let preset: Value =
+        serde_json::from_str(include_str!("../../../policy/model-settings-default.json")).unwrap();
+    let mut registry = json!({"schema_version":1,"connections":{}});
+    let mut fixture_policy = json!({"enabled":{},"models":{}});
+    let models = |names: &[&'static str]| names.iter().map(|&name| (name, Value::Null)).collect();
+    f.routing_catalog(
+        &mut registry,
+        &mut fixture_policy,
+        [
+            (
+                "codex-acp",
+                "cn_fixture",
+                models(&["gpt-6-luna", "gpt-6.2-sol", "gpt-6.1-terra"]),
+            ),
+            (
+                "claude-agent-acp",
+                "cn_claude",
+                models(&["haiku", "claude-sonnet-5", "opus"]),
+            ),
+        ],
+    );
+    f.write("config/cortex/routing.json", &preset["routing"]);
+    let resolver = f.load().unwrap();
+    let evidence = Default::default();
+    assert_eq!(preset["coordinator"]["model"], "opus");
+    let menu = resolver.menu(&evidence).unwrap();
+    for role in [
+        "worker-technical-writer",
+        "worker-general",
+        "worker-planner",
+    ] {
+        assert_eq!(
+            menu["roles"][role],
+            json!({"low":"light","normal":"standard","high":"deep"})
+        );
+    }
+    assert_eq!(
+        menu["roles"]["worker-explorer"],
+        json!({"low":"light","normal":"light","high":"standard"})
+    );
+    let light = ["claude-agent-acp/haiku", "codex-acp/gpt-6-luna"];
+    let deep = ["claude-agent-acp/claude-sonnet-5", "codex-acp/gpt-6.2-sol"];
+    let standard = [deep[0], deep[1], "codex-acp/gpt-6.1-terra"];
+    // Menu tiers alone do not exercise the retry dispatch path.
+    for (complexity, tier) in [("low", "light"), ("normal", "light"), ("high", "standard")] {
+        for escalated in [false, true] {
+            let selected = resolver
+                .choose(
+                    "worker-explorer",
+                    &json!({"complexity":complexity}),
+                    &evidence,
+                    escalated,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(
+                selected.decision["role_tier"], tier,
+                "{complexity}/{escalated}"
+            );
+            assert_eq!(selected.decision["tier"], tier, "{complexity}/{escalated}");
+            if tier == "light" {
+                let effort = if escalated { "xhigh" } else { "high" };
+                assert_eq!(selected.parameters["thought_level"], effort);
+            }
+        }
+    }
+    for role in ["worker-technical-writer", "worker-qa-engineer"] {
+        for (complexity, tier, preferred, effort) in [
+            ("low", "light", light.as_slice(), None),
+            ("normal", "standard", standard.as_slice(), Some("medium")),
+            ("high", "deep", deep.as_slice(), Some("high")),
+        ] {
+            let selected = resolver
+                .choose(
+                    role,
+                    &json!({"complexity":complexity}),
+                    &evidence,
+                    false,
+                    None,
+                )
+                .unwrap();
+            let decision = &selected.decision;
+            assert_eq!(decision["role_tier"], tier);
+            assert_eq!(decision["tier"], tier);
+            assert_eq!(decision["purpose"]["status"], "honoured");
+            let expected = preferred.iter().copied().collect::<BTreeSet<_>>();
+            let actual = decision["purpose"]["preferred"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|route| route.as_str().unwrap())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(actual, expected);
+            let candidates = decision["candidates"].as_array().unwrap();
+            assert!(candidates
+                .iter()
+                .take(expected.len())
+                .all(|candidate| expected.contains(candidate["route"].as_str().unwrap())));
+            if tier == "light" {
+                assert_eq!(candidates.len(), light.len());
+            }
+            if tier == "standard" {
+                assert_eq!(candidates.len(), standard.len());
+            }
+            if tier == "deep" {
+                assert_eq!(candidates.last().unwrap()["route"], "claude-agent-acp/opus");
+            }
+            if let Some(effort) = effort {
+                assert_eq!(selected.parameters["thought_level"], effort);
+            }
+        }
+    }
+}
+
 #[test]
 fn parity_menu_has_oracle_fields_live_tiers_roles_efforts_and_conditional_preferences() {
     let f = Fixture::new();

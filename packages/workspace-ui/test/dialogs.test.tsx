@@ -2,7 +2,7 @@
 import { createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
-import { emptyWorkspace, type WorkspaceCommand } from "@cortex/workspace-domain";
+import { emptyWorkspace, type Check, type Task, type WorkspaceCommand } from "@cortex/workspace-domain";
 import { WsContext, type Ws } from "../src/ctx";
 import { ReviewDialogs, type WsDialog } from "../src/dialogs";
 import { MachineDialogs } from "../src/machine-dialogs";
@@ -24,11 +24,11 @@ const type = (selector: string, text: string) => {
 };
 const settle = async () => { await flush(); await flush(); };
 
-function mount(accepted = true, remote = "origin") {
+function mount(accepted = true, remote = "origin", checks: Check[] = [{ name: "Check", outcome: "not_run", detail: "", technicalReason: "Executable unavailable" }], reviewActions?: Task["reviewActions"]) {
   const state = emptyWorkspace(), cap = { everything: true, operations: [] };
   state.machines[0].connection = "connected";
   state.projects.push({ id: "p", machineId: state.machines[0].id, name: "Project", repository: "/p", openBranch: "dev", defaultBranch: "main" });
-  state.tasks.push({ ...draftTask(), checkout: { kind: "main", branch: "dev" }, status: "review", result: { version: 1, digest: "digest", summary: "Result", checks: [{ name: "Check", outcome: "not_run", detail: "", technicalReason: "Executable unavailable" }] }, workspaceDigest: "digest", acceptance: accepted ? { version: 1, digest: "digest" } : null });
+  state.tasks.push({ ...draftTask(), checkout: { kind: "main", branch: "dev" }, status: "review", result: { version: 1, digest: "digest", summary: "Result", checks }, reviewActions, workspaceDigest: "digest", acceptance: accepted ? { version: 1, digest: "digest" } : null });
   state.repos.push({ projectId: "p", remote, tree: [], sources: {}, commits: [], branches: [], fetchedAt: null,
     checkouts: [{ id: "p:main", projectId: "p", kind: "main", branch: "dev", path: "/p", taskId: null, label: null, base: "main", ahead: 0, behind: 0, behindOf: {}, files: [], draft: "", sources: {}, updateConflict: null }] });
   const script = scriptedPort({ capabilities: cap });
@@ -92,6 +92,32 @@ it.each(cases)("$name stays open pending/refused, then closes and returns focus 
   expect(document.activeElement).toBe(h.trigger());
   if (c.name === "profile") expect(h.ws.settings.draftsOn(h.state.machines[0].id)).toBe(0);
 });
+
+const paidReason = "paid live check not requested by the owner";
+const skipped: Check[] = [
+  { name: "Live desktop", outcome: "not_run", kind: "policy", detail: paidReason, technicalReason: paidReason, rerunnable: false },
+  { name: "Manual smoke", outcome: "not_run", kind: "manual", detail: "The owner did not authorize this step." },
+  { name: "Runtime test", outcome: "not_run", kind: "automated", detail: "", technicalReason: "Executable unavailable", rerunnable: false },
+  { name: "Verification", outcome: "passed", detail: "" },
+];
+
+it.each([{ kind: "accept", taskId: "t" }, { kind: "merge", taskId: "t", how: "squash" }] as const)(
+  "$kind lists each skipped check with its own status and reason",
+  dialog => {
+    const h = mount(false, "origin", [...skipped, ...(dialog.kind === "accept" ? [{ name: "Open check", outcome: "unverified", detail: "Incomplete receipt" } as const] : [])],
+      { accept: true, reason: null, unblockAction: null, acknowledgeOpenChecks: dialog.kind === "accept" });
+    h.open(dialog);
+    expect(active()!.textContent).toContain("1 passed, 3 not run");
+    const rows = [...active()!.querySelectorAll(".ws-rows .l-row")];
+    expect(rows.map(row => [row.querySelector(".l-row-t")?.textContent, row.querySelector(".l-row-d")?.textContent])).toEqual([
+      ["Live desktop", `Not run: ${paidReason}`],
+      ["Manual smoke", "Not run: The owner did not authorize this step."],
+      ["Runtime test", "Not run: Executable unavailable"],
+      ...(dialog.kind === "accept" ? [["Open check", "Incomplete receipt"]] : []),
+    ]);
+    expect(active()!.querySelector('input[type="checkbox"]') !== null).toBe(dialog.kind === "accept");
+  },
+);
 
 it("confirms the displayed SSH URL and sends one push request for the current branch", async () => {
   const remote = "git@github.com:igovet/cortex-orch-acp.git";

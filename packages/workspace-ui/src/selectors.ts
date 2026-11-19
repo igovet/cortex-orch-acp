@@ -1,7 +1,75 @@
-import { boardPhase, dependencyReady, descriptionLabel, isOpen, plainModel, targetBranch } from "@cortex/workspace-domain";
-import type { Check, CheckOutcome, EngineWeeklyUsage, Machine, Project, Sprint, Task, TaskStatus, Worker, WorkspaceState } from "@cortex/workspace-domain";
+import { automaticQueueOf, boardPhase, dependencyReady, descriptionLabel, isOpen, plainModel, targetBranch } from "@cortex/workspace-domain";
+import type { Decision as TaskDecision, Check, CheckOutcome, EngineWeeklyUsage, HoldActor, Machine, OwnerHoldAction, Project, Sprint, SprintRunMode, Task, TaskStatus, Worker, WorkspaceState } from "@cortex/workspace-domain";
 import type { Scope } from "./router";
 import { share } from "./stable";
+import { plainPhase, plainReason, plainStop } from "./status-text";
+
+export const sprintModeLabel: Record<SprintRunMode, string> = { manual: "Manual", hybrid: "Hybrid", automatic: "Automatic" };
+
+export const sprintModeDescription: Record<SprintRunMode, string> = {
+  manual: "You start each ready task. Starting one never starts its neighbours.",
+  hybrid: "The queue runs one task at a time in dependency order. You confirm each merge.",
+  automatic: "Tasks go to Done on their own in the current branch. You answer work questions and permission requests, and review blocked results.",
+};
+
+export const staleResult = (task: Task) => !!task.result &&
+  (task.workspaceDigest !== task.result.digest || task.result.warnings?.includes("workspace_drift") === true);
+
+type ReviewHoldView = Pick<TaskView, "id" | "sprint" | "task" | "unknown">;
+
+function resultHold(view: ReviewHoldView) {
+  const hold = automaticQueueOf(view.sprint);
+  if (!view.unknown && hold?.needsOwner && hold.taskId === view.id && hold.kind === "settlement_blocked" &&
+      (view.task.status === "review" || view.task.status === "ready_to_merge")) return hold;
+}
+
+export function automaticStaleResultHold(view: ReviewHoldView) {
+  const hold = resultHold(view);
+  return !!hold && (["stale_result", "workspace_drift", "task_content_unknown", "task_files_changed"].includes(hold.code)
+    || hold.code === "automatic_acceptance_blocked" && !!view.task.acceptance?.automatic && staleResult(view.task));
+}
+
+/** Surface the queue's recorded review decision on the task it belongs to. */
+export function automaticAcceptanceHold(view: ReviewHoldView) {
+  const hold = automaticQueueOf(view.sprint);
+  if (!view.unknown && view.task.status === "ready_to_merge" && hold?.needsOwner && hold.taskId === view.id &&
+      hold.kind === "owner_integration" && hold.code === "owner_accepted") return true;
+  return (!view.task.acceptance && resultHold(view)?.code === "automatic_acceptance_blocked") || automaticStaleResultHold(view);
+}
+
+/** The service's decision about a held task: who acts next, what the owner is asked and the actions offered. It comes from
+ *  the queue hold of a Hybrid or Automatic sprint, or, outside a queue hold, from the task's own facts (a failed run).
+ *  The pinned conversation card renders from this alone; nothing here re-derives the decision from other flags. */
+export type OwnerHold = {
+  source: "queue" | "task"; mode: SprintRunMode | null; sprintId: string | null; code: string;
+  nextActor: HoldActor; reason: string; asks: string[]; actions: OwnerHoldAction[]; allowed: boolean;
+  /** The service's identity of this exact hold; an action sent from an older card is refused instead of applied to a newer hold. */
+  holdId?: string;
+};
+export function ownerHold(view: ReviewHoldView): OwnerHold | null {
+  if (view.unknown || view.task.status === "done" || view.task.archive) return null;
+  const sprint = view.sprint, hold = automaticQueueOf(sprint);
+  if (sprint && hold?.nextActor && hold.taskId === view.id && sprint.queueState === "paused")
+    return { source: "queue", mode: sprint.runMode, sprintId: sprint.id, code: hold.code, nextActor: hold.nextActor, reason: hold.reason,
+      asks: hold.asks ?? [], actions: hold.ownerActions ?? [], allowed: typeof hold.allowedAt === "number", ...(hold.holdId ? { holdId: hold.holdId } : {}) };
+  // A queue that runs decides itself first: a failed member goes back to its agent before anyone is asked.
+  if (sprint && sprint.runMode !== "manual" && sprint.queueState === "running") return null;
+  const facts = view.task.reviewActions;
+  if (view.task.status === "failed" && facts?.nextActor && facts.ownerActions?.length)
+    return { source: "task", mode: sprint?.runMode ?? null, sprintId: sprint?.id ?? null, code: "task_failed", nextActor: facts.nextActor,
+      reason: facts.reason ?? "The last run of this task ended as failed.", asks: facts.asks ?? [], actions: facts.ownerActions, allowed: false };
+  return null;
+}
+
+/** One authorization applies to a displayed service result on its own local branch. */
+export function automaticFinishOffer(view: TaskView) {
+  const { sprint, task, target } = view;
+  if (!sprint || sprint.queueState !== "paused" || !automaticAcceptanceHold(view) || automaticStaleResultHold(view) ||
+      !task.result?.sourceVersion || staleResult(task) || task.acceptance?.automatic || task.conflict !== "none" ||
+      task.integration || task.checkout.kind !== "main" || !sameBranch(task, target) || view.project.hasGit === false ||
+      (sprint.targetBranch && sprint.targetBranch !== target) || task.reviewActions?.pending || !task.reviewActions?.accept) return null;
+  return { sprintId: sprint.id, targetBranch: target, sourceVersion: task.result.sourceVersion, digest: task.result.digest };
+}
 
 /**
  * Read models for the screens. Every counter and empty state comes from these lists, so a badge and the list it
@@ -43,34 +111,18 @@ export const readyLabel = (task: Task, target: string) => task.integrationFacts?
 
 /** Recovery and stop reasons the runtime records as a code, in words. A stop that is not a lost turn or an unknown outcome
  *  (a result whose completion could not be confirmed, a step that could not continue) is a stop, not an interruption. */
-const STOP_REASONS: Record<string, string> = {
-  turn_interrupted: "The turn was interrupted",
-  native_session_outcome_unknown: "The app stopped while this task ran, so how its engine session ended is not known",
-  native_control_outcome_unknown: "Whether your last stop, pause or message took effect is not known",
-  native_shutdown_unconfirmed: "The engine's exit could not be confirmed",
-  native_answer_delivery_outcome_unknown: "Whether your answer reached the task is not known",
-  native_outside_outcome_unknown: "Whether an approved command or write outside the sandbox finished is not known",
-  native_verification_outcome_unknown: "Whether the final check finished is not known",
-  legacy_effect_outcome_unknown: "Whether a command started by an earlier version of the app finished is not known",
-  native_recovery_failed: "The app could not restore this task after a restart",
-  native_continuation_unavailable: "The task could not continue with its next step",
-  native_session_start_failed: "A worker session could not start",
-  coordinator_session_start_failed: "The coordinator session could not start",
-  native_progress_limit: "The task reached its limit of steps",
-  native_driver_progress_limit: "The task reached its limit of steps",
-  coordinator_no_progress_limit: "The coordinator stopped making progress",
-};
-/** A waiting reason in words: a known code reads as what it means, an unknown bare code as an internal stop with its code
- *  spelled out, and a written reason (a question, the runtime's own sentence) stays as written. */
-export function stopReason(reason: string | null | undefined): string {
-  const code = (reason ?? "").trim();
-  if (!code) return "The turn was interrupted";
-  if (Object.hasOwn(STOP_REASONS, code)) return STOP_REASONS[code];
-  if (code.startsWith("completion_")) return "The work could not be confirmed as complete";
-  if (code.startsWith("lost_worker_")) return "A worker process was lost";
-  return /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/.test(code) ? `Stopped for an internal reason (${code.replace(/_/g, " ")})` : code;
-}
-/** Why the runtime refused a worker's result submission, in words. An unknown code is named as recorded. */
+// The code-to-sentence table lives in ./status-text.
+
+/**
+ * Formats a machine status/reason for a person. This is intentionally only
+ * used with fields whose contract is a status/reason; task titles, commands,
+ * paths, reports and model text must remain untouched.
+ */
+export const humanStatus = plainReason;
+/** A waiting reason in words: a known code reads as what it means, an unknown bare code as a generic sentence (never the
+ *  code), and a written reason (a question, the runtime's own sentence) stays as written. */
+export const stopReason = plainStop;
+/** Why the runtime refused a worker's result submission, in words. An unknown code reads generically, never as the code. */
 const REFUSALS: Record<string, string> = {
   open_failed_check: "a check it cited failed and was still open",
   omitted_failed_check: "it left out a failed check an earlier submission had cited",
@@ -87,7 +139,7 @@ const REFUSALS: Record<string, string> = {
   channel_identity_changed: "its session was no longer the current one",
   worker_required: "it was not allowed to submit a result",
 };
-export const refusalReason = (code: string) => Object.hasOwn(REFUSALS, code) ? REFUSALS[code] : `the runtime refused it (${code.replace(/_/g, " ")})`;
+export const refusalReason = (code: string) => Object.hasOwn(REFUSALS, code) ? REFUSALS[code] : "the runtime refused it";
 /** Whether a recovery hold is a lost turn or an outcome nobody could observe, rather than a stop the runtime decided. */
 export const interruptedTurn = (reason: string | null | undefined) => { const code = (reason ?? "").trim();
   return !code || code === "turn_interrupted" || code === "native_recovery_failed" || /(?:_outcome_unknown|_unconfirmed)$/.test(code); };
@@ -97,16 +149,37 @@ export type TaskView = {
   id: string; task: Task; project: Project; machine: Machine; sprint: Sprint | null;
   column: ColumnId | "archive"; unknown: boolean; fact: Fact; at: number | null;
   target: string; workers: Worker[]; running: number;
+  automaticFact?: Fact; ownerDecision?: TaskDecision; ownerIntegration?: NonNullable<Sprint["automaticQueue"]>;
 };
 export type ProjectSummary = {
   project: Project; machine: Machine; offline: boolean; views: TaskView[];
   counts: Record<ColumnId, number>; archived: number; conflicts: number; worktrees: number;
   sprints: Sprint[]; at: number | null; signal: { text: string; tone: string } | null;
 };
+/** `views` are the tasks the lists show; `planning` the tasks that plan a sprint, read only inside that sprint. `byId` holds both. */
 export type WorkspaceIndex = {
-  now: number; state: WorkspaceState; views: TaskView[]; byId: Map<string, TaskView>;
+  now: number; state: WorkspaceState; views: TaskView[]; planning: TaskView[]; byId: Map<string, TaskView>;
   summaries: Map<string, ProjectSummary>; archive: TaskView[];
 };
+
+/**
+ * The tasks that plan a sprint. Each is an ordinary runtime task, but it belongs to its sprint: it has no row, card, count or
+ * page of its own, and its conversation and workers read on the sprint's page. Every list is built without these, here.
+ */
+export const planningTaskIds = (state: Pick<WorkspaceState, "sprints">) => new Set(state.sprints.flatMap(s => s.planningTaskId ? [s.planningTaskId] : []));
+/** The sprint a planning task plans, or null for any other task. */
+export const planningSprintOf = (state: Pick<WorkspaceState, "sprints">, taskId: string) => state.sprints.find(s => s.planningTaskId === taskId) ?? null;
+/** The task planning this sprint, when the runtime has it as a task. A sprint saved by an earlier version plans without one
+ *  (or with a hidden run that is not a task): its planning chat is the sprint's own. */
+export const planningTaskOf = (state: Pick<WorkspaceState, "tasks">, sprint: Pick<Sprint, "planningTaskId">) =>
+  sprint.planningTaskId && state.tasks.some(t => t.id === sprint.planningTaskId) ? sprint.planningTaskId : null;
+/** The open questions and permissions of a sprint's planning task: they wait on the owner as the sprint's, never as a task's. */
+export const planningWaits = (state: Pick<WorkspaceState, "tasks" | "sessions">, sprint: Sprint) => {
+  const id = sprint.planning === "created" || sprint.planning === "cancelled" ? null : planningTaskOf(state, sprint);
+  return id ? state.sessions.find(s => s.taskId === id)?.decisions.filter(d => isOpen(d) && !d.suspended) ?? [] : [];
+};
+/** The sprint's planning waits on the owner: its question, or an open question or permission of its planning task. */
+export const planningNeedsOwner = (state: Pick<WorkspaceState, "tasks" | "sessions">, sprint: Sprint) => sprint.planning === "question" || planningWaits(state, sprint).length > 0;
 
 export const sprintTitle = (sprint: Sprint) => sprint.title ?? descriptionLabel(sprint.description);
 /** The icon for a one-line row: the fact's own icon, otherwise its column's. */
@@ -117,14 +190,37 @@ export const checkCounts = (checks: Check[]) => {
   return out;
 };
 
+function automaticStatusFact(task: Task, sprint: Sprint | null): Fact | undefined {
+  if (task.status === "done" || task.status === "stopping") return;
+  const hold = automaticQueueOf(sprint);
+  if (hold?.taskId === task.id && hold.kind !== "owner_integration")
+    return { text: hold.kind === "continuation" ? stopReason(hold.reason) : humanStatus(hold.reason), tone: "st-warn", icon: hold.kind === "continuation" ? "pause" : "alert" };
+  const continuation = task.automaticContinuation;
+  if (continuation?.pause && task.status === "paused")
+    return { text: stopReason(continuation.pause.reason), tone: "st-warn", icon: "pause" };
+  if (continuation && task.status === "working" && continuation.lastContinuationReason)
+    return { text: `Automatic continuation: ${humanStatus(continuation.lastContinuationReason)}`, tone: "st-run", icon: "loader", spin: true };
+  if (continuation && task.issue === "automatic_continuation_pending")
+    return { text: "Preparing automatic continuation", tone: "st-idle", icon: "hourglass" };
+  if (sprint?.runMode !== "automatic") return;
+  if (task.conflict !== "none") return { text: "Integration conflict", tone: "st-bad", icon: "alert" };
+  switch (task.status) {
+    case "review": return { text: "Result recorded; awaiting automatic acceptance", tone: "st-idle", icon: "hourglass" };
+    case "ready_to_merge": return { text: task.acceptance ? "Accepted; awaiting automatic finish" : "Awaiting automatic finish", tone: "st-idle", icon: "hourglass" };
+    case "needs_you": return { text: humanStatus(task.issue, "Run waiting"), tone: "st-idle", icon: "pause" };
+    case "paused": return { text: humanStatus(task.issue, "Paused"), tone: "st-idle", icon: "pause" };
+    case "failed": case "cancelled": return { text: humanStatus(task.issue, STATUS_WORD[task.status]), tone: "st-warn", icon: "x-circle" };
+  }
+}
+
 function statusFact(task: Task, ctx: { target: string; running: number; title: (id: string) => string; sprint: Sprint | null; ready: (id: string) => boolean; next: boolean }): Fact {
   // The runtime's own notice while the coordinator's engine has not opened: a retry, or giving up.
-  if (task.warnings?.includes("engine_launch_failed")) return { text: task.issue ?? "The engine could not start", tone: "st-bad", icon: "alert" };
-  if (task.warnings?.includes("engine_launch_retrying")) return { text: task.issue ?? "Starting the engine again", tone: "st-warn", icon: "hourglass" };
+  if (task.warnings?.includes("engine_launch_failed")) return { text: humanStatus(task.issue, "The engine could not start"), tone: "st-bad", icon: "alert" };
+  if (task.warnings?.includes("engine_launch_retrying")) return { text: humanStatus(task.issue, "Starting the engine again"), tone: "st-warn", icon: "hourglass" };
   // A step queued behind another task's files waits for that task and starts on its own once they are released.
-  if (task.warnings?.includes("waiting_for_files") && task.status === "working") return { text: task.issue ?? "Waiting for another task to release files", tone: "st-warn", icon: "hourglass" };
+  if (task.warnings?.includes("waiting_for_files") && task.status === "working") return { text: humanStatus(task.issue, "Waiting for another task to release files"), tone: "st-warn", icon: "hourglass" };
   if (task.observedPhase === "recovery" && task.process === "live") return { text: interruptedTurn(task.issue) ? "Turn interrupted; waiting for your message" : "Stopped; waiting for your message", tone: "st-warn", icon: "pause" };
-  if (task.observedPhase && task.observedPhase !== "not_started") return {text:task.observedPhase === "result" ? "Runtime result" : task.observedPhase === "waiting" ? "Waiting for you" : task.observedPhase[0].toUpperCase()+task.observedPhase.slice(1),tone:"st-idle"};
+  if (task.observedPhase && task.observedPhase !== "not_started") return {text:plainPhase(task.observedPhase),tone:"st-idle"};
   if (task.conflict === "conflict") return { text: `Conflict with ${ctx.target}`, tone: "st-bad", icon: "alert" };
   if (task.conflict === "resolving") return { text: "Resolving the conflict", tone: "st-run", icon: "loader", spin: true };
   if (task.conflict === "failed") return { text: "Automatic resolution failed", tone: "st-bad", icon: "alert" };
@@ -140,7 +236,7 @@ function statusFact(task: Task, ctx: { target: string; running: number; title: (
     case "cancelled": return { text: "Run cancelled", tone: "st-idle", icon: "x-circle" };
     case "paused": return { text: "Paused by you", tone: "st-idle", icon: "pause" };
     case "stopping": return { text: "Stopping", tone: "st-warn", icon: "hourglass" };
-    case "needs_you": return { text: task.issue ? `Asks: ${task.issue.replace(/^question:\s*/i, "") || task.issue}` : "Waiting for you", tone: "st-warn" };
+    case "needs_you": return { text: task.issue ? `Asks: ${humanStatus(task.issue.replace(/^question:\s*/i, "")) || task.issue}` : "Waiting for you", tone: "st-warn" };
     case "review": {
       if (task.result && task.workspaceDigest !== task.result.digest) return { text: "Stale result, workspace changed", tone: "st-warn", icon: "alert" };
       const checks = task.result?.checks ?? [];
@@ -153,6 +249,8 @@ function statusFact(task: Task, ctx: { target: string; running: number; title: (
       if (task.integration?.method === "pr") return { text: "Pull request open, not merged", tone: "st-idle", icon: "merge" };
       return { text: `${task.acceptance.automatic ? "Automatically accepted" : "Accepted"} v${task.acceptance.version}`, tone: "st-ok" };
     case "done":
+      if (task.integration?.automatic) return { text: task.integration.committed === true ? `Done · Committed to ${task.integration.targetBranch}`
+        : task.integration.committed === false ? `Done · Already in ${task.integration.targetBranch}` : "Done", tone: "st-idle", icon: "check" };
       if (task.integration?.method === "commit") return { text: `Committed to ${task.integration.targetBranch}`, tone: "st-idle", icon: "check" };
       if (task.closedAs === "external") return { text: "Done outside the app", tone: "st-idle", icon: "circle" };
       if (task.closedAs === "as_is") return { text: closedAsIs(task), tone: "st-idle", icon: "circle" };
@@ -188,12 +286,13 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
   for (const event of state.events) if (event.occurredAt) last.set(event.taskId, event.occurredAt);
   const workers = new Map<string, Worker[]>();
   for (const worker of state.workers) workers.set(worker.taskId, [...(workers.get(worker.taskId) ?? []), worker]);
-  const ready = (id: string) => { const t = tasks.get(id); return !!t && dependencyReady(t); };
+  const ready = (id: string, mode?: SprintRunMode) => { const t = tasks.get(id); return !!t && dependencyReady(t, mode); };
+  const sessions = new Map(state.sessions.map(session => [session.taskId, session]));
   const title = (id: string) => tasks.get(id)?.title ?? "another task";
   // A sprint comes from the project's plan and its tasks from the project's runtime, so a sprint can name tasks that are
   // not loaded yet (the runtime is starting, stopped or refused). The index is read by every screen: it must not throw.
   const nextInSprint = new Set(state.sprints.filter(s => !s.archivedAt).flatMap(s => {
-    const next = s.taskIds.map(id => tasks.get(id)).find(t => t?.status === "draft" && t.dependencies.every(ready));
+    const next = s.taskIds.map(id => tasks.get(id)).find(t => t?.status === "draft" && t.dependencies.every(id => ready(id, s.runMode)));
     return next ? [next.id] : [];
   }));
 
@@ -209,18 +308,32 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
     // The machine lists workers oldest first; every screen shows the newest one on top, so the order is turned once, here.
     const running = own.filter(w => w.status === "working").length, target = targetBranch(state, task);
     const unknown = phase === "unknown";
-    const column = phase === "archive" ? "archive" : phase === "unknown" ? STATUS_COLUMN[task.status] : STATUS_COLUMN[phase];
-    const fact: Fact = !unknown ? statusFact(task, { target, running, title, sprint, ready, next: nextInSprint.has(task.id) })
+    const queue = automaticQueueOf(sprint);
+    const ownerIntegration = !unknown && phase !== "archive" && task.status === "ready_to_merge" && queue?.kind === "owner_integration" && queue.taskId === task.id ? queue : undefined;
+    // Only a real pending question or permission is actionable, not a recovery's text or coarse native "waiting" phase.
+    const ownerDecision = sprint?.runMode === "automatic" && !ended && !unknown && phase !== "archive" && task.status !== "stopping"
+      ? sessions.get(task.id)?.decisions.find(d => isOpen(d) && !d.suspended && !d.unavailable) : undefined;
+    const automaticFact = !unknown && !ownerIntegration && !ownerDecision ? automaticStatusFact(task, sprint) : undefined;
+    const acceptanceHold = automaticAcceptanceHold({ id: task.id, sprint, task, unknown });
+    const column = phase === "archive" ? "archive" : ownerIntegration ? "merge" : ownerDecision || acceptanceHold ? "needs"
+      : automaticFact || (unknown && sprint?.runMode === "automatic" && task.status !== "done" && task.status !== "draft") ? "work"
+      : STATUS_COLUMN[phase === "unknown" ? task.status : phase];
+    const fact: Fact = !unknown ? ownerDecision ? { text: ownerDecision.text, tone: "st-warn", icon: ownerDecision.kind === "permission" ? "shield" : "question" }
+      : ownerIntegration ? { text: humanStatus(ownerIntegration.reason), tone: "st-warn", icon: "merge" }
+      : automaticFact ?? statusFact(task, { target, running, title, sprint, ready: id => ready(id, sprint?.runMode), next: nextInSprint.has(task.id) })
       : machine.connection !== "connected" ? { text: `Last known: ${STATUS_WORD[task.status]}`, tone: "st-idle", icon: "help" }
       : task.status === "stopping" ? { text: "Stop not confirmed", tone: "st-warn", icon: "hourglass" }
       : { text: "Process state unknown", tone: "st-idle", icon: "help" };
     const seen = last.get(task.id);
-    return { id: task.id, task, project, machine, sprint, column, unknown, fact, at: task.doneAt ?? (seen ? Date.parse(seen) : task.lastConfirmedAt ?? null), target, workers: own, running };
+    return { id: task.id, task, project, machine, sprint, column, unknown, fact, automaticFact, ownerDecision, ownerIntegration, at: task.doneAt ?? (seen ? Date.parse(seen) : task.lastConfirmedAt ?? null), target, workers: own, running };
   });
 
+  // A sprint's planning task reads only on its sprint: no list, count, badge or search below sees it.
+  const hidden = planningTaskIds(state);
+  const listed = hidden.size ? views.filter(v => !hidden.has(v.id)) : views, planning = hidden.size ? views.filter(v => hidden.has(v.id)) : [];
   const summaries = new Map<string, ProjectSummary>(state.projects.map(project => {
     const machine = machines.get(project.machineId)!, offline = machine.connection !== "connected";
-    const own = views.filter(v => v.project.id === project.id), active = own.filter(v => v.column !== "archive");
+    const own = listed.filter(v => v.project.id === project.id), active = own.filter(v => v.column !== "archive");
     const counts = Object.fromEntries(COLUMNS.map(c => [c.id, active.filter(v => v.column === c.id).length])) as Record<ColumnId, number>;
     const conflicts = active.filter(v => v.task.conflict !== "none").length;
     const signal = offline ? { text: "Offline", tone: "muted" }
@@ -235,7 +348,7 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
       sprints: state.sprints.filter(s => onView(s) && s.projectId === project.id), at, signal,
     }];
   }));
-  return { now, state, views, byId: new Map(views.map(v => [v.id, v])), summaries, archive: views.filter(v => v.column === "archive") };
+  return { now, state, views: listed, planning, byId: new Map(views.map(v => [v.id, v])), summaries, archive: listed.filter(v => v.column === "archive") };
 }
 
 /**
@@ -245,17 +358,18 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
  */
 export function stableIndex(prev: WorkspaceIndex | undefined, next: WorkspaceIndex): WorkspaceIndex {
   if (!prev) return next;
-  const views = share(prev.views, next.views);
-  const byId = new Map(views.map(v => [v.id, v]));
+  const views = share(prev.views, next.views), planning = share(prev.planning ?? [], next.planning);
+  const byId = new Map([...views, ...planning].map(v => [v.id, v]));
   const own = (list: TaskView[]) => list.map(v => byId.get(v.id) ?? v);
   const summaries = new Map([...next.summaries].map(([id, s]) => [id, share(prev.summaries.get(id) as ProjectSummary, { ...s, views: own(s.views) })] as const));
-  return { ...next, views, byId, summaries, archive: share(prev.archive, own(next.archive)) };
+  return { ...next, views, planning, byId, summaries, archive: share(prev.archive, own(next.archive)) };
 }
 
 /** Where a card's primary action lands: the screen that decision is made on, not just the task. */
 export const decisionRoute = (view: TaskView) => {
   const base = { name: "task" as const, machine: view.machine.id, task: view.id };
   if (view.task.conflict === "conflict" || view.task.conflict === "failed") return { ...base, tab: "changes" as const, sub: "conflict" as const };
+  if (automaticAcceptanceHold(view)) return base;
   return view.column === "review" || view.column === "merge" ? { ...base, tab: "changes" as const } : base;
 };
 export const projectsOn = (index: WorkspaceIndex, machineId: string) => [...index.summaries.values()].filter(s => s.machine.id === machineId);
@@ -277,6 +391,12 @@ export const awaitsOwner = (view: TaskView) => !view.unknown && (view.column ===
 /** The one word on a sidebar task row. A stopping task sits in the Working column but never reads as working; a paused
  *  one waits in Needs you and says it is paused. */
 export function sideWord(view: TaskView): string {
+  if (automaticQueueOf(view.sprint)?.taskId === view.id && view.sprint?.automaticQueue?.needsOwner) return "Needs you";
+  if (view.automaticFact) {
+    if (view.task.status === "review") return "Checking";
+    if (view.task.status === "ready_to_merge") return "Finishing";
+    return STATUS_WORD[view.task.status];
+  }
   if (view.task.status === "paused") return "Paused";
   if (view.column === "needs") return "Needs you";
   if (view.column === "work") return view.task.status === "stopping" ? "Stopping" : "Working";
@@ -290,6 +410,9 @@ const placed = (machine: Machine, text: string) => machine.kind === "local" ? te
 export function decisionOf(view: TaskView): Decision {
   const { task } = view, issue = task.issue ?? "";
   const base = { key: `task:${view.id}`, where: placed(view.machine, `${view.project.name} / ${task.title}`), view, project: view.project, sprintId: null, at: view.at };
+  if (view.ownerDecision) return { ...base, kind: view.ownerDecision.kind === "permission" ? "Permission" : "Question",
+    icon: view.fact.icon ?? "question", tone: "st-warn", ask: view.ownerDecision.text };
+  if (automaticAcceptanceHold(view)) return { ...base, kind: "Verification", icon: "alert", tone: "st-warn", ask: view.fact.text };
   if (task.conflict !== "none") return { ...base, kind: "Conflict", icon: "alert", tone: "st-bad", ask: `Merge conflict with ${view.target}` };
   // The domain keeps the waiting reason as text, so the row label follows it rather than a separate kind.
   if (/permission/i.test(issue)) return { ...base, kind: "Permission", icon: "shield", tone: "st-warn", ask: issue };
@@ -304,6 +427,7 @@ export function attentionOf(view: TaskView): Decision {
   if (view.column === "needs") return decisionOf(view);
   const { task } = view;
   const base = { key: `task:${view.id}`, where: placed(view.machine, `${view.project.name} / ${task.title}`), view, project: view.project, sprintId: null, at: view.at };
+  if (view.ownerIntegration) return { ...base, kind: "Finish", icon: "merge", tone: "st-warn", ask: humanStatus(view.ownerIntegration.reason) };
   if (view.column === "review") {
     if (task.result && task.workspaceDigest !== task.result.digest) return { ...base, kind: "Review", icon: "alert", tone: "st-warn", ask: "The result is stale: the workspace changed after it" };
     const c = checkCounts(task.result?.checks ?? []);
@@ -320,7 +444,7 @@ export function attentionOf(view: TaskView): Decision {
  */
 export function cardFact(view: TaskView): Fact {
   const notice = !!view.task.warnings?.length || (!!view.task.observedPhase && view.task.observedPhase !== "not_started");
-  if (view.unknown || notice) return view.fact;
+  if (view.unknown || notice || view.automaticFact || view.ownerDecision || view.ownerIntegration) return view.fact;
   // A run that failed or was cancelled waits on the owner too, but its own outcome is the fact to read.
   const waiting = view.column === "needs" && (view.task.status === "needs_you" || view.task.conflict !== "none");
   if (waiting || view.column === "review" || view.column === "merge") {
@@ -342,10 +466,12 @@ export function inboxItems(index: WorkspaceIndex): Decision[] {
   const of = (column: ColumnId) => live.filter(v => v.column === column).map(attentionOf);
   const planning = index.state.sprints.filter(s => !s.archivedAt).flatMap((sprint): Decision[] => {
     const summary = index.summaries.get(sprint.projectId)!;
-    if (sprint.planning !== "question" || !connected(summary.machine)) return [];
-    const open = index.state.sessions.find(s => s.taskId === sprint.planningTaskId)?.decisions.filter(d => d.kind === "question" && isOpen(d)) ?? [];
+    if (!planningNeedsOwner(index.state, sprint) || !connected(summary.machine)) return [];
+    // The planning task's own questions and permissions are the sprint's one row: the task has none of its own.
+    const waits = planningWaits(index.state, sprint);
+    const open = waits.length ? waits : index.state.sessions.find(s => s.taskId === sprint.planningTaskId)?.decisions.filter(d => d.kind === "question" && isOpen(d)) ?? [];
     const first = open[0]?.text ?? sprint.conversation.filter(m => m.kind === "question").at(-1)?.text ?? "Planning question";
-    const ask = open.length > 1 ? `${open.length} questions: ${first}` : first;
+    const ask = open.length > 1 ? `${open.length} ${open.every(d => d.kind === "question") ? "questions" : "decisions"}: ${first}` : first;
     return [{ key: `sprint:${sprint.id}`, kind: "Planning", icon: "layers", tone: "st-warn", ask, where: placed(summary.machine, `${summary.project.name} / ${sprintTitle(sprint)}`), view: null, project: summary.project, sprintId: sprint.id, at: open[0]?.at ?? null }];
   });
   return [...of("needs"), ...planning, ...of("review"), ...of("merge")];
@@ -373,14 +499,14 @@ export function bySprint(views: TaskView[]): GroupedRow[] {
 export function sprintView(index: WorkspaceIndex, sprint: Sprint) {
   const views = sprint.taskIds.flatMap(id => { const v = index.byId.get(id); return v ? [v] : []; });
   const drafts = views.filter(v => v.task.status === "draft");
-  const ready = (v: TaskView) => v.task.dependencies.every(id => { const d = index.byId.get(id); return !!d && dependencyReady(d.task); });
+  const ready = (v: TaskView) => v.task.dependencies.every(id => { const d = index.byId.get(id); return !!d && dependencyReady(d.task, sprint.runMode); });
   const started = views.length - drafts.length;
   const planning = { planning: "Planning, no tasks yet", question: "Planning, question open", ready: "Plan ready", cancelled: "Planning cancelled", created: "" }[sprint.planning];
   const queue = { idle: "queue idle", running: "queue running", paused: "queue paused", complete: "queue complete" }[sprint.queueState];
   return {
     sprint, title: sprintTitle(sprint), views, started, missing: sprint.taskIds.length - views.length, usable: sprint.planning === "created",
     now: views.find(v => v.task.status === "working") ?? null, next: drafts.find(ready) ?? null, blocked: drafts.filter(v => !ready(v)).length,
-    state: sprint.deletion ? deletionState(index, sprint) : planning || `${sprint.runMode === "automatic" ? "Automatic" : "Manual"}, ${queue}, ${started} of ${sprint.taskIds.length} started${views.length < sprint.taskIds.length && index.state.projects.find(p => p.id === sprint.projectId)?.issue ? ", task details unavailable" : ""}`,
+    state: sprint.deletion ? deletionState(index, sprint) : planning || `${sprintModeLabel[sprint.runMode]}, ${queue}, ${started} of ${sprint.taskIds.length} started${views.length < sprint.taskIds.length && index.state.projects.find(p => p.id === sprint.projectId)?.issue ? ", task details unavailable" : ""}`,
   };
 }
 
@@ -390,6 +516,12 @@ export function sprintRoute(machine: string, sprint: Sprint) {
   if (sprint.deletion) return { name: "sprint" as const, machine, project: sprint.projectId, sprint: sprint.id, tab: "summary" as const };
   return sprint.planning === "created"
     ? { name: "project" as const, machine, project: sprint.projectId, view: "board" as const, scope: { kind: "sprint" as const, id: sprint.id } }
+    : { name: "sprint" as const, machine, project: sprint.projectId, sprint: sprint.id, tab: "planning" as const };
+}
+/** Where an address of a sprint's planning task opens: its sprint's Workers tab for a worker, its Conversation otherwise. */
+export function planningPlace(machine: string, sprint: Sprint, route: { tab?: string; worker?: string }) {
+  return route.tab === "workers"
+    ? { name: "sprint" as const, machine, project: sprint.projectId, sprint: sprint.id, tab: "workers" as const, ...(route.worker ? { worker: route.worker } : {}) }
     : { name: "sprint" as const, machine, project: sprint.projectId, sprint: sprint.id, tab: "planning" as const };
 }
 export type SideRow = { kind: "task"; view: TaskView } | { kind: "sprint"; sprint: Sprint; started: number; total: number };

@@ -56,6 +56,7 @@ mod native_sandbox;
 pub mod native_sessions;
 mod native_skills;
 mod native_sources;
+mod native_sprint_plan;
 mod native_tool_errors;
 mod notifier;
 mod project_guard;
@@ -612,7 +613,8 @@ impl Service {
         Ok(json!({"outcome":"removed"}))
     }
     pub async fn activate(&self, id: &str) -> io::Result<Value> {
-        self.activate_inner(id).await
+        self.activate_inner(id, Path::new(native_recovery::SYSTEM_PROC))
+            .await
     }
     /// Claims the start of this project's runtime and records the owner's intent. The lock is held
     /// only for this bookkeeping, never across the runtime opening.
@@ -676,7 +678,7 @@ impl Service {
             },
         );
     }
-    async fn activate_inner(&self, id: &str) -> io::Result<Value> {
+    async fn activate_inner(&self, id: &str, engine_proc: &Path) -> io::Result<Value> {
         self.accepting()?;
         let root = match self.prepare_activation(id).await {
             Ok(Ok(root)) => root,
@@ -720,7 +722,7 @@ impl Service {
             let opened = match opened {
                 Ok(runtime) => {
                     let runtime = Arc::new(runtime);
-                    match runtime.recover().await {
+                    match runtime.recover_from(engine_proc).await {
                         // An answered stop question whose relaunch a restart interrupted
                         // is resumed, never left in RECOVERING. A failure to relaunch
                         // leaves an explicit, stoppable task, not a failed project.
@@ -787,7 +789,7 @@ impl Service {
         for id in due {
             let service = self.clone();
             tokio::spawn(async move {
-                let _ = service.activate_inner(&id).await;
+                let _ = service.activate(&id).await;
             });
         }
     }

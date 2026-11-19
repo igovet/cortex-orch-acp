@@ -11,10 +11,11 @@ import {fileURLToPath} from "node:url";
 const root=fileURLToPath(new URL("../../../",import.meta.url));
 const args=process.argv.slice(2);
 const set=args[0]==="--set"?args[1]:"pages";
-if(!/^(pages|polish|ui-fixes|review-fixes)$/.test(set))throw Error("Use --set pages, --set polish, --set ui-fixes or --set review-fixes");
+if(!/^(pages|polish|ui-fixes|review-fixes|settings-rework)$/.test(set))throw Error("Use --set pages, --set polish, --set ui-fixes, --set review-fixes or --set settings-rework");
 const pages=args[0]==="--set"?args.slice(2):args;
 const out=root+".workspace-build/pages-shots-"+set;
-const shots=root+".design-evidence/conversation/"+set;
+// settings-rework: every orchestration settings section and secondary page, with a set-up machine (world=settings).
+const shots=root+".design-evidence/"+(set==="settings-rework"?"settings-rework":"conversation/"+set);
 await mkdir(shots,{recursive:true});
 await build({configFile:root+"packages/workspace-ui/vite.config.ts",root:root+"packages/workspace-ui",logLevel:"error",build:{outDir:out+"/bundle",emptyOutDir:true,rollupOptions:{input:root+"packages/workspace-ui/test/layout-fit.html"}}});
 const labelFit=await readFile(new URL("./label-fit.js",import.meta.url),"utf8");

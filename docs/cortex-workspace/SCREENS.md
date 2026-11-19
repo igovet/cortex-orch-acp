@@ -53,7 +53,7 @@ A created sprint has **New task** and **Close sprint…** in its title band; a n
 | Inbox | Built: Home's Needs you list for every connected machine, in the same order: a question, permission or conflict, and each sprint planning question; then a result to review, with its check counts; then accepted work to finish. Each task appears once. A question, permission or result opens the task's conversation, where it is answered or accepted inline; a conflict opens its resolution; a planning question its sprint's planning. No separate answering interface. The sidebar's Inbox count is this list. |
 | Board and list | Built: each card or row shows its title, its column as the state, one concise fact and, on a card, one next action. The fact is the question itself, the result's check counts, what was accepted and where it goes, or Working without a worker count; a failed or cancelled run keeps its outcome. The action is Answer, Review (a permission), Resolve, Start, Resume, Open (running work), Review (a result, which opens the conversation) or the finishing step. Stop is no longer a card action: it stays in the card's menu and on the task. Scopes, sprint grouping and filters are unchanged. |
 | New task and New sprint | The shared composer, with the description first. Save draft is the default and starts nothing. Start now stays an explicit secondary action; a sprint uses Start planning. |
-| Sprint planning | Built: a sprint has four tabs, Chat, Plan, Board and Summary, so the planning chat and the plan each have the whole width at every window size. The proposed plan is a line in the chat ("Plan vN proposed: N tasks") whose Open plan opens the Plan tab; on the Plan tab a chip says Question waiting, Working on the plan or Unsent message and opens the Chat tab, and Request changes opens the Chat tab with the cursor in its message box. Once the tasks exist the chat's composer stays in place, smaller, and says once "Tasks are created. Edit them on the Board." Create tasks stays explicit. Queue semantics are unchanged. |
+| Sprint planning | Built: a sprint has four tabs, Chat, Plan, Board and Summary, so the planning chat and the plan each have the whole width at every window size. The proposed plan is a line in the chat ("Plan vN proposed: N tasks") whose Open plan opens the Plan tab; on the Plan tab a chip says Question waiting, Working on the plan or Unsent message and opens the Chat tab, and Request changes opens the Chat tab with the cursor in its message box. Once the tasks exist the chat's composer stays in place, smaller, and says once "Tasks are created. Edit them on the Board." Create tasks stays explicit. Queue semantics are unchanged. A sprint planned by its own read-only planning task has five tabs instead: Conversation, Workers, Plan, Board and Summary. Conversation is that task's conversation drawn exactly as a task's (the coordinator's messages, the "Worked …" step folds, question and permission cards, the workers bar and the task composer with its Stop and Resume), headed by the sprint's own description rather than the planner's instructions, with the plan line and any planning failure note after it. Workers is the task's Work details. A message asks for changes to the plan and continues the same planning task; an answer, Stop, Resume and the model choice go through the sprint's planning. The plan is still approved on the Plan tab and with Create tasks. The planning task itself has no row, card, count, page, search result or notification of its own: its questions make the sprint read Needs you, and any address of it opens its sprint. An older sprint planned without such a task keeps the four tabs and its planning chat. |
 | Knowledge and skills | Built: Collect knowledge, Refresh knowledge and New skill are written in the shared composer, with Voice, Attach disabled because the request is text only, and the machine's default route shown read-only. The plane, named "Create the task", creates an ordinary task, which does not start. |
 | Changes, ready to finish, merge and conflicts | An accepted result appears in the conversation; integration stays a separate confirmation. Conflict progress is a factual inline update that links to its detail. Same-branch results use Commit, non-Git projects use Close, and a pull request is not a merge. |
 | Archive | Read-only outcome rows, with details on open. A task reaches it with one press of Archive (or automatically after the auto-archive days), with no dialog and no question; its work and checkout stay as they were and Restore brings it back. A row whose cleanup is blocked by unmerged work offers Decide…, where deleting that work at cleanup is a separate explicit choice. No composer. |
@@ -122,7 +122,7 @@ The local desktop slice connects these conversation controls to the real service
 - A description-only draft with per-task model/effort/access/language and main/worktree choices. Ctrl+Enter saves it; saving starts nothing. Automatic title generation is explicitly unavailable; rename is connected.
 - Task-owned Changes, guarded merge/PR and conflict controls, real archived-row purge, project overrides, service-owned automatic queues and project removal. The project menu, worktree menu and Code open VS Code or the default application when one exists, and say what to install when not. Code edits checkout and worktree files with tabs, a dirty marker, Save, Autosave and conflict choices; see [editing files](local-task-execution.md#editing-files). It opens Markdown, CSV, TSV and SVG formatted with a Preview and Source switch, previews HTML and JSON on request, shows pictures and plays video and sound inline, and shows a placeholder with Show as text for PDF and other binary files; see [viewing files](local-task-execution.md#viewing-files). Its file tree shows every file and folder in the project folder, dot-files such as `.env` and files Git ignores included and dimmed, with Refresh files and Collapse all; a folder Git ignores starts closed, opens with one read of that folder (at most 500 entries and a "N more not shown" row) and never reads on a timer; `.git` and Cortex's private stores are never shown; see [the file tree](local-task-execution.md#the-file-tree). See [task execution](local-task-execution.md) for safety refusals and incomplete surfaces.
 - Explicit start and observed progress. Live data carries no freshness stamp; "Last confirmed" with its age appears only while the service is away.
-- Unconfirmed task state. When the machine is connected but Cortex cannot confirm whether a task is running or stopped, the task's title shows one status, Not confirmed, and one alert notice explains it: "Task state not confirmed." with the reason that the machine is connected but cannot confirm whether the task is running or stopped, and the action Re-check state. A reply that is still unconfirmed says so and links to Machine settings → Diagnostics; a failed read keeps the notice and asks to try again. Re-check rereads the existing task state only: it resumes, stops and replays nothing. A confirmed read removes the notice and restores the composer and task controls. While the state is unconfirmed, sending and worker messages stay off and the disabled composer names Re-check state. A disconnected machine is a different case, with its own notice, "Machine disconnected.", the same Re-check state action and the Diagnostics link. Board cards and list rows show Process state unknown on a connected machine and Last known status on a disconnected one.
+- Unconfirmed task state. When the machine is connected but Cortex cannot confirm whether a task is running or stopped, the task's title shows one status, Not confirmed, and one alert notice explains it: "Task state not confirmed." with the reason that the machine is connected but cannot confirm whether the task is running or stopped, and the action Re-check state. A reply that is still unconfirmed says so and links to Machine settings → Diagnostics; a failed read keeps the notice and asks to try again. Re-check rereads the existing task state only: it resumes, stops and replays nothing. A confirmed read removes the notice and restores the composer and task controls. While the state is unconfirmed, sending and worker messages stay off and the disabled composer names Re-check state. A disconnected machine is a different case, with its own notice, "Machine disconnected.", the same Re-check state action and the Diagnostics link. Board cards and list rows show Process state unknown on a connected machine and Last known status on a disconnected one. When the runtime says why the state is unconfirmed, the conversation also pins a card above the message box: a session still being stopped reads as one quiet line that continues by itself; a process that did not confirm its exit gets a decision card with Re-check state, Open workers, Open Diagnostics and Close as is…; records that disagree get the same card with Close as is… disabled and its reason. The task header's See what is needed brings the card into view.
 - Identified single and batch questions. Several open questions, of a task or of sprint planning, are one form: the owner sees every question, answers each one, changes any answer before sending, and sends them all with one button. Multiline answers are kept unchanged; a batch submits atomically. Paused task-level questions remain visible and require Resume before answering. A settled question reads as the question with its answer under it, and the Inbox says how many questions a planning run has open.
 - Durable owner/coordinator conversation, plans and tool activity, in recorded order. Streamed text reads as the message it was, and a different message that follows it directly starts a new paragraph instead of running into it, and a worker's or reviewer's narration is left to that worker's page rather than shown in the Conversation; one turn's tool calls fold into one line with its steps, and machine identifiers and display updates are not shown. First result is `Result v1`, independent of its runtime entity version; each Request changes that produces a new result adds one (v2, v3), and the banner, Accept label and inspector use the same number. A paused task reads Paused in the sidebar, and cancelled or failed workers are counted apart from finished ones, in the header and on the team bar alike ("Workers: 0 finished, 1 cancelled").
 - Worker order. Every list of a task's workers (the team bar's menu, the Work details groups, the Inspector) shows the newest worker first, and the team bar names the newest worker at work.
@@ -132,6 +132,7 @@ The local desktop slice connects these conversation controls to the real service
 - A sprint plan lists task titles, one line each. Read more opens a right sidebar with the title, dependencies and full description, which scrolls on its own and is always docked beside the plan, never over it. Panels give way by one rule ([sprint plan](#sprint-plan-list-graph-and-full-view-desktop)), and on a window with no room for both, Details takes the plan's place with a way back. Escape closes it.
 - All work names sprints on the board and the list: each column and status group shows standalone tasks, then each sprint under its name, and a card repeats the sprint's name in its footer. The heading leads to that sprint.
 - A task waiting for the owner, in Needs you or Review, is tinted on the board and the list and marked in the sidebar. Same-branch and non-Git results use Finish in the sidebar; the inspector describes committing or closing, not merging. Review the diff opens the result-bound Accept control before the separate commit or merge confirmation.
+- Status and reason text is plain language everywhere (sidebar, board, task header, queue strip, notifications, check rows): a recorded reason code reads as a sentence, a code the app does not recognise reads as a generic sentence, and no internal code or underscore is ever shown. A sidebar row always keeps the task title and shows its short status in a separate word beside it; the longer reason is read in the task itself. One table (`packages/workspace-ui/src/status-text.ts`) holds the wording.
 - A card that changes status crosses to its new column instead of vanishing, and a folded column opens around it. Reduced motion moves it at once. A manual drag uses the card’s measured size. Start stays on the pressed card through background reads and shows a refusal there, with a retry path; sprint queue mode does not silently disable an otherwise startable draft.
 - Every action shows its loader on the control that was pressed, after a short delay so a quick action shows nothing, and that control takes no second press until the action ends. Enter in a composer counts as pressing its send button, and an action from a menu shows on the control that opened the menu.
 - A machine-persisted queue, sent by the service at the coordinator's next step. Edit removes an unsent item and restores the composer; Send now captures steering even during a running turn. Captured text is not replayed automatically after a lost response. Each queued row is one line: its text shortens and opens whole on a press or Enter, and Edit, Send now and remove keep their own box. The row shows no attachment chips; the message keeps its files, which show again in Edit and open from the conversation once sent.
@@ -295,8 +296,8 @@ The machine service raises the desktop notifications, so they also arrive while 
 | Task stopped: your decision | the runtime stopped a task and asks the owner; the second line is its headline | the task's Conversation, at that question |
 | Result ready for review | a task has a result the owner has not accepted (not for a sprint in Automatic mode, which accepts it itself) | the task's Conversation, with the result card in view |
 | Task failed | a task failed or could not start, with no question | the task |
-| Planning question waiting | a sprint's planning asks the owner | the sprint's planning chat |
-| Sprint paused | a sprint paused itself; the second line is its reason (not Manual mode's stop after a result, nor the owner's own pause, close or delete) | the sprint |
+| Planning question waiting | a sprint's planning asks the owner (its planning task's question included, never raised as a task's) | the sprint's planning chat, or its Conversation for a sprint planned by a planning task |
+| Sprint paused | a sprint paused itself; the second line is its reason (not Manual mode's stop after a result, nor the owner's own pause, close or delete). In an Automatic sprint a saved hold that requires the owner raises it, including a blocked acceptance or integration | the sprint |
 
 Routine progress, an automatic acceptance that went through and anything on view in the focused window raise nothing. One notification stands for each task or sprint: a newer state replaces it (an answered question followed by a result, for example), and resolving it any way (answering, accepting, closing, archiving) withdraws it. Settings, Appearance turns notifications off and on, and below that switch each kind on its own; all are on at first.
 
@@ -316,7 +317,7 @@ A tab that already shows the task or sprint (any of its tabs) comes forward inst
 - Interface words: a label never names the program, because the whole program is Cortex: "Use", not "Use in Cortex". The agent you talk to reads as Coordinator where a name is needed. Labels and hints are English only.
 - Task state: a same-branch (or no-Git) review points to Ready to finish, not Ready to merge, in the header and the review bar alike (Accept moves the task to Ready to finish), and so does the New task form's hint for a project-folder task on the branch it would merge into ("The task stops at Ready to finish for your confirmation."). A task working again after Request changes shows no result and no Accept until its next result exists, and its Inspector counts only the current version's worker checks, never the previous version's. A closed task offers no Request changes. A worker check the runtime kept unverified says why in words (run before the final files, or a command that tests nothing), never that a tool was unavailable: every reason code the runtime records reads as what it means, also inside a reviewer's own sentence, and an unknown code is named as recorded, never as a missing tool or service. Once the runtime's own verification of the version passed, self-reported checks it does not cover are listed on the result card as notes and do not keep Accept off. A worker's failed probe it withdrew is not counted once the runtime confirms the withdrawal from the run it was bound to; a check that still keeps Accept off is named in the reason beside it ("Worker check “…” failed. Rerun that check or request changes."), never a generic instruction. A task in review shows its result card as soon as its page opens: the summary, the version and the runtime's checks come from the result's own record, and while the result is still being checked against the project folder Accept stays off with "Checking the result against the project…" and no other action is offered; the same card fills in when the check lands, without being rebuilt. A board read does not hide a result card already shown. A task in Ready to merge whose files are still being checked against its target branch says so in place of its commit facts and offers no commit until they are known. The reason beside a disabled Accept ends in one full stop. A project-folder sprint task's result is not called stale because a later task wrote other files, and a result the app committed itself is not stale. The inspector shows the completed outcome once, without repeating the same status as a second fact.
 - Held and ended tasks: a task the runtime holds for the owner reads Interrupted only for a lost turn or an outcome nobody could observe, and Stopped for a stop the runtime decided; its reason reads in words wherever it shows (Home, Inbox, the strip), never as a raw code, and the header offers Continue (the runtime's Retry: the coordinator decides the next step from the recorded state; nothing is replayed). A previous result next to such a task says it waits for the owner's message, never "Work is running", and its Accept waits for the task to finish. Finish chosen on the runtime's stop question closes the task as is, so it leaves Needs you, the Inbox and Home at once. The machine presents that close as a saved close as is (not verified), so the task archives like any closed task, by Archive or automatically after its days in Done, and a sprint counts it as closed and moves on; a saved disposition always wins. The runtime's stop question card shows its full explanation (what happened, what each answer does), each option's consequence under its label, a Recommended mark on the recommended one, and buttons for what it names: Open review findings (the reviewer's page with its report), Open task “<title>” (the task holding the files), and the denied path as text. A question it replaced reads "Replaced by the question below: <reason>"; another withdrawn one reads "Withdrawn: <first line>". A working task whose next step waits for another task's files reads "Waiting for the task “<title>” to release <files>" and starts that step by itself. A paused task waits in Needs you (Paused, with Resume), never in Working; a failed or cancelled run there reads as its outcome. Its title band offers Close task…, whose dialog closes it as is or cancels it and offers no Stop; its composer says so. A closed task's title band offers Archive, one command with no question. A runtime result that can never be accepted (its evidence is unavailable, or it comes from an earlier version) offers Close as is… beside the reason Accept is off. The sprint Summary counts Needs you apart from Working. A project-folder task whose record names no target branch reads Ready to finish, not Ready to merge. An answer that changed no files reads Nothing to commit with Close task, and a closed task offers no Commit in Changes. A worker whose result submissions were refused says so on its card and, where the binding is exact, on each refused Submit result step.
-- Sprint queue: "All queued tasks have run. Finished results wait for your confirmation; nothing closes by itself." stays only while a task of the sprint is still open; once every task is closed the queue says nothing.
+- Sprint queue (Hybrid): "All queued tasks have run. Finished results wait for your confirmation; nothing closes by itself." stays only while a task of the sprint is still open; once every task is closed the queue says nothing.
 - Identifiers: task, assignment, report, route and connection ids and build hashes never appear in the interface. Diagnostics is the one exception, and it shows the build and connection identifiers for support. A version elsewhere reads as `1.0.6`. Two connections offering one model are told apart by connection name.
 - Counts: nothing to count shows nothing, never "All 0". What differs from a profile is listed in words, for example "Claude: 4 sessions at most, was 2".
 - Titles and names are edited by clicking them. There is no separate Rename or Edit control. A click opens the name as a field with Save and Cancel beside it; an unchanged name also closes when focus leaves it. A task's title stays editable after Start, review, finishing and closing, because it is presentation, not lifecycle; only a cleared task's title is read-only. Edit task… (the saved request and its settings) remains for a never-started task only.
@@ -340,46 +341,235 @@ A tab that already shows the task or sprint (any of its tabs) comes forward inst
 
 ## Orchestration settings (desktop)
 
-Per-machine orchestration settings reach field-level parity with the Cortex configuration that Paseo exposes, in a more convenient form ([CW-R41](requirements.md), [CW-R23](requirements.md)). The field checklist and acceptance criteria are in [CW-U07](backlog/CW-U07.md). This section fixes the pages and the shared rules. No owner approval of these pages is recorded yet, and the current prototype pages do not yet meet this inventory.
+**Status: built in the Workspace interface (`packages/workspace-ui`), part of the unreleased 1.0.6 changes.** The eight-section structure below is the built structure. It replaces the former nine-page structure (Overview, Coordinator, Models, Routing, Route preview, Limits and fallback, Tools and MCP, Profiles, and Files and presets) and the separate Engine connections item. Where the build differs from the Paseo panel, the difference is stated in this section.
 
-Each page is scoped to one machine and shows the same context bar: machine name, connection state, runtime version, active profile and its state. Project scope appears only where it applies.
+Owner decision (2026-11-19): the Workspace orchestration settings follow the structure and the way of configuring of the Cortex settings panel in the Paseo plugin. The same sections appear in the same order, each setting is configured the same way, and each section keeps the same save model. The Workspace visual language is applied on top. The owner chose to implement without a mockup approval step; this section records the built behaviour.
 
-| Page | Purpose | Project scope |
-|---|---|---|
-| Overview | Items that need attention, each linking to its field; summary rows; the routing source in use | Shows the source |
-| Coordinator | Model, effort, access mode, language and checkout that new tasks start with; exact default route under Advanced | No |
-| Models | Which models may run, their tiers, effort limits and preferences; engine switches; per-connection model refresh | Yes (routing) |
-| Routing | Roles and pins, work kinds and engine lean, quota windows, rules under Advanced | Yes (routing) |
-| Route preview | Read-only answer to what would run for a role, work kind, complexity and attempt, from the saved or the draft rules | Yes (routing) |
-| Limits and fallback | Attempts, allowed connections and data recipients, fallback failure classes, budget and consent | Yes (ceiling, narrow only) |
-| Tools and MCP | Server list, add, edit and remove; tool access per role class; sandbox | No |
-| Profiles | Saved snapshots of routing, defaults and ceiling, MCP usage policy and connection session limits | No |
-| Files and presets | Source precedence, preserved keys, environment overrides, default preset, model-policy migration | Read-only |
+Per-machine orchestration settings reach field-level parity with the Cortex configuration that Paseo exposes ([CW-R41](requirements.md), [CW-R23](requirements.md)). [CW-U07](backlog/CW-U07.md) holds the field inventory and the acceptance criteria, and names the section for each field.
 
-Engine connections stay on the machine's Connections page, which gains the real fields listed in CW-U07.
+Each section is scoped to one machine. The context bar shows the machine name and connection state, and the profile bar below it shows the active profile and its state. The Project picker appears only where a project scope applies.
 
-Shared rules:
+Eight sidebar sub-items sit under the machine's Orchestration item, in this order:
 
-- Drafts are per surface, not per page: routing (Models and Routing share one draft and one save), user defaults (Coordinator and Limits share one draft and one save), project ceiling, MCP servers and connections. The save bar names what it covers, for example "4 unsaved changes in routing rules".
-- A save over a surface that changed elsewhere is refused with a conflict state. The owner reviews the changed keys and then reapplies; nothing is overwritten blind.
-- Offline, every write is disabled with its reason, last-known values stay visible, and a dirty draft is kept. Nothing is queued.
-- Built-in values (role tiers, complexity shift, fallback order, effort by tier, hot band, work-kind table) are read-only, marked with a lock and "Built in". They are never controls.
-- A value that is not set is omitted; no dash or "None" stands in for it. Selecting anything changes no font weight, size or layout.
-- Advanced sections are closed by default and open by themselves when they hold a non-default value or an error.
+| # | Sidebar label | Paseo section | Writes | Project picker |
+|---|---|---|---|---|
+| 1 | Defaults | User defaults, with the default preset card | `user_defaults` (preset actions run at once) | Hidden |
+| 2 | Models | Models | `routing` | Shown |
+| 3 | Engines and models | Engines & models | `routing` | Shown |
+| 4 | Project ceiling | Project ceiling | `project_ceiling` | Shown (required) |
+| 5 | Routing | Routing | `routing` | Shown |
+| 6 | Profiles | Profiles | Profile commands (at once) | Hidden |
+| 7 | MCP servers | MCP servers | `mcp_servers` | Hidden |
+| 8 | Connections | Connections | `connections` (commands at once) | Hidden |
 
-Routing preview: the route preview shows the tier path, the effort, the ranked routes with the decision that placed each, and the excluded routes with their reasons. A blocked result states its reason in words. The page states that live availability, retries and plan hints are known only at dispatch.
+- Deliberate difference from the Paseo panel: the Paseo panel shows its workspace picker above every section. Workspace shows the Project picker only on sections 2 to 5, which take a project scope; sections 1, 6, 7 and 8 are machine-wide.
+- Engine connections is no longer a separate top-level machine item; Connections is section 8. The `section: "connections"` route stays, so existing links keep working.
+- The bare Orchestration route opens Defaults. Existing deep links resolve: `defaults` opens Defaults; `models` opens Models; `routing` with tab `roles`, `kinds`, `quota` or `rules` opens Routing, scrolled to the matching group; `effective` opens Route preview; `policy` opens Defaults › Machine ceiling under machine scope, or Project ceiling under project scope; `tools` opens MCP servers; `profiles` opens Profiles; `files` opens Files and sources.
+- Secondary pages are not in the sidebar. Each opens from a link in the section named, and has a "Back to <section>" link: Route preview (from Routing and from Engines and models); Files and sources (from Routing, from the Defaults notice about kept keys, and from the invalid-routing and migration strips); MCP server add and edit pages (from MCP servers).
+- The Overview page is removed. Its needs-attention list moves to the top of Defaults.
 
-Tools and MCP:
+### Frame on every section
 
-- The server list shows each server with its tool counts by audience, worded so the overlapping grants never read as one total ("15 tools for writing workers, 11 for read-only roles, 8 for the coordinator"), its engines, its network state, the time of its last tool check and an enabled switch. Invalid, path-missing, unmanaged-settings and disabled rows carry their reason.
-- Adding a server takes three steps: Define, Connect and list tools, Tool access. Connecting starts the server in its sandbox, lists its tools and calls none. The draft stays in the client until it is saved, because a server with no granted tool cannot be saved, even when disabled.
-- The tool access matrix has one row per tool and the columns Coordinator, Read-only, Writing, Consultant (fixed to Never) and Always load (Claude only). The levels cascade: Coordinator implies Read-only, which implies Writing. Removing Writing clears the higher levels, so every saved list is a subset of the list above it.
-- Each tool row shows one state: Granted; New (listed by the server and never granted by default); Not offered (granted but no longer listed; kept until removed); or Not checked (typed by hand).
-- Bulk actions set the selected rows to Off, Writing only, Read-only too or Coordinator too. Suggest from server applies the server's own hints as a labelled preview; it is never automatic.
-- Check as, for a chosen role class and engine, shows the exact access result the runtime would use.
-- Stored environment values are never shown after saving; they can be kept, replaced or removed. Redacted arguments keep their stored value until the whole part is replaced.
+From top to bottom:
+
+1. **Context bar**: the machine name and connection state, as today. At its end is the **Project** picker, a choice of "Machine only" and then the machine's projects. It is shown only on sections 2 to 5 and writes the same scope as today. With no projects it offers only "Machine only", and the status lane says "This machine has no projects, so only machine settings can be chosen." Below about 720 px a **Section** choice that lists the eight labels sits at the start of the bar, because the sidebar is held away there. Below about 720 px the machine name is not shown in this bar. Below about 560 px the connection state keeps only its icon beside the Project picker; its word is still read by assistive technology.
+2. **Profile bar** (see below).
+3. **Status lane**: the offline, remote-write and no-projects strips as today, and the routing source strips on sections 2, 3 and 5.
+4. **Title and lead**, with section actions at the end of the title row.
+5. **Section body.**
+6. **Save bar** on the draft sections 1 to 5 and 7. Sections 6 and 8 act at once and have no save bar.
+
+### Profile bar
+
+One line under the context bar on every section and secondary page, with a hairline below it:
+
+- **Profile**: a choice of saved profiles, plus "No profile". Changing it opens "Switch to <name>?" when the machine differs from the profile or drafts would be dropped, with "Save and switch", "Discard and switch" and "Cancel". Otherwise it switches at once.
+- **State word**, with an icon and never colour alone: "Applied", "Modified (n)" (opens the list of differences), "No profile", "Interrupted" or "Unavailable".
+- **Actions**: "Save to profile" (off with the reason "Nothing differs from <name>" or "No profile is active"); "Revert to saved" (shown when modified); and "Save as new…", which asks for a name; the description is added afterwards under Profiles.
+- **Interrupted**: "A switch to <name> was interrupted, so the files may be a mix." with "Activate again", "Save current settings to it" and "Detach".
+- **Partial profile**: "<name> stores only <sections>. Save to profile stores every section."
+- **Offline**: every action is off with the offline reason, and the picker shows the last known value.
+- **Narrow width**: the bar wraps onto more lines as it narrows. Its controls keep the 28 px row size (32 px in the phone shell).
+
+### 1. Defaults (`user_defaults`)
+
+Title "Defaults". Lead: "What a new task on this machine starts with, and the widest limits any task may use." Groups, in order:
+
+1. **Needs attention**, shown only when there are configuration issues: one link per issue to its section.
+2. **Default preset**. "Apply preset" creates only the files that are missing and never replaces one; it is off with "Every file exists, so there is nothing to create". "Reset to default…" replaces routing and defaults with the preset after a warning that names the files replaced and the backups kept (`<name>.json.cortex-backup-<time>`), and a literal confirmation. Both are commands, not draft edits; their outcome shows under the group, with "Read again" after a conflict.
+3. **Coordinator**. Model: a picker over enabled, available models; each option names its engine. Recommended: "A strong general model; it plans and checks the work." Effort: the model's observed levels; a general list is labelled "Not observed: this is a general list". Status: "Bound to <route>" (the engine and model, or the exact route), or the error with "Fix in Models". "More coordinator parameters" is a closed block of name and value rows that opens when it holds a value.
+4. **Language**: Automatic, English or Russian. Recommended: "Automatic, or Russian to always get Russian."
+5. **New tasks**: Access mode (Development, Guarded or Auto) and Checkout for new tasks (Worktree or Project folder).
+6. **Exact default route**: closed by default, and open when set or in error. Use an exact route or clear it, with pickers for the connection and model and the route parameters. Recommended: "Leave this off and use the coordinator above."
+7. **Machine ceiling**: "The widest limits any project or task may use. A project can only narrow them." Recommended: "Leave every restriction off unless you need a hard lock; switch models on and off under Models instead." Rows: Attempts per task (blank means no limit; about 8 to 12 stops runaway retries), Connections and Data recipients. A **Fallback** subgroup, with "Off unless all of these allow it.": Failure classes, Budget, "Allow work to move to another provider", and the fixed note on hard denials (cancellation, refusal, authorization loss, provider restriction). Recommended: "Leave fallback off. If you want it: both failure classes, budget 1, consent only if another provider may see the code." Advanced: Allowed routes and Fallback target routes. "Stored, not applied" rows appear only when set.
+8. **Kept keys**, only when the app keeps keys it does not manage: "Kept unchanged, not edited here: <keys>." with a link to Files and sources.
+
+Save bar: one draft for groups 3 to 7, labelled "Save defaults on <machine>". After a save: "Saved on <machine>. Not yet in profile <name>.", with "Save to profile". With a project selected this section shows no project picker, because machine defaults never become project values.
+
+### 2. Models (`routing`)
+
+Title "Models". Lead: "Switch on the models tasks may use. Only these appear in the model selector and in automatic routing. New models stay off until you switch them on."
+
+- Head actions: a "Filter models" field and "Refresh model lists".
+- **Model lists**: one read-only row per connection, "<Engine> · <connection name>", with "Observed <time>" and, after a refresh, its outcome. On a failed read: "List could not be read; the previous one is kept." Recommended: "After an engine update, refresh to see new models." When no connection exists: "No connection is registered. Add one under Connections."
+- One group per engine, headed "<Engine>" with a count, "n of m on":
+  - "Turn on all shown" and "Turn off all shown", when more than one row is shown. They skip rows that a broader rule blocks.
+  - When the engine is switched off under Engines and models, a notice says so and links there. Its rows are off with that reason.
+  - One row per model: the display name; the model id, followed by "Not confirmed by the engine yet" or "Context window <n> tokens" when observed; and a switch named "<name> enabled". A model that a broader rule blocks shows the reason "Off because of "x", which can cover other models too" and "Remove rule "x"".
+  - "<Engine>: not offered now": models that are switched on but no longer offered, each with Remove.
+  - Empty texts: "No connection for this engine.", "No models known yet: refresh the model lists.", "No model matches the filter." For OpenCode with no models: "No models. Enable OpenCode under Connections first."
+- Strips: the routing source strips (invalid routing, migration, project and environment notes). A connection whose model list could not be read shows "Not read" on its row under Model lists.
+- Save bar: "Save routing rules on <machine or project>".
+
+### 3. Engines and models (`routing`)
+
+Title "Engines and models". Lead: "How automatic routing uses the models you switched on. Every model stays selectable by hand."
+
+- Head action: "Preview routes", which opens Route preview.
+- Group "What these switches change": two or three visible lines that summarise the switches, with the full help behind "?".
+- One block per engine, headed "<Engine>" ("optional engine" for OpenCode):
+  - **Now**: the engine's state and its connections by name and state (read-only).
+  - **Use <Engine>** switch. On: "Its models can be chosen and routed." Off: "Off: every <Engine> model is hidden from the selector, refused when chosen or pinned, and never routed. Connections and logins stay." Recommended: "On for every engine you pay for."
+  - **Automatic routing may use <Engine>** switch. It is off for the last engine, with the reason "At least one engine must stay available to automatic routing". Off: "Its models stay selectable by hand; automatic routing, fallback and pins skip it." Recommended: "On, so workers can use both plans."
+  - A model table with the columns Model, Automatic, Tiers, Preferred work and a disclosure, with one row for each model switched on under Models:
+    - **Automatic**: a switch named "Pick <name> automatically". It is off with "Switched off under Models" when the model is not enabled, and it shows "Choose a tier." as its error when no tier is set.
+    - **Tiers**: Light, Standard, Deep and Flagship toggles, in that order. Off with "Turn on Automatic first" when automatic is off.
+    - **Preferred work**: a summary in words, shown in full on press or focus.
+    - **Expanded details**: the "Now" line (automatic verdict and reason, with matching deny rules in monospace; no route ids); the checklist of the twelve work kinds, in two columns and one below 560 px, each with a help line that names its roles (legacy kinds shown as "<kind> (legacy, kept)"); "Prefer <name> when", a text area with a counter ("n of 500. The coordinator judges this. Retries ignore it."); and "Effort and policy for <name>", a link to that model in Routing › Model policy. For a model that routing excludes by default (OpenCode routes), "Allow <name> in automatic routing" writes an `auto_allow` token for that exact route; its effect is open point 6.
+  - Empty texts: "No models: no connection for this engine.", "No models known yet: refresh the model lists under Models.", "No model of this engine is switched on (see Models)."
+- **Other entries in this file**: deny or auto-allow tokens that match no listed model, each with Remove. Shown only when there are any.
+- Strips and save bar as on Models: one shared routing draft.
+
+### 4. Project ceiling (`project_ceiling`)
+
+Title "Project ceiling". Lead: "Narrows the machine ceiling for one project. It is stored in that project and never in a profile." Recommended: "Only for projects that must stay on specific models or providers."
+
+- **Machine only** (no project chosen): one state line, "Choose a project in the bar above to read or set its ceiling.", or "This machine has no projects." when none exists. No save bar.
+- **Project chosen**: the notice "This project has no ceiling of its own. Saving creates one." when none is set; a table of Limit, Machine, Project and Effective, with the states "Starts from the machine ceiling", "No longer narrows" (warning) and "Must stay within the machine limit." (danger); "Remove project ceiling…" with a confirmation; and the save bar "Save project ceiling on <project>". A project ceiling may only narrow the machine limit. Its rows are attempts per task, connections, data recipients, failure classes, fallback budget, consent to move work to another provider, allowed routes and fallback target routes.
+
+### 5. Routing (`routing`)
+
+Title "Routing". Lead: "Who runs what. Pins are strict; leans and preferences only rank what is eligible." Head actions: "Preview routes" and "Files and sources". Groups, in order:
+
+1. **Routing files** (read-only): "Rules in use" (User, Project or Environment routing file, with "(invalid)" when invalid); "Precedence": "Project, then environment, then user. Files never merge."; "Model policy version", with the migration strip when it is not 2; and "Saving to", the file for the current scope.
+2. **Model policy**: one disclosure per model, grouped by engine, with an anchor for each model. Its summary is the name and tiers in words. Its fields: Tiers; Effort floor and Max effort (pickers over the observed levels, Neutral, and any stored value the model does not offer, labelled "Not offered by this model"); Preferred work (the same checklist as Engines and models); Prefer when; Effort ladder (three pickers, light models only); Also standard for (light models only); Request names (a tag list). A stored value the model does not offer stays visible as "Not offered by this model"; the page shows no separate notice for other stored data. Recommended: "Most owners only need Engines and models; set these for models that work badly at low effort or that you call by a short name."
+3. **Roles and pins**: the role table, Role, Work kind, Tier and Pin, in the groups Writing, Read-only and Consultant, with an "All roles" row. Work kind and Tier are built in and locked. The Tier column reads the built-in ladder from the domain in words. "Pin…" or "Edit pin" is a visible line button that opens the pin editor with its strict-pin warning. Recommended: "No pins: automatic routing balances cost, quota and quality."
+4. **Work kinds**: Work kind, Lean to engine, Preferred models and Light models also standard. Recommended: "Leave every lean on Built in."
+5. **Quota windows** (open when windows exist): the per-engine quota editor, with the locked hot-band note.
+6. **Deny list** (open when non-empty): the tag list with token validation, and the other entries.
+7. **Auto-allow** (shown only when non-empty; its effect is open point 6) and **Legacy tiers** (shown only when present, with Migrate) sit inside the Deny list group, not as groups of their own.
+8. **How the router decides**: locked rows for fallback order, effort by tier, rank order, hot band and the flagship rule. Route preview shows the same rows.
+
+Save bar: the shared routing draft, labelled "Save routing rules on <machine or project>".
+
+### 6. Profiles
+
+Title "Profiles". Lead: the first two sentences of the profiles help. A table of saved profiles (name, description, stored sections, updated, matches, and actions), where a name is changed by clicking it. "Activate…" is a visible line button; Edit description, Detach and Delete are in the More menu. Empty state: "No saved profiles. Current settings still apply; use Save as new in the bar above to keep them." Note: "Profiles never hold project settings, MCP commands, arguments, environment or credentials." The environment-override note stays. This section acts at once and has no save bar.
+
+### 7. MCP servers (`mcp_servers`)
+
+Title "MCP servers". Lead: "External tools for agents on this machine, and who may use each one. Servers are per machine; a project cannot add its own."
+
+- **List**: Server, Tools, Engines, Network, Checked and Enabled. Each row has a visible Edit button; Check tools, Duplicate and Remove (a danger item) are in More. Head action: "Add server".
+- Tool counts are worded by audience, so overlapping grants never read as one total ("15 tools for writing workers, 11 for read-only roles, 8 for the coordinator"). Invalid, path-missing, unmanaged-settings and disabled servers carry their reason.
+- The enabled switch is a draft edit under the save bar, as it is today. Paseo saves it at once; the save bar says so.
+- **Add** takes three steps: Define, Connect and list tools, Tool access. Connecting starts the server in its sandbox and lists its tools; it calls none. The draft stays in the client until it is saved. A server with no granted tool cannot be saved, even when disabled. Listing tools from an unsaved draft calls no tool, and its failures show fixed reasons only. The last step offers "Save, keep off" and "Save and turn on".
+- **Tool access matrix**: one row per tool, with the columns Coordinator, Read-only, Writing, Consultant (fixed to Never) and Always load (Claude only). Coordinator implies Read-only, which implies Writing. Removing Writing clears the higher levels, so every saved list is a subset of the list above it. New tools get no access by default. A filter row (All, Granted, New, Not offered and Warnings) and a search box narrow the matrix.
+- Each tool shows one state: Granted; New (listed by the server, never granted by default); Not offered (granted but no longer listed, kept until removed); or Not checked (a granted tool that no check has listed, such as a name typed by hand).
+- Bulk actions set the selected rows to Off, Writing only, Read-only too or Coordinator too. "Suggest from server" applies the server's hints as a labelled preview; it is never automatic.
+- **Check as**, for one role (or the coordinator) and one engine, shows the access result the runtime would use.
+- Environment values are never shown after saving; they can be kept, replaced or removed. Redacted arguments keep their stored value until the whole part is replaced.
+- Consultant access is fixed to "Never", with its reason; it is not a setting.
+- The edit pages (Connection, Tools, Sandbox) keep their fields, with "Back to MCP servers".
 
 Open owner decisions, not in the current configuration schema: per-tool engine access (today set by duplicating a server per engine) and access per worker role. The prototype simulates tool listing, the route preview and the new runtime operations, and labels each as simulated; none is runtime behaviour.
+
+### 8. Connections
+
+The existing Connections page, rendered inside the orchestration shell so that it gets the profile bar. Groups: Engines: download and connect, polled every 3 seconds; the connections table; "Details of <name>" for the generated fields; and session limits, which are profile-bound. Every action is immediate: rename, max concurrent sessions, validate, remove, download, add connection and OpenCode enable. A line on the page names the models each engine offers and links "Models" to section 2.
+
+### Secondary pages
+
+- **Route preview** (read-only; from Routing and from Engines and models). Inputs: role, work kind, complexity, attempt, and, when the routing draft has changes, a choice of saved or draft rules. Outputs: the tier path, effort, the ranked routes with the decision that placed each, the excluded routes with their reasons, and the all-roles grid. A blocked result states its reason in words. The page states that live availability, retries and plan hints are known only at dispatch.
+- **Files and sources** (read-only; from Routing, the Defaults notice and the invalid-routing and migration strips). It holds source precedence, path, existence, validity and revision; the full list of preserved keys; the environment overrides and `ssh-askpass.json`; and model-policy migration (preview, then apply with explicit consent). Exact paths and variable names appear only behind "Copy file location" or "Copy variable name".
+
+### Shared rules
+
+- **Drafts** are per surface, not per page. Models, Engines and models, Routing and Route preview share one routing draft and one save. Defaults holds one `user_defaults` draft for the coordinator, language, new tasks, exact default route and machine ceiling. The project ceiling and MCP servers each keep their own draft. Moving between sections that share a draft never prompts and never loses an edit. The save bar names what it covers, for example "4 unsaved changes in routing rules", and adds that running tasks keep their configuration.
+- **Save bar**: Discard; "Go to the first" when a field has an error; and Save, which is off with the reason "Fix <n> fields" until the errors are fixed. An error opens its disclosure by itself.
+- **Conflict**: a save over a surface that changed elsewhere writes nothing. The bar reads "Changed elsewhere since you opened it. Nothing was written." with "Discard mine" and "Review changes". The review lists changes made elsewhere, changes you made and collisions. "Reapply mine" is offered only after that review.
+- **Unknown outcome**: "No answer. It may have been saved." with "Read again". Nothing is replayed.
+- **Refused save**: the refusal shows in a note above the bar, and the draft is kept.
+- **Saved**: "Saved on <where>. Not yet in profile <name>.", with "Save to profile" and, where a project file still wins, "Open source".
+- **Offline**: every write and profile action is off with its reason, last-known values stay visible, a dirty draft is kept, and nothing is queued.
+- **Built-in values** (role tiers, complexity shift, fallback order, effort by tier, hot band, rank order, the flagship rule and the work-kind table) are read-only, marked with a lock and "Built in". They are never controls.
+- **Stored values** the page does not offer (a model no longer offered, or a server key the app does not manage) stay visible as stored, and no save removes them.
+- **Absent values** are omitted. No dash or "None" stands in for them. Selecting anything changes no font weight, size or layout.
+- **Advanced** blocks are closed by default and open by themselves when they hold a non-default value or an error.
+- **Help**: every editable row shows its one-sentence description; a row with a recommendation shows "Recommended: …" beneath it; the longer help stays behind "?". The help text is in `orch-help.ts`.
+- **Names**: labels are English only and never name the program. No route, connection or task identifier appears; pickers show names. No native `title` tooltip is used.
+
+### States
+
+- **Offline or read-only**: the existing strip, "<machine> is offline, so settings are read-only. Last confirmed <time>. Nothing is queued." Every write control and profile action is off with that reason.
+- **Empty**: one state line per panel, with its reason and the section that fixes it. No placeholder values.
+- **Unsaved draft**: "<n> unsaved changes in <surface>. Running tasks keep their configuration." with Discard and Save.
+- **Field errors**: Discard, "Go to the first" and Save, as above.
+- **Saved**, **Conflict**, **Unknown outcome** and **Refused save**: as under Shared rules.
+- **Invalid routing, migration, environment override, shadowed or seeded project file**: the source strips on sections 2, 3 and 5, and the needs-attention list on Defaults.
+- **Profile interrupted, unavailable or partial**: the profile bar.
+- **Catalogue failure**: the Models row "List could not be read; the previous one is kept", and a strip for each connection.
+- **Loading**: open point 2.
+
+### Responsive and keyboard
+
+- Reading width: Defaults, Project ceiling, Profiles and Connections use the narrow column (about 860 px). Models, Engines and models, Routing, MCP servers and Route preview use the wide column (about 1120 px).
+- From 900 px: the context bar shows its labels, rows are two columns, and the engine table shows all four columns. From 720 to 900 px: the context bar hides its caption words but keeps the Project and Profile pickers, and the tier toggles wrap inside their cell.
+- Below 720 px: the Section choice appears in the context bar; the profile bar takes two lines; each row puts its control under its description; engine model rows become labelled rows below 560 px of table width; the preferred-work checklist is one column; and the MCP tool matrix keeps its own horizontal scroller.
+- No page scrolls sideways. On the phone shell the same eight items sit in the drawer's settings navigation.
+- Keyboard: sidebar sub-items are tabs with `aria-selected`, and activating one moves focus to the page title. Tab order follows the reading order: context bar, profile bar, strips, page actions, groups top to bottom, then the save bar. Disclosures and advanced blocks expose `aria-expanded`. Tier toggles are individual stops with `aria-pressed`. Popovers close on Escape and return focus to their trigger. "Go to the first" focuses the first error inside its opened disclosure.
+- Icon-only controls have accessible names, such as "Details of <model>" and "More for <name>".
+
+### Wording
+
+The section, page and group names are the labels above. Recommendations use the prefix "Recommended: " and a sentence-case text taken from `orch-help.ts`. Where the Paseo wording is clearer it is reused. The renamed labels are "Lean to engine" (was "Engine lean") and "Light models also standard" (was "Stretch").
+
+### Removed on purpose
+
+- **Overview summary rows and the Source row.** They restated the other pages. Each section shows its state where it is edited, and the routing source is shown under Routing › Routing files. The needs-attention list is kept and moves to the top of Defaults.
+- **Free-text identifiers** (Paseo's route id, connection id and policy engine and model fields). Pickers over enabled models and connections by name replace them, as the current Workspace pages already do. A stored value that a picker does not offer stays visible as "No longer offered".
+- **"Restrict automatic routing to engines" list.** The per-engine switch "Automatic routing may use <Engine>" replaces it, and at least one engine stays on.
+
+### Acceptance
+
+- The sidebar lists exactly the eight sections above, in that order, and nothing else. The bare Orchestration route opens Defaults, and each existing deep link lands on the section or group named above.
+- Route preview and Files and sources are reachable from the links named above, each with a Back link, and are not in the sidebar.
+- Every field in the CW-U07 checklist is reachable on the section that CW-U07 names; a test walks the list.
+- The profile bar appears on every section and secondary page, and offers the actions listed above.
+- The project picker appears only on sections 2 to 5.
+- Every editable row shows a visible description, and every row with a recommendation shows it.
+- Tiers show full words in the order Light, Standard, Deep, Flagship. No single-letter tier control remains.
+- Models, Engines and models, Routing and Route preview share one routing draft, and their edits are never lost when moving between them.
+- A save over a surface that changed elsewhere writes nothing until the owner has reviewed the changes.
+- Offline, every write and profile action is off with its reason, and nothing is queued.
+- No interface text shows a route, connection or task identifier, the program name, a dash for an absent value, or a native tooltip.
+- At about 390, 820 and 1440 px wide, in light and dark, no page scrolls sideways and labels stay on one line.
+- Every section can be operated from the keyboard alone.
+- Evidence: the rendered statements in this section need screenshots of every section, Route preview and Files and sources at those widths, in light and dark. None is recorded yet.
+
+### Open points
+
+These are not decided by this section. Each stays open until the owner or a later review decides it.
+
+1. **Help language.** [CW-U07](backlog/CW-U07.md) lists English, Russian or both (default both) under App > Appearance. The interface rule above says labels and hints are English only, and the settings help is English only today. This section keeps English. The owner must decide.
+2. **Loading state.** The current orchestration pages render from the machine snapshot and have no loading state of their own. This section asks for one state line, "Reading this machine's settings…", rather than empty fields. Whether a snapshot can be absent while a section is open is not established.
+3. **Whole-ceiling switch.** Paseo's "Set an owner ceiling" switch is not offered. A Workspace save always writes the ceiling as set, and the domain has no unset state, so the machine ceiling cannot be removed as a whole. Each limit has its own Restrict control instead. A whole-ceiling switch needs a domain and service change.
+4. **Reload of profile state.** An explicit reload is wired only in the demo. In real mode the Unavailable state needs either a working Reload or a statement that the next machine read retries it.
+5. **Profile summaries.** The native read model computes a per-profile summary (providers, selected models, default model, language, enabled MCP servers and whether a ceiling is set), while the Workspace `Profile` type carries only the stored sections. This section does not add those values to the Profiles table. The owner decides whether they appear.
+6. **`auto_allow`.** The runtime's routing validator describes `auto_allow` as lifting the OpenCode exclusion only for an exact `opencode/<provider>/<model>` route, and the catalogue reports `auto_allow` tokens for each model. The current Workspace help and [CW-U07](backlog/CW-U07.md) say it has no effect under model policy version 2. These statements conflict. The routing decision code has not been traced, so the per-model switch stays in the Engines and models row and the note stays open until the decision code confirms the effect.
+7. **Deliberate deviations from Paseo**: Coordinator comes before the exact default route, because Paseo's own help advises leaving the exact route empty; the MCP enabled switch stays a draft edit rather than an immediate save; and the per-engine switch replaces Paseo's ordered engine list.
+8. **Route ids.** [CW-U07](backlog/CW-U07.md) lists the route id among the per-connection route facts, while the interface rule keeps identifiers out of the interface. This section omits route ids. The owner must decide whether a route id is ever shown.
+9. **Rendering.** No screenshot backs the layout statements above. They are the specification until captures exist.
 
 ## Application updates (desktop)
 
@@ -392,7 +582,8 @@ Open owner decisions, not in the current configuration schema: per-tool engine a
 ## Project board and card actions (desktop)
 
 - Card actions (Open, Preview, the column's primary action and the more menu) appear on hover or keyboard focus in a strip outside the card content. They never cover the card's title, branch or fact line ([CW-R37](requirements.md), [CW-U01](backlog/CW-U01.md)).
-- In an automatic sprint, the queue's rule ("Passed checks leave each task ready for your final confirmation and start the next ready task.") sits behind a `?` button on the board, closed by default, and is not a line above it. A manual sprint shows no such line.
+- In a Hybrid or Automatic sprint, the queue's rule sits behind a `?` button on the board, closed by default, and is not a line above it. It states the run mode's description: for Hybrid, "The queue runs one task at a time in dependency order. You confirm each merge."; for Automatic, "Tasks go to Done on their own in the current branch. You answer work questions and permission requests, and review blocked results.", followed by "Finishing on a different target branch still needs confirmation." A Manual sprint shows no such line.
+- New sprint asks for the run mode with three labelled choices, each with its description: Manual ("You start each ready task. Starting one never starts its neighbours."), Hybrid and Automatic. The sprint's Finishing line reads "Automatic on the current branch; another target needs confirmation" in an Automatic sprint and "Each task waits for your confirmation" otherwise. See [sprint run modes](../cortex-workspace/local-task-execution.md#sprint-run-modes) for what each mode does.
 - A sprint's board, Planning and Summary say why the sprint is not moving, with an Open task link to the task that holds it: what Run sprint would refuse in an automatic sprint, or the dependency the first unstarted task waits for in a manual one.
 - A sprint whose recorded tasks could not all be loaded says how many are unavailable and offers Retry, which only reads again. It is never shown as empty, and Archive stays off until every recorded task is loaded and done. An empty created sprint, and a sprint's own board, offer New task with that sprint already selected; Ctrl+N from a sprint's pages does the same.
 
@@ -402,11 +593,14 @@ Open owner decisions, not in the current configuration schema: per-tool engine a
 - The Git button's main action replaces the title band's former Merge…, Review and merge… and Commit to <target>… buttons and keeps their names. Review changes, Close task… and Close as is… stay where they were; Start, Stop and Resume are the task composer's action button; the task menu keeps its entries.
 - Beside Git, ↑ and ↓ count the commits ahead of and behind the upstream and a dot counts uncommitted files. On a narrower band the two buttons show icons only. On a narrow band (the smallest window, or a wide sidebar) the counts and the state chip give way (the task's strip repeats the state), Open folds away (the task and project menus keep Open in VS Code, and Code is a tab), a stopped task's Close task… moves into the task menu, and Git is one menu button unless its main action is the task's own next step. The buttons keep their size and place whether they are on or off.
 - A refusal opens beside the button in the service's words, with Retry where repeating it makes sense.
+- A pull stopped at a conflict comes first in the Git button: **Resolve conflicts** while files remain in conflict, then **Continue merge** or **Continue rebase**. **Abort merge…** or **Abort rebase…** is in the Git menu and on the Git page.
+- Diverged histories, when no pull is stopped, no file is uncommitted and no task result is waiting to merge: the Git button's main action is **Pull…**, which opens a dialog where the owner chooses Merge or Rebase before anything is pulled. In the Git menu, Push and Pull and push are off there with their reasons; the Git page's Push button is not disabled by divergence. A worktree task on a branch other than its target has **Update from <target>…** in the Git menu and in the Worktrees page's worktree menu, where it is shown off with its reason when the machine does not offer it; it opens its own dialog. See [IDE and Git](ide-and-git.md#title-band-actions).
 
 ## Ready to merge and conflicts (desktop)
 
-- Every finished task, including tasks of an automatic sprint, reaches Ready to merge with its target branch. The target defaults to the repository's Git default branch and can be changed for a task or sprint. A local squash merge or a PR runs only after owner confirmation; there is no automatic merge ([CW-G07](backlog/CW-G07.md)). In an automatic sprint, a task that passes its checks moves to Ready to merge by itself, with no separate Accept step; the owner confirms there.
+- Every finished task, including tasks of a Hybrid or Automatic sprint, reaches Ready to merge with its target branch. The target defaults to the repository's Git default branch and can be changed for a task or sprint. A local squash merge or a PR runs only after owner confirmation; there is no automatic merge ([CW-G07](backlog/CW-G07.md)). In a Hybrid sprint, a task that passes its checks moves to Ready to merge by itself, with no separate Accept step; the owner confirms there. In an Automatic sprint the task continues to Done on its own: it shows "Accepted; awaiting automatic finish" only briefly, and the owner is asked only when its different target branch needs confirmation.
 - Ready to merge always has one primary next action. A task that is not accepted yet offers "Review and merge…": its dialog shows the exact result version, checks and target, and its one confirmation records acceptance of that version first and then merges or creates the PR. A refused merge keeps the dialog open and the acceptance on record; nothing is resent by itself. An accepted task offers "Merge…" and "Create PR…".
+- An accepted task whose pull request was created shows a "Pull request created into <target>" row with the recorded address and a **View PR** button, which opens the address in the browser where `/usr/bin/xdg-open` or `/usr/bin/gio` is installed. Without a recorded address the row says "GitHub CLI did not report this pull request's address, so it was not recorded. Find it on GitHub." and has no button. A worktree task on a branch other than its target that is behind it gets an **Update from <target>…** button in the Finish task dialog where the machine offers the update; otherwise the dialog shows no such button. See [IDE and Git](ide-and-git.md#title-band-actions).
 - A project folder without Git has nothing to merge. Ready to merge offers "Close as is…" and "Set up Git…" instead of Merge and PR. Closing a result that is already accepted, or promoted after passed checks, keeps it on record as checked, without the Not verified warning. Setting up Git opens the project's Git page, where creating an empty repository asks first. New task offers no worktree or target branch for such a folder.
 - Loading covers the whole action: a multi-step action such as staging every change and then committing, or accepting and then merging, keeps the pressed button loading and closed to a second click or shortcut until its last step ends. The label stays readable and a thin bar runs along the button's lower edge.
 - Before Ready to merge, a check the system skipped runs automatically. A failed or not-run check offers a forced re-run. A result with an unpassed check can be accepted only when that check cannot complete for a technical reason, and only with an explicit confirmation ([CW-R40](requirements.md), [CW-U04](backlog/CW-U04.md)).

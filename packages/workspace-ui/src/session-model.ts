@@ -1,6 +1,6 @@
 import { readableCheckReason, ACCESS_MODES, effortLabel, emptySession, engineLabel, isOpen, LANGUAGES, machineDefaults } from "@cortex/workspace-domain";
 import type { Check, Decision, EngineKey, Machine, Message, SessionOptions, TaskSession, TaskSettings, Worker, WorkerRoute, WorkerStatus } from "@cortex/workspace-domain";
-import { clock, interruptedTurn, plainChoice, readyLabel, readyStep, sameBranch, type TaskView, type WorkspaceIndex } from "./selectors";
+import { automaticAcceptanceHold, automaticStaleResultHold, staleResult, clock, interruptedTurn, plainChoice, readyLabel, readyStep, sameBranch, type TaskView, type WorkspaceIndex } from "./selectors";
 
 /** Read models for the task session. Every count on the screen comes from these lists; nothing here changes state. */
 export type Face = { label: string; tone: string; icon: string; spin?: boolean };
@@ -47,7 +47,7 @@ export function workersOutcome(workers: Worker[], active: number): string {
   return `${active} active, ${c.done} finished${c.cancelled ? `, ${c.cancelled} cancelled` : ""}${c.failed ? `, ${c.failed} failed` : ""}`;
 }
 
-export type ComposerMode = "live" | "paused" | "stopping" | "draft" | "review" | "closed" | "ended" | "archived" | "offline" | "unconfirmed";
+export type ComposerMode = "live" | "paused" | "stopping" | "draft" | "review" | "closed" | "ended" | "archived" | "offline" | "unconfirmed" | "automatic";
 export type SessionModel = {
   view: TaskView; session: TaskSession; workers: Worker[]; active: Worker[]; finished: Worker[]; running: Worker[];
   messages: Message[]; queue: Message[]; open: Decision[]; mode: ComposerMode; planDone: number; planTotal: number;
@@ -56,13 +56,17 @@ function composerMode(v: TaskView): ComposerMode {
   if (v.column === "archive") return "archived";
   if (v.machine.connection !== "connected") return "offline";
   if (v.unknown && v.task.status !== "stopping") return "unconfirmed";
+  if (v.ownerDecision) return "live";
+  if (v.automaticFact && (v.task.status !== "working" || v.task.observedPhase === "recovery")) return "automatic";
   switch (v.task.status) {
     case "working": case "needs_you": return "live";
     case "paused": return "paused";
     case "stopping": return "stopping";
     case "draft": return "draft";
     case "done": return "closed";
-    case "failed": case "cancelled": return "ended";
+    // A failed run with known effects takes a message: it reopens the task for the agent (Request changes).
+    case "failed": return v.task.reviewActions?.unblockAction === "request_changes" ? "review" : "ended";
+    case "cancelled": return "ended";
     default: return "review";
   }
 }
@@ -93,11 +97,31 @@ export const workingNow = (m: SessionModel) => m.running.length > 0 || m.view.ta
  *  step (its command, edit or read) is read on that worker's page, never here. */
 export const coordinatorLine = (m: SessionModel) => m.running.length === 0 ? "Working…" : m.running.length === 1 ? `Waiting for ${m.running[0].role}…` : `Waiting for ${m.running.length} workers…`;
 
+/** The review projection is optional for older services; without it the existing worker line remains unchanged. */
+export function reviewLine(w: Worker): string | null {
+  const r = w.review;
+  if (!r) return null;
+  const verdict = r.verdict === "APPROVE" ? "Review approved"
+    : r.verdict === "REQUEST_CHANGES" ? "Review requested changes"
+    : r.verdict === "BLOCK" ? "Review blocked this result"
+    : r.verdict === "INCOMPLETE" ? "Review incomplete"
+    : null;
+  if (r.rerun?.followUpWorkerId === w.id) {
+    const item = r.notCovered?.[0]?.item;
+    return item ? `Follow-up review: checking ${item}` : "Follow-up review: covering the previous review gap";
+  }
+  if (r.rerun?.previousWorkerId === w.id) return `${verdict ?? "Review"}. Follow-up review started`;
+  return verdict;
+}
+
 export type Chip = { icon: string; tone: string; spin?: boolean; text: string; wide?: string; next?: string };
 /** The current state and the next step, for the title band. */
 export function stateChip(m: SessionModel): Chip {
   const { task } = m.view;
   if (m.view.unknown && task.status !== "stopping") return { icon: "alert", tone: "st-idle", text: m.mode === "unconfirmed" ? "Not confirmed" : m.view.fact.text };
+  if (m.view.ownerDecision) return { icon: m.view.fact.icon ?? "question", tone: "st-warn", text: "Needs you" };
+  if (m.view.ownerIntegration) return { icon: "merge", tone: "st-warn", text: "Needs you", next: "Confirm integration" };
+  if (m.view.automaticFact) return { ...m.view.automaticFact, icon: m.view.automaticFact.icon ?? "hourglass" };
   if (task.observedPhase === "recovery") return { icon: "pause", tone: "st-warn", text: interruptedTurn(task.issue) ? "Interrupted" : "Stopped", next: "Waiting for you" };
   if (task.conflict === "resolving") return { icon: "loader", tone: "st-run", spin: true, text: "Resolving" };
   if (task.conflict !== "none") return { icon: "alert", tone: "st-bad", text: "Conflict" };
@@ -110,7 +134,7 @@ export function stateChip(m: SessionModel): Chip {
     case "done": return { icon: m.view.fact.icon ?? "check-circle", tone: "st-idle", text: m.view.fact.text };
     case "failed": return { icon: "x-circle", tone: "st-bad", text: "Run failed" };
     case "cancelled": return { icon: "x-circle", tone: "st-idle", text: "Run cancelled" };
-    default: return workingNow(m) ? { icon: "loader", tone: "st-run", spin: true, text: "Working", next: "Review" } : { icon: "question", tone: "st-warn", text: "Needs you" };
+    default: return workingNow(m) ? { icon: "loader", tone: "st-run", spin: true, text: "Working", next: m.view.sprint?.runMode === "automatic" ? undefined : "Review" } : { icon: "question", tone: "st-warn", text: "Needs you" };
   }
 }
 
@@ -121,10 +145,10 @@ export function phases(m: SessionModel): Phase[] {
   const { status, result, acceptance, closedAs, conflict, work, observedPhase } = m.view.task;
   if (closedAs === "external") return [{ label: "Done outside the app", state: "done" }];
   if (result && !closedAs && (conflict !== "none" || ["review", "ready_to_merge", "done"].includes(status))) {
-    const finished = sameBranch(m.view.task, m.view.target) ? "Finished" : "Merged";
+    const finished = m.view.task.integration?.automatic ? "Done" : sameBranch(m.view.task, m.view.target) ? "Finished" : "Merged";
     const held = acceptance ? `${acceptance.automatic ? "Automatically accepted" : "Accepted"} v${acceptance.version}` : `Result v${result.version}`;
     const end: Phase[] = status === "review" ? [{ label: `Result v${result.version}`, state: "now" }]
-      : work === "merged" ? [{ label: held, state: "done" }, { label: m.view.task.integration?.method === "commit" ? "Committed" : finished, state: "done" }]
+      : (work === "merged" || (status === "done" && m.view.task.integration?.automatic)) ? [{ label: held, state: "done" }, { label: m.view.task.integration?.method === "commit" && m.view.task.integration.committed !== false ? "Committed" : finished, state: "done" }]
       : [{ label: conflict === "resolving" ? "Resolving conflict" : held, state: "now" }, { label: finished, state: "todo" }];
     return [...["Planned", "Executed", "Reviewed", "Verification ran"].map((label): Phase => ({ label, state: "done" })), ...end];
   }
@@ -213,7 +237,7 @@ const names = (list: string[]) => list.length < 2 ? list.join("") : `${list.slic
 /** A result that passed review and verification and waits in Ready to merge: closing it keeps it checked, never Not verified. */
 export const checkedResult = (m: SessionModel) => {
   const t = m.view.task;
-  return t.status === "ready_to_merge" && !!t.result && (!!t.acceptance || t.result.automaticReady === true);
+  return t.status === "ready_to_merge" && !!t.result && !staleResult(t) && !automaticStaleResultHold(m.view) && (!!t.acceptance || t.result.automaticReady === true);
 };
 /** What closing does, in numbers, before the owner agrees to it. */
 export function closeConsequences(m: SessionModel) {
@@ -221,21 +245,48 @@ export function closeConsequences(m: SessionModel) {
   const live = m.workers.filter(w => w.status === "working" || (w.status === "waiting_you" && m.mode === "live"));
   const pending = m.messages.filter(x => x.workerId && ["sending", "recorded"].includes(x.delivery)).length;
   const lines: { icon: string; text: string }[] = [];
+  if (automaticAcceptanceHold(m.view)) {
+    lines.push({ icon: "alert", text: m.view.fact.text });
+    for (const check of checksOf(m).filter(c => c.kind !== "manual" && c.outcome !== "passed")) {
+      lines.push({ icon: "eye", text: check.name + " · " + check.outcome.replace("_", " ") });
+    }
+
+  }
+  if (unconfirmedState(m)?.closable) lines.push({ icon: "alert", text: "A process of this task is not confirmed as stopped. Closing stops what the service still runs for it and repeats nothing it did." });
   if (live.length) lines.push({ icon: "users", text: `${count(live.length, "worker")} will be stopped: ${names(live.map(w => w.role))}` });
   else if (m.workers.length) lines.push({ icon: "users", text: "All workers are already stopped" });
   if (m.open.length) lines.push({ icon: "question", text: `${count(m.open.length, "open question")} will be withdrawn` });
   if (m.queue.length || pending) lines.push({ icon: "queue", text: `${[m.queue.length ? count(m.queue.length, "queued message") : "", pending ? count(pending, "pending worker message") : ""].filter(Boolean).join(" and ")} will not be applied` });
   const t = m.view.task;
   if (checkedResult(m)) lines.push({ icon: "check-circle", text: `Result v${t.result!.version}${t.acceptance ? t.acceptance.automatic ? ", accepted automatically," : ", accepted by you," : ""} stays on record with its checks` });
-  else lines.push({ icon: "eye", text: "Review and verification did not finish, so the result is marked not verified" });
+  else lines.push({ icon: "eye", text: "The result will be marked Not verified" });
   const c = m.session.changes, where = m.view.project.hasGit === false ? "project folder" : m.view.task.checkout.kind === "worktree" ? "worktree" : "project folder";
-  lines.push({ icon: "file", text: c ? `Changes stay in the ${where}: ${count(c.files, "file")}, +${c.add} −${c.del}` : `Changes stay in the ${where}` });
+  const files = c ? `${count(c.files, "file")}, +${c.add} −${c.del}` : "";
+  lines.push({ icon: "file", text: automaticAcceptanceHold(m.view)
+    ? `Closing creates no commit. Pending changes stay in the project folder used by the next task${files ? ` (${files})` : ""}.`
+    : `Changes stay in the ${where}${files ? `: ${files}` : ""}` });
   return lines;
 }
 /** The rule that decides Stop, Close and the composer, in one place. */
+/**
+ * Why a task's state is not confirmed, as the runtime states it (a projection warning), and who acts next:
+ * - `stopping`: a session of the task is still being stopped; the runtime decides by itself once its stop is observed.
+ * - `exit_unconfirmed`: the runtime recorded that a process did not confirm its exit. Nothing in the running service
+ *   observes it again (the next service start does), so the owner decides now: inspect, or Close as is, which replays nothing.
+ * - `records`: the task's records disagree, so the runtime refuses every change to it; the owner can only inspect.
+ * Close as is is possible exactly when the runtime can still bind the task (the first two).
+ */
+export type UnconfirmedState = { kind: "stopping" | "exit_unconfirmed" | "records"; closable: boolean };
+export function unconfirmedState(m: SessionModel): UnconfirmedState | null {
+  if (m.mode !== "unconfirmed") return null;
+  const warnings = m.view.task.warnings ?? [];
+  if (warnings.includes("process_exit_pending")) return { kind: "stopping", closable: true };
+  if (warnings.includes("process_exit_unconfirmed")) return { kind: "exit_unconfirmed", closable: true };
+  return { kind: "records", closable: false };
+}
 export const closeBlocked = (m: SessionModel) =>
   m.mode === "stopping" ? "Available once every worker is confirmed as stopped"
-    : m.mode === "offline" || m.mode === "unconfirmed" ? "Unavailable until this task's state is confirmed"
+    : m.mode === "offline" || (m.mode === "unconfirmed" && !unconfirmedState(m)?.closable) ? "Unavailable until this task's state is confirmed"
     : m.mode === "archived" ? "Restore the task first"
     : m.mode === "closed" ? "This task is already closed" : m.view.task.integration?.method === "squash" ? "This task is already merged"
     : m.view.task.conflict !== "none" ? "A merge is in progress. Abort it first" : null;

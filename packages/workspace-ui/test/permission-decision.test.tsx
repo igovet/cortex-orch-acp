@@ -48,9 +48,12 @@ it("shows who asks, what and why, folds long path lists and answers with the dec
   expect(card.querySelector("details summary")!.textContent).toBe("2 more");
   expect(card.textContent).toContain("It is outside the project.");
   expect(card.textContent).toContain("Guarded");
+  expect(card.textContent).toContain("Operationread");
+  expect(card.textContent).toContain("Resource");
+  expect(card.textContent).toContain("Allow once lets this worker continue this request");
   expect(card.querySelector("textarea, input[type=text]")).toBeNull();
   const buttons = [...card.querySelectorAll<HTMLButtonElement>(".ws-dc-acts button")];
-  expect(buttons.map(b => b.textContent)).toEqual(["Deny", "Allow once"]);
+  expect(buttons.map(b => b.textContent)).toEqual(["Deny", "Allow once", "Close task…"]);
   expect(buttons.every(b => b.type === "button")).toBe(true);
   buttons[1].click(); await settle();
   const sent = p.commands.at(-1)!;

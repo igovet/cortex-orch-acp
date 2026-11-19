@@ -44,6 +44,8 @@ stop work or request another consultation. If needed information is absent, reco
 report as a limitation with the exact data request that would resolve it. Ask
 the user nothing: no prose-only question, no native engine question tool, and
 no request to repair missing tool access.
+Finish the consultation to the end within this boundary. Report it as failed only
+at a genuine dead end you cannot clear yourself, with its blocker and concrete reason.
 
 ## Recovery
 

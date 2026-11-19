@@ -1,5 +1,5 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show, type JSX } from "solid-js";
-import { capabilityOf, type Attachment } from "@cortex/workspace-domain";
+import { capabilityOf, type Attachment, type Check } from "@cortex/workspace-domain";
 import { attachmentPreview } from "./attachments";
 import { autoGrow } from "./autogrow";
 import { EditTask } from "./task-edit";
@@ -8,15 +8,15 @@ import { createAttachments, createDictation, MessageComposer } from "./composer"
 import { useWs } from "./ctx";
 import { I, MenuItem, Modal, Pop, useWantOverview } from "./kit";
 import { ActionBar, Row, Whole } from "./layout";
-import { behindTarget, checksLine, conflictFacts, fileName, needsOverride, openChecks, repoOf, targetOptions, taskCheckout, worktreeWork } from "./review-model";
-import { clock, sameBranch } from "./selectors";
+import { behindTarget, checksLine, conflictFacts, fileName, needsOverride, repoOf, targetOptions, taskCheckout, worktreeWork } from "./review-model";
+import { automaticFinishOffer, clock, ownerHold, sameBranch } from "./selectors";
 import { same as sameData } from "./stable";
 import { acceptBlocked } from "./review-model";
 import { CHECK_ICON } from "./worker";
 
 export type WsDialog =
   | { kind: "edit-task"; taskId: string }
-  | { kind: "accept"; taskId: string }
+  | { kind: "accept"; taskId: string; automaticFinish?: NonNullable<ReturnType<typeof automaticFinishOffer>> }
   | { kind: "changes"; taskId: string; text?: string }
   | { kind: "cortex"; taskId: string }
   | { kind: "merge"; taskId: string; how: "squash" | "pr" }
@@ -41,26 +41,65 @@ type Of<K extends WsDialog["kind"]> = Extract<WsDialog, { kind: K }>;
 const Head = (props: { title: JSX.Element; close: string; onClose: () => void }) => <div class="dlg-h"><h2>{props.title}</h2><button class="ib" aria-label={props.close} onClick={() => props.onClose()}><I n="x" /></button></div>;
 const useTask = (id: string) => { const ws = useWs(); return createMemo(() => ws.store.index().byId.get(id)!); };
 
+function ReviewCheckRow(props: { check: Check }) {
+  const c = () => props.check;
+  const reason = () => {
+    const detail = c().detail.trim(), technical = c().technicalReason?.trim();
+    return technical && detail !== technical ? [detail, technical].filter(Boolean).join(" ") : detail;
+  };
+  return <Row lead={<I n={CHECK_ICON[c().outcome].icon} s={14} class={CHECK_ICON[c().outcome].tone} />}
+    title={c().name} detail={c().outcome === "not_run" ? <><strong>Not run</strong>{reason() ? `: ${reason()}` : ""}</> : reason()} />;
+}
+
 /** Accepting with open checks is the owner's call, but never an accident: the checks are listed and it takes a tick. */
 function Accept(props: { d: Of<"accept">; onClose: () => void }) {
   const ws = useWs();
   const view = useTask(props.d.taskId);
   const [sure, setSure] = createSignal(false);
-  const r = () => view().task.result!;
-  const accept = () => { if (sure() && !acceptBlocked(view().task)) ws.ok({ type: "accept_result", taskId: props.d.taskId, digest: r().digest, openChecks: true, now: ws.store.clock() }, () => { props.onClose(); }); };
+  const initial = view().task.result!;
+  const r = () => view()?.task.result ?? initial;
+  const shownChecks = createMemo(() => r().checks.filter(c => c.outcome === "not_run" || (c.kind !== "manual" && c.outcome !== "passed")));
+  const automaticFinish = () => props.d.automaticFinish;
+  const [sending, setSending] = createSignal(false);
+  const blocked = () => {
+    if (sending()) return "Saving your decision…";
+    if (!view()?.task.result) return "This result changed. Reopen the decision.";
+    const consent = automaticFinish();
+    // The service decided that this hold asks for the finish; the approval stays bound to the exact result shown.
+    if (consent) {
+      const r = view().task.result, hold = ownerHold(view());
+      return hold?.actions.includes("allow_finish") && r?.digest === consent.digest && r.sourceVersion === consent.sourceVersion && view().target === consent.targetBranch
+        ? null : "This result or target changed. Close and reopen the approval.";
+    }
+    // Hybrid: the queue asks for the owner's acceptance of this result with its recorded checks.
+    if (ownerHold(view())?.actions.includes("accept_result")) return null;
+    return acceptBlocked(view().task);
+  };
+  const accept = async () => {
+    if (!sure() || blocked()) return;
+    const consent = automaticFinish();
+    setSending(true);
+    try {
+      const result = await ws.run({ type: "accept_result", taskId: props.d.taskId, digest: r().digest, openChecks: true,
+        ...(consent ? { sourceVersion: consent.sourceVersion, automaticFinish: { sprintId: consent.sprintId, targetBranch: consent.targetBranch } } : {}), now: ws.store.clock() });
+      if (result.ok && ws.dialog() === props.d) props.onClose();
+    } finally { setSending(false); }
+  };
   return <>
-    <Head title={`Accept v${r().version} with open checks?`} close="Keep reviewing" onClose={props.onClose} />
+    <Head title={automaticFinish() ? `Allow Automatic to finish v${initial.version}?` : `Accept v${r().version} with open checks?`} close="Keep reviewing" onClose={props.onClose} />
     <div class="dlg-b">
-      <div class="lab">{checksLine(r().checks)}</div>
-      <Show when={r().checks.length > 0 && openChecks(r().checks).length === 0}><div class="cap muted">A worker's own check was not run for a recorded technical reason, such as a paid or forbidden step. The result lists it under what was not verified.</div></Show>
-      <Show when={r().checks.length > 0} fallback={<div class="cap muted">No checks were reported for this version.</div>}>
-        <div class="pre ws-rows"><For each={openChecks(r().checks)}>{c => <Row lead={<I n={CHECK_ICON[c.outcome].icon} s={14} class={CHECK_ICON[c.outcome].tone} />} title={c.name} detail={<>{c.detail ? `${c.detail} ` : ""}Technical blocker: {c.technicalReason}</>} />}</For></div>
+      <div class="lab">{checksLine(r().checks, { includeManualSkips: true })}</div>
+      <Show when={shownChecks().length > 0}>
+        <div class="pre ws-rows"><For each={shownChecks()}>{c => <ReviewCheckRow check={c} />}</For></div>
       </Show>
-      <label class="ck"><input type="checkbox" checked={sure()} onChange={e => setSure(e.currentTarget.checked)} /><span>I accept v{r().version} knowing these checks did not pass<span class="hint ws-block">They stay on the record, and acceptance applies to exactly this version.</span></span></label>
+      <Show when={automaticFinish()} fallback={<label class="ck"><input type="checkbox" checked={sure()} onChange={e => setSure(e.currentTarget.checked)} /><span>I accept v{r().version} knowing these checks did not pass<span class="hint ws-block">They stay on the record, and acceptance applies to exactly this version.</span></span></label>}>
+        <div class="note-box plain"><I n="check-circle" s={14} /><span>Allow Automatic to verify this exact result, commit the task's local changes on <span class="mono">{automaticFinish()!.targetBranch ?? "the current branch"}</span>, and close the task after verification succeeds. No push, merge, or other result is included.</span></div>
+        <label class="ck"><input type="checkbox" checked={sure()} onChange={e => setSure(e.currentTarget.checked)} /><span>I approve this Automatic finish for result v{initial.version}<span class="hint ws-block">Open or skipped checks remain recorded and are not silently marked passed.</span></span></label>
+      </Show>
     </div>
-    <ActionBar place="dialog" hint="Accepting does not commit, push or merge.">
+    <ActionBar place="dialog" hint={automaticFinish() ? "Automatic acts only after the runtime rechecks this exact result." : "Accepting does not commit, push or merge."}>
       <button class="btn btn-line btn-lg" data-autofocus onClick={() => props.onClose()}>Keep reviewing</button>
-      <button class="btn btn-primary btn-lg" aria-disabled={sure() && !acceptBlocked(view().task) ? undefined : "true"} data-why={acceptBlocked(view().task) ?? (sure() ? undefined : "Tick the box first")} {...ws.needs("accept_result")} onClick={accept}>Accept v{r().version}</button></ActionBar>
+      <button class="btn btn-primary btn-lg" aria-disabled={sure() && !blocked() ? undefined : "true"} data-why={blocked() ?? (sure() ? undefined : "Tick the box first")} {...ws.needs("accept_result")} onClick={accept}>{automaticFinish() ? "Allow Automatic to finish" : `Accept v${r().version}`}</button></ActionBar>
   </>;
 }
 
@@ -143,7 +182,7 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
   // a refused merge leaves the acceptance on record and the dialog open, and nothing is resent by itself.
   const pending = () => !t().acceptance;
   const [sure, setSure] = createSignal(false);
-  const overrides = () => pending() && (needsOverride(t().result?.checks ?? []) || t().reviewActions?.acknowledgeOpenChecks === true);
+  const overrides = () => pending() && (t().reviewActions?.acknowledgeOpenChecks ?? needsOverride(t().result?.checks ?? []));
   const why = () => same() && !t().integrationFacts?.commitAvailable ? t().integrationFacts?.reason ?? "Refresh the task before committing." : pending() ? acceptBlocked(t()) ?? (overrides() && !sure() ? "Tick the box about the open checks first" : null) : null;
   // The target is the one part of the label that can be long, so only it shortens; the whole label stays the button's name.
   const label = () => same() ? `Confirm commit to ${target()}` : pending() ? `Accept v${t().result?.version} and ${how() === "squash" ? `merge into ${target()}` : "create PR"}` : how() === "squash" ? `Confirm merge into ${target()}` : ws.store.mode === "demo" ? "Push and create PR" : "Create PR (no push)";
@@ -211,9 +250,12 @@ function Merge(props: { d: Of<"merge">; onClose: () => void }) {
           <div class="chk"><I n={files() ? "alert" : "check-circle"} s={14} class={files() ? "st-warn" : "st-ok"} /><span>{isWorktree() ? "Worktree" : "Project folder"} {files() ? `has ${files()} uncommitted file${files() === 1 ? "" : "s"}` : "is clean"}</span><span class="src">{files() ? (ws.store.mode === "demo" ? "Not part of this merge" : "Will be committed after confirmation") : "No uncommitted files"}</span></div>
         </Show>
         </Show>
-        <div class="chk"><I n={openCheck().icon} s={14} class={openCheck().tone} /><span>Checks: {checksLine(t().result?.checks ?? [])}</span><span class="src"><button class="lnk" onClick={seeChecks}>See checks</button></span></div>
+        <div class="chk"><I n={openCheck().icon} s={14} class={openCheck().tone} /><span>Checks: {checksLine(t().result?.checks ?? [], { includeManualSkips: true })}</span><span class="src"><button class="lnk" onClick={seeChecks}>See checks</button></span></div>
       </div>
-      <Show when={overrides()}><label class="ck"><input type="checkbox" checked={sure()} onChange={e => setSure(e.currentTarget.checked)} /><span>I accept v{t().result?.version} knowing these checks did not pass<span class="hint ws-block">{checksLine(t().result?.checks ?? [])}. They stay on the record.</span></span></label></Show>
+      <Show when={t().result?.checks.some(c => c.outcome === "not_run")}>
+        <div class="pre ws-rows"><For each={t().result?.checks.filter(c => c.outcome === "not_run")}>{c => <ReviewCheckRow check={c} />}</For></div>
+      </Show>
+      <Show when={overrides()}><label class="ck"><input type="checkbox" checked={sure()} onChange={e => setSure(e.currentTarget.checked)} /><span>I accept v{t().result?.version} knowing these checks did not pass<span class="hint ws-block">{checksLine(t().result?.checks ?? [], { includeManualSkips: true })}. They stay on the record.</span></span></label></Show>
       <Show when={same() || how() === "squash"} fallback={<div class="ws-fields">
         <label class="fld"><span class="lab">Title <span class="faint">{written("")}</span></span><input class="inp" value={title()} onInput={e => { edited.add("title"); setTitle(e.currentTarget.value); }} /></label>
         <label class="fld"><span class="lab">Description <span class="faint">{written(`Generated from Result v${a()?.version}, with its checks`)}</span></span><textarea class="inp" rows="3" ref={el => autoGrow(el, body)} value={body()} onInput={e => { edited.add("body"); setBody(e.currentTarget.value); }} /></label>
@@ -380,7 +422,7 @@ export function ReviewDialogs() {
     <Modal open={open("prompt")} onClose={close} label="Name"><Show when={of("prompt")} keyed>{x => <Prompt d={x} onClose={close} />}</Show></Modal>
     <Modal open={open("describe")} onClose={close} label={of("describe")?.title ?? "Describe"}><Show when={of("describe")} keyed>{x => <Describe d={x} onClose={close} />}</Show></Modal>
     <Modal open={open("edit-task")} onClose={close} label="Edit task"><Show when={of("edit-task")} keyed>{x => <EditTask taskId={x.taskId} onClose={close} />}</Show></Modal>
-    <Modal open={open("accept")} onClose={close} label="Accept with open checks"><Show when={of("accept")} keyed>{x => <Accept d={x} onClose={close} />}</Show></Modal>
+    <Modal open={open("accept")} onClose={close} label={of("accept")?.automaticFinish ? "Allow Automatic to finish" : "Accept with open checks"}><Show when={of("accept")} keyed>{x => <Accept d={x} onClose={close} />}</Show></Modal>
     <Modal open={open("changes")} onClose={close} label="Request changes"><Show when={of("changes")} keyed>{x => <Changes d={x} onClose={close} />}</Show></Modal>
     <Modal open={open("attachment")} onClose={close} label="Attachment"><Show when={of("attachment")} keyed>{x => <AttachmentView d={x} onClose={close} />}</Show></Modal>
     <Modal open={open("merge")} onClose={close} label="Finish task" class="wide"><Show when={of("merge")} keyed>{x => <Merge d={x} onClose={close} />}</Show></Modal>

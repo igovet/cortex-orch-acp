@@ -125,10 +125,59 @@ impl Item {
         let mut body = escape(&clean(&self.label, 200));
         if let Some(detail) = &self.detail {
             body.push('\n');
-            body.push_str(&escape(&clean(detail, 300)));
+            body.push_str(&escape(&clean(&plain_detail(detail), 300)));
         }
         body
     }
+}
+
+/// Notification text is read by the owner: a bare internal code becomes a
+/// generic sentence, and a snake_case code inside a sentence is spelled out.
+/// Tokens touching `/` or `.` (paths, file names) are kept as written.
+fn plain_detail(detail: &str) -> String {
+    let code = |w: &str| {
+        w.contains('_')
+            && w.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    };
+    let trimmed = detail.trim().trim_end_matches('.');
+    if code(trimmed) {
+        return "Open it to see what is needed.".into();
+    }
+    let mut out = String::with_capacity(detail.len());
+    let mut word = String::new();
+    let mut prev: Option<char> = None;
+    let flush = |word: &mut String, out: &mut String, next: Option<char>, prev: Option<char>| {
+        let pathlike = matches!(prev, Some('/' | '.')) || next == Some('/');
+        if !pathlike && code(word) {
+            out.push_str(&word.replace('_', " "));
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
+    let chars: Vec<char> = detail.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            if word.is_empty() {
+                prev = i.checked_sub(1).map(|j| chars[j]);
+            }
+            word.push(c);
+        } else {
+            let next_after = chars.get(i + 1).copied();
+            // A '.' followed by a letter is a file extension: keep the word.
+            let ext = c == '.' && next_after.is_some_and(|n| n.is_ascii_alphanumeric());
+            if ext {
+                out.push_str(&word);
+                word.clear();
+            } else {
+                flush(&mut word, &mut out, Some(c), prev);
+            }
+            out.push(c);
+        }
+    }
+    flush(&mut word, &mut out, None, prev);
+    out
 }
 /// Notification bodies can be markup; project text is plain.
 fn escape(text: &str) -> String {
@@ -169,9 +218,20 @@ pub(crate) fn items(
                     .is_some_and(|d| !d.is_null() && *d != false)
         })
         .collect();
-    // An Automatic sprint accepts its members' results itself; one it cannot accept pauses the
+    // A queue-driven sprint accepts its members' results itself; one it cannot accept pauses the
     // sprint, which is its own notification.
     let automatic: HashSet<&str> = sprints
+        .iter()
+        .filter(|s| crate::machine::queue_driven_mode(s))
+        .flat_map(|s| {
+            s["taskIds"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+        })
+        .collect();
+    let unattended: HashSet<&str> = sprints
         .iter()
         .filter(|s| s["runMode"] == "automatic")
         .flat_map(|s| {
@@ -182,13 +242,20 @@ pub(crate) fn items(
                 .filter_map(Value::as_str)
         })
         .collect();
+    // A sprint's planning task is part of its sprint, never an owner moment of its own.
+    let planning: HashSet<&str> = product["sprints"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s["planningTaskId"].as_str())
+        .collect();
     let mut out = Vec::new();
     for t in tasks {
         let Some(id) = t["taskId"].as_str().filter(|id| id_ok(id)) else {
             continue;
         };
         let record = &records[id];
-        if !record["archive"].is_null() || record["purged"] == true {
+        if !record["archive"].is_null() || record["purged"] == true || planning.contains(id) {
             continue;
         }
         let place = Place {
@@ -204,11 +271,11 @@ pub(crate) fn items(
             .unwrap_or_else(|| "A task".into());
         let settled = matches!(record["status"].as_str(), Some("ready_to_merge" | "done"))
             || !record["closedAs"].is_null();
-        let pending = decisions
-            .get(id)
-            .into_iter()
-            .flatten()
-            .find(|d| d["status"] == "pending" && d["decisionId"].as_str().is_some_and(id_ok));
+        let pending = decisions.get(id).into_iter().flatten().find(|d| {
+            d["status"] == "pending"
+                && d["decisionId"].as_str().is_some_and(id_ok)
+                && !(t["automaticContinuation"].is_object() && d["runtimeStop"] == true)
+        });
         let execution = t["executionId"].as_str().unwrap_or("");
         let at = t["lastConfirmedAt"].as_str().unwrap_or("");
         let item = if let Some(d) = pending {
@@ -234,7 +301,7 @@ pub(crate) fn items(
                     place,
                     label,
                 }),
-                Some("failed" | "blocked") if !settled => Some(Item {
+                Some("failed" | "blocked") if !settled && !unattended.contains(id) => Some(Item {
                     kind: Kind::Failed,
                     state: format!("f:{execution}:{at}"),
                     decision: None,
@@ -261,7 +328,24 @@ pub(crate) fn items(
             .filter(|t| !t.trim().is_empty())
             .unwrap_or("Sprint")
             .to_owned();
-        if s["planning"] == "question" {
+        let asked_now =
+            s["planningTaskId"].as_str().and_then(|task| {
+                decisions.get(task).into_iter().flatten().find(|d| {
+                    d["status"] == "pending" && d["decisionId"].as_str().is_some_and(id_ok)
+                })
+            });
+        if let Some(d) = asked_now.filter(|_| s["planning"] == "planning") {
+            // The planning task asks the owner: the sprint's planning question.
+            let decision = d["decisionId"].as_str().unwrap().to_owned();
+            out.push(Item {
+                kind: Kind::Planning,
+                state: format!("pq:{decision}"),
+                decision: Some(decision),
+                detail: None,
+                place,
+                label,
+            });
+        } else if s["planning"] == "question" {
             let asked: Vec<&Value> = s["conversation"]
                 .as_array()
                 .into_iter()
@@ -283,12 +367,33 @@ pub(crate) fn items(
                 label,
             });
         } else if s["queueState"] == "paused" {
-            let Some(reason) = s["pauseReason"].as_str().filter(|r| !r.trim().is_empty()) else {
+            let hold = &s["automaticQueue"];
+            // A Hybrid or Automatic queue hold notifies only when the owner acts next;
+            // one the runtime rechecks or an agent fixes is not the owner's moment.
+            let automatic =
+                s["runMode"] == "automatic" || s["runMode"] == "hybrid" && hold.is_object();
+            if automatic
+                && (hold["needsOwner"] != true
+                    || hold["nextActor"]
+                        .as_str()
+                        .is_some_and(|actor| actor != "owner"))
+            {
+                continue;
+            }
+            let reason = if automatic {
+                hold["reason"]
+                    .as_str()
+                    .or_else(|| s["pauseReason"].as_str())
+            } else {
+                s["pauseReason"].as_str()
+            };
+            let Some(reason) = reason.filter(|r| !r.trim().is_empty()) else {
                 continue;
             };
             // The owner's own pause, closing and deletion, and Manual mode's stop after each
             // result (that result is its own notification), are not news to the owner.
             if reason == "This sprint is in manual mode."
+                || reason == "Paused by you"
                 || reason == "Sprint closed by you"
                 || reason.starts_with("Deletion pending")
             {
@@ -296,7 +401,15 @@ pub(crate) fn items(
             }
             out.push(Item {
                 kind: Kind::Paused,
-                state: format!("p:{reason}"),
+                state: if automatic {
+                    format!(
+                        "p:{}:{}:{reason}",
+                        hold["code"].as_str().unwrap_or_default(),
+                        hold["taskId"].as_str().unwrap_or_default()
+                    )
+                } else {
+                    format!("p:{reason}")
+                },
                 decision: None,
                 detail: Some(reason.to_owned()),
                 place,

@@ -1,5 +1,5 @@
 import type { Check as WireCheck, Decision as WireDecision, Result as WireResult, Task as WireTask } from "@cortex/workspace-contract";
-import { emptySession } from "./invariants";
+import { emptySession, isAutomaticContinuation } from "./invariants";
 import type { ProjectSlice } from "./port";
 import { descriptionLabel } from "./projections";
 import type { AttachmentRef, Check, CheckOutcome, Connection, Decision, DecisionTarget, Project, Result, Task, TaskStatus } from "./types";
@@ -71,6 +71,10 @@ const REASON_CODES: Record<string, readonly [string, string]> = {
   bubblewrap_launch_failed: ["The command sandbox could not be started, so the check did not run.", "a sandbox that could not start"],
   namespace_or_mount_setup_failed: ["The command sandbox could not be set up, so the check did not run.", "a sandbox that could not be set up"],
   setup_timeout: ["Preparing the command sandbox took too long, so the check did not run.", "a sandbox setup that took too long"],
+  check_preflight_unavailable: ["The check could not be prepared, so it did not run.", "a check that could not be prepared"],
+  task_files_changed: ["The task files changed after this check, so it no longer covers them.", "task files that changed after the check"],
+  workspace_drift: ["The workspace changed after this check, so it no longer covers it.", "a workspace that changed after the check"],
+  stale_result: ["This check belongs to a result that is out of date.", "a result that is out of date"],
   write_grant_outside_project: ["The command asked to write outside the project, which is not allowed.", "a write outside the project"],
 };
 /** The plain words of one bare code, or undefined. `Object.hasOwn` keeps names like `constructor` from reading the prototype. */
@@ -151,17 +155,24 @@ export function mapTask(task: WireTask, context: { projectId: string }, result?:
   // A cancelled turn, or a recovery whose reason the runtime recorded, waits in RECOVERING for the next
   // owner message, Stop or Close. This is not generic recovery or proof that every engine process has stopped;
   // a recovery without a stated reason stays unconfirmed.
-  const interrupted = task.executionId !== null && task.phase === "recovery" && task.runtimeState === "RECOVERING"
+  const continuation = isAutomaticContinuation(task.automaticContinuation) ? task.automaticContinuation : undefined;
+  const consistent = !task.warnings.includes("contradictory_evidence");
+  const pending = consistent && !!continuation && task.phase === "recovery" && task.runtimeState === "RECOVERING"
+    && task.executionState === "recovering" && task.waitReason === "automatic_continuation_pending";
+  const paused = consistent && !!continuation?.pause && task.phase === "paused" && task.executionState === "paused"
+    && task.runtimeState === "RECOVERING";
+  const interrupted = !pending && task.executionId !== null && task.phase === "recovery" && task.runtimeState === "RECOVERING"
     && task.executionState === "recovering" && typeof task.waitReason === "string" && task.waitReason.trim() !== ""
     && !task.warnings.includes("contradictory_evidence");
-  const phase = interrupted ? "recovery" : phaseOf(task), mapped = result ? mapResult(result) : null;
-  const known = interrupted || (phase !== "unknown" && task.phase !== "recovery");
+  const phase = paused ? "paused" : interrupted || pending ? "recovery" : phaseOf(task), mapped = result ? mapResult(result) : null;
+  const known = interrupted || pending || paused || (phase !== "unknown" && task.phase !== "recovery");
   const ownerResolved = phase === "stopped" && task.runtimeState === "CANCELLED" && task.warnings.includes("owner_resolved_without_certification") && !task.warnings.includes("contradictory_evidence");
   const status = ownerResolved ? "done" : interrupted ? "needs_you" : STATUS_OF_PHASE[phase] ?? (task.executionId ? "working" : "draft");
   return {
     id: task.taskId, projectId: context.projectId, sprintId: null, description: task.description, sourceVersion: task.version,
     title: task.title ?? descriptionLabel(task.description), titleState: task.title === null ? "pending" : "generated",
     checkout: { kind: "main", branch: "" }, targetBranch: null, dependencies: [], status, resumeStatus: "working",
+    ...(continuation ? { automaticContinuation: continuation } : {}),
     observedPhase:phase, coordinatorRoute: task.coordinatorRoute ?? null, warnings:task.warnings, issue: task.waitReason, executionId: task.executionId, result: mapped, workspaceDigest: mapped?.digest ?? null, acceptance: null,
     conflict: "none", merge: null, resolvedBy: null, integration: null, closedAs: ownerResolved ? "as_is" : null, notVerifiedByCortex: ownerResolved, doneAt: ownerResolved ? lastConfirmed(task.lastConfirmedAt) : null,
     archive: null, work: "unmerged",

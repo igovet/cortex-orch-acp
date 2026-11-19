@@ -347,24 +347,14 @@ availability and quota rules remain controlling. Preferences cannot promote
 a model into a different tier. See [configuration](../../configuration.md#user-routing-profiles).
 
 The current install snapshot follows the refreshed saved default profile:
-explicit OpenCode denial and a `claude-agent-acp/opus[1m]` coordinator at medium effort.
-The 2026-10-27 sync adds `codex-acp/gpt-6.1-terra` to enabled and automatic
-membership for `standard` only, with medium-to-high effort and
-`preferred_for: [writing, testing, debugging]`. It also syncs the portable
-coordinator to production's Opus medium default. It adds no pin, ordered per-kind
-lists, request labels or quota-window mapping; installed route availability
-still gates selection. Preferences rank eligible candidates; they do not guarantee
-Terra selection. The same day's priority refinement makes Terra the sole
-unconditional standard-tier preference for testing, debugging and writing:
-remove these kinds from Sonnet/Sol `preferred_for`, and testing from Haiku/Luna
-while retaining their `also_standard_for` testing eligibility. This ranks Terra
-first in ordinary automatic selection, not by list order or a pin. Sol retains
-review preference. Missing, unavailable or exhausted Terra falls back to other
-eligible candidates; purpose preference yields when known usage is >=95% and
-more than 10 points worse than an available alternative. Provider preferences
-and hard eligibility still control. Normal-complexity technical writers remain
-light-tier; only standard-tier writing prefers Terra. This configuration and
-offline ranking change is not live qualification.
+explicit OpenCode denial and a `claude-agent-acp/opus` coordinator at medium effort.
+In the current preset, Haiku, Luna, Sonnet, Sol and Terra are preferred for
+all work kinds other than frontend design implementation. The existing Opus,
+Fable and Astra preferences and the Opus condition are unchanged. At the
+requested tier the usual pools are Haiku/Luna for light, Sonnet/Sol/Terra for
+standard, and Sonnet/Sol for deep (where Opus remains eligible). Haiku and Luna
+do not stretch into standard testing. Preferences do not override eligibility,
+usage constraints or fallback.
 The 2026-10-21 production routing refresh removes Opus from the `standard` tier:
 its configured tiers are now `flagship` and `deep` only. Standard-tier generic
 `design` and `implementation_frontend` work cannot select Opus, even with an
@@ -433,10 +423,10 @@ retain soft affinity and ordinary conditional-hint/retry rules.
 
 ## Current preset: Haiku 5.5 and Luna
 
-The installation preset now enables `claude-agent-acp/haiku` at full
-policy parity with `codex-acp/gpt-6-luna`: light tier, testing stretch,
-high/xhigh/max effort ladder, max ceiling, the same preferred work kinds,
-and null request names. Its exact quota label is `seven_day_haiku`.
+The installation preset enables `claude-agent-acp/haiku` with the same
+policy as `codex-acp/gpt-6-luna`: light tier only (no `also_standard_for`, so
+Haiku and Luna never serve standard testing), high/xhigh/max effort ladder,
+max ceiling, the same eleven preferred work kinds, and null request names. Its exact quota label is `seven_day_haiku`.
 This alias is observed as Haiku 5.5 only in the independently inspected
 SDK 0.3.293 refresh; upstream adapter 0.87.0's SDK 0.3.287 resolves it to
 Haiku 4.5. See [catalog/effort evidence](../claude-engine/index.md#haiku-55-catalog-and-effort-evidence).
@@ -724,23 +714,25 @@ cheaper; high moves stronger). On escalation, the runtime normally advances the 
 `flagship` is reserved for escalation. A retry caused by an infrastructure failure
 (`engine_failure`, `transport_failure`) or by a worker lost to a runtime restart or host disconnect
 (`worker_lost`) does not escalate; other retries, including a retry with no recorded failure class, do. Ordinary standard-tier testing
-retries and review fixes retain the standard candidate pool described below;
-other standard-tier retries escalate normally. If no usable candidate exists in the
-requested tier, the configured fallback order searches other tiers. Explorer
-remains light at every complexity and escalation; because its tier cannot rise,
-escalation raises its effort one supported step (normally low to medium; on
-Luna, high to xhigh).
+retries and review fixes keep the standard pool (Sonnet, Sol and Terra in the
+preset; Haiku and Luna do not stretch into it); other standard-tier retries
+escalate normally. If no usable candidate exists in the
+requested tier, the configured fallback order searches other tiers. Planner, general and technical writer use light, standard and deep for low,
+normal and high complexity respectively. Explorer uses light for low and normal
+and standard for high. Its escalation raises effort without changing the
+complexity tier.
 
 Models are grouped into light, standard, deep, and flagship; the owner may
 place one model in several tiers (`models.<engine>.tiers` as a list), which
 makes it a candidate of each and runs it at the effort of the tier it was
 chosen for. An unavailable
 role tier searches the nearest tier permitted by policy; flagship is never a
-starting tier except for a node the user explicitly asked to run on it. Haiku is excluded from automatic selection by default, but
-`auto_allow` can opt in a model or `engine/model`; `deny` and `providers` still
-apply. Setup writes the default user `routing.json`, `{"deny": ["gpt-5.5",
-"haiku"]}`, whose bare `haiku` token denies every Haiku id and alias
-everywhere (see [configuration](../../configuration.md#routing-rules)). A pin is
+starting tier except for a node the user explicitly asked to run on it. The bundled preset puts Haiku in automatic selection at the light tier and
+denies only its exact Haiku 4.5 identity, `claude-agent-acp/claude-haiku-4-5-20251001`;
+`deny` and `providers` still apply. A bare `haiku` token in `deny` would deny
+every Haiku id and alias everywhere (see [configuration](../../configuration.md#routing-rules)).
+OpenCode routes stay out of automatic selection unless `auto_allow` lists the
+exact `opencode/<provider>/<model>` route. A pin is
 strict and has priority over automatic selection.
 
 `enabled` is the per-engine list of models Cortex may use at all (Settings >
@@ -753,11 +745,12 @@ Models.
 
 Weaker models do light work and stronger models do hard work: a task never
 runs on a stronger tier than its own because another engine lacks a model in
-that tier. With Haiku auto-excluded, the light tier has only Codex Luna, so
-light work (explorer, planner, technical writer, general, and low-complexity
-work) runs on Luna even when a Claude plan has more room. This single-engine
-light tier is accepted; `auto_allow` for Haiku in `routing.json` is the
-owner's lever for letting Claude take light work. The rank falls back to
+that tier. The preset's light tier holds two models, Haiku (Claude) and Luna
+(Codex), so light work (including low-complexity planning, general work and
+technical writing, and low- or normal-complexity exploration) can run on either
+engine; the rank chooses between them by quota, usage and preference. Light
+models serve standard work only through `also_standard_for`, which is empty for
+both. The rank falls back to
 another tier only when **no** engine has a usable model in the task's tier
 (`_FALLBACK_ORDER`). Rank version 3 briefly added a stronger model from the
 other engine as a `cross_tier` candidate; that was removed in rank version 4,
@@ -767,8 +760,10 @@ readable.
 ### Owner-configured models: selection, tiers and policy
 
 Every name-keyed rule in this section -- the family and line tier tables, the
-Haiku and optional-engine exclusions, the flagship effort ceiling, the Luna
-rule and the Russian request spellings -- is only a built-in default. The owner overrides it per engine and per exact
+Haiku and optional-engine exclusions, the flagship effort ceiling and the
+Russian request spellings -- describes defaults from the earlier ranker.
+The current runtime uses exact configured model identities; stretch eligibility
+is never inferred from a model name. The owner overrides it per engine and per exact
 model id with the `models` key of `routing.json` (reference:
 [configuration](../../configuration.md#routing-rules)); with no `models` key
 every routing decision is the same as before rank version 8.

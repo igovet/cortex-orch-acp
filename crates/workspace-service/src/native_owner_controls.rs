@@ -278,6 +278,7 @@ impl Runtime {
                 if checks["digest"]!=q["digest"] || checks["sourceVersion"]!=q["resultVersion"] {return refused("stale_result");}
                 let check=checks["checks"].get(q["checkIndex"].as_u64().unwrap() as usize).ok_or(CoreError::Refused("invalid_check"))?;
                 if check["name"]!=q["checkName"] {return refused("stale_result");}
+                if check["rerunnable"]!=true {return refused("invalid_check");}
                 serde_json::from_value::<Vec<String>>(check["command"].clone()).map_err(|_|CoreError::Refused("invalid_check"))
             })?).await?)
         } else {
@@ -610,9 +611,25 @@ pub(super) fn checks(db: &rusqlite::Connection, task: &str) -> CoreResult<Value>
         let v: Value = serde_json::from_str(&raw)?;
         let receipt = &v["receipt"];
         let argv = receipt["argv"].clone();
-        let item = json!({"name":argv.as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(" "),
-            "command":argv,"sourceDigest":receipt["revision_digest"],"kind":"automated","source":"runtime","rerunnable":true,"outcome":if receipt["observation"]["complete"]==true && receipt["observation"]["exit_code"]==0 {"passed"} else {"failed"},
-            "detail":receipt["observation"]["failure"].as_str().unwrap_or(""),"toolCallRef":receipt["tool_call_ref"]});
+        let observation = &receipt["observation"];
+        let reason = observation["failure"].as_str().unwrap_or("");
+        // This code is returned before the verifier starts the command. A
+        // generic incomplete receipt (timeout, cancellation, etc.) is not a skip.
+        let skipped = observation["exit_code"].is_null()
+            && reason == "native_verification_sandbox_unavailable";
+        let outcome = if skipped {
+            "not_run"
+        } else if observation["complete"] == true && observation["exit_code"] == 0 {
+            "passed"
+        } else {
+            "failed"
+        };
+        let mut item = json!({"name":argv.as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(" "),
+            "command":argv,"sourceDigest":receipt["revision_digest"],"kind":"automated","source":"runtime","rerunnable":!skipped,"outcome":outcome,
+            "detail":reason,"toolCallRef":receipt["tool_call_ref"]});
+        if skipped {
+            item["technicalReason"] = json!(reason);
+        }
         if let Some(index) = items.iter().position(|i: &Value| i["command"] == argv) {
             items[index] = item;
         } else {
@@ -625,6 +642,7 @@ pub(super) fn checks(db: &rusqlite::Connection, task: &str) -> CoreResult<Value>
         if item["sourceDigest"] != digest {
             item["outcome"] = json!("unverified");
             item["detail"] = json!("verification_review_revision_changed");
+            item.as_object_mut().unwrap().remove("technicalReason");
         }
         item.as_object_mut().unwrap().remove("sourceDigest");
     }
@@ -1066,6 +1084,15 @@ impl Runtime {
                 let mut nodes=nodes;
                 if nodes.len()>1000 {nodes.truncate(1000);partial.insert("workers".into(),json!(true));}
                 nodes.reverse();
+                // A rerun event is the runtime's authoritative link between the
+                // finished review and its follow-up. Keep it beside the worker
+                // projection so Work details can explain both rows without
+                // parsing model prose.
+                let review_reruns:Vec<Value>=db.prepare("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REVIEW_RERUN' ORDER BY id")?
+                    .query_map([&task],|r|r.get::<_,String>(0))?
+                    .collect::<Result<Vec<_>,_>>()?.into_iter()
+                    .map(|raw|serde_json::from_str::<Value>(&raw).map_err(|_|rusqlite::Error::InvalidQuery))
+                    .collect::<Result<Vec<_>,_>>()?;
                 let host_worker=nodes.iter().rev().find(|n|n.3=="completed").map(|n|n.0.clone());
                 // A worker of an earlier version (the plan revision moved on, or the task was
                 // reopened after it) is history: its checks are not the current version's.
@@ -1290,12 +1317,33 @@ impl Runtime {
                             result
                         })
                         .filter(|r|!r["summary"].as_str().unwrap_or("").is_empty());
+                    let review_info = if role.contains("review") {
+                        let recorded = node_result.as_deref().and_then(|raw|serde_json::from_str::<Value>(raw).ok());
+                        let outgoing = review_reruns.iter().find(|event| event["review"].as_str() == Some(id.as_str()));
+                        let incoming = review_reruns.iter().find(|event| event["rerun"].as_str() == Some(id.as_str()));
+                        let mut info = serde_json::Map::new();
+                        if let Some(verdict)=recorded.as_ref().and_then(|r|r["verdict"].as_str()).filter(|v| matches!(*v,"APPROVE"|"REQUEST_CHANGES"|"BLOCK"|"INCOMPLETE")) {
+                            info.insert("verdict".into(),json!(verdict));
+                        }
+                        if let Some(items)=recorded.as_ref().and_then(|r|r["not_covered"].as_array()) {
+                            let covered=items.iter().filter_map(|item|Some(json!({"item":item["item"].as_str()?.to_owned(),"reason":item["reason"].as_str()?.to_owned()}))).collect::<Vec<_>>();
+                            if !covered.is_empty() { info.insert("notCovered".into(),json!(covered)); }
+                        }
+                        if let Some(event)=outgoing.or(incoming) {
+                            info.insert("rerun".into(),json!({
+                                "reason":event["reason"].as_str().unwrap_or("The previous review did not cover the whole change."),
+                                "previousWorkerId":event["review"].as_str().unwrap_or(""),
+                                "followUpWorkerId":event["rerun"].as_str().unwrap_or(""),
+                            }));
+                        }
+                        if info.is_empty() { Value::Null } else { Value::Object(info) }
+                    } else { Value::Null };
                     let route=worker_route(db,&task,&id)?;
                     workers.push(json!({"id":id,"taskId":draft,"executionId":execution,"role":role.trim_start_matches("worker-"),
                         "status":worker_status(&status,&process,&state),
                         "lane":if role.contains("review"){"review"}else{"execution"},"goal":goal,"now":null,"waitsFor":null,
                         "scope":serde_json::from_str::<Value>(&scope)?,"route":route,"attempt":null,"elapsedMs":null,"runningSince":null,
-                        "context":null,"usage":null,"activity":activity,"result":worker_result,"messages":[]}));
+                        "context":null,"usage":null,"activity":activity,"result":worker_result,"review":review_info,"messages":[]}));
                     // Present only when they apply, so a current worker keeps its recorded shape.
                     let worker=workers.last_mut().expect("pushed above");
                     if superseded {worker["superseded"]=json!(true);}
@@ -1355,13 +1403,25 @@ impl Runtime {
                 })
                 .collect();
             let reviews = self.reviews(project, records, current.clone()).await?;
-            for ((draft, _, synthesis, ordinal), (actions, work)) in completed.iter().zip(reviews) {
+            for ((draft, _, synthesis, ordinal), (mut actions, work)) in
+                completed.iter().zip(reviews)
+            {
                 let task = &mut facts["product"]["tasks"][draft];
                 if !task["result"].is_object() {
                     task["result"] = json!({"checks":[],"digest":null,"sourceVersion":"0"});
                 }
                 let result = &mut task["result"];
                 identify(result, &actions);
+                if let Some(Value::Array(mut skipped)) = actions
+                    .as_object_mut()
+                    .and_then(|actions| actions.remove("notRunChecks"))
+                {
+                    // Keep receipt indices stable for owner reruns. These appended rows
+                    // describe checks that did not execute and are not rerun targets.
+                    if let Some(checks) = result["checks"].as_array_mut() {
+                        checks.append(&mut skipped);
+                    }
+                }
                 result["kind"] = json!(if work { "work" } else { "answer" });
                 result["acceptanceAvailable"] = json!(actions["accept"] == true);
                 // A result from an earlier version is read-only and keeps its identity

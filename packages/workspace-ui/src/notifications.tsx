@@ -74,7 +74,9 @@ export function QuestionNotifications(props: { tabs?: Pick<Tabs, "ids" | "active
     const report = createMemo((): NotificationReport => {
       const r = ws.router.route(), on = ws.panels.notifications();
       const task = r.name === "task" ? ws.store.state().tasks.find(t => t.id === r.task) : undefined;
-      const place = !focused() ? null : task ? { project: task.projectId, task: task.id }
+      // An address of a sprint's planning task shows its sprint.
+      const planned = task ? ws.store.state().sprints.find(s => s.planningTaskId === task.id) : undefined;
+      const place = !focused() ? null : planned ? { project: planned.projectId, sprint: planned.id } : task ? { project: task.projectId, task: task.id }
         : r.name === "sprint" ? { project: r.project, sprint: r.sprint }
         : r.name === "project" && r.scope.kind === "sprint" ? { project: r.project, sprint: r.scope.id } : null;
       return { focused: place, kinds: on ? kinds() : [] };
@@ -97,8 +99,10 @@ export function QuestionNotifications(props: { tabs?: Pick<Tabs, "ids" | "active
     const raised: Notification[] = [];
     let changed = false;
     for (const session of state.sessions) {
-      const task = state.tasks.find(t => t.id === session.taskId);
-      const sprint = state.sprints.find(s => !s.archivedAt && s.planningTaskId === session.taskId);
+      // A planning task's questions are its sprint's: they never raise a notification of their own task.
+      const planned = state.sprints.find(s => s.planningTaskId === session.taskId);
+      const sprint = planned && !planned.archivedAt ? planned : undefined;
+      const task = planned ? undefined : state.tasks.find(t => t.id === session.taskId);
       if (!task && !sprint) continue;
       const machineId = state.projects.find(p => p.id === (task?.projectId ?? sprint?.projectId))?.machineId;
       if (!state.machines.some(m => m.id === machineId && m.connection === "connected")) continue;

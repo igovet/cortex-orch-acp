@@ -194,7 +194,7 @@ describe("production workspace", () => {
 
   it("opens every screen, and a machine that offers nothing leaves its controls off", async () => {
     const root = await mount(scriptedPort().port, "/settings/machine/"+LOCAL_MACHINE_ID+"/orchestration/tools");
-    expect(root.textContent).toContain("Tools and MCP");
+    expect(root.querySelector("h1.set-title")?.textContent).toBe("MCP servers");
     expect(root.textContent).not.toContain("Not connected in this version");
     expect(root.querySelector('input[aria-label="Server name"]')).toBeNull();
     for (const path of [`/m/${LOCAL_MACHINE_ID}/archive`, "/settings/app/shortcuts", `/settings/machine/${LOCAL_MACHINE_ID}/storage`, `/settings/machine/${LOCAL_MACHINE_ID}/diagnostics`]) {

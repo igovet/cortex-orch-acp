@@ -8,6 +8,7 @@ import { FieldEdit, NameEdit } from "./field-edit";
 import { A, I, Keyed, MenuItem, OverviewShown, Pop, useOverviewWait, useWantOverview } from "./kit";
 import { Page as Frame, revealCutIn } from "./layout";
 import { Orchestration, useReadOnly } from "./orchestration";
+import { orchTo, Shell } from "./orch-shared";
 import type { Route } from "./router";
 import { asOf, clock, dayClock, engineLimits, limitsText, plainVersion, projectsOn } from "./selectors";
 import { HELP } from "./orch-help";
@@ -124,7 +125,7 @@ function Connections() {
   const setupText = { not_downloaded: "Not downloaded", downloaded_no_login: "Downloaded, sign in on this machine", ready_to_connect: "Ready to connect", connected: "Connected" };
   const setupNote = (e: EngineKey) => { const s = m().config.setup[e]; return [setupText[s.status], s.automatic ? "automatic setup on" : "", s.reason ?? "", s.autoConnectDisabled ? "automatic connection off" : ""].filter(Boolean).join(", "); };
   const enableOpenCode = () => ws.open({ kind: "prompt", title: "Enable OpenCode", label: "Connection name", value: "OpenCode", action: "Enable", hint: "OpenCode is never downloaded. It uses the one on this machine.", go: name => ws.run({ type: "enable_opencode", machineId: m().id, name }).then(r => r.ok) });
-  return <Page title="Engine connections" lead="How this machine reaches each engine and how much of their limits is used. Secrets are never shown.">
+  return <Shell section="connections" title="Connections" lead="How this machine reaches each engine and how much of their limits is used. Every action here takes effect at once. Secrets are never shown.">
     <SetH title="Engines: download and connect"><Hint text={HELP.engineSetup} label="engine setup" /></SetH>
     <div class="surface"><For each={ENGINES}>{e => <Srow t={e.label} d={setupNote(e.id)}>
       <Show when={e.id === "opencode"} fallback={<Show when={m().config.setup[e.id].status === "not_downloaded"}><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs("download_engine")} onClick={guard(() => ws.run({ type: "download_engine", machineId: m().id, engine: e.id }))}>Download engine</button></Show>}>
@@ -147,7 +148,7 @@ function Connections() {
         </Pop>
       </div>}</Keyed>
     </div></div>
-    <A class="lnk" to={{name:"settings", section:"orchestration", machine:m().id, page:"models"}}>Engine models and observed context</A>
+    <div class="row ws-gap4"><span class="cap muted">Which models each engine offers, and which are on:</span><A class="lnk" to={orchTo(m().id, "models")}>Models</A></div>
     <Keyed each={m().connections} by={c => c.id}>{c => <Adv id={`conn-${c().id}`} label={`Details of ${c().label}`}><div class="surface ws-pad ws-kv">
       <For each={[["Engine", engineLabel(CONNECTION_ENGINE[c().engine])], ["Provider", c().detail.provider], ["Sign-in", c().detail.authMode], ["Key kind", c().detail.keyKind], ["Endpoint", c().detail.endpoint], ["Launch command", c().detail.launchCommand], ["Credential", c().detail.credential], ["Qualified", c().detail.qualified ? "Yes" : "No"], ["Created", c().detail.createdAt], ["Updated", c().detail.updatedAt]].filter(([, v]) => v)}>{([k, v]) => <><span class="cap muted">{k}</span><span class="cap mono trunc">{v}</span></>}</For>
     </div></Adv>}</Keyed>
@@ -166,7 +167,7 @@ function Connections() {
       </div></div>
     </Show>
     <p class="hint">Percentages come from each provider and are a snapshot, read again every few minutes while the app is open, not a live meter. A snapshot older than 15 minutes is marked stale. An unknown value is never counted as zero.</p>
-  </Page>;
+  </Shell>;
 }
 
 /** Worktrees live outside every repository by default, so a project never sees another task's files as its own. */
@@ -279,8 +280,13 @@ function RemoteAccess() {
 /**
  * Names each cell of a settings table after its column, so a table too narrow for its columns (a phone) can show its rows as
  * labelled lines (workspace.css, container gtable). The header row stays the one source of the names; the matrix of tool
- * access keeps its columns and scrolls in its own box.
+ * access keeps its columns and scrolls in its own box (it is a grid of its own).
+ *
+ * The same header makes it a table to assistive technology: the box is a table, each line a row, the header's words column
+ * headers and the rest cells, so a control is read with its row and column. A table holding anything but rows (a row's own
+ * details are a row of one cell: `role="row"`) keeps only its labels, since a table with stray children reads worse than none.
  */
+const setRole = (el: Element, role: string) => { if (el.getAttribute("role") !== role) el.setAttribute("role", role); };
 function labelTableCells(root: HTMLElement) {
   let frame = 0;
   const apply = () => {
@@ -292,6 +298,14 @@ function labelTableCells(root: HTMLElement) {
       const names = [...head.children].map(c => [...c.childNodes].filter(n => !(n instanceof Element && n.matches("button, [popover], .i"))).map(n => n.textContent ?? "").join("").trim());
       for (const row of table.querySelectorAll<HTMLElement>(":scope > .gr:not(.th)"))
         [...row.children].forEach((cell, i) => { const name = names[i] ?? ""; if (cell.getAttribute("data-label") !== name) cell.setAttribute("data-label", name); });
+      const lines = [...table.children];
+      if (!lines.every(line => line.matches(".gr, [role='row']"))) continue;
+      setRole(table, "table");
+      for (const line of lines) {
+        if (!line.matches(".gr")) continue;
+        setRole(line, "row");
+        for (const cell of line.children) setRole(cell, line === head ? "columnheader" : "cell");
+      }
     }
   };
   const watch = new MutationObserver(() => { if (!frame) frame = requestAnimationFrame(apply); });

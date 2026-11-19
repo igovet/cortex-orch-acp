@@ -228,8 +228,47 @@ pub fn add_review_tx(
     task: &str,
     snapshot: &EvidenceSnapshot,
 ) -> CoreResult<()> {
+    schedule_review_tx(db, task, snapshot, false)
+}
+
+/// Invalidate an approval (including a waiver) after observed verification drift.
+/// The usual review-cycle budget bounds repeated external changes.
+pub fn review_changed_checkout_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    snapshot: &EvidenceSnapshot,
+) -> CoreResult<()> {
+    if domain::task_tx(db, task)?.0 != TaskState::Verifying {
+        return refuse("verification_not_expected");
+    }
+    let (review_event, reviewed) = review_binding_tx(db, task)?;
+    let current = digest(snapshot)?;
+    if reviewed == current {
+        return refuse("verification_revision_unchanged");
+    }
+    event_tx(
+        db,
+        task,
+        "VERIFICATION_REVISION_CHANGED",
+        json!({"review_event":review_event,"reviewed_digest":reviewed,"observed_digest":current}),
+    )?;
+    schedule_review_tx(db, task, snapshot, true)
+}
+
+fn schedule_review_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    snapshot: &EvidenceSnapshot,
+    after_drift: bool,
+) -> CoreResult<()> {
     let (state, revision) = domain::task_tx(db, task)?;
-    if state != TaskState::Executing {
+    if state
+        != (if after_drift {
+            TaskState::Verifying
+        } else {
+            TaskState::Executing
+        })
+    {
         return refuse("review_not_expected");
     }
     let nodes=db.prepare("SELECT node_id,stage,status FROM runtime_nodes WHERE task_id=? AND revision=? ORDER BY rowid")?
@@ -242,7 +281,10 @@ pub fn add_review_tx(
     let mut waiver = None;
     // Metadata-only or incomplete observations can be forged (mtime restored), so they
     // never support a waiver; the review then runs.
-    let waivable = !snapshot.metadata_only && !snapshot.incomplete;
+    let waivable = !after_drift
+        && !snapshot.metadata_only
+        && !snapshot.incomplete
+        && !super::automatic::enabled(db, task)?;
     if waivable && !nodes.iter().any(|n| n.1 == "review") {
         if let Some(d) = observed {
             let baseline:Option<String>=db.query_row("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='EXECUTION_BASELINE'
@@ -293,7 +335,7 @@ pub fn add_review_tx(
         return Ok(());
     }
     db.execute("INSERT INTO runtime_nodes(task_id,revision,node_id,role,objective,dependencies_json,scope_json,stage,status)
-        VALUES (?,?,?,'worker-code-reviewer','Independently review the objective, implementation and retained reports.',?,'[\"**\"]','review','pending')",
+        VALUES (?,?,?,'worker-code-reviewer','Independently review the objective, implementation and retained reports. Use the review packet change_boundary: inspect task-written paths across plans and relevant baseline changes. Check the current bytes when a write hash differs or is unavailable. Report any material coverage gap.',?,'[\"**\"]','review','pending')",
         (task,revision,format!("_review_{cycle}"),json!(nodes.iter().map(|n|&n.0).collect::<Vec<_>>()).to_string()))?;
     // The reviewer routes as review work at the highest complexity of the work it
     // reviews; it names no provider or model (independence is chosen by routing).
@@ -369,6 +411,174 @@ enum Independence {
     Warning(Value),
     Refused,
 }
+
+/// The host records the exact packet delivered to a reviewer and the native
+/// project channel records every file read.  A reviewer result is not allowed
+/// to claim a complete verdict until those two authoritative records agree.
+/// This is deliberately scoped to the packet (not the checkout): unrelated
+/// files must never become a surprise review obligation.
+/// The changed files a review has not read completely on its own channel, from its
+/// latest review packet. Each entry is `{"path"|"kind","reason"}`. An INCOMPLETE
+/// review is not asked for parts it declared blocked by a dead end, nor for host
+/// limits (an unenumerable change set, paths outside its read scope) that it
+/// cannot resolve itself; any other verdict must have read everything.
+pub fn review_coverage_missing_tx(
+    db: &rusqlite::Connection,
+    task: &str,
+    assignment: &str,
+    result: &Value,
+) -> CoreResult<Vec<Value>> {
+    let raw: Option<String> = db
+        .query_row(
+            "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REVIEW_PACKET'
+             AND json_extract(payload_json,'$.assignment_ref')=? ORDER BY id DESC LIMIT 1",
+            (task, assignment),
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let event: Value = serde_json::from_str(&raw)?;
+    let packet = event["packet"].clone();
+    let incomplete = result["verdict"]
+        .as_str()
+        .is_some_and(|v| v.eq_ignore_ascii_case("INCOMPLETE"));
+    let blocked = super::review::blocked_items(result);
+    let changed = &packet["changed_files"];
+    let mut missing = Vec::new();
+    if !incomplete {
+        if changed["complete"] != true || changed["more"]["count"].as_i64().unwrap_or(0) > 0 {
+            missing.push(
+                json!({"kind":"change_set","reason":"host could not enumerate every changed path"}),
+            );
+        }
+        if packet["read_scope_covers_change"] != true {
+            for path in packet["outside_read_scope"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                missing.push(json!({"path":path,"reason":"outside reviewer read scope"}));
+            }
+        }
+    }
+    let channel: Option<String> = db
+        .query_row(
+            "SELECT channel_id FROM trusted_channels WHERE task_id=? AND assignment_id=?
+             AND revoked_at IS NULL ORDER BY rowid DESC LIMIT 1",
+            (task, assignment),
+            |r| r.get(0),
+        )
+        .optional()?;
+    let outside: BTreeSet<&str> = packet["outside_read_scope"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if let Some(files) = changed["files"].as_array() {
+        for file in files {
+            let Some(path) = file["path"].as_str() else {
+                continue;
+            };
+            // Deletions are proven by the complete baseline/current manifest;
+            // there are no current bytes for project_read to inspect.
+            // Only current regular-file bytes the host hashed can be read and bound:
+            // a directory or an unobservable entry has no `current_sha256`.
+            if file["change"] == "deleted"
+                || !file["current_sha256"].is_string()
+                || blocked.contains(path)
+            {
+                continue;
+            }
+            if incomplete && outside.contains(path) {
+                continue;
+            }
+            let Some(channel) = channel.as_deref() else {
+                missing.push(json!({"path":path,"reason":"review channel unavailable"}));
+                continue;
+            };
+            let key = format!("file-read:{}", crate::digest(path.as_bytes()));
+            let read: Option<String> = db
+                .query_row(
+                    "SELECT result_json FROM runtime_requests WHERE task_id=? AND request_key=?
+                     AND actor=? AND operation='native_file_read'",
+                    (task, key, channel),
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let valid = read
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .is_some_and(|v| v["complete"] == true && v["sha256"] == file["current_sha256"]);
+            if !valid {
+                missing.push(
+                    json!({"path":path,"reason":"current complete read is missing or stale"}),
+                );
+            }
+        }
+    }
+    Ok(missing)
+}
+/// What a submitted result leaves undone that its worker can still do, as the
+/// refusal code and the exact outstanding items. `None` when the result may be
+/// recorded. A worker finishes its own assignment: only a dead end it names with
+/// its blocker category (see `review::COVERAGE_BLOCKERS`) is accepted as unfinished.
+pub fn outstanding_tx(
+    db: &rusqlite::Connection,
+    task: &str,
+    assignment: &str,
+    stage: &str,
+    result: &Value,
+) -> CoreResult<Option<(&'static str, Vec<String>)>> {
+    if result["assignment_outcome"] == "failed"
+        && !(super::review::valid_blocker(&result["blocker"]["kind"])
+            && result["blocker"]["detail"]
+                .as_str()
+                .is_some_and(|d| !d.trim().is_empty()))
+    {
+        return Ok(Some(("assignment_blocker_required", Vec::new())));
+    }
+    if stage != "review" {
+        return Ok(None);
+    }
+    // An incomplete review names what it did not cover; only that verdict does.
+    let incomplete = result["verdict"]
+        .as_str()
+        .is_some_and(|v| v.eq_ignore_ascii_case("INCOMPLETE"));
+    if incomplete
+        != result["not_covered"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty())
+    {
+        return Ok(Some(("review_not_covered_required", Vec::new())));
+    }
+    if super::review::block_without_findings(result) {
+        return Ok(Some(("review_block_findings_required", Vec::new())));
+    }
+    let unfinished = super::review::unfinished_coverage(result);
+    if !unfinished.is_empty() {
+        return Ok(Some(("review_coverage_unfinished", unfinished)));
+    }
+    let missing = review_coverage_missing_tx(db, task, assignment, result)?;
+    if !missing.is_empty() {
+        let items = missing
+            .iter()
+            .map(|m| match m["path"].as_str() {
+                Some(path) => format!("{path} ({})", m["reason"].as_str().unwrap_or("")),
+                None => format!(
+                    "{} ({})",
+                    m["kind"].as_str().unwrap_or("change"),
+                    m["reason"].as_str().unwrap_or("")
+                ),
+            })
+            .collect();
+        return Ok(Some(("review_file_coverage_required", items)));
+    }
+    Ok(None)
+}
+
 fn review_independence_tx(
     db: &Transaction<'_>,
     task: &str,
@@ -501,6 +711,21 @@ pub fn record_result_tx(
     if let Some(digest) = &snapshot.ignored_digest {
         result["ignored_digest"] = json!(digest);
     }
+    // Nothing the worker can still do may be left undone; result_submit refuses the
+    // same before publication with the exact items, and the assignment stays active.
+    if let Some((code, _)) = outstanding_tx(db, task, assignment, &stage, &result)? {
+        if code == "review_file_coverage_required" {
+            let missing = review_coverage_missing_tx(db, task, assignment, &result)?;
+            event_tx(
+                db,
+                task,
+                "REVIEW_COVERAGE_REQUIRED",
+                json!({"assignment_ref":assignment,"missing":missing,
+                    "message":"Read every listed changed file with project_read before submitting this verdict, or submit INCOMPLETE naming each part you cannot reach with its blocker."}),
+            )?;
+        }
+        return refuse(code);
+    }
     // A reviewer that requests changes may cite a failing check as the finding;
     // that is a completed review that starts a fix cycle, not a failed reviewer.
     // Only an explicit assignment_outcome=failed marks the review itself failed.
@@ -520,13 +745,6 @@ pub fn record_result_tx(
             .contains(&result["verdict"].as_str().unwrap_or(""))
         {
             return refuse("review_verdict_required");
-        }
-        // An incomplete review names what it did not cover; only that verdict does.
-        let uncovered = result["not_covered"]
-            .as_array()
-            .is_some_and(|a| !a.is_empty());
-        if (result["verdict"] == "INCOMPLETE") != uncovered {
-            return refuse("review_not_covered_required");
         }
         let start: String = db
             .query_row(
@@ -603,7 +821,7 @@ pub fn record_result_tx(
     )?;
     Ok(())
 }
-fn review_binding_tx(db: &Transaction<'_>, task: &str) -> CoreResult<(i64, String)> {
+pub(super) fn review_binding_tx(db: &Transaction<'_>, task: &str) -> CoreResult<(i64, String)> {
     let (_, revision) = domain::task_tx(db, task)?;
     let review: Option<(String, Option<String>)> = db
         .query_row(
@@ -725,6 +943,7 @@ pub fn record_verification_tx(
     let mut checks = Vec::new();
     let mut ids = BTreeSet::new();
     let mut passed = commands.len() == receipt_keys.len();
+    let mut unresolved = Vec::new();
     for (index, key) in receipt_keys.iter().enumerate() {
         let s:Option<String>=db.query_row("SELECT result_json FROM runtime_requests WHERE task_id=? AND actor='runtime-verifier'
             AND request_key=? AND operation='verification_command'",(task,key),|r|r.get(0)).optional()?;
@@ -751,14 +970,26 @@ pub fn record_verification_tx(
             [task],
             |r| r.get(0),
         )?;
-        passed &= v["complete"] == true
+        let valid = v["complete"] == true
             && v["exit_code"] == 0
             && v["revision"] == revision
             && v["revision_digest"] == reviewed
             && v["review_event"] == review_event
             && v["owner_epoch"] == epoch
             && commands.get(index) == Some(&v["argv"]);
+        if !valid {
+            passed = false;
+            unresolved.extend(commands.get(index).cloned());
+        }
         checks.push(v);
+    }
+    let mut verification = json!({"revision":revision,"revision_digest":reviewed,"review_event":review_event,"checks":checks});
+    if !passed {
+        unresolved.extend(commands.iter().skip(receipt_keys.len()).cloned());
+        verification["unresolved_commands"] = json!(unresolved);
+    }
+    if !passed && super::automatic::enabled(db, task)? {
+        verification["commands"] = json!(commands);
     }
     event_tx(
         db,
@@ -768,7 +999,7 @@ pub fn record_verification_tx(
         } else {
             "VERIFICATION_FAILED"
         },
-        json!({"revision":revision,"revision_digest":reviewed,"review_event":review_event,"checks":checks}),
+        verification,
     )?;
     if passed {
         domain::state_tx(db, task, TaskState::Reconciling, None)?;
@@ -792,7 +1023,12 @@ pub fn submit_answer_tx(db: &Transaction<'_>, task: &str, text: &str) -> CoreRes
         AND NOT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=?)
         AND NOT EXISTS(SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator')
         FROM runtime_tasks WHERE task_id=?",(task,task,task),|r|r.get(0))?;
-    if state != TaskState::Planning || revision != 0 || !informational || text.trim().is_empty() {
+    if state != TaskState::Planning
+        || revision != 0
+        || !informational
+        || text.trim().is_empty()
+        || super::automatic::enabled(db, task)?
+    {
         return refuse("direct_answer_not_allowed");
     }
     db.execute(
@@ -802,49 +1038,126 @@ pub fn submit_answer_tx(db: &Transaction<'_>, task: &str, text: &str) -> CoreRes
     event_tx(db, task, "ANSWER_SUBMITTED", json!({"text":text}))?;
     domain::state_tx(db, task, TaskState::AnswerReady, None)
 }
-/// Retain dropped failed commands until an exact successful rerun, or a real
-/// answer to a task-global question asked after the removal. Worker-local answers
-/// reset retry budgets but cannot certify these obligations (state.py:137-165).
-pub fn dropped_failures_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Vec<Value>> {
-    let rows=db.prepare("SELECT id,type,payload_json FROM runtime_events WHERE task_id=? AND id>coalesce(
-        (SELECT max(id) FROM runtime_events WHERE task_id=? AND type='PLAN_ACCEPTED'),0)
-        AND type IN ('VERIFICATION_REVISED','VERIFICATION_PASSED','USER_QUESTION_REQUESTED','USER_ANSWER_RECEIVED') ORDER BY id")?
-        .query_map((task,task),|r|Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<Result<Vec<_>,_>>()?;
-    let mut outstanding: BTreeMap<String, (Value, i64)> = BTreeMap::new();
+/// Older format-12 events retain the individual receipts only.
+pub(super) fn unresolved_commands(failure: &Value, planned: &Value) -> Vec<Value> {
+    if let Some(commands) = failure["unresolved_commands"].as_array() {
+        return commands.clone();
+    }
+    if let Some(commands) = failure["commands"]
+        .as_array()
+        .or_else(|| planned.as_array())
+    {
+        return commands
+            .iter()
+            .enumerate()
+            .filter(|(index, argv)| {
+                let check = &failure["checks"][*index];
+                check["complete"] != true
+                    || check["exit_code"] != 0
+                    || &check["argv"] != *argv
+                    || check["revision"] != failure["revision"]
+                    || check["revision_digest"] != failure["revision_digest"]
+                    || check["review_event"] != failure["review_event"]
+            })
+            .map(|(_, argv)| argv.clone())
+            .collect();
+    }
+    failure["checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["exit_code"] != 0 || c["complete"] != true)
+        .map(|c| c["argv"].clone())
+        .collect()
+}
+
+/// Carry open verification failures across repair plans. A replacement under
+/// verification_submit may still be acknowledged through the existing owner
+/// question route, but answering a retry prompt never waives an undropped check.
+fn outstanding_commands(
+    db: &Transaction<'_>,
+    task: &str,
+    include_retained: bool,
+) -> CoreResult<Vec<Value>> {
+    let mut stmt = db.prepare("SELECT id,type,payload_json FROM runtime_events WHERE task_id=?
+        AND type IN ('VERIFICATION_FAILED','VERIFICATION_REVISED','VERIFICATION_PASSED','USER_QUESTION_REQUESTED','USER_ANSWER_RECEIVED') ORDER BY id")?;
+    let rows = stmt.query_map([task], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    // Only an explicitly dropped command has a removal event that an owner may resolve.
+    let mut outstanding: BTreeMap<String, (Value, Option<i64>)> = BTreeMap::new();
     let mut questions = BTreeMap::new();
-    for (id, kind, s) in rows {
-        let v: Value = serde_json::from_str(&s)?;
+    for row in rows {
+        let (id, kind, raw) = row?;
+        let v: Value = serde_json::from_str(&raw)?;
         match kind.as_str() {
+            "VERIFICATION_FAILED" if include_retained => {
+                // Older runs may have stopped before every planned argv got a receipt.
+                let planned = if v["unresolved_commands"].is_null() && v["commands"].is_null() {
+                    let raw: Option<String> = db.query_row(
+                        "SELECT coalesce(json_extract(payload_json,'$.plan.verification'),json_extract(payload_json,'$.verification'),'null')
+                         FROM runtime_events WHERE task_id=? AND id<? AND type IN ('PLAN_ACCEPTED','VERIFICATION_REVISED')
+                         ORDER BY id DESC LIMIT 1", (task,id), |r|r.get(0)).optional()?;
+                    serde_json::from_str(raw.as_deref().unwrap_or("null"))?
+                } else {
+                    Value::Null
+                };
+                for argv in unresolved_commands(&v, &planned) {
+                    outstanding.insert(argv.to_string(), (argv, None));
+                }
+            }
             "VERIFICATION_REVISED" => {
-                if let Some(checks) = v["dropped_failed"].as_array() {
-                    for argv in checks {
-                        outstanding.insert(argv.to_string(), (argv.clone(), id));
-                    }
+                for argv in v["dropped_failed"].as_array().into_iter().flatten() {
+                    outstanding.insert(argv.to_string(), (argv.clone(), Some(id)));
                 }
             }
             "VERIFICATION_PASSED" => {
-                if let Some(checks) = v["checks"].as_array() {
-                    for c in checks {
-                        if c["complete"] == true && c["exit_code"] == 0 {
-                            outstanding.remove(&c["argv"].to_string());
-                        }
+                for c in v["checks"].as_array().into_iter().flatten() {
+                    if c["complete"] == true && c["exit_code"] == 0 {
+                        outstanding.remove(&c["argv"].to_string());
                     }
                 }
             }
             "USER_QUESTION_REQUESTED" => {
-                questions.insert(v["question_id"].to_string(), id);
+                if let Some(question) = v["question_id"].as_str() {
+                    questions.insert(question.to_owned(), id);
+                }
             }
             "USER_ANSWER_RECEIVED" => {
-                let asked = questions
-                    .get(&v["question_id"].to_string())
-                    .copied()
-                    .unwrap_or(0);
-                outstanding.retain(|_, (_, removed)| *removed >= asked);
+                if let Some(asked) = v["question_id"].as_str().and_then(|q| questions.remove(q)) {
+                    outstanding
+                        .retain(|_, (_, removed)| !removed.is_some_and(|event| event < asked));
+                }
             }
             _ => {}
         }
     }
-    Ok(outstanding.into_values().map(|(v, _)| v).collect())
+    Ok(outstanding.into_values().map(|(argv, _)| argv).collect())
+}
+
+pub fn dropped_failures_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Vec<Value>> {
+    outstanding_commands(db, task, false)
+}
+
+pub(super) fn require_repair_commands(
+    db: &Transaction<'_>,
+    task: &str,
+    proposed: &Value,
+) -> CoreResult<()> {
+    let commands = proposed
+        .as_array()
+        .ok_or(CoreError::Refused("verification_commands_missing"))?;
+    if outstanding_commands(db, task, true)?
+        .iter()
+        .any(|argv| !commands.contains(argv))
+    {
+        return refuse("verification_failed_check_missing");
+    }
+    Ok(())
 }
 /// Runtime alone calls this after reconciling processes and safe artifact reads.
 pub fn complete_tx(
@@ -901,6 +1214,9 @@ pub fn complete_tx(
     }
     let informational:bool=db.query_row("SELECT revision=0 AND plan_json IS NULL AND NOT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=?)\n            AND NOT EXISTS(SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator') FROM runtime_tasks WHERE task_id=?",(task,task,task),|r|r.get(0))?;
     if state == TaskState::AnswerReady && informational {
+        if super::automatic::enabled(db, task)? {
+            return refuse("completion_answer_invariant");
+        }
         let informational:bool=db.query_row("SELECT plan_json IS NULL AND NOT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=?)
             AND NOT EXISTS(SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator')
             FROM runtime_tasks WHERE task_id=?",(task,task,task),|r|r.get(0))?;
@@ -1027,7 +1343,7 @@ pub fn complete_tx(
                 return refuse("completion_artifact_changed_or_missing");
             }
         }
-        if !dropped_failures_tx(db, task)?.is_empty() {
+        if !outstanding_commands(db, task, true)?.is_empty() {
             return refuse("completion_dropped_failed_check");
         }
         let (review_id, reviewed) = review_binding_tx(db, task)?;
@@ -1051,6 +1367,7 @@ pub fn complete_tx(
         if v["revision_digest"] != reviewed || digest(snapshot)? != reviewed {
             return refuse("completion_project_revision_changed");
         }
+        super::repair_checks::require_prior_worker_repairs(db, task, revision, &v)?;
     }
     domain::state_tx(db, task, TaskState::Completed, None)
 }

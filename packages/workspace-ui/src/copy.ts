@@ -49,7 +49,7 @@ export const COPY = {
   noConflictDetails: "Conflict details are not available",
   newTaskNote: "Ctrl+Enter starts now.",
   previewNote: "",
-  filesLead: "Where the settings live, what wins, and the bundled default preset.",
+  filesLead: "Where the settings live, which file wins, and what is kept or overridden. Read-only.",
   remoteWrites: "",
   rerunTitle: "Rerun this exact retained check. This records a request, not a passed check.",
   rerunning: "Running check…",

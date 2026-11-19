@@ -366,7 +366,14 @@ pub(super) async fn execute(
                 let c = status_credential;
                 let identity =
                     store.read(|db| channels::authenticate(db, &c.channel_id, c.secret(), true))?;
-                status(store, &identity.task, &c.channel_id, &pending_reference)
+                let response = status(store, &identity.task, &c.channel_id, &pending_reference)?;
+                if identity.assignment.is_some() && response["structuredContent"]["settled"] == false {
+                    // A command can finish before the worker ends its turn. Remember
+                    // which worker actually received a pending reply in this turn.
+                    store.write(|db| lifecycle::event_tx(db, &identity.task, "NATIVE_COMMAND_PENDING_REPLY",
+                        json!({"ref":pending_reference,"channel_id":c.channel_id,"attempt":identity.attempt})))?;
+                }
+                Ok(response)
             })?)
             .await
         }

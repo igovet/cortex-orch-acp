@@ -122,94 +122,169 @@ fn strings(v: &Value) -> CoreResult<Vec<String>> {
         })
         .collect()
 }
-/// Fresh reviews of one revision after an incomplete review.
-pub const MAX_INCOMPLETE_REVIEW_RERUNS: i64 = 2;
+/// Why a review could not cover one part of the change itself. These are the only
+/// dead ends: anything else the reviewer can still do inside its own assignment.
+pub const COVERAGE_BLOCKERS: &[&str] = &[
+    "missing_access",
+    "owner_decision",
+    "other_role_work",
+    "tool_unavailable",
+];
+/// The same categories are the dead ends a worker may name for a failed assignment.
+pub fn valid_blocker(kind: &Value) -> bool {
+    kind.as_str()
+        .is_some_and(|k| COVERAGE_BLOCKERS.contains(&k))
+}
+/// The `not_covered` parts of an INCOMPLETE review that name no dead end. The
+/// reviewer can still cover them, so the result is not final: the runtime refuses
+/// it with exactly these items and the same review session continues.
+pub fn unfinished_coverage(result: &Value) -> Vec<String> {
+    if !result["verdict"]
+        .as_str()
+        .is_some_and(|v| v.eq_ignore_ascii_case("INCOMPLETE"))
+    {
+        return Vec::new();
+    }
+    result["not_covered"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|gap| !valid_blocker(&gap["blocker"]))
+        .map(|gap| gap["item"].as_str().unwrap_or("").to_owned())
+        .collect()
+}
+/// Parts an INCOMPLETE review declared blocked by a dead end, by their item text.
+pub fn blocked_items(result: &Value) -> BTreeSet<String> {
+    if !result["verdict"]
+        .as_str()
+        .is_some_and(|v| v.eq_ignore_ascii_case("INCOMPLETE"))
+    {
+        return BTreeSet::new();
+    }
+    result["not_covered"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|gap| valid_blocker(&gap["blocker"]))
+        .filter_map(|gap| gap["item"].as_str().map(str::to_owned))
+        .collect()
+}
+/// A BLOCK must name the confirmed problems that block.
+pub fn block_without_findings(result: &Value) -> bool {
+    result["verdict"]
+        .as_str()
+        .is_some_and(|v| v.eq_ignore_ascii_case("BLOCK"))
+        && result["findings"].as_array().is_none_or(Vec::is_empty)
+}
+/// A concrete finding with an owning execution node and an in-scope file can be
+/// repaired immediately, even in an INCOMPLETE review; the fresh review after the
+/// fix covers the new bytes.
+fn actionable_findings(result: &Value) -> bool {
+    let Some(findings) = result["findings"].as_array() else {
+        return false;
+    };
+    !findings.is_empty()
+        && findings.iter().all(|finding| {
+            finding.is_object()
+                && finding["cross_cutting"] == false
+                && finding["node"]
+                    .as_str()
+                    .is_some_and(|node| !node.trim().is_empty())
+                && finding["fix"]
+                    .as_str()
+                    .is_some_and(|fix| !fix.trim().is_empty())
+                && finding["files"]
+                    .as_array()
+                    .is_some_and(|files| !files.is_empty())
+        })
+}
+/// One finding's identity: the plan task, its files and the requested fix, with
+/// case and spacing normalized.
+fn finding_key(finding: &Value) -> (String, Vec<String>, String) {
+    let mut files: Vec<String> = finding["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f.as_str().map(canonical))
+        .collect();
+    files.sort();
+    let fix = finding["fix"]
+        .as_str()
+        .unwrap_or("")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    (
+        finding["node"].as_str().unwrap_or("").to_owned(),
+        files,
+        fix,
+    )
+}
+/// Whether this review shows no progress over the previous completed review of the
+/// same revision (the one whose findings the last fixes addressed): the reviewed
+/// bytes are unchanged, or the same findings came back. `None` when this is the
+/// first review of the revision or something changed.
+fn no_progress_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    revision: i64,
+    review: &str,
+    result: &Value,
+) -> CoreResult<Option<&'static str>> {
+    let previous: Option<String> = db
+        .query_row(
+            "SELECT result_json FROM runtime_nodes WHERE task_id=? AND revision=? AND stage='review'
+             AND status='completed' AND node_id!=? AND result_json IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+            (task, revision, review),
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(previous) = previous else {
+        return Ok(None);
+    };
+    let previous: Value = serde_json::from_str(&previous)?;
+    if !matches!(
+        previous["verdict"].as_str(),
+        Some("REQUEST_CHANGES" | "INCOMPLETE")
+    ) {
+        return Ok(None);
+    }
+    let digest = |v: &Value| {
+        v["project_digest"]
+            .as_str()
+            .filter(|d| d.len() == 64)
+            .map(str::to_owned)
+    };
+    if digest(result).is_some() && digest(result) == digest(&previous) {
+        return Ok(Some("unchanged_files"));
+    }
+    let keys = |v: &Value| -> BTreeSet<(String, Vec<String>, String)> {
+        v["findings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(finding_key)
+            .collect()
+    };
+    let current = keys(result);
+    if !current.is_empty() && current == keys(&previous) {
+        return Ok(Some("repeated_findings"));
+    }
+    Ok(None)
+}
 /// The parts of the change a review reports it did not cover, as given in its
-/// `not_covered` (a BLOCK that names no finding left everything unconfirmed).
+/// `not_covered`.
 fn uncovered(result: &Value) -> Vec<Value> {
     result["not_covered"]
         .as_array()
         .cloned()
         .unwrap_or_default()
 }
-/// After an INCOMPLETE review (or a BLOCK that names no finding, which counts as
-/// one), schedule a fresh review of the same revision: same dependencies and
-/// routing, a brief listing exactly what was left uncovered, recorded as
-/// `REVIEW_RERUN` with its reason. Never an approval and never a blocking finding.
-/// Returns false once this revision had `MAX_INCOMPLETE_REVIEW_RERUNS` reruns.
-fn rerun_incomplete_review_tx(
-    db: &Transaction<'_>,
-    task: &str,
-    revision: i64,
-    review: &str,
-    result: &Value,
-    reason: &str,
-) -> CoreResult<bool> {
-    let reruns: i64 = db.query_row(
-        "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='REVIEW_RERUN' AND json_extract(payload_json,'$.revision')=?",
-        (task, revision),
-        |r| r.get(0),
-    )?;
-    if reruns >= MAX_INCOMPLETE_REVIEW_RERUNS {
-        return Ok(false);
-    }
-    let deps: String = db.query_row(
-        "SELECT dependencies_json FROM runtime_nodes WHERE task_id=? AND revision=? AND node_id=?",
-        (task, revision, review),
-        |r| r.get(0),
-    )?;
-    let base = review.split("_rerun").next().unwrap_or(review);
-    let node = format!("{base}_rerun{}", reruns + 1);
-    let report = result["report_ref"].as_str().unwrap_or("");
-    let left = uncovered(result);
-    let mut objective = format!(
-        "Independently review the objective, implementation and retained reports. The previous independent review of this \
-         revision (report {report}) did not finish: "
-    );
-    if left.is_empty() {
-        objective.push_str("it returned BLOCK without naming a confirmed problem, so none of its conclusions are established.");
-    } else {
-        objective.push_str("it left these parts uncovered, which this review must cover:");
-        for item in &left {
-            objective.push_str(&format!(
-                "\n- {} (not covered because: {})",
-                item["item"].as_str().unwrap_or(""),
-                item["reason"].as_str().unwrap_or("")
-            ));
-        }
-    }
-    objective.push_str(
-        "\nCover the whole change listed in the review packet: every changed file, and every predecessor report to its last page.",
-    );
-    db.execute(
-        "INSERT INTO runtime_nodes(task_id,revision,node_id,role,objective,dependencies_json,scope_json,stage,status)
-         VALUES (?,?,?,'worker-code-reviewer',?,?,'[\"**\"]','review','pending')",
-        (task, revision, &node, &objective, &deps),
-    )?;
-    let plan: Option<String> = db.query_row(
-        "SELECT plan_json FROM runtime_tasks WHERE task_id=?",
-        [task],
-        |r| r.get(0),
-    )?;
-    let plan: Value = serde_json::from_str(plan.as_deref().unwrap_or("{}"))?;
-    let routing = super::plan::node_routing(&plan, review);
-    let routing = if routing.as_object().is_some_and(|o| !o.is_empty()) {
-        routing
-    } else {
-        json!({"work_kind":"review","complexity":"normal"})
-    };
-    super::plan::record_node_routing_tx(db, task, &node, &routing)?;
-    event_tx(
-        db,
-        task,
-        "REVIEW_RERUN",
-        json!({"revision":revision,"review":review,"rerun":node,"report_ref":report,"reason":reason,"not_covered":left}),
-    )?;
-    Ok(true)
-}
 /// Select the latest review's outcome. Approval enables final verification;
 /// request-changes schedules bounded scoped fixes; BLOCK with findings asks about the
-/// stop; INCOMPLETE (or a BLOCK naming no finding) reruns the review, bounded.
+/// stop; INCOMPLETE (or a legacy BLOCK naming no finding) routes its named dead ends
+/// as a stop without scheduling another review of the same revision.
 pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
     let (state, revision) = domain::task_tx(db, task)?;
     if state != TaskState::Reviewing {
@@ -229,28 +304,62 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
     }
     let result: Value =
         serde_json::from_str(&result.ok_or(CoreError::Refused("review_incomplete"))?)?;
+    // The review of a submitted sprint plan (see `sprint_planning`): findings return the
+    // plan to its coordinator for a revision within the same bounded rules.
+    let plan_review = super::sprint_planning::is_plan_review(&review);
     match result["verdict"].as_str() {
         Some("APPROVE") => return domain::state_tx(db, task, TaskState::Verifying, None),
+        Some("BLOCK")
+            if plan_review && result["findings"].as_array().is_some_and(|f| !f.is_empty()) => {}
         // A BLOCK with confirmed problems goes to the coordinator to address them.
         Some("BLOCK") if result["findings"].as_array().is_some_and(|f| !f.is_empty()) => {
             domain::stop_tx(db, task, "review_blocked")?;
             return Ok(());
         }
-        // An unfinished review (or a BLOCK naming no problem) is reviewed again by a
-        // fresh reviewer; after the bounded reruns the owner is asked.
-        Some(verdict @ ("INCOMPLETE" | "BLOCK")) => {
-            let reason = if verdict == "BLOCK" {
-                "block_without_findings"
-            } else {
-                "review_incomplete"
-            };
-            if !rerun_incomplete_review_tx(db, task, revision, &review, &result, reason)? {
-                domain::stop_tx(db, task, "review_incomplete")?;
-            }
+        // Concrete findings are repaired first; the review after the fix covers the
+        // new bytes, including what this one could not reach.
+        Some("INCOMPLETE") if actionable_findings(&result) => {}
+        // A reviewer finishes its own review: result_submit refuses a part it can still
+        // cover. What remains is a dead end it named with its blocker. Another reviewer
+        // of the same bytes would meet the same dead end, so none is scheduled: the
+        // stop goes the task's run-mode way (Automatic: coordinator, then the senior
+        // consultant, then the owner; otherwise the owner's stop question). A legacy
+        // result without blockers, or a BLOCK naming no problem, takes the same stop.
+        Some("INCOMPLETE" | "BLOCK") => {
+            let blocked: Vec<Value> = uncovered(&result)
+                .into_iter()
+                .map(|gap| json!({"item":gap["item"],"blocker":gap["blocker"],"reason":gap["reason"]}))
+                .collect();
+            event_tx(
+                db,
+                task,
+                "REVIEW_DEAD_END_ROUTED",
+                json!({"review":review,"revision":revision,"report_ref":result["report_ref"],
+                    "verdict":result["verdict"],"blocked":blocked}),
+            )?;
+            domain::stop_tx(db, task, "review_incomplete")?;
             return Ok(());
         }
         Some("REQUEST_CHANGES") => {}
         _ => return refuse("review_verdict_required"),
+    }
+    // A fix and review round continues only on real progress. When the files did not
+    // change since the previous review of this revision, or the review repeats the
+    // same findings, another identical round would ping-pong: stop once instead and
+    // let the run mode escalate (coordinator, senior consultant, owner).
+    // A plan review sees unchanged project files by design; the plan itself changed
+    // (an unchanged plan is refused at submission), so only repeated findings count.
+    if let Some(reason) = no_progress_tx(db, task, revision, &review, &result)?
+        .filter(|reason| !(plan_review && *reason == "unchanged_files"))
+    {
+        event_tx(
+            db,
+            task,
+            "REVIEW_NO_PROGRESS",
+            json!({"review":review,"revision":revision,"reason":reason,"report_ref":result["report_ref"]}),
+        )?;
+        domain::stop_tx(db, task, "review_no_progress")?;
+        return Ok(());
     }
     let cycle: i64 = db.query_row(
         "SELECT review_cycle FROM runtime_tasks WHERE task_id=?",
@@ -260,6 +369,9 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
     if cycle >= MAX_REVIEW_CYCLES as i64 {
         domain::stop_tx(db, task, "review_cycle_limit")?;
         return Ok(());
+    }
+    if plan_review {
+        return super::sprint_planning::return_for_revision_tx(db, task, &review, &result);
     }
     let plan: Option<String> = db.query_row(
         "SELECT plan_json FROM runtime_tasks WHERE task_id=?",
@@ -366,6 +478,19 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
                     strings(&item["files"])?.join(", "),
                     item["fix"].as_str().unwrap_or("")
                 );
+            }
+            if result["verdict"] == "INCOMPLETE" {
+                let left = uncovered(&result);
+                if !left.is_empty() {
+                    objective.push_str("\nAfter this fix, recheck the following parts before publishing the next result:\n");
+                    for item in left {
+                        objective.push_str(&format!(
+                            "- {} ({})\n",
+                            item["item"].as_str().unwrap_or("unlisted part"),
+                            item["reason"].as_str().unwrap_or("coverage gap")
+                        ));
+                    }
+                }
             }
             if objective.chars().count() > 8000 {
                 fallback = Some("findings_too_long");

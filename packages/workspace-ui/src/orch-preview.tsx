@@ -1,9 +1,10 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
-import { EFFORT_BY_TIER, effortLabel, FALLBACK_ORDER, kindLabel, previewContext, previewGrid, previewRoute, RANK_ORDER, ROLE_CATALOG, TIER_LABELS, TIERS, WORK_KINDS, type Complexity, type RoutingRules } from "@cortex/workspace-domain";
+import { effortLabel, kindLabel, previewContext, previewGrid, previewRoute, ROLE_CATALOG, TIER_LABELS, WORK_KINDS, type Complexity, type RoutingRules } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { I } from "./kit";
-import { Bar, Shell, SourceStrips, useRouting } from "./orch-shared";
-import { Adv, Lock, Pick, Seg, SetH, Srow } from "./settings-kit";
+import { RouterRules } from "./orch-routing";
+import { Bar, orchTo, Shell, SourceStrips, useRouting } from "./orch-shared";
+import { Adv, Pick, Seg, SetH } from "./settings-kit";
 import { share } from "./stable";
 
 const COMPLEXITIES = [{ id: "low", label: "Low" }, { id: "normal", label: "Normal" }, { id: "high", label: "High" }] as const;
@@ -25,7 +26,7 @@ export function RoutePreview() {
   const grid = createMemo<ReturnType<typeof previewGrid>>(prev => share(prev, view() === "all" ? previewGrid(attempt(), ctx()) : []), []);
   const pickRole = (id: string) => { setRole(id); setKind(ROLE_CATALOG.find(r => r.id === id)?.kind ?? kind()); };
   const open = (id: string, c: Complexity) => { pickRole(id); setComplexity(c); setView("one"); };
-  return <Shell scoped wide title="Route preview" lead="What would run this work, and why the other routes are out. Read-only." bar={<Bar d={d} />}>
+  return <Shell section="routing" wide back={{ to: orchTo(m().id, "routing"), label: "Routing" }} title="Route preview" lead="What would run this work, and why the other routes are out. Read-only." bar={<Bar d={d} />}>
     <SourceStrips />
     <div class="surface ws-pad ws-pv-in">
       <span class="row ws-gap4"><span class="cap muted">Role</span><Pick id="m-pv-role" label="Role" width="170px" value={role()} options={ROLE_CATALOG.map(r => ({ id: r.id, label: r.label }))} onPick={pickRole} /></span>
@@ -41,7 +42,7 @@ export function RoutePreview() {
         <For each={grid()}>{r => <div class="gr ogrow"><span class="w500 trunc">{r.label}</span><For each={r.cells}>{c => <button class={`ws-cellbtn cap trunc ${c.blocked ? "st-bad" : ""}`} aria-label={`Fill the inputs: ${r.label}, ${c.complexity}: ${c.text}`} onClick={() => open(r.role, c.complexity)}>{c.text}</button>}</For></div>}</For>
       </div></div>
     }>
-      <Show when={result().blocked}>{b => <div class="note-box bad" role="status"><I n="x-circle" s={14} /><span><b class="mono">{b().code}</b>: {b().text}</span></div>}</Show>
+      <Show when={result().blocked}>{b => <div class="note-box bad" role="status"><I n="x-circle" s={14} /><span>{b().text}</span></div>}</Show>
       <Show when={!result().blocked}>
         <div class="surface">
           <div class="srow"><span><span class="t">Tier path</span><span class="d">{TIER_LABELS[result().baseTier]} role, {complexity()} complexity, {kindLabel(kind())}</span></span><span class="ctl"><span>{TIER_LABELS[result().tier]}</span><Show when={result().served && result().served !== result().tier}><span class="cap muted">served at {TIER_LABELS[result().served!]}</span></Show></span></div>
@@ -58,11 +59,7 @@ export function RoutePreview() {
       </Show>
     </Show>
     <Adv id="preview-rules" label="How the router decides">
-      <div class="surface">
-        <Srow t="Tier fallback order" d={TIERS.map(t => `${TIER_LABELS[t]}: ${FALLBACK_ORDER[t].join(", ")}`).join(". ")}><Lock /></Srow>
-        <Srow t="Effort by tier" d={TIERS.map(t => `${TIER_LABELS[t]}: ${EFFORT_BY_TIER[t]}`).join(", ")}><Lock /></Srow>
-        <Srow t="Rank order" d={RANK_ORDER.join(", ")}><Lock /></Srow>
-      </div>
+      <RouterRules />
     </Adv>
     <p class="hint">Live availability, retries and plan hints are only known at dispatch. Usage is a snapshot.{ws.t("previewNote")}</p>
   </Shell>;

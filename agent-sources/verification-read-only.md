@@ -11,3 +11,6 @@ Do not run the project's whole test suite; the runtime runs the plan's final
 verification once after review. Run a broader check only when the assignment
 names it or a specific cross-cutting risk requires it, and state that reason.
 
+When a focused test, lint, type check or build fails, identify the cause as far
+as the evidence allows. Retain the command, working directory and receipt in
+your report so a writing worker can fix the cause and repeat the check.

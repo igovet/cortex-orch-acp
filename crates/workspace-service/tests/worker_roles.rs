@@ -11,6 +11,11 @@
 //! was not observed is reported as a pass.
 #[path = "support/hermetic.rs"]
 mod hermetic;
+#[allow(dead_code, unused_imports)]
+#[path = "support/namespace_host.rs"]
+mod namespace_host;
+#[allow(unused_imports)]
+use namespace_host::{native_effects, tool_path};
 
 use cortex_core::{ownership::OwnerEpoch, OpenMode, ProjectKey, Store, StoreChannel, TaskState};
 use cortex_engine::environment::{EngineKind, LaunchSpec};
@@ -1149,11 +1154,15 @@ async fn battery(
             ),
         );
     }
+    let command_step = "command_run trivial check";
+    // Probe independently before dispatch; an unexpected tool error cannot
+    // select the restricted-host assertion.
+    let namespace_unavailable = served("command_run") && namespace_host::assert_unavailable_view();
     if served("command_run") {
         push(
             &mut calls,
             &mut steps,
-            "command_run trivial check",
+            command_step,
             true,
             call(
                 "command_run",
@@ -1172,6 +1181,27 @@ async fn battery(
             continue;
         };
         let batch = &reply["result"]["structuredContent"];
+        if *step == command_step {
+            if namespace_unavailable {
+                ledger.check(
+                    role,
+                    "command_run fails closed without namespaces",
+                    reply.get("error").is_none()
+                        && reply["result"]["isError"] == true
+                        && batch["code"] == "native_command_sandbox_unavailable",
+                    compact(reply),
+                );
+                ledger.not_run(role, step, "real command sandbox requires namespaces");
+            } else {
+                ledger.check(
+                    role,
+                    step,
+                    classify(reply).is_ok() && batch["complete"] == true && batch["exit_code"] == 0,
+                    compact(reply),
+                );
+            }
+            continue;
+        }
         if step == "read_batch" {
             // A member result above the 6144-byte inline bound is retained and deferred:
             // a normal outcome, so the batch is complete and not an MCP error.
@@ -1366,6 +1396,51 @@ async fn battery(
     if let Some((v, findings)) = &verdict {
         args["verdict"] = json!(v);
         args["findings"] = findings.clone();
+    }
+    // A reviewer finishes its own review: a part it can still cover is refused,
+    // naming exactly that part, and the same session continues; only a named dead
+    // end is accepted as not covered.
+    if verdict.as_ref().is_some_and(|(v, _)| *v == "INCOMPLETE") {
+        let part = "live deployment behaviour";
+        args["not_covered"] = json!([{"item":part,"blocker":"missing_access",
+            "reason":"the deployment host is not reachable from this review"}]);
+        // Submitting with the same gap twice for the same version is refused both
+        // times on the same channel; no other reviewer is dispatched meanwhile.
+        for attempt in 1..=2 {
+            let mut open = args.clone();
+            open["not_covered"] = json!([{"item":part,"reason":"not inspected yet"}]);
+            open["request_key"] = json!(format!("open-{attempt}-{}", w.node));
+            let refused = turn(&d, &home, &[call("result_submit", open)]).await;
+            let reply = refused.replies.first().cloned().unwrap_or(Value::Null);
+            let sc = &reply["result"]["structuredContent"];
+            ledger.check(
+                role,
+                &format!("a part it can still cover is refused, naming it ({attempt})"),
+                reply["result"]["isError"] == true
+                    && sc["code"] == "review_coverage_unfinished"
+                    && sc["missing"] == json!([part])
+                    && sc["field"] == "not_covered"
+                    && sc["recorded"] == false,
+                compact(&reply),
+            );
+        }
+        let s = p.store();
+        let (reviews, running): (i64, i64) = s
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT count(*), sum(status='running' AND result_json IS NULL) FROM runtime_nodes
+                     WHERE task_id=? AND stage='review'",
+                    [task],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap_or((-1, -1));
+        ledger.check(
+            role,
+            "the refused review stays the one running review",
+            (reviews, running) == (1, 1),
+            format!("reviews {reviews}, running {running}"),
+        );
     }
     let key = args["request_key"].as_str().unwrap().to_owned();
     // A report missing a required section is a correctable error naming exactly that
@@ -1995,7 +2070,7 @@ async fn single_review(ledger: &mut Ledger, verdict: &str, engine: EngineKind) {
         close(h).await;
         return;
     }
-    let findings = if verdict == "APPROVE" {
+    let findings = if matches!(verdict, "APPROVE" | "INCOMPLETE") {
         json!([])
     } else {
         json!([{"node":"work","files":["area/work/out.txt"],"fix":"Correct the fixture output.","cross_cutting":false}])
@@ -2033,13 +2108,35 @@ async fn single_review(ledger: &mut Ledger, verdict: &str, engine: EngineKind) {
         "REQUEST_CHANGES" => {
             state == "EXECUTING" && assignment_of(&after).iter().any(|a| a.5 == "execution")
         }
-        // One fresh rerun of the review, then a stop: never acceptance.
         // A BLOCK with findings goes back to the coordinator (RECOVERING, then planning).
         "BLOCK" => {
             state == "REVIEWING"
                 || state == "STOPPED"
                 || state == "PLANNING"
                 || state == "RECOVERING"
+        }
+        // A named dead end is the run mode's stop (Manual: the owner's question),
+        // never a second review of the same revision.
+        "INCOMPLETE" => {
+            let s = p.store();
+            let (reviews, reruns, routed): (i64, i64, i64) = s
+                .read(|db| {
+                    Ok(db.query_row(
+                        "SELECT (SELECT count(*) FROM runtime_nodes WHERE task_id=?1 AND stage='review'),
+                            (SELECT count(*) FROM runtime_events WHERE task_id=?1 AND type='REVIEW_RERUN'),
+                            (SELECT count(*) FROM runtime_events WHERE task_id=?1 AND type='REVIEW_DEAD_END_ROUTED')",
+                        [task],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )?)
+                })
+                .unwrap_or((-1, -1, -1));
+            ledger.check(
+                &role,
+                "no second reviewer for the same revision",
+                (reviews, reruns, routed) == (1, 0, 1),
+                format!("reviews {reviews}, reruns {reruns}, routed {routed}"),
+            );
+            state == "WAITING_USER"
         }
         _ => state != "REVIEWING",
     };
@@ -2393,6 +2490,7 @@ fn main() {
             all_planned_roles(&mut ledger).await;
             single_review(&mut ledger, "REQUEST_CHANGES", EngineKind::Codex).await;
             single_review(&mut ledger, "BLOCK", EngineKind::Claude).await;
+            single_review(&mut ledger, "INCOMPLETE", EngineKind::Codex).await;
             consultant(&mut ledger).await;
             build_verification(&mut ledger).await;
             structure_bound(&mut ledger).await;

@@ -100,6 +100,14 @@ export function updateBlocked(c: RepoCheckout | null, v: TaskView): string | und
   return undefined;
 }
 
+export const PR_UNKNOWN = "GitHub CLI did not report this pull request's address, so it was not recorded. Find it on GitHub.";
+
+/** Only offer to open a recorded PR. Keep the missing-address reason even when another gate is closed. */
+export function viewPrItem(task: Task, f: Pick<GitFacts, "offered" | "gate">): GitItem | undefined {
+  if (task.integration?.method !== "pr" || !f.offered("open_pull_request")) return;
+  return { id: "view_pr", label: "View PR", icon: "external", why: task.integration.url ? f.gate("open_pull_request") : PR_UNKNOWN };
+}
+
 /** The menu: always the same items in the same order, each on or off with its reason. Task-only items need a task on view. */
 export function gitItems(f: GitFacts): GitItem[] {
   const c = f.checkout, v = f.task, t = v?.task;
@@ -146,14 +154,11 @@ export function gitItems(f: GitFacts): GitItem[] {
       items.push({ id: "pr", label: "Create PR…", icon: "pr", why: busy ?? (pr ? "A pull request is already open for this version" : v.machine.ghAvailable === false ? "GitHub CLI not available" : notReady(v, f.mode) ?? finishBlocked(t) ?? f.gate("integrate")) });
     }
   }
-  // A pull request created from this app; its address is the one GitHub CLI reported, never made up.
-  if (t.integration?.method === "pr" && f.offered("open_pull_request")) {
-    items.push({ id: "view_pr", label: "View PR", icon: "external", why: t.integration.url ? f.gate("open_pull_request") : PR_UNKNOWN });
-  }
+  const viewPr = viewPrItem(t, f);
+  if (viewPr) items.push(viewPr);
   items.push({ id: "archive", label: "Archive task", icon: "archive", why: busy ?? archiveBlocked(t) ?? f.gate("archive_task") });
   return items;
 }
-export const PR_UNKNOWN = "GitHub CLI did not report this pull request's address, so it was not recorded. Find it on GitHub.";
 
 /** One action for the state the checkout and the task are in, chosen in this order; nothing to do is said, never guessed. */
 export function gitPrimary(f: GitFacts, items = gitItems(f)): GitPrimary {

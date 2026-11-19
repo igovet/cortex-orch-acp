@@ -1,56 +1,12 @@
 import { createMemo, For, Show } from "solid-js";
-import { CONNECTION_ENGINE, denyTokens, allRoutes, ceilingProblems, ceilingState, coordinatorEfforts, coordinatorResolution, effectiveCeiling, effortLabel, engineLabel, ENGINE_KEYS, ENGINES, FAILURE_CLASSES, HARD_DENIALS, modelLabel, LANGUAGES, ACCESS_MODES, routeIdOf, SURFACE_LABELS, type Ceiling, type CeilingFieldState, type EngineKey } from "@cortex/workspace-domain";
+import { allRoutes, ceilingProblems, ceilingState, effectiveCeiling, ENGINES, FAILURE_CLASSES, HARD_DENIALS, SURFACE_LABELS, type Ceiling, type CeilingFieldState, type UserDefaults } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
-import { A, I, Keyed } from "./kit";
+import { I, Keyed } from "./kit";
 import { share } from "./stable";
 import { HELP } from "./orch-help";
-import { Bar, orchTo, Shell, useDefaults, useProjectName, useReadOnly } from "./orch-shared";
-import { Adv, Chk, Err, Hint, KeyValues, Lock, NumField, Pick, Seg, SetH, Srow, Sw } from "./settings-kit";
-import { useDraft } from "./settings-state";
-
-const FALLBACK_EFFORTS = "Not observed: this is a general list.";
-export function Coordinator() {
-  const ws = useWs();
-  const d = useDefaults(), off = useReadOnly();
-  const v = () => d.value(), m = () => ws.machine(), c = () => m().config, set = (patch: Partial<ReturnType<typeof v>>) => d.set({ ...v(), ...patch });
-  const available = (e: EngineKey, id: string) => c().setup[e].status === "connected" && !c().catalogue[e].failed && c().catalogue[e].models.some(m => m.id === id) && c().surfaces.routing.engines[e].enabled.includes(id) && denyTokens(c().surfaces.routing, e, id).length === 0;
-  const models = createMemo(() => ENGINE_KEYS.flatMap(e => c().surfaces.routing.engines[e].enabled.filter(id => available(e, id)).map(id => ({ id: `${e}|${id}`, label: modelLabel(c().catalogue, e, id), sub: `${engineLabel(e)}, ${id}` }))));
-  const coord = () => v().coordinator;
-  const efforts = () => coord() ? coordinatorEfforts(c().catalogue, coord()!.engine, coord()!.model) : { levels: [], observed: true };
-  const pick = (value: string) => { const [engine, model] = value.split("|") as [EngineKey, string]; const levels = coordinatorEfforts(c().catalogue, engine, model).levels, was = coord()?.effort ?? "medium"; set({ coordinator: { engine, model, effort: levels.includes(was) ? was : levels[0], parameters: coord()?.parameters ?? {} } }); };
-  const bound = createMemo(() => coordinatorResolution({ ...m(), config: { ...c(), surfaces: { ...c().surfaces, user_defaults: v() } } }));
-  const routes = createMemo(() => ENGINE_KEYS.flatMap(e => c().catalogue[e].models.filter(x => available(e, x.id)).map(x => ({ id: x.routeId ?? routeIdOf(e, x.id), label: x.label, sub: engineLabel(e), engine: e, model: x.id }))));
-  const first = () => { const e = coord()?.engine ?? "claude-agent-acp", id = coord()?.model ?? c().surfaces.routing.engines[e].enabled[0]; return { routeId: routes().find(r => r.engine === e && r.model === id)?.id ?? routeIdOf(e, id), connectionId: m().connections.find(x => CONNECTION_ENGINE[x.engine] === e)?.detail.connectionId ?? "", model: id, parameters: {} }; };
-  const route = () => v().routeDefault;
-  // A saved route the engines no longer offer still shows, by its model, so it can be seen and replaced.
-  const routeChoices = () => routes().some(r => r.id === route()?.routeId) ? routes() : [{ id: route()?.routeId ?? "", label: route()?.model || "No longer offered", sub: "Not offered now", off: "Unavailable — choose another route" }, ...routes()];
-  const connectionChoices = () => { const list = m().connections.map(x => ({ id: x.detail.connectionId, label: x.label })), now = route()?.connectionId ?? ""; return list.some(x => x.id === now) ? list : [{ id: now, label: "No longer registered" }, ...list]; };
-  const patchRoute = (x: Partial<NonNullable<ReturnType<typeof route>>>) => set({ routeDefault: { ...route()!, ...x } });
-  return <Shell title="Coordinator" lead="What a new task on this machine starts with. You can still change each one in the composer for a single task." bar={<Bar d={d} />}>
-    <div class="surface">
-      <Srow t={<>Model<Hint text={HELP.coordinator} label="coordinator" /></>} d="Enabled models, grouped by engine."><Pick id="m-def-model" label="Main model" width="260px" value={coord() ? `${coord()!.engine}|${coord()!.model}` : ""} empty="Choose a model" options={models()} disabled={off()} onPick={pick} /></Srow>
-      <Show when={coord()}><Srow t="Effort" d={efforts().observed ? "The levels this model reports." : FALLBACK_EFFORTS}><Seg label="Effort" value={coord()!.effort} disabled={off()} options={efforts().levels.map(e => ({ id: e, label: effortLabel(e) }))} onChange={effort => set({ coordinator: { ...coord()!, effort } })} /></Srow></Show>
-      <Srow t="Access mode" d="What engine tools may do without asking. In every mode a command can read anything your account can read."><Seg label="Access mode" value={v().mode} disabled={off()} options={ACCESS_MODES} onChange={mode => set({ mode })} /></Srow>
-      <Srow t={<>Language<Hint text={HELP.language} label="language" /></>} d="Language of messages. It does not guarantee the language of model replies."><Seg label="Language" value={v().language} disabled={off()} options={LANGUAGES.map(l => ({ id: l.id, label: l.id === "auto" ? "Automatic" : l.label as string }))} onChange={language => set({ language })} /></Srow>
-      <Srow t="Checkout for new tasks" d="Preselected in New task. You choose each time."><Seg label="Default checkout" value={v().checkout} disabled={off()} options={[{ id: "worktree", label: "Worktree" }, { id: "main", label: "Project folder" }] as const} onChange={checkout => set({ checkout })} /></Srow>
-      <Srow t="Status" d="What this resolves to now."><Show when={bound().ok} fallback={<><span class="st st-bad"><I n="x-circle" s={12} />{(bound() as { text: string }).text}</span><A class="lnk" to={orchTo(m().id, "models")}>Fix in Models</A></>}><span class="st st-ok"><I n="check-circle" s={12} />Bound to {(bound() as { route: string }).route}</span></Show></Srow>
-    </div>
-    <Adv id="coordinator" force={!!route() || Object.keys(coord()?.parameters ?? {}).length > 0 || d.problems().length > 0}>
-      <Show when={coord()}><div class="surface ws-pad"><div class="ws-fld"><span class="lab">Other coordinator parameters<Hint text={HELP.parameters} label="parameters" /></span><KeyValues label="Parameter" values={coord()!.parameters} disabled={off()} onChange={parameters => set({ coordinator: { ...coord()!, parameters } })} /></div></div></Show>
-      <SetH title="Exact default route"><Hint text={HELP.defaultRoute} label="exact route" /></SetH>
-      <Show when={route()} fallback={<div class="surface"><Srow t="Portable coordinator is in use" d="An exact route changes if a connection is registered again, so the portable form is better."><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) set({ routeDefault: first(), coordinator: null }); }}>Use an exact route</button></Srow></div>}>
-        <div class="surface">
-          <Srow t="Model" d="An exact route changes if a connection is registered again."><Pick id="m-def-route" label="Route model" width="260px" value={route()!.routeId} disabled={off()} options={routeChoices()} onPick={id => { const r = routes().find(x => x.id === id); if (r) patchRoute({ routeId: id, model: r.model }); }} /></Srow>
-          <div class="ws-errline"><Err problems={d.problems()} path="route_default.route_id" /></div>
-          <Srow t="Connection"><Pick id="m-def-conn" label="Route connection" width="200px" value={route()!.connectionId} disabled={off()} options={connectionChoices()} onPick={connectionId => patchRoute({ connectionId })} /></Srow>
-          <div class="ws-pad"><KeyValues label="Route parameter" values={route()!.parameters} disabled={off()} onChange={parameters => patchRoute({ parameters })} /></div>
-          <Srow t="Clear the exact route" d="Goes back to the portable coordinator."><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) set({ routeDefault: null, coordinator: coord() ?? { engine: "claude-agent-acp", model: route()!.model, effort: "medium", parameters: {} } }); }}>Clear</button></Srow>
-        </div>
-      </Show>
-      <Err problems={d.problems()} path="route_default" />
-    </Adv>
-  </Shell>;
-}
+import { Bar, Shell, useProjectName, useReadOnly } from "./orch-shared";
+import { Adv, Chk, Err, Hint, Lock, NumField, Rec, SetH, Srow, Sw } from "./settings-kit";
+import { useDraft, type Draft } from "./settings-state";
 
 const recipients = () => [...new Set(ENGINES.map(e => e.recipient))].map(id => ({ id, label: id }));
 /** Off means no restriction. A list means only these, and an empty list means nothing at all. */
@@ -81,21 +37,26 @@ function useLimitOptions() {
     routes: () => allRoutes(ws.machine().config.surfaces.routing, ws.machine().config.catalogue),
   };
 }
-function MachineLimits() {
-  const d = useDefaults(), off = useReadOnly(), o = useLimitOptions();
+/** Defaults › Machine ceiling: the widest limits on this machine, in the same draft as the rest of Defaults. */
+export function MachineCeiling(props: { d: Draft<UserDefaults> }) {
+  const off = useReadOnly(), o = useLimitOptions();
+  const d = props.d;
   const c = () => d.value().ceiling, set = (x: Partial<Ceiling>) => d.set({ ...d.value(), ceiling: { ...c(), ...x } });
-  return <Shell scoped title="Limits and fallback" lead="The hard ceiling for this machine. A project can narrow it, never widen it." bar={<Bar d={d} />}>
-    <SetH title="Permission to run"><Hint text={HELP.limits} label="limits" /></SetH>
+  return <section class="set-grp" id="set-machine-ceiling" aria-labelledby="set-machine-ceiling-h">
+    <SetH title={<span id="set-machine-ceiling-h">Machine ceiling</span>}><Hint text={HELP.ownerCeiling} label="machine ceiling" /></SetH>
+    <p class="set-grp-lead">The widest limits any project or task may use. A project can only narrow them.</p>
+    <Rec>Leave every restriction off unless you need a hard lock; switch models on and off under Models instead.</Rec>
     <div class="surface">
-      <Srow t="Attempts per task" d="Empty means no limit."><NumField label="Attempts per task" value={c().attempts} placeholder="No limit" disabled={off()} onChange={attempts => set({ attempts })} /><Err problems={d.problems()} path="attempts" /></Srow>
+      <Srow t={<>Attempts per task<Hint text={HELP.limits} label="attempts per task" /></>} d="Most model runs one task may start. Blank means no limit." r="Blank, or about 8 to 12 to stop runaway retries."><NumField label="Attempts per task" value={c().attempts} placeholder="No limit" disabled={off()} onChange={attempts => set({ attempts })} /><Err problems={d.problems()} path="attempts" /></Srow>
       <Srow t={<>Connections<Hint text={HELP.allowedConnections} label="connections" /></>} d="Which engine accounts tasks may use."><ListLimit label="Connections" value={c().allowedConnections} options={o.connections()} off={off()} onChange={allowedConnections => set({ allowedConnections })} /></Srow>
       <Srow t={<>Data recipients<Hint text={HELP.allowedRecipients} label="data recipients" /></>} d="Which providers may receive project data."><ListLimit label="Data recipients" value={c().allowedRecipients} options={recipients()} off={off()} onChange={allowedRecipients => set({ allowedRecipients })} /></Srow>
     </div>
     <SetH title="Fallback"><Hint text={HELP.fallback} label="fallback" /></SetH>
-    <div class="note-box plain"><I n="alert" s={14} /><span>Off unless all of these allow it.</span></div>
+    <p class="set-grp-lead">Off unless all of these allow it.</p>
+    <Rec>Leave fallback off. If you want it: both failure classes, budget 1, consent only if another provider may see the code.</Rec>
     <div class="surface">
       <Srow t="Failure classes" d="What may trigger a move to another route."><ListLimit label="Failure classes" value={c().failureClasses} options={FAILURE_CLASSES} off={off()} onChange={failureClasses => set({ failureClasses })} /></Srow>
-      <Srow t="Budget" d="How many moves one task may make. Empty means no limit."><NumField label="Fallback budget" value={c().budget} placeholder="No limit" disabled={off()} onChange={budget => set({ budget })} /><Err problems={d.problems()} path="fallback.budget" /></Srow>
+      <Srow t="Budget" d="How many moves one task may make. Blank means no limit."><NumField label="Fallback budget" value={c().budget} placeholder="No limit" disabled={off()} onChange={budget => set({ budget })} /><Err problems={d.problems()} path="fallback.budget" /></Srow>
       <Srow t="Allow work to move to another provider" d="Required for any fallback. Cross-provider fallback also needs a consent record per recipient."><Sw label="Allow work to move to another provider" checked={c().consent} disabled={off()} onChange={consent => set({ consent })} /></Srow>
     </div>
     <div class="note-box plain"><I n="lock" s={14} /><span>Never a reason to fall back: {HARD_DENIALS.join(", ")}.</span></div>
@@ -106,7 +67,7 @@ function MachineLimits() {
       </div>
     </Adv>
     <StoredLimits c={c()} />
-  </Shell>;
+  </section>;
 }
 
 const STATE_NOTE: Record<CeilingFieldState, { text: string; tone: string } | null> = {
@@ -114,6 +75,8 @@ const STATE_NOTE: Record<CeilingFieldState, { text: string; tone: string } | nul
 };
 const listText = (v: string[] | null, of?: { id: string; label: string }[]) => v === null ? "Any" : v.length ? v.map(x => of?.find(o => o.id === x)?.label ?? x).join(", ") : "Nothing";
 const numText = (n: number | null) => n === null ? "No limit" : String(n);
+const LEAD = "Narrows the machine ceiling for one project. It is stored in that project and never in a profile.";
+const RECOMMEND = "Only for projects that must stay on specific models or providers.";
 function ProjectLimits(props: { projectId: string }) {
   const ws = useWs(), name = useProjectName(), off = useReadOnly(), o = useLimitOptions();
   const m = () => ws.machine(), machine = () => m().config.surfaces.user_defaults.ceiling, own = () => m().config.projects[props.projectId]?.ceiling;
@@ -139,9 +102,11 @@ function ProjectLimits(props: { projectId: string }) {
     <span><NumField label={`Project ${p.t}`} value={c()[p.k]} placeholder="Not set" disabled={off()} onChange={value => set({ [p.k]: value })} /><Note s={p.s} /></span>
     <span class="cap tnum">{numText(eff()[p.k])}</span>
   </div>;
-  return <Shell scoped wide title="Limits and fallback" lead={`What ${name(props.projectId)} may do. It can narrow the machine ceiling, never widen it.`} bar={<Bar d={d} />}
+  return <Shell section="ceiling" title="Project ceiling" lead={LEAD} bar={<Bar d={d} />}
     head={<Show when={own()}><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} {...ws.needs("save_surface")} onClick={() => { if (!off()) remove(); }}>Remove project ceiling…</button></Show>}>
+    <Rec>{RECOMMEND}</Rec>
     <Show when={!own()}><div class="note-box plain"><I n="pencil" s={14} /><span>This project has no ceiling of its own. Saving creates one.</span></div></Show>
+    <SetH title={<>Limits for {name(props.projectId)}<Hint text={HELP.projectCeiling} label="project ceiling" /></>} />
     <div class="surface"><div class="gt">
       <div class="gr olrow th"><span>Limit</span><span>Machine</span><span>Project</span><span>Effective</span></div>
       <Num t="Attempts per task" k="attempts" s={state().attempts} />
@@ -156,7 +121,14 @@ function ProjectLimits(props: { projectId: string }) {
     </div></div>
   </Shell>;
 }
-export function Limits() {
+/** Section 4. With no project chosen there is nothing to edit, so it says what to do instead of showing empty fields. */
+export function ProjectCeiling() {
   const ws = useWs();
-  return <Show when={ws.settings.scope()} keyed fallback={<MachineLimits />}>{id => <ProjectLimits projectId={id} />}</Show>;
+  const none = () => !ws.store.state().projects.some(p => p.machineId === ws.machine().id);
+  return <Show when={ws.settings.scope()} keyed fallback={
+    <Shell section="ceiling" title="Project ceiling" lead={LEAD}>
+      <Rec>{RECOMMEND}</Rec>
+      <div class="surface ws-empty" role="status">{none() ? "This machine has no projects." : "Choose a project in the bar above to read or set its ceiling."}</div>
+    </Shell>
+  }>{id => <ProjectLimits projectId={id} />}</Show>;
 }

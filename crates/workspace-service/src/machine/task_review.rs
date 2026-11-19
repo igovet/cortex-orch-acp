@@ -5,12 +5,6 @@ use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::path::Path;
 
-/// The sprint's current run mode settles results automatically. Unknown or
-/// closed sprints never do.
-pub(crate) fn automatic_mode(sprint: &Value) -> bool {
-    sprint["runMode"] == "automatic" && sprint["archivedAt"].is_null()
-}
-
 /// Refused or failed automatic settles, by (state, project, task): what the outcome
 /// depended on, when, and the outcome. A memo only ever repeats a refusal; an
 /// acceptance always runs the full validator. It holds while its inputs (runtime
@@ -61,10 +55,10 @@ fn remember(key: Key, inputs: Option<String>, signalled: bool, outcome: Value) -
 }
 
 /// Accepts a finished sprint result exactly as manual Accept would, marked
-/// automatic, while the sprint's current run mode is Automatic. The caller holds the
+/// automatic, while the sprint's current run mode is queue-driven. The caller holds the
 /// machine lock, so the mode checked here is the one in force when the acceptance is
 /// written: switching to Manual stops every acceptance not yet written, and switching
-/// to Automatic settles results that are still waiting. Automatic acceptance also
+/// to a queued mode settles results that are still waiting. Automatic acceptance also
 /// needs the runtime's passed verification and no owner resolution of the task.
 /// A settle that cannot complete answers `accepted:false` with `failed`/`reason`;
 /// it never fails the background pass.
@@ -89,7 +83,7 @@ pub async fn automatic(
         .into_iter()
         .flatten()
         .find(|s| s["id"].is_string() && s["id"] == product["tasks"][task]["sprintId"]);
-    if !current.is_some_and(automatic_mode) {
+    if !current.is_some_and(queue_driven_mode) {
         return Ok(json!({"accepted":false}));
     }
     let key = (state.to_owned(), project.to_owned(), task.to_owned());
@@ -139,7 +133,7 @@ async fn settle(
     inputs: &mut Option<String>,
     signalled: &mut bool,
 ) -> Result<Option<Value>> {
-    let refusal = || json!({"accepted":false});
+    let refusal = |reason: &str| json!({"accepted":false,"reason":reason});
     let store = context::open(root, OpenMode::RuntimeValidate)?.ok_or_else(unavailable)?;
     let record = product["tasks"][task].clone();
     let finished: Option<(String, String, bool)> = store.read(|db| Ok(db.query_row(
@@ -151,11 +145,13 @@ async fn settle(
          FROM workspace_tasks w JOIN workspace_executions e ON e.execution_id=w.execution_id JOIN runtime_tasks r ON r.task_id=e.runtime_task_id WHERE w.project_id=? AND w.task_id=? AND r.state='COMPLETED'",
         (project,task), |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?)).map_err(context::core)?;
     let Some((execution, evidence, verified)) = finished else {
-        return Ok(Some(refusal()));
+        return Ok(Some(refusal(
+            "There is no completed execution for this result.",
+        )));
     };
     // Only a result the runtime verified, with no owner resolution, settles itself.
     if !verified {
-        return Ok(Some(refusal()));
+        return Ok(Some(refusal("This result has no eligible passing runtime verification. Review the result or request changes.")));
     }
     // An unchanged refusal is not repeated on every background pass.
     let probe = root.to_owned();
@@ -179,26 +175,33 @@ async fn settle(
                 &execution,
                 native.as_deref(),
                 task_facts::own_writes(&record),
+                true,
             ) {
                 Ok(evidence) => evidence,
-                Err(cortex_core::CoreError::Refused("result_unavailable")) => return Ok(None),
+                Err(cortex_core::CoreError::Refused("result_unavailable")) => return Ok(Err("The result evidence could not be read. Refresh the task or request a new result.".to_owned())),
                 Err(e) => return Err(e),
             };
             if warnings || actions["accept"] != true || counts != [0, 0, 0] {
-                return Ok(None);
+                let reason = actions["reason"]
+                    .as_str()
+                    .filter(|text| !text.trim().is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "The result is not ready to accept.".to_owned());
+                return Ok(Err(reason));
             }
-            Ok(Some(
-                json!({"version":actions["version"],"digest":actions["digest"]}),
-            ))
+            Ok(Ok(json!({"version":actions["version"],"digest":actions["digest"]})))
         })
         .map_err(context::core)?;
-    let Some(p) = candidate else {
-        return Ok(Some(remember(
-            key.clone(),
-            inputs.clone(),
-            *signalled,
-            refusal(),
-        )));
+    let p = match candidate {
+        Ok(p) => p,
+        Err(reason) => {
+            return Ok(Some(remember(
+                key.clone(),
+                inputs.clone(),
+                *signalled,
+                refusal(&reason),
+            )))
+        }
     };
     // The ordinary validator is repeated under the write transaction. No owner
     // acknowledgement is manufactured for open checks.
@@ -218,7 +221,7 @@ async fn settle(
                 key.clone(),
                 inputs.clone(),
                 *signalled,
-                refusal(),
+                refusal(&e.message),
             )))
         }
         Err(e) => Err(e),
@@ -262,6 +265,7 @@ fn validate(
         &execution,
         native,
         task_facts::own_writes(record),
+        false,
     )
     .map_err(|e| {
         if e.code() == "result_unavailable" {
@@ -317,6 +321,76 @@ pub async fn accept(
 ) -> Result<Value> {
     accept_inner(root, project, task, state, product, p, git, false).await
 }
+
+/// Validate the separate owner consent that lets an Automatic sprint finish this
+/// exact result after acceptance.  This is deliberately narrower than ordinary
+/// Accept: it is only valid for the currently paused Automatic settlement hold,
+/// and the captured target must still be the task and sprint target.
+fn automatic_finish_consent(product: &Value, task: &str, p: &Value) -> Result<Option<Value>> {
+    let Some(consent) = p.get("automaticFinish") else {
+        return Ok(None);
+    };
+    if consent.is_null() {
+        return Ok(None);
+    }
+    let sprint_id = consent["sprintId"].as_str().filter(|s| !s.is_empty());
+    let target = consent["targetBranch"].as_str().filter(|s| !s.is_empty());
+    let Some((sprint_id, target)) = sprint_id.zip(target) else {
+        return Err(refuse(
+            "invalid_request",
+            "Automatic finish consent must name the sprint and target branch.",
+        ));
+    };
+    let record = &product["tasks"][task];
+    if record["sprintId"] != sprint_id
+        || (record["targetBranch"].is_string() && record["targetBranch"] != target)
+    {
+        return Err(refuse(
+            "stale_result",
+            "The Automatic target changed. Refresh the task before allowing it to finish.",
+        ));
+    }
+    let sprint = product["sprints"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|s| s["id"] == sprint_id)
+        .ok_or_else(|| refuse("stale_result", "The Automatic sprint no longer exists."))?;
+    if !super::product::automatic_sprint(sprint)
+        || !sprint["taskIds"]
+            .as_array()
+            .is_some_and(|ids| ids.iter().any(|id| id == task))
+        || record["purged"] == true
+        || !record["archive"].is_null()
+        || (sprint["targetBranch"].is_string() && sprint["targetBranch"] != target)
+        || sprint["queueState"] != "paused"
+        || !matches!(
+            (
+                sprint["automaticQueue"]["kind"].as_str(),
+                sprint["automaticQueue"]["code"].as_str()
+            ),
+            (
+                Some("settlement_blocked"),
+                Some("automatic_acceptance_blocked")
+            ) | (Some("owner_integration"), Some("owner_accepted"))
+        )
+        || sprint["automaticQueue"]["taskId"] != task
+        || sprint["automaticQueue"]["needsOwner"] != true
+    {
+        return Err(refuse(
+            "automatic_finish_unavailable",
+            "Automatic is no longer waiting for this task. Refresh before approving finish.",
+        ));
+    }
+    if record["checkout"]["kind"] != "main" {
+        return Err(refuse(
+            "automatic_finish_unavailable",
+            "Automatic finish consent is available only for the project-folder checkout.",
+        ));
+    }
+    Ok(Some(json!({"sprintId": sprint_id, "targetBranch": target})))
+}
+
 async fn accept_inner(
     root: &Path,
     project: &str,
@@ -347,6 +421,20 @@ async fn accept_inner(
         .map_err(context::core)??;
     checkout_shape(&record)?;
     let path = super::retention::task_path(root, &record, git).await?;
+    let finish_consent = automatic_finish_consent(product, task, p)?;
+    if let Some(consent) = finish_consent.as_ref() {
+        let current_branch = git.out(&path, &["branch", "--show-current"]).await?;
+        let effective = match record["targetBranch"].as_str().filter(|s| !s.is_empty()) {
+            Some(branch) => branch.to_owned(),
+            None => git.default_branch(root).await?,
+        };
+        if current_branch.trim() != effective || consent["targetBranch"] != effective {
+            return Err(refuse(
+                "automatic_finish_unavailable",
+                "The project folder is no longer on the requested target branch. Refresh before approving finish.",
+            ));
+        }
+    }
     store.write(|db| Ok((|| {
         // Start/owner replacement cannot race evidence validation and overlay replacement.
         let (_, counts) = validate(db, &store, root, project, task, &record, p, native)?;
@@ -359,6 +447,8 @@ async fn accept_inner(
             "open":{"failed":counts[0],"not_run":counts[1],"unverified":counts[2]}});
         if automatic {
             record["acceptance"]["automatic"] = json!(true);
+        } else if let Some(consent) = finish_consent.as_ref() {
+            record["acceptance"]["finishConsent"] = consent.clone();
         }
         // No retained-provider error may be returned after this mutation boundary.
         settings::write_json(&product_path(state, project)?, product)?;
@@ -529,9 +619,10 @@ mod native_acceptance_tests {
     async fn automatic_acceptance_binds_the_result_and_follows_the_current_mode() {
         // (mode while the task ran and finished, mode when the result is settled)
         for (at_finish, at_settle, accepted) in [
+            ("hybrid", "hybrid", true),
+            ("manual", "hybrid", true),
+            ("hybrid", "manual", false),
             ("automatic", "automatic", true),
-            ("manual", "automatic", true),
-            ("automatic", "manual", false),
             ("manual", "manual", false),
         ] {
             let (root, runtime, draft) = completed().await;
@@ -772,6 +863,117 @@ mod native_acceptance_tests {
             drop(runtime);
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn automatic_acceptance_keeps_unrequested_policy_checks_as_notes() {
+        let (root, runtime, draft) = completed().await;
+        let state = automatic_state(&root);
+        let mut product = sprint_product(&draft, "automatic");
+        report_checks(
+            &runtime,
+            json!([{"name":"Paid live qualification","outcome":"not_run",
+                "blocker":"paid live check not requested by the owner"}]),
+            json!([{"name":"Paseo CLI qualification","outcome":"not_run",
+                "command":["scripts/cortex-paseo-tools.sh","probe-codex"],
+                "blocker":"paid live check not requested by the owner"}]),
+        )
+        .await;
+        let result = automatic(
+            &root,
+            "project",
+            &draft,
+            &state,
+            &mut product,
+            &mut Git::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["accepted"], true, "{result}");
+        assert_eq!(
+            product["tasks"][&draft]["acceptance"]["open"],
+            json!({
+                "failed": 0, "not_run": 0, "unverified": 0
+            })
+        );
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn automatic_acceptance_does_not_treat_policy_variants_as_optional_notes() {
+        // A reported receipt, a plan command, or a different refusal requires review.
+        let cases = [
+            json!({"name":"reported receipt","outcome":"not_run",
+                "tool_call_ref":"native-command:v","blocker":"paid live check not requested by the owner"}),
+            json!({"name":"required command","outcome":"not_run",
+                "command":["/bin/true"],
+                "blocker":"paid live check not requested by the owner"}),
+            json!({"name":"similar policy wording","outcome":"not_run",
+                "blocker":"paid live check was not requested by the owner"}),
+        ];
+        for check in cases {
+            let (root, runtime, draft) = completed().await;
+            let state = automatic_state(&root);
+            let mut product = sprint_product(&draft, "automatic");
+            report_checks(&runtime, json!([check]), json!([])).await;
+            let result = automatic(
+                &root,
+                "project",
+                &draft,
+                &state,
+                &mut product,
+                &mut Git::new(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["accepted"], false, "{result}");
+            assert!(result["reason"].is_string(), "{result}");
+            assert!(product["tasks"][&draft]["acceptance"].is_null());
+            runtime.shutdown().await;
+            drop(runtime);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn automatic_acceptance_refuses_optional_note_when_runtime_verification_failed() {
+        let (root, runtime, draft) = completed().await;
+        let state = automatic_state(&root);
+        let mut product = sprint_product(&draft, "automatic");
+        report_checks(
+            &runtime,
+            json!([{"name":"Paid live qualification","outcome":"not_run",
+                "blocker":"paid live check not requested by the owner"}]),
+            json!([]),
+        )
+        .await;
+        with_task(&runtime, |db, task| {
+            lifecycle::event_tx(
+                db,
+                task,
+                "VERIFICATION_FAILED",
+                json!({"revision":0,"checks":[]}),
+            )?;
+            Ok(())
+        })
+        .await;
+        let result = automatic(
+            &root,
+            "project",
+            &draft,
+            &state,
+            &mut product,
+            &mut Git::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["accepted"], false, "{result}");
+        assert!(result["reason"].is_string(), "{result}");
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -2067,6 +2269,130 @@ mod native_acceptance_tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn result_checks_include_not_run_worker_and_reviewer_rows() {
+        let (root, runtime, draft) = completed().await;
+        let paid = "paid live check not requested by the owner";
+        let forbidden = "Deployment is prohibited by policy.";
+        report_checks(
+            &runtime,
+            json!([{"name":"Live desktop","outcome":"not_run","blocker":paid}]),
+            json!([{"name":"Deployment","outcome":"not_run","blocker":forbidden}]),
+        )
+        .await;
+        let task = presented(&runtime, &draft).await;
+        assert_eq!(task["reviewActions"]["accept"], true, "{task}");
+        assert_eq!(task["reviewActions"]["acknowledgeOpenChecks"], true);
+        assert_eq!(task["result"]["checks"][0]["outcome"], "passed");
+        assert_eq!(
+            &task["result"]["checks"].as_array().unwrap()[1..],
+            &[
+                json!({"name":"Live desktop","outcome":"not_run","detail":paid,
+                    "technicalReason":paid,"source":"worker","kind":"policy","rerunnable":false}),
+                json!({"name":"Deployment","outcome":"not_run","detail":forbidden,
+                    "technicalReason":forbidden,"source":"worker","kind":"policy","rerunnable":false}),
+            ]
+        );
+        assert!(task["reviewActions"].get("notRunChecks").is_none());
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn result_checks_include_not_run_runtime_attempt_with_blocker() {
+        let (root, runtime, draft) = completed().await;
+        with_task(&runtime, |db, task| {
+            let (revision, epoch): (i64, i64) = db.query_row(
+                "SELECT revision,epoch FROM runtime_tasks JOIN task_owners USING(task_id) WHERE task_id=?",
+                [task],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            db.execute(
+                "UPDATE runtime_tasks SET plan_json=json_insert(plan_json,'$.verification[#]',json(?)) WHERE task_id=?",
+                (r#"["missing-tool","test"]"#, task),
+            )?;
+            let payload = json!({
+                "binding":{"revision":revision,"owner_epoch":epoch,
+                    "target":{"assignment":"runtime-verification","index":1}},
+                "result":{"blocker":"verification_executable_unavailable"}
+            });
+            db.execute(
+                "INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at)
+                 VALUES (?,'WORKER_CHECK_FINISHED','runtime',?,'2026-11-19T00:00:00Z')",
+                (task, payload.to_string()),
+            )?;
+            Ok(())
+        })
+        .await;
+        let task = presented(&runtime, &draft).await;
+        assert_eq!(task["reviewActions"]["accept"], false, "{task}");
+        assert!(
+            task["result"]["checks"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({
+                    "name":"missing-tool test","outcome":"not_run",
+                    "detail":"verification_executable_unavailable",
+                    "technicalReason":"verification_executable_unavailable",
+                    "source":"runtime","kind":"automated","rerunnable":false,
+                    "command":["missing-tool","test"]
+                })),
+            "{task}"
+        );
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn result_checks_distinguish_verifier_launch_skip_from_timeout() {
+        let (root, runtime, draft) = completed().await;
+        with_task(&runtime, |db, task| {
+            let (revision, digest): (i64, String) = db.query_row(
+                "SELECT json_extract(payload_json,'$.revision'),json_extract(payload_json,'$.revision_digest')
+                 FROM runtime_events WHERE task_id=? AND type='VERIFICATION_PASSED' ORDER BY id DESC LIMIT 1",
+                [task],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            for (command, reason) in [
+                ("sandboxed", "native_verification_sandbox_unavailable"),
+                ("timed-out", "timeout"),
+            ] {
+                let payload = json!({"receipt":{"argv":[command],"revision":revision,
+                    "revision_digest":digest,"tool_call_ref":format!("native-command:{command}"),
+                    "observation":{"complete":false,"exit_code":null,"failure":reason}}});
+                db.execute(
+                    "INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at)
+                     VALUES (?,'NATIVE_COMMAND_FINISHED','runtime',?,'2026-11-19T00:00:00Z')",
+                    (task, payload.to_string()),
+                )?;
+            }
+            Ok(())
+        })
+        .await;
+        let task = presented(&runtime, &draft).await;
+        let checks = task["result"]["checks"].as_array().unwrap();
+        assert!(
+            checks.contains(&json!({
+                "name":"sandboxed","outcome":"not_run","source":"runtime","kind":"automated",
+                "rerunnable":false,"command":["sandboxed"],"toolCallRef":"native-command:sandboxed",
+                "detail":"native_verification_sandbox_unavailable",
+                "technicalReason":"native_verification_sandbox_unavailable"
+            })),
+            "{task}"
+        );
+        let timeout = checks
+            .iter()
+            .find(|check| check["name"] == "timed-out")
+            .unwrap();
+        assert_eq!(timeout["outcome"], "failed");
+        assert!(timeout.get("technicalReason").is_none());
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// Live run (MCP task): runtime verification of the current version passed and the
     /// reviewer approved, yet Accept stayed off ("Run the unpassed checks first") because
     /// of the worker's own superseded claims (a run before its last edit, a trivial
@@ -2093,6 +2419,18 @@ mod native_acceptance_tests {
         assert_eq!(actions["acknowledgeOpenChecks"], false, "{task}");
         assert!(actions["unblockAction"].is_null(), "{task}");
         assert_eq!(task["result"]["acceptanceAvailable"], true);
+        assert!(
+            task["result"]["checks"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({
+                    "name":"npm test","outcome":"not_run","source":"worker","kind":"automated",
+                    "rerunnable":false,"command":["npm","test"],
+                    "detail":"npm is not installed in the guarded sandbox.",
+                    "technicalReason":"npm is not installed in the guarded sandbox."
+                })),
+            "{task}"
+        );
         let notes: Vec<&str> = task["result"]["warnings"]
             .as_array()
             .unwrap()

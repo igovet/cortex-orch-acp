@@ -18,9 +18,9 @@ The product contains no Python. The Python runtime (`src/`), its tests, `.venv` 
 
 ## Native host
 
-Workspace sprint planning is a separate description-only engine turn, not a
-Core task execution. It bounds the collected reply and shares one corrective
-pass between oversized and invalid replies. See [Sprint planning limits](../cortex-workspace/local-task-execution.md#sprint-planning-limits).
+Workspace sprint planning is a read-only Core task execution bound to the
+sprint planning policy; its plan arrives through the runtime-validated
+`sprint_plan_submit` tool and an independent review. See [Sprint planning limits](../cortex-workspace/local-task-execution.md#sprint-planning-limits).
 
 The desktop service selects the Rust Core for native-owned projects. It hosts one reusable, read-only Core projection provider per opened logical project/channel for desktop task pages, detail/state and filtered history. `native.query` reads those projections directly; a committed-outbox tail feeds the Core EventStream and the native desktop subscription. Small task upserts/removals update the UI without rereading the task list. The same service retains a reusable native draft writer and acquires a cooperative Core owner lease before starting a project controller. Plain `tasks.create` writes go directly to Core; attachment-bearing creates, legacy decisions, results, configuration and unsupported execution controls refuse or use their existing adapters.
 

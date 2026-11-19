@@ -165,6 +165,33 @@ fn holdings_tx(db: &Transaction<'_>) -> CoreResult<Vec<Holding>> {
     }
     Ok(out)
 }
+/// A stable checkout is shared by independent readers through final verification.
+fn review_holder_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Option<String>> {
+    let root = root_tx(db, task)?;
+    Ok(db.query_row("SELECT t.task_id FROM runtime_tasks t JOIN tasks b ON b.id=t.task_id
+        LEFT JOIN task_workspaces w ON w.task_id=t.task_id
+        WHERE t.task_id!=? AND coalesce(w.workspace_root,b.project_root)=?
+        AND (t.state IN ('REVIEWING','VERIFYING') OR (t.state IN ('RECONCILING','ANSWER_READY')
+          AND EXISTS(SELECT 1 FROM runtime_events e WHERE e.task_id=t.task_id
+            AND e.type='VERIFICATION_PASSED' AND json_extract(e.payload_json,'$.revision')=t.revision)) OR (t.state='EXECUTING'
+          AND EXISTS(SELECT 1 FROM runtime_nodes n WHERE n.task_id=t.task_id AND n.revision=t.revision)
+          AND NOT EXISTS(SELECT 1 FROM runtime_nodes n WHERE n.task_id=t.task_id AND n.revision=t.revision AND n.status!='completed')))
+        AND NOT EXISTS(SELECT 1 FROM pending_deletions d WHERE d.task_id=t.task_id)
+        ORDER BY t.task_id LIMIT 1", (task,root), |r|r.get(0)).optional()?)
+}
+
+/// Check before entering review, in the same transaction that reserves the checkout.
+pub fn review_writer_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Option<Value>> {
+    let root = root_tx(db, task)?;
+    for h in holdings_tx(db)? {
+        if h.task != task && root_tx(db, &h.task)? == root {
+            return Ok(Some(
+                json!({"node":"review","holder_task":h.task,"paths":h.paths}),
+            ));
+        }
+    }
+    Ok(None)
+}
 fn pending_tx(db: &Transaction<'_>) -> CoreResult<Vec<Value>> {
     let tasks = db
         .prepare("SELECT DISTINCT task_id FROM runtime_events WHERE type='WORKER_WAIT_CHANGED'")?
@@ -215,6 +242,9 @@ impl SchedulingPolicy for NativePolicy {
         if read_only(&role, &stage) {
             return Ok(true);
         }
+        if review_holder_tx(db, task)?.is_some() {
+            return Ok(false);
+        }
         let scope = effective_scope_tx(db, task, assignment.as_deref(), &scope)?;
         let denied = denied_tx(db, task)?;
         if scope.iter().any(|a| denied.iter().any(|b| overlaps(a, b))) {
@@ -253,6 +283,11 @@ pub fn write_conflict_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Option<
     else {
         return Ok(None);
     };
+    if matches!(state.as_str(), "REVIEWING" | "VERIFYING") {
+        if let Some(conflict) = review_writer_tx(db, task)? {
+            return Ok(Some(conflict));
+        }
+    }
     let stage = match state.as_str() {
         "EXECUTING" => "execution",
         "REVIEWING" => "review",
@@ -271,6 +306,12 @@ pub fn write_conflict_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Option<
         .collect::<CoreResult<Vec<_>>>()?;
     let ready = super::dependency_ready(&nodes, stage)?;
     if ready.is_empty() {
+        if state == "EXECUTING"
+            && !nodes.is_empty()
+            && nodes.iter().all(|n| n.status == "completed")
+        {
+            return review_writer_tx(db, task);
+        }
         return Ok(None);
     }
     let holdings = holdings_tx(db)?;
@@ -283,6 +324,11 @@ pub fn write_conflict_tx(db: &Transaction<'_>, task: &str) -> CoreResult<Option<
         )?;
         if read_only(&role, &node_stage) {
             continue;
+        }
+        if let Some(holder) = review_holder_tx(db, task)? {
+            return Ok(Some(
+                json!({"node":node,"holder_task":holder,"paths":[root]}),
+            ));
         }
         let paths = absolute(
             &root,
@@ -366,6 +412,10 @@ pub fn claim_obstacles_tx(
             json!("retry_backoff")
         } else if read_only(&role, &node_stage) {
             json!("claimable")
+        } else if let Some(holder) = review_holder_tx(db, task)? {
+            item["holder_task"] = json!(holder);
+            item["paths"] = json!([root]);
+            json!("held")
         } else if let Some(rules) = Some(
             denied
                 .iter()
@@ -642,36 +692,54 @@ pub fn request_access_tx(
         },
     )
 }
-pub fn reconcile_access_tx(db: &Transaction<'_>, task: &str, now: &str) -> CoreResult<()> {
-    if domain::task_tx(db, task)?.0 == crate::TaskState::Paused {
-        return Ok(());
+/// Advance this assignment's open access wait once. The caller arms a timer for
+/// the returned duration; owner questions and paused tasks have no timer.
+pub fn poll_access_tx(
+    db: &Transaction<'_>,
+    wait: &mut Value,
+    now: &str,
+) -> CoreResult<Option<std::time::Duration>> {
+    if wait["kind"] != "access" || wait["status"] != "open" {
+        return Ok(None);
     }
-    for mut w in waits::projection_tx(db, task)? {
-        if w["kind"] != "access" || w["status"] != "open" {
-            continue;
+    if domain::task_tx(db, waits::field(wait, "task_id")?)?.0 == crate::TaskState::Paused {
+        return Ok(None);
+    }
+    if !waits::valid_tx(db, wait)? {
+        wait["status"] = json!("cancelled");
+        wait["reason"] = json!("authority_lost");
+        waits::change_tx(db, wait)?;
+        return Ok(None);
+    }
+    let parse = |s: &str| {
+        chrono::DateTime::parse_from_rfc3339(s).map_err(|_| CoreError::Refused("invalid_time"))
+    };
+    let now = parse(now)?;
+    if let Some(at) = wait["retry_at"].as_str() {
+        if let Ok(remaining) = (parse(at)? - now).to_std() {
+            if !remaining.is_zero() {
+                return Ok(Some(remaining));
+            }
         }
-        if !waits::valid_tx(db, &w)? {
-            w["status"] = json!("cancelled");
-            w["reason"] = json!("authority_lost");
-            waits::change_tx(db, &mut w)?;
-            continue;
-        }
-        if w["retry_at"].as_str().is_some_and(|at| at > now) {
-            continue;
-        }
-        let reason = predicate_tx(db, &w, &strings(&w["paths"])?)?;
-        let attempt = w["retry_attempt"].as_u64().unwrap_or(0);
-        if reason != Some("active_writer_conflict") || attempt >= 2 {
-            resolve_tx(db, &mut w, reason)?;
-        } else {
-            let next = attempt + 1;
-            let time = chrono::DateTime::parse_from_rfc3339(now)
-                .map_err(|_| CoreError::Refused("invalid_time"))?;
-            w["retry_attempt"] = json!(next);
-            w["retry_at"] = json!((time + chrono::Duration::seconds([1, 2, 4][next as usize]))
-                .to_rfc3339_opts(chrono::SecondsFormat::Micros, false));
-            waits::change_tx(db, &mut w)?;
-        }
+    }
+    let reason = predicate_tx(db, wait, &strings(&wait["paths"])?)?;
+    let attempt = wait["retry_attempt"].as_u64().unwrap_or(0);
+    if reason != Some("active_writer_conflict") || attempt >= 2 {
+        resolve_tx(db, wait, reason)?;
+        return Ok(None);
+    }
+    let next = attempt + 1;
+    let seconds = [1, 2, 4][next as usize];
+    wait["retry_attempt"] = json!(next);
+    wait["retry_at"] = json!((now + chrono::Duration::seconds(seconds))
+        .to_rfc3339_opts(chrono::SecondsFormat::Micros, false));
+    waits::change_tx(db, wait)?;
+    Ok(Some(std::time::Duration::from_secs(seconds as u64)))
+}
+
+pub fn reconcile_access_tx(db: &Transaction<'_>, task: &str, now: &str) -> CoreResult<()> {
+    for mut wait in waits::projection_tx(db, task)? {
+        poll_access_tx(db, &mut wait, now)?;
     }
     Ok(())
 }

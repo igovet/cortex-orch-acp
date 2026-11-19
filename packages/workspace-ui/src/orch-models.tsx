@@ -1,141 +1,225 @@
 import { createMemo, createSignal, For, Show } from "solid-js";
-import { autoOn, autoVerdict, denyTokens, EFFORT_LEVELS, effortLabel, engineInUse, engineLabel, ENGINES, kindLabel, notOffered, policyOf, setEngineUse, setModelAuto, setModelEnabled, setPolicy, setPreferred, setProvider, setStretch, setTier, TIER_LABELS, TIERS, WORK_KINDS, type CatalogueModel, type EngineKey, type ModelPolicy, type RoutingRules, type Tier } from "@cortex/workspace-domain";
+import { autoOn, autoVerdict, CONNECTION_ENGINE, denyTokens, EFFORT_LEVELS, effortLabel, engineInUse, ENGINES, notOffered, orphanTokens, policyOf, ROLE_CATALOG, setDeny, setEngineUse, setModelAuto, setModelEnabled, setPolicy, setPreferred, setProvider, setStretch, setTier, WORK_KINDS, type CatalogueModel, type EngineKey, type ModelPolicy, type Problem, type RoutingRules } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
-import { I } from "./kit";
-import { HELP, PREFERRED_WHEN_HELP } from "./orch-help";
-import { Bar, Shell, slug, SourceStrips, useReadOnly, useRouting, useRoutingOff } from "./orch-shared";
+import { A, I } from "./kit";
+import { HELP, PREFERRED_WHEN_HELP, PREFERRED_WORK_HELP, workKindHelp } from "./orch-help";
+import { Bar, orchTo, sectionTo, Shell, slug, SourceStrips, useReadOnly, useRouting, useRoutingOff } from "./orch-shared";
 import { clock } from "./selectors";
-import { Adv, Chk, Err, Hint, Pick, SetH, Sw, Tags } from "./settings-kit";
+import { Adv, Chk, Err, Hint, Pick, Rec, SetH, Srow, Sw, Tags, Tiers } from "./settings-kit";
 
-type Selected = { engine: EngineKey; model: string };
-const effortRange = (p: ModelPolicy) => p.effortFloor && p.maxEffort ? `${p.effortFloor} to ${p.maxEffort}` : p.maxEffort ? `up to ${p.maxEffort}` : p.effortFloor ? `from ${p.effortFloor}` : "";
+type Fields = { engine: EngineKey; model: CatalogueModel; rules: RoutingRules; set: (r: RoutingRules) => void; off?: string; problems: Problem[] };
+const kindName = (id: string) => WORK_KINDS.find(k => k.id === id)?.label ?? `${id} (legacy, kept)`;
+/** Preferred work in words, for a cell that has no room for the checklist. */
+export const preferredWords = (p: ModelPolicy) => (p.preferredFor ?? []).map(kindName).join(", ");
 
-function Tiers(props: { label: string; on: Tier[]; onChange: (tier: Tier, on: boolean) => void; disabled?: string }) {
-  return <span class="tier" role="group" aria-label={`${props.label} tiers`}><For each={[...TIERS].reverse()}>{t =>
-    <button aria-pressed={props.on.includes(t)} aria-label={`${props.label}: ${TIER_LABELS[t]}`} data-why={props.disabled} aria-disabled={props.disabled ? "true" : undefined} onClick={e => { e.stopPropagation(); if (!props.disabled) props.onChange(t, !props.on.includes(t)); }}>{TIER_LABELS[t][0]}</button>
-  }</For></span>;
+/** The twelve work kinds as a checklist, each with the roles it covers. Kinds an older file still names stay, marked as kept. */
+export function PreferredWork(props: Fields & { needsAuto?: boolean }) {
+  const e = () => props.engine, id = () => props.model.id;
+  const p = () => policyOf(props.rules, e(), id());
+  const auto = () => props.rules.engines[e()].auto.includes(id());
+  const legacy = () => (p().preferredFor ?? []).filter(k => !WORK_KINDS.some(w => w.id === k));
+  const why = () => props.off ?? (props.needsAuto !== false && !auto() ? "Turn on Automatic first" : undefined);
+  return <div class="ws-fld"><span class="lab">Preferred work<Hint text={PREFERRED_WORK_HELP} label="preferred work" /></span>
+    <div class="ws-checks ws-kinds">
+      <For each={WORK_KINDS}>{k => <label class="ws-check"><Chk label={`${props.model.label} preferred for ${k.label}`} checked={!!p().preferredFor?.includes(k.id)} disabled={why()} onChange={on => props.set(setPreferred(props.rules, e(), id(), k.id, on))} /><span><span class="ws-kind-t">{k.label}</span><span class="ws-kind-d">{ROLE_CATALOG.filter(r => r.kind === k.id).map(r => r.label).join(", ") || workKindHelp(k.id, [])}</span></span></label>}</For>
+      <For each={legacy()}>{k => <label class="ws-check"><Chk label={`${props.model.label} preferred for ${k}`} checked disabled={props.off} onChange={on => props.set(setPreferred(props.rules, e(), id(), k, on))} /><span>{k} (legacy, kept)</span></label>}</For>
+    </div>
+    <Err problems={props.problems} path={`models.${e()}.policy.${id()}.preferred_for`} />
+  </div>;
+}
+export function PreferWhen(props: Fields) {
+  const p = () => policyOf(props.rules, props.engine, props.model.id);
+  const patch = (x: Partial<ModelPolicy>) => props.set(setPolicy(props.rules, props.engine, props.model.id, x));
+  return <div class="ws-fld"><span class="lab">Prefer {props.model.label} when<Hint text={PREFERRED_WHEN_HELP} label="Prefer when" /></span>
+    <textarea class="inp ws-when" rows="3" aria-label={`Prefer ${props.model.label} when`} disabled={!!props.off} value={p().preferredWhen ?? ""} onInput={ev => patch({ preferredWhen: ev.currentTarget.value || null })} />
+    <span class={`cap tnum ${(p().preferredWhen?.length ?? 0) > 500 ? "st-bad" : "faint"}`}>{p().preferredWhen?.length ?? 0} of 500. The coordinator judges this. Retries ignore it.</span>
+    <Err problems={props.problems} path={`models.${props.engine}.policy.${props.model.id}.preferred_when`} />
+  </div>;
 }
 
-/** Everything per model that does not fit a row. Stored values stay visible even when the model no longer offers them. */
-function Detail(props: { engine: EngineKey; model: CatalogueModel; rules: RoutingRules; set: (r: RoutingRules) => void; off?: string; problems: ReturnType<ReturnType<typeof useRouting>["problems"]>; back: () => void }) {
-  const ws = useWs();
+/** Routing › Model policy: every per-model field. Stored values stay visible even when the model no longer offers them. */
+export function ModelPolicyFields(props: Fields) {
   const e = () => props.engine, id = () => props.model.id;
   const p = () => policyOf(props.rules, e(), id());
   const at = () => `models.${e()}.policy.${id()}`;
   const patch = (x: Partial<ModelPolicy>) => props.set(setPolicy(props.rules, e(), id(), x));
-  const light = () => !!props.rules.engines[e()].tiers[id()]?.includes("light");
-  const auto = () => props.rules.engines[e()].auto.includes(id());
+  const tiers = () => props.rules.engines[e()].tiers[id()] ?? [];
+  const light = () => tiers().includes("light");
   const offered = (value: string | null) => [{ id: "", label: "Neutral" }, ...props.model.efforts.map(x => ({ id: x, label: effortLabel(x) })), ...(value && !props.model.efforts.includes(value) ? [{ id: value, label: effortLabel(value), sub: "Not offered by this model" }] : [])];
-  const level = (label: string, value: string | null, key: "effortFloor" | "maxEffort") => <Pick id={`m-${key}-${slug(id())}`} label={label} width="120px" value={value ?? ""} options={offered(value)} disabled={props.off} onPick={x => patch({ [key]: x || null })} />;
-  const legacy = () => (p().preferredFor ?? []).filter(k => !WORK_KINDS.some(w => w.id === k));
+  const level = (label: string, value: string | null, key: "effortFloor" | "maxEffort") => <Pick id={`m-${key}-${slug(`${e()}-${id()}`)}`} label={`${label} for ${props.model.label}`} width="120px" value={value ?? ""} options={offered(value)} disabled={props.off} onPick={x => patch({ [key]: x || null })} />;
   const ladder = () => p().effortLadder ?? [];
   const setRung = (i: number, value: string) => { const next = ladder().slice(0, i); if (value) next[i] = value; const rest = ladder().slice(i + 1); patch({ effortLadder: [...next, ...(value ? rest : [])].length ? [...next, ...(value ? rest : [])] : null }); };
-  const verdict = () => autoVerdict(props.rules, ws.machine().config.catalogue, e(), id());
-  const tokens = () => denyTokens(props.rules, e(), id());
-  return <div class="surface ws-detail">
-    <button class="lnk ws-detail-back" onClick={() => props.back()}><I n="arrow-left" s={12} />Back to models</button>
-    <div class="ws-detail-h"><span class="t">{props.model.label}</span><span class="sub mono">{id()}</span></div>
-    <div class="ws-detail-b">
-      <Show when={props.model.contextWindow}><div class="ws-fld"><span class="lab">Observed context window</span><span>{props.model.contextWindow?.toLocaleString()} tokens</span></div></Show>
-      <div class="ws-fld"><span class="lab">Effort floor<Hint text={HELP.modelPolicy} label="model policy" /></span>{level("Effort floor", p().effortFloor, "effortFloor")}</div>
-      <div class="ws-fld"><span class="lab">Max effort</span>{level("Max effort", p().maxEffort, "maxEffort")}<Err problems={props.problems} path={`${at()}.max_effort`} /></div>
-      <div class="ws-fld"><span class="lab">Preferred for</span>
-        <div class="ws-checks">
-          <For each={WORK_KINDS}>{k => <label class="ws-check"><Chk label={`${props.model.label} preferred for ${k.label}`} checked={!!p().preferredFor?.includes(k.id)} disabled={props.off ?? (auto() ? undefined : "Turn on Auto first.")} onChange={on => props.set(setPreferred(props.rules, e(), id(), k.id, on))} /><span>{k.label}</span></label>}</For>
-          <For each={legacy()}>{k => <label class="ws-check"><Chk label={`${props.model.label} preferred for ${k}`} checked disabled={props.off} onChange={on => props.set(setPreferred(props.rules, e(), id(), k, on))} /><span>{k} (legacy, kept)</span></label>}</For>
-        </div>
-        <Err problems={props.problems} path={`${at()}.preferred_for`} />
+  return <div class="ws-detail-b">
+    <div class="ws-fld"><span class="lab">Tiers</span><Tiers label={props.model.label} on={tiers()} disabled={props.off} onChange={(t, on) => props.set(setTier(props.rules, e(), id(), t, on))} /><Err problems={props.problems} path={`models.${e()}.tiers.${id()}`} /></div>
+    <div class="ws-row2">
+      <div class="ws-fld"><span class="lab">Effort floor<Hint text={HELP.modelPolicy} label="model policy" /></span>{level("Effort floor", p().effortFloor, "effortFloor")}<span class="cap faint">Never run it below this level.</span></div>
+      <div class="ws-fld"><span class="lab">Max effort</span>{level("Max effort", p().maxEffort, "maxEffort")}<span class="cap faint">Never run it above this level.</span><Err problems={props.problems} path={`${at()}.max_effort`} /></div>
+    </div>
+    <PreferredWork {...props} />
+    <PreferWhen {...props} />
+    <Show when={light()}>
+      <div class="ws-fld"><span class="lab">Effort ladder</span><span class="cap faint">Effort for low, normal and high complexity, for light models.</span>
+        <div class="row ws-gap4"><For each={[0, 1, 2]}>{i => <Pick id={`m-ladder-${i}-${slug(`${e()}-${id()}`)}`} label={`Ladder step ${i + 1} for ${props.model.label}`} width="96px" value={ladder()[i] ?? ""} disabled={props.off ?? (i > ladder().length ? "Set the step before it" : undefined)} options={[{ id: "", label: "None" }, ...EFFORT_LEVELS.map(x => ({ id: x as string, label: effortLabel(x) }))]} onPick={x => setRung(i, x)} />}</For></div>
+        <Err problems={props.problems} path={`${at()}.effort_ladder`} />
       </div>
-      <Adv id="models-detail" force={!!(p().preferredWhen || p().effortLadder || p().alsoStandardFor || p().requestNames) || props.problems.some(x => x.path.startsWith(`${at()}.`))}>
-        <div class="ws-fld"><span class="lab">Prefer when<Hint text={PREFERRED_WHEN_HELP} label="Prefer when" /></span>
-          <textarea class="inp ws-when" rows="4" aria-label="Prefer when" disabled={!!props.off} value={p().preferredWhen ?? ""} onInput={ev => patch({ preferredWhen: ev.currentTarget.value || null })} />
-          <span class={`cap tnum ${(p().preferredWhen?.length ?? 0) > 500 ? "st-bad" : "faint"}`}>{p().preferredWhen?.length ?? 0} of 500. The coordinator judges this. Retries ignore it.</span>
-          <Err problems={props.problems} path={`${at()}.preferred_when`} />
-        </div>
-        <Show when={light()}>
-          <div class="ws-fld"><span class="lab">Effort ladder</span>
-            <div class="row ws-gap4"><For each={[0, 1, 2]}>{i => <Pick id={`m-ladder-${i}-${slug(id())}`} label={`Ladder step ${i + 1}`} width="84px" value={ladder()[i] ?? ""} disabled={props.off ?? (i > ladder().length ? "Set the step before it" : undefined)} options={[{ id: "", label: "None" }, ...EFFORT_LEVELS.map(x => ({ id: x as string, label: effortLabel(x) }))]} onPick={x => setRung(i, x)} />}</For></div>
-            <Err problems={props.problems} path={`${at()}.effort_ladder`} />
-          </div>
-          <div class="ws-fld"><span class="lab">Also standard for</span>
-            <div class="ws-checks"><For each={WORK_KINDS}>{k => <label class="ws-check"><Chk label={`${props.model.label} also standard for ${k.label}`} checked={!!p().alsoStandardFor?.includes(k.id)} disabled={props.off} onChange={on => props.set(setStretch(props.rules, e(), id(), k.id, on))} /><span>{k.label}</span></label>}</For></div>
-          </div>
-        </Show>
-        <div class="ws-fld"><span class="lab">Request names</span>
-          <Tags label="Request name" hint="Names you type, for example opus" items={p().requestNames ?? []} disabled={props.off} onChange={items => patch({ requestNames: items.length ? items : null })} />
-          <Err problems={props.problems} path={`${at()}.request_names`} />
-        </div>
-      </Adv>
-      <div class="ws-fld"><span class="lab">Route</span>
-        <div class="ws-kv"><span class="cap muted">Engine</span><span class="cap trunc">{engineLabel(e())}</span><span class="cap muted">Automatic</span><span class="cap">{verdict()}</span>
-          <Show when={tokens().length > 0}><span class="cap muted">Deny rules</span><span class="cap mono trunc">{tokens().join(", ")}</span></Show></div>
+      <div class="ws-fld"><span class="lab">Also standard for</span><span class="cap faint">Work kinds where this light model may also serve standard work.</span>
+        <div class="ws-checks"><For each={WORK_KINDS}>{k => <label class="ws-check"><Chk label={`${props.model.label} also standard for ${k.label}`} checked={!!p().alsoStandardFor?.includes(k.id)} disabled={props.off} onChange={on => props.set(setStretch(props.rules, e(), id(), k.id, on))} /><span>{k.label}</span></label>}</For></div>
       </div>
+    </Show>
+    <div class="ws-fld"><span class="lab">Request names</span><span class="cap faint">Short names you can type to ask for this model, for example opus.</span>
+      <Tags label={`Request name for ${props.model.label}`} hint="Add a name" items={p().requestNames ?? []} disabled={props.off} onChange={items => patch({ requestNames: items.length ? items : null })} />
+      <Err problems={props.problems} path={`${at()}.request_names`} />
     </div>
   </div>;
 }
 
+/** A deny rule broader than this model's own: switching it on here would not help, so it says which rule and offers to remove it. */
+const blockingRule = (rules: RoutingRules, engine: EngineKey, model: string) => denyTokens(rules, engine, model).find(t => t !== `${engine}/*`);
+
+/** Section 2: which models tasks may use at all. Everything about how routing uses them is under Engines and models. */
 export function Models() {
   const ws = useWs();
   const d = useRouting(), off = useRoutingOff(), offline = useReadOnly();
   const v = () => d.value(), m = () => ws.machine(), cat = () => m().config.catalogue;
   const [filter, setFilter] = createSignal("");
-  const [picked, setPicked] = createSignal<Selected | null>(null);
   const shown = (e: EngineKey) => { const q = filter().trim().toLowerCase(); return cat()[e].models.filter(x => !q || `${x.label} ${x.id}`.toLowerCase().includes(q)); };
-  const bulk = (e: EngineKey, on: boolean) => d.set(shown(e).reduce((r, x) => setModelEnabled(r, e, x.id, on), v()));
-  const selected = createMemo(() => { const s = picked(); const model = s && cat()[s.engine].models.find(x => x.id === s.model); return s && model ? { ...s, entry: model } : null; });
+  const bulk = (e: EngineKey, on: boolean) => d.set(shown(e).filter(x => !blockingRule(v(), e, x.id)).reduce((r, x) => setModelEnabled(r, e, x.id, on), v()));
   const refresh = () => { if (!offline()) ws.run({ type: "refresh_models", machineId: m().id, now: ws.store.clock() }); };
-  return <Shell scoped wide title="Models" lead="What may run, at which tier and effort. Auto means routing may pick it without you asking." bar={<Bar d={d} />}
-    head={<div class="row ws-gap4"><input class="inp ws-filter" aria-label="Filter models" placeholder="Filter models" value={filter()} onInput={e => setFilter(e.currentTarget.value)} /><button class="btn btn-line btn-sm" aria-disabled={offline() ? "true" : undefined} data-why={offline()} {...ws.needs("refresh_models")} onClick={refresh}><I n="refresh" s={12} />Refresh model lists</button><Hint text={HELP.modelLists} label="model lists" /></div>}>
+  const connections = () => m().connections;
+  return <Shell section="models" wide title="Models" lead="Switch on the models tasks may use. Only these appear in the model selector and in automatic routing. New models stay off until you switch them on." bar={<Bar d={d} />}
+    head={<div class="row ws-gap4 ws-head-acts"><input class="inp ws-filter" aria-label="Filter models" placeholder="Filter models" value={filter()} onInput={e => setFilter(e.currentTarget.value)} /><button class="btn btn-line btn-sm" aria-disabled={offline() ? "true" : undefined} data-why={offline()} {...ws.needs("refresh_models")} onClick={refresh}><I n="refresh" s={12} />Refresh model lists</button></div>}>
     <SourceStrips />
-    <div class="ws-split" data-open={selected() ? "true" : "false"}>
-      <div class="ws-split-l">
-        <For each={ENGINES}>{e => {
-          const rules = () => v().engines[e.id], used = () => engineInUse(v(), e.id), auto = () => v().providers.includes(e.id), c = () => cat()[e.id];
-          const last = () => auto() && v().providers.length === 1;
-          const gone = () => notOffered(v(), cat(), e.id);
-          return <>
-            <SetH title={e.label}>
-              <Show when={c().observedAt !== null}><span class="cap faint ws-w400 tnum">Observed {clock(c().observedAt)}</span></Show>
-              <Show when={c().failed}><span class="cap st-warn ws-w400">List could not be read, previous one kept</span></Show>
-              <label class="sw-l">Use<Sw label={`Use ${e.label}`} checked={used()} disabled={off()} onChange={on => d.set(setEngineUse(v(), e.id, on))} /></label>
-              <label class="sw-l">Automatic routing<Sw label={`${e.label} in automatic routing`} checked={auto()} disabled={off() ?? (last() ? "The last engine stays: automatic routing needs one" : undefined)} onChange={on => d.set(setProvider(v(), e.id, on))} /></label>
-            </SetH>
-            <Show when={!used()}><div class="cap muted">Hidden from selection, refused when pinned. Connection and login stay.</div></Show>
-            <Show when={c().models.length > 0} fallback={<div class="surface ws-empty">{e.id === "opencode" ? "No models. Enable OpenCode in Engine connections first. Its usage is not tracked." : "The engine listed no models."}</div>}>
-              <div class="surface"><div class="gt">
-                <div class="gr omrow th"><span>Model</span><span>Tiers</span><span>Effort</span><span>On</span><span>Auto</span><span>Preferred</span><span></span></div>
-                <For each={shown(e.id)}>{x => {
-                  const p = () => policyOf(v(), e.id, x.id), tierPath = () => `models.${e.id}.tiers.${x.id}`;
-                  const prefs = () => p().preferredFor?.length ?? 0, hasError = () => d.problems().some(q => q.path === tierPath());
-                  const isSel = () => picked()?.engine === e.id && picked()?.model === x.id;
-                  return <div class="gr omrow ws-pointer" role="row" aria-selected={isSel() ? "true" : "false"} onClick={() => setPicked({ engine: e.id, model: x.id })}>
-                    <span class="trunc"><button class="ws-cellbtn w500 trunc" onClick={ev => { ev.stopPropagation(); setPicked({ engine: e.id, model: x.id }); }}>{x.label}</button><span class="sub mono trunc">{x.id}</span>
-                      <Show when={!x.observed}><span class="sub st-warn">Not confirmed by the engine yet</span></Show>
-                      <Show when={hasError()}><span class="ws-err" data-problem="">Choose a tier.</span></Show></span>
-                    <span><Tiers label={x.label} on={rules().tiers[x.id] ?? []} disabled={off()} onChange={(t, on) => d.set(setTier(v(), e.id, x.id, t, on))} /></span>
-                    <span class="cap muted tnum trunc">{effortRange(p())}</span>
-                    <span onClick={ev => ev.stopPropagation()}><Sw label={`${x.label} enabled`} checked={rules().enabled.includes(x.id)} disabled={off()} onChange={on => d.set(setModelEnabled(v(), e.id, x.id, on))} /></span>
-                    <span onClick={ev => ev.stopPropagation()}><Sw label={`${x.label} in automatic routing`} checked={autoOn(v(), e.id, x.id)} disabled={off()} onChange={on => d.set(setModelAuto(v(), e.id, x.id, on))} /></span>
-                    <span class="cap muted tnum">{prefs() ? `${prefs()} kind${prefs() === 1 ? "" : "s"}` : ""}</span>
-                    <I n="chevron-right" s={14} class="faint" />
-                  </div>;
-                }}</For>
-              </div></div>
-              <div class="row ws-gap4"><button class="btn btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) bulk(e.id, true); }}>Turn on all shown</button><button class="btn btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) bulk(e.id, false); }}>Turn off all shown</button></div>
-            </Show>
-            <Show when={gone().length > 0}>
-              <SetH title="Not offered now" />
-              <div class="surface"><For each={gone()}>{id => <div class="srow"><span><span class="t mono">{id}</span><span class="d">Enabled here, but {e.label} does not list it. Nothing is inferred.</span></span><span class="ctl"><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} aria-label={`Remove ${id}`} onClick={() => { if (!off()) d.set(setModelEnabled(v(), e.id, id, false)); }}>Remove</button></span></div>}</For></div>
-            </Show>
-          </>;
-        }}</For>
-      </div>
-      <div class="ws-split-r">
-        {/* Keyed by the picked model, not by its catalogue entry: a background catalogue read updates the panel in place. */}
-        <Show when={selected() ? `${selected()!.engine}:${selected()!.model}` : null} keyed fallback={<div class="surface ws-empty">Pick a model to see its policy.</div>}>
-          {_ => { const first = selected()!, s = () => selected() ?? first; return <Detail engine={s().engine} model={s().entry} rules={v()} set={r => d.set(r)} off={off()} problems={d.problems()} back={() => setPicked(null)} />; }}
+    <section class="set-grp" aria-labelledby="set-lists-h">
+      <SetH title={<span id="set-lists-h">Model lists</span>}><Hint text={HELP.modelLists} label="model lists" /></SetH>
+      <Rec>After an engine update, refresh to see new models.</Rec>
+      <Show when={connections().length > 0} fallback={<div class="surface ws-empty">No connection is registered. Add one under <A class="lnk" to={sectionTo(m().id, "connections")}>Connections</A>.</div>}>
+        <div class="surface"><For each={connections()}>{x => {
+          const c = () => cat()[CONNECTION_ENGINE[x.engine]];
+          return <Srow t={`${ENGINES.find(e => e.id === CONNECTION_ENGINE[x.engine])?.label ?? x.engine} · ${x.label}`} d={c()?.failed ? "List could not be read; the previous one is kept." : c()?.observedAt ? `Observed ${clock(c()!.observedAt)}, ${c()!.models.length} model${c()!.models.length === 1 ? "" : "s"} listed.` : "Not read yet."}>
+            <Show when={c()?.failed}><span class="st st-warn"><I n="alert" s={12} />Not read</span></Show>
+          </Srow>;
+        }}</For></div>
+      </Show>
+    </section>
+    <For each={ENGINES}>{e => {
+      const rules = () => v().engines[e.id], c = () => cat()[e.id], used = () => engineInUse(v(), e.id);
+      const on = () => c().models.filter(x => rules().enabled.includes(x.id)).length;
+      const gone = () => notOffered(v(), cat(), e.id);
+      const hasConnection = () => connections().some(x => CONNECTION_ENGINE[x.engine] === e.id);
+      const engineOff = () => used() ? undefined : `${e.label} is switched off under Engines and models`;
+      return <section class="set-grp" aria-labelledby={`set-eng-${slug(e.id)}`}>
+        <SetH title={<span id={`set-eng-${slug(e.id)}`}>{e.label}</span>}>
+          <Show when={c().models.length > 0}><span class="cap faint ws-w400 tnum">{on()} of {c().models.length} on</span></Show>
+        </SetH>
+        {/* On their own line, so the engine's name always has the heading's width, also on a phone. */}
+        <Show when={shown(e.id).length > 1}>
+          <div class="row ws-gap4 ws-head-acts">
+            <button class="btn btn-line btn-sm" aria-disabled={off() ?? engineOff() ? "true" : undefined} data-why={off() ?? engineOff()} onClick={() => { if (!off() && !engineOff()) bulk(e.id, true); }}>Turn on all shown</button>
+            <button class="btn btn-line btn-sm" aria-disabled={off() ?? engineOff() ? "true" : undefined} data-why={off() ?? engineOff()} onClick={() => { if (!off() && !engineOff()) bulk(e.id, false); }}>Turn off all shown</button>
+          </div>
         </Show>
+        <Show when={!used()}><div class="note-box plain"><I n="alert" s={14} /><span>{e.label} is switched off, so its models are hidden and never routed. <A class="lnk" to={orchTo(m().id, "engines")}>Engines and models</A></span></div></Show>
+        <Show when={c().models.length > 0} fallback={<div class="surface ws-empty">{e.id === "opencode" ? "No models. Enable OpenCode under Connections first." : hasConnection() ? "No models known yet: refresh the model lists." : "No connection for this engine."}</div>}>
+          <Show when={shown(e.id).length > 0} fallback={<div class="surface ws-empty">No model matches the filter.</div>}>
+            <div class="surface"><For each={shown(e.id)}>{x => {
+              const rule = () => blockingRule(v(), e.id, x.id);
+              return <Srow t={x.label} d={<><span class="mono">{x.id}</span>{x.observed ? x.contextWindow ? `, context window ${x.contextWindow.toLocaleString("en")} tokens` : "" : ". Not confirmed by the engine yet"}<Show when={rule()}>{r => <span class="ws-block">Off because of "{r()}", which can cover other models too.</span>}</Show></>}>
+                <Show when={rule()}>{r => <button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) d.set(setDeny(v(), v().deny.filter(t => t !== r()))); }}>Remove rule "{r()}"</button>}</Show>
+                <Sw label={`${x.label} enabled`} checked={rules().enabled.includes(x.id) && !rule()} disabled={off() ?? engineOff() ?? (rule() ? `Off because of "${rule()}"` : undefined)} onChange={on => d.set(setModelEnabled(v(), e.id, x.id, on))} />
+              </Srow>;
+            }}</For></div>
+          </Show>
+        </Show>
+        <Show when={gone().length > 0}>
+          <SetH title={`${e.label}: not offered now`} />
+          <div class="surface"><For each={gone()}>{id => <Srow t={<span class="mono">{id}</span>} d={`Switched on here, but ${e.label} does not list it now. Nothing is inferred.`}><button class="btn btn-line btn-sm" aria-disabled={off() ? "true" : undefined} data-why={off()} aria-label={`Remove ${id}`} onClick={() => { if (!off()) d.set(setModelEnabled(v(), e.id, id, false)); }}>Remove</button></Srow>}</For></div>
+        </Show>
+      </section>;
+    }}</For>
+  </Shell>;
+}
+
+const SETUP_WORDS = { not_downloaded: "Not downloaded", downloaded_no_login: "Downloaded, sign in on this machine", ready_to_connect: "Ready to connect", connected: "Connected" } as const;
+const STATE_WORDS = { connected: "configured", needs_login: "sign in needed" } as Record<string, string>;
+/** Section 3: how automatic routing uses the models that are on. Every model stays selectable by hand. */
+export function EnginesModels() {
+  const ws = useWs();
+  const d = useRouting(), off = useRoutingOff();
+  const v = () => d.value(), m = () => ws.machine(), cat = () => m().config.catalogue;
+  const [open, setOpen] = createSignal<string | null>(null);
+  const orphans = createMemo(() => [...orphanTokens(v(), cat()).map(t => ({ t, list: "deny" as const })), ...v().autoAllow.filter(t => !ENGINES.some(e => cat()[e.id].models.some(x => `${e.id}/${x.id}` === t))).map(t => ({ t, list: "auto" as const }))]);
+  const dropToken = (x: { t: string; list: "deny" | "auto" }) => d.set(x.list === "deny" ? setDeny(v(), v().deny.filter(t => t !== x.t)) : { ...v(), autoAllow: v().autoAllow.filter(t => t !== x.t) });
+  return <Shell section="engines" wide title="Engines and models" lead="How automatic routing uses the models you switched on. Every model stays selectable by hand." bar={<Bar d={d} />}
+    head={<A class="btn btn-line btn-sm" to={orchTo(m().id, "effective")}><I n="eye" s={12} />Preview routes</A>}>
+    <SourceStrips />
+    <section class="set-grp" aria-labelledby="set-legend-h">
+      <SetH title={<span id="set-legend-h">What these switches change</span>}><Hint text={HELP.switchesLegend} label="engine and model switches" /></SetH>
+      <div class="surface ws-pad ws-legend">
+        <p>Use: off hides every model of the engine and refuses it when chosen or pinned. Automatic routing: off keeps its models selectable by hand only.</p>
+        <p>Automatic: the router may pick the model by itself, at the tiers you mark. Preferred work ranks it first for those kinds of work.</p>
       </div>
-    </div>
+    </section>
+    <For each={ENGINES}>{e => {
+      const rules = () => v().engines[e.id], used = () => engineInUse(v(), e.id), auto = () => v().providers.includes(e.id), c = () => cat()[e.id];
+      const last = () => auto() && v().providers.length === 1;
+      const own = () => m().connections.filter(x => CONNECTION_ENGINE[x.engine] === e.id);
+      const rows = () => c().models.filter(x => rules().enabled.includes(x.id));
+      const hasConnection = () => own().length > 0;
+      return <section class="set-grp" aria-labelledby={`set-em-${slug(e.id)}`}>
+        <SetH title={<span id={`set-em-${slug(e.id)}`}>{e.label}<Show when={e.id === "opencode"}><span class="faint ws-w400"> optional engine</span></Show></span>} />
+        <div class="surface">
+          <Srow t="Now" d={`${SETUP_WORDS[m().config.setup[e.id].status]}${own().length ? `. ${own().map(x => `${x.label}, ${STATE_WORDS[x.state] ?? "unavailable"}`).join("; ")}` : ". No connection."}`} />
+          <Srow t={`Use ${e.label}`} d={used() ? "Its models can be chosen and routed." : `Off: every ${e.label} model is hidden from the selector, refused when chosen or pinned, and never routed. Connections and logins stay.`} r="On for every engine you pay for.">
+            <Sw label={`Use ${e.label}`} checked={used()} disabled={off()} onChange={on => d.set(setEngineUse(v(), e.id, on))} />
+          </Srow>
+          <Srow t={`Automatic routing may use ${e.label}`} d={auto() ? "Workers may be routed to its models automatically." : "Its models stay selectable by hand; automatic routing, fallback and pins skip it."} r="On, so workers can use both plans.">
+            <Sw label={`Automatic routing may use ${e.label}`} checked={auto()} disabled={off() ?? (last() ? "At least one engine must stay available to automatic routing" : undefined)} onChange={on => d.set(setProvider(v(), e.id, on))} />
+            <Err problems={d.problems()} path="providers" />
+          </Srow>
+        </div>
+        <Show when={rows().length > 0} fallback={<div class="surface ws-empty">{!hasConnection() && !c().models.length ? "No models: no connection for this engine." : !c().models.length ? "No models known yet: refresh the model lists under Models." : <>No model of this engine is switched on (see <A class="lnk" to={orchTo(m().id, "models")}>Models</A>).</>}</div>}>
+          <div class="surface"><div class="gt">
+            <div class="gr oerow th"><span>Model</span><span>Automatic</span><span>Tiers</span><span>Preferred work</span><span></span></div>
+            <For each={rows()}>{x => {
+              const key = `${e.id}:${x.id}`, isOpen = () => open() === key;
+              const isAuto = () => autoOn(v(), e.id, x.id);
+              const p = () => policyOf(v(), e.id, x.id);
+              const tierError = () => d.problems().some(q => q.path === `models.${e.id}.tiers.${x.id}`);
+              const tokens = () => denyTokens(v(), e.id, x.id);
+              const allowToken = () => `${e.id}/${x.id}`;
+              return <>
+                <div class="gr oerow">
+                  <span class="trunc"><span class="w500 trunc">{x.label}</span><span class="sub mono trunc">{x.id}</span></span>
+                  <span><Sw label={`Pick ${x.label} automatically`} checked={isAuto()} disabled={off() ?? (rules().enabled.includes(x.id) ? undefined : "Switched off under Models")} onChange={on => d.set(setModelAuto(v(), e.id, x.id, on))} /><Show when={tierError()}><span class="ws-err" data-problem="">Choose a tier.</span></Show></span>
+                  <span><Tiers label={x.label} on={rules().tiers[x.id] ?? []} disabled={off() ?? (isAuto() ? undefined : "Turn on Automatic first")} onChange={(t, on) => d.set(setTier(v(), e.id, x.id, t, on))} /></span>
+                  <span class="cap muted trunc">{preferredWords(p())}</span>
+                  <button class="ib ws-ib" aria-label={`Details of ${x.label}`} aria-expanded={isOpen()} onClick={() => setOpen(isOpen() ? null : key)}><I n={isOpen() ? "chevron-down" : "chevron-right"} s={14} /></button>
+                </div>
+                <Show when={isOpen()}>
+                  {/* A row of one cell across the table, so the table stays a table with the details open. */}
+                  <div role="row"><div class="ws-mdetail" role="cell" aria-colspan={5}>
+                    <div class="ws-kv"><span class="cap muted">Now</span><span class="cap">{autoVerdict(v(), cat(), e.id, x.id)}<Show when={tokens().length > 0}>, matching <span class="mono">{tokens().join(", ")}</span></Show></span></div>
+                    <PreferredWork engine={e.id} model={x} rules={v()} set={r => d.set(r)} off={off()} problems={d.problems()} />
+                    <PreferWhen engine={e.id} model={x} rules={v()} set={r => d.set(r)} off={off()} problems={d.problems()} />
+                    <Show when={e.id === "opencode"}>
+                      <Srow t={`Allow ${x.label} in automatic routing`} d="OpenCode routes stay out of automatic routing unless allowed one by one. This writes an auto-allow entry for this exact route.">
+                        <Sw label={`Allow ${x.label} in automatic routing`} checked={v().autoAllow.includes(allowToken())} disabled={off()} onChange={on => d.set({ ...v(), autoAllow: on ? [...v().autoAllow, allowToken()] : v().autoAllow.filter(t => t !== allowToken()) })} />
+                      </Srow>
+                    </Show>
+                    <A class="lnk" to={orchTo(m().id, "routing", { tab: `policy:${e.id}:${x.id}` })}>Effort and policy for {x.label}</A>
+                  </div></div>
+                </Show>
+              </>;
+            }}</For>
+          </div></div>
+        </Show>
+      </section>;
+    }}</For>
+    <Show when={orphans().length > 0}>
+      <section class="set-grp" aria-labelledby="set-other-h">
+        <SetH title={<span id="set-other-h">Other entries in this file</span>} />
+        <div class="surface"><For each={orphans()}>{x => <Srow t={<span class="mono">{x.t}</span>} d={x.list === "deny" ? "Deny entry that matches no model this machine knows." : "Auto-allow entry that matches no model this machine knows."}><button class="btn btn-line btn-sm" aria-label={`Remove ${x.t}`} aria-disabled={off() ? "true" : undefined} data-why={off()} onClick={() => { if (!off()) dropToken(x); }}>Remove</button></Srow>}</For></div>
+      </section>
+    </Show>
   </Shell>;
 }

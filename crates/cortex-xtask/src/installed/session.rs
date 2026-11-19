@@ -329,12 +329,14 @@ pub fn run(channel: &Channel, backend: &str, phase: &str, close_cycles: u32) -> 
         };
         if phase == "cold-start" || phase == "incident" {
             click("Settings", "Back to workspace", &["link"], false)?;
-            click("Orchestration", "Coordinator", &["page tab"], false)?;
-            click("Profiles", "Saved", &["page tab"], false)?;
+            click("Orchestration", "Coordinator", &["link"], false)?;
+            click("Profiles", "Saved", &["link"], false)?;
             wait("six profiles with default active in Settings", || {
                 Ok(profiles_visible(&input.nodes()?))
             })?;
-            click("Coordinator", "Exact default route", &["page tab"], false)?;
+            // Coordinator is a group inside Defaults, not a navigation tab. Returning through
+            // the Defaults link keeps the check on the owner-visible settings route.
+            click("Defaults", "Exact default route", &["link"], false)?;
             wait("saved coordinator model and effort in Settings", || {
                 Ok(coordinator_visible(&input.nodes()?))
             })?;
@@ -826,56 +828,78 @@ fn journey_phase(
         input.has("Changes", &["landmark"])
     })?;
     input.key("Escape")?;
-    // Every reachable Settings navigation page is followed through a link.
+    // Every reachable Settings navigation page is followed through a real link. SettingsNav
+    // deliberately exposes page links (not ARIA tabs), including the orchestration children.
     click("Settings", "Back to workspace", &["link"], false)?;
     let pages = [
-        "Updates",
-        "Appearance",
-        "Voice input",
-        "Shortcuts",
-        "All machines",
-        "Overview",
-        "Engine connections",
-        "Orchestration",
-        "Coordinator",
-        "Models",
-        "Routing",
-        "Route preview",
-        "Limits and fallback",
-        "Tools and MCP",
-        "Profiles",
-        "Files and presets",
-        "Worktrees",
-        "Storage and archive",
-        "Diagnostics",
-        "Remote access",
+        ("Updates", "Updates"),
+        ("Appearance", "Appearance"),
+        ("Voice input", "Voice input"),
+        ("Shortcuts", "Shortcuts"),
+        ("All machines", "Machines"),
+        ("Overview", "Open machine settings"),
+        // The bare Orchestration link intentionally opens the Defaults page.
+        ("Orchestration", "Defaults"),
+        ("Defaults", "Defaults"),
+        ("Models", "Models"),
+        ("Engines and models", "Engines and models"),
+        ("Project ceiling", "Project ceiling"),
+        ("Routing", "Routing"),
+        ("MCP servers", "MCP servers"),
+        ("Profiles", "Profiles"),
+        ("Connections", "Connections"),
+        ("Worktrees", "Worktrees"),
+        ("Storage and archive", "Storage and archive"),
+        ("Diagnostics", "Diagnostics"),
+        ("Remote access", "Remote access"),
     ];
-    for name in pages {
-        let headings = |input: &Input| -> Res<Vec<String>> {
-            Ok(input
-                .nodes()?
-                .into_iter()
-                .filter(|n| n.role == "heading")
-                .map(|n| n.name)
-                .collect())
-        };
-        let old = headings(input)?;
-        input.click(name, &["page tab"], name == "All machines")?;
-        if name == "Coordinator" {
-            // Alias of the default Orchestration page.
-            wait("selected Coordinator page", || {
-                Ok(input.nodes()?.iter().any(|n| n.name == name && n.selected))
-            })?;
-        } else {
-            wait(&format!("Settings content {name}"), || {
-                Ok(headings(input)? != old)
-            })?;
-        }
-        if name != "All machines" {
-            input.stable(name)?;
-        }
-        emit("settings_page", vec![("name", s(name))]);
+    for (name, marker) in pages {
+        input.click(name, &["link"], name == "All machines")?;
+        wait(&format!("Settings content {name}"), || {
+            input.has(marker, &["heading"])
+        })?;
+        input.stable(marker)?;
+        emit(
+            "settings_page",
+            vec![("name", s(name)), ("marker", s(marker))],
+        );
     }
+
+    // Route preview and Files and sources are deliberately secondary links from
+    // Routing, not SettingsNav entries. Exercise both links and their exact page
+    // headings, then return through each page's real Routing link.
+    input.click("Routing", &["link"], false)?;
+    wait("Routing page before secondary links", || {
+        input.has("Routing", &["heading"])
+    })?;
+    input.click("Preview routes", &["link"], false)?;
+    wait("Route preview page", || {
+        input.has("Route preview", &["heading"])
+    })?;
+    input.stable("Route preview")?;
+    emit(
+        "settings_page",
+        vec![
+            ("name", s("Preview routes")),
+            ("marker", s("Route preview")),
+        ],
+    );
+    input.click("Routing", &["link"], false)?;
+    wait("Routing page before files link", || {
+        input.has("Routing", &["heading"])
+    })?;
+    input.click("Files and sources", &["link"], false)?;
+    wait("Files and sources page", || {
+        input.has("Files and sources", &["heading"])
+    })?;
+    input.stable("Files and sources")?;
+    emit(
+        "settings_page",
+        vec![
+            ("name", s("Files and sources")),
+            ("marker", s("Files and sources")),
+        ],
+    );
     click("Back to workspace", "Inbox", &["link"], false)?;
     Ok(())
 }

@@ -266,6 +266,17 @@ not a claim that every engine is technically unable to inspect source.
 
 The native runtime does not enforce situational skill triggers at worker `result_submit`: it retains neither a per-attempt tree manifest nor a record of which skills an attempt read (`read_skill` is a read that records nothing), so a refusal such as `situational_skill_required` cannot be grounded in observable data and is not issued. Skill use rests on the role instructions and the `read_skill` catalogue of situational triggers (for example `documentation-sync` before assessing documentation impact), and on independent review. The earlier per-attempt manifest gate belonged to the Python runtime.
 
+Every worker finishes its own assignment within its role and permissions. A
+`result_submit` that leaves something the worker can still do is refused
+correctably with the outstanding items listed, and the same session continues;
+a failure (`assignment_outcome: "failed"`) is accepted only with a structured
+`blocker` naming the dead end (`missing_access`, `owner_decision`,
+`other_role_work` or `tool_unavailable`) and its concrete detail, which reaches
+the coordinator with the handoff. A turn that ends without a result is asked once
+more in the same session. No role is redispatched for the same revision and
+objective because an earlier attempt left work undone; only a lost process is
+retried within the bounded retry window.
+
 An independent reviewer is a fresh runtime assignment. Its verdict controls the
 review/fix loop, while actual command verification belongs to the runtime. Route policy is configured by the user and resolved by the runtime for each role; per-node model hints are validated recommendations, not authority.
 

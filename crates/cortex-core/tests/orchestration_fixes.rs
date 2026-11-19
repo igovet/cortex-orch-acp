@@ -59,6 +59,48 @@ fn routed(db: &Transaction<'_>, node: &str, a: &str, model: &str, warning: bool)
     )?;
     Ok(())
 }
+
+#[test]
+fn failed_non_review_specialist_handoff_keeps_exact_blocker_for_coordinator() {
+    let p = Project::new();
+    let s = p.open();
+    TaskMachine::new(&s).create("t", "goal", "owner").unwrap();
+    s.write(|db| {
+        db.execute(
+            "UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='t'",
+            [],
+        )?;
+        db.execute(
+            "INSERT INTO runtime_nodes VALUES ('t',1,'build','worker-backend-dev',?,'[]','[\"src\"]','execution','failed','a1',?)",
+            (
+                "Implement the backend change",
+                json!({
+                    "report_ref":"report-build-1",
+                    "summary":"The provider refused the required deployment permission.",
+                    "blocker":"owner approval is required for deployment"
+                })
+                .to_string(),
+            ),
+        )?;
+        assert!(return_to_coordinator_tx(db, "t", "worker_failed")?);
+        let raw: String = db.query_row(
+            "SELECT payload_json FROM runtime_events WHERE task_id='t' AND type='RETURNED_TO_COORDINATOR' ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )?;
+        let payload: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(payload["reason"], "worker_failed");
+        assert_eq!(payload["handoff"]["role"], "worker-backend-dev");
+        assert_eq!(payload["handoff"]["report_ref"], "report-build-1");
+        assert_eq!(
+            payload["handoff"]["blocker"],
+            "owner approval is required for deployment"
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
 /// A one-node plan whose node carries explicit routing fields, already executed.
 fn executed() -> (Project, Store, EvidenceSnapshot, OwnerEpoch) {
     let p = Project::new();
@@ -157,7 +199,8 @@ fn request_changes_citing_a_failed_check_starts_a_fix_cycle() {
 fn an_approval_or_explicit_failure_citing_a_failed_check_still_fails_the_review() {
     for result in [
         json!({"report_ref":"review","summary":"ok","verdict":"APPROVE","checks":[{"name":"tests","outcome":"failed","tool_call_ref":"x"}]}),
-        json!({"report_ref":"review","summary":"broken","verdict":"REQUEST_CHANGES","assignment_outcome":"failed","checks":[]}),
+        json!({"report_ref":"review","summary":"broken","verdict":"REQUEST_CHANGES","assignment_outcome":"failed","checks":[],
+            "blocker":{"kind":"tool_unavailable","detail":"The project's test runner is not installed on this host."}}),
     ] {
         let (_p, s, mut e, _o) = executed();
         submit_review(&s, &mut e, result).unwrap();

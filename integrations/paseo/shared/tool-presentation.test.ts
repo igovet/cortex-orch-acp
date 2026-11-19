@@ -4,7 +4,7 @@ import { KNOWN_CORTEX_TOOL_NAMES, presentToolSemantics } from "./tool-presentati
 
 const cortexTools = [
   "answer_submit", "replan_request", "scope_request", "escalation_request",
-  "project_read", "project_write", "project_edit", "project_delete", "project_mkdir", "project_git", "draft_write", "command_run",
+  "project_read", "project_write", "project_edit", "project_delete", "project_mkdir", "project_git", "draft_write", "command_run", "command_status",
   "create_task", "set_governance", "create_draft", "read_draft", "write_report",
   "list_reports", "read_report", "task_get_context", "plan_submit", "synthesis_submit",
   "user_question_request", "result_submit", "list_sources", "read_source",

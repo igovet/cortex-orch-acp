@@ -357,6 +357,33 @@ pub(super) fn execute(
         let value = read(store, i, name, args)?;
         authenticate(store, c, i)?;
         let value = finish(store, i, name, value)?;
+        // Keep an observable, channel-bound receipt for every successful report
+        // page. Review completion uses these receipts to prove that the reviewer
+        // actually consumed every predecessor report through its final page;
+        // prose in the result is not evidence of a read.
+        if name == "read_report" {
+            let report_id = value["report_id"].as_str().unwrap_or_default();
+            if !report_id.is_empty() {
+                store.write(|db| {
+                    cortex_core::lifecycle::event_tx(
+                        db,
+                        &i.task,
+                        "REPORT_PAGE_READ",
+                        json!({
+                            "channel_id": c.channel_id,
+                            "assignment_ref": i.assignment,
+                            "attempt": i.attempt,
+                            "report_id": report_id,
+                            "cursor": args["cursor"],
+                            "next_cursor": value["next_cursor"],
+                            "sha256": value["sha256"],
+                            "total_characters": value["total_characters"]
+                        }),
+                    )?;
+                    Ok(())
+                })?;
+            }
+        }
         return crate::native_commands::defer_json(store, i, value);
     }
     let generated = crate::identity()?;

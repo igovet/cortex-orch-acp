@@ -185,14 +185,14 @@ The SDK lists old Haiku separately; the observed ACP picker only exposed
 the new alias. This is configuration/control evidence, not inference from
 the generic unknown-model effort fallback and not a paid inference result.
 
-The public preset and the owner's active `default` profile enable `haiku`
-with the same light tier, testing stretch, high→xhigh→max ladder, maximum,
+The public preset enables `haiku` with the same light-only tier (no
+`also_standard_for` testing override), high→xhigh→max ladder, maximum,
 preferences and request-name policy as `codex-acp/gpt-6-luna`.
 `seven_day_haiku` names that exact alias. Only the old exact
 `claude-agent-acp/claude-haiku-4-5-20251001` is denied; Cortex deny matching
 does not infer families. Existing owner settings are not silently replaced
-by installation; this production adoption was explicitly authorized and
-backed up. New sessions must use the refreshed install, not the original SDK.
+by installation, so the preset does not establish the policy of an existing
+profile. New sessions must use the refreshed install, not the original SDK.
 
 SDK 0.3.293's `sdk.mjs` `fT` still separates system/preset-append
 instructions from conversation input, and its initialize control payload

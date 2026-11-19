@@ -166,7 +166,7 @@ async fn tasks_without_a_runtime_record_or_with_a_damaged_state_never_fail_the_p
         INSERT INTO tasks VALUES ('damaged','{r}','0');
         INSERT INTO runtime_tasks(task_id,state,goal,created_at,updated_at) VALUES ('damaged','NOT_A_STATE','g','0','0');
         INSERT INTO task_owners VALUES ('damaged','python-owner',1,'0');")).await;
-    runtime.recover().await.unwrap();
+    runtime.recover_fixture().await.unwrap();
     // Positive evidence settles the old task's rows; no runtime event is written for it.
     assert_eq!(sql(&runtime, "SELECT group_concat(idempotency_key||':'||status,',') FROM (SELECT * FROM delegation_provisioning WHERE task_id='legacy-old' ORDER BY idempotency_key)").await,
         "old-failed:terminated,old-open:in_progress,old-ready:terminated");
@@ -188,7 +188,7 @@ async fn tasks_without_a_runtime_record_or_with_a_damaged_state_never_fail_the_p
         "NOT_A_STATE:"
     );
     // A later restart is just as quiet.
-    runtime.recover().await.unwrap();
+    runtime.recover_fixture().await.unwrap();
     close(root, runtime).await;
 }
 
@@ -210,7 +210,7 @@ async fn a_finished_python_task_is_adopted_and_its_result_is_shown_as_an_earlier
             .to_string(),
         "native_execution_binding_invalid"
     );
-    runtime.recover().await.unwrap();
+    runtime.recover_fixture().await.unwrap();
     assert_eq!(sql(&runtime, "SELECT json_extract(payload_json,'$.finished')||':'||json_extract(payload_json,'$.replayed') FROM runtime_events WHERE type='NATIVE_TASK_ADOPTED'").await, "1:0");
     assert_eq!(sql(&runtime, "SELECT o.epoch=e.owner_epoch AND o.epoch=2 FROM task_owners o JOIN workspace_executions e ON e.runtime_task_id=o.task_id").await, "1");
     // The finished result reads as a read-only result of an earlier version, with its
@@ -278,7 +278,7 @@ async fn a_finished_python_task_is_adopted_and_its_result_is_shown_as_an_earlier
     );
     relaunched(&runtime).await;
     // Adoption happens once.
-    runtime.recover().await.unwrap();
+    runtime.recover_fixture().await.unwrap();
     assert_eq!(
         sql(
             &runtime,
@@ -318,7 +318,7 @@ async fn process_records_end_only_when_their_process_cannot_run() {
         purge(&runtime).await.unwrap_err().code(),
         "active_execution"
     );
-    runtime.recover().await.unwrap();
+    runtime.recover_fixture().await.unwrap();
     assert_eq!(sql(&runtime, "SELECT group_concat(attempt_id||':'||coalesce(termination_reason,'open'),',') FROM (SELECT * FROM attempt_process_registry ORDER BY attempt_id)").await,
         "p-dead:process_gone,p-live:open,p-old:previous_boot");
     // The live process still blocks deletion; once it ends, Delete proceeds.
@@ -357,7 +357,7 @@ async fn never_started_legacy_rows_settle_and_restarts_record_nothing_new() {
         INSERT INTO capacity_reservations VALUES ('py-r2','fixture','{task}',NULL,'py-a2','worker','released','0','0','never_started');
         INSERT INTO delegation_provisioning VALUES ('unconfirmed','{task}',NULL,'x-a3','worker-backend-dev','ready','ambiguous',NULL,NULL,NULL,NULL,NULL,NULL,NULL,1,'0','0');
         INSERT INTO capacity_reservations VALUES ('x-r3','fixture','{task}',NULL,'x-a3','worker','ambiguous','0','0','termination_unconfirmed');")).await;
-    runtime.recover().await.unwrap();
+    runtime.recover_fixture().await.unwrap();
     assert_eq!(sql(&runtime, "SELECT group_concat(idempotency_key||':'||status,',') FROM (SELECT * FROM delegation_provisioning ORDER BY idempotency_key)").await,
         "py-failed:terminated,py-progress:terminated,unconfirmed:terminated");
     // The unconfirmed attempt's host is gone and no engine works in the project.
@@ -371,8 +371,8 @@ async fn never_started_legacy_rows_settle_and_restarts_record_nothing_new() {
     );
     let counted = "SELECT count(*) FROM runtime_events";
     let before = sql(&runtime, counted).await;
-    runtime.recover().await.unwrap();
-    runtime.recover().await.unwrap();
+    runtime.recover_fixture().await.unwrap();
+    runtime.recover_fixture().await.unwrap();
     assert_eq!(
         sql(&runtime, counted).await,
         before,
@@ -417,7 +417,7 @@ async fn a_result_held_only_for_a_descriptive_check_command_is_checked_again() {
         exec(&runtime, format!("
             UPDATE runtime_tasks SET state='RECOVERING',blocker='{blocker}',synthesis='Done.' WHERE task_id='{task}';
             INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES ('{task}','{verification}','runtime','{{}}','0');")).await;
-        runtime.recover().await.unwrap();
+        runtime.recover_fixture().await.unwrap();
         let resumed = "SELECT count(*) FROM runtime_events WHERE type='NATIVE_RECOVERY_RESUMED' AND json_extract(payload_json,'$.reason')='completion_rechecked' AND json_extract(payload_json,'$.state')='RECONCILING'";
         assert_eq!(
             sql(&runtime, resumed).await,
@@ -456,7 +456,7 @@ async fn a_dead_services_broker_directory_is_removed_on_recovery() {
     for dir in [&stale, &other] {
         std::fs::File::open(dir).unwrap().set_modified(old).unwrap();
     }
-    runtime.recover().await.unwrap();
+    runtime.recover_fixture().await.unwrap();
     assert!(
         !stale.exists(),
         "the dead service's broker directory stayed"
@@ -528,7 +528,7 @@ async fn an_unasked_legacy_work_stop_gets_its_question_on_start() {
         if followed {
             exec(&runtime, format!("INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES ('{task}','USER_STEERING','runtime','{{}}','0');")).await;
         }
-        runtime.recover().await.unwrap();
+        runtime.recover_fixture().await.unwrap();
         let state = sql(
             &runtime,
             "SELECT state||':'||coalesce(blocker,'') FROM runtime_tasks",
@@ -543,7 +543,7 @@ async fn an_unasked_legacy_work_stop_gets_its_question_on_start() {
                 ("WAITING_USER:lost_worker_action_outcome_unknown", "1")
             );
             // A later start does not ask twice.
-            runtime.recover().await.unwrap();
+            runtime.recover_fixture().await.unwrap();
             assert_eq!(
                 sql(
                     &runtime,

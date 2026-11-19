@@ -25,7 +25,7 @@ mod usage_refresh;
 pub(crate) use mcp_redact::redact as redact_display_text;
 mod native;
 // The native owner read and its result identity use the same saved task records.
-pub(crate) use native::product as native_product;
+pub(crate) use native::{product as native_product, queue_driven_mode};
 mod product;
 // The service takes the owner's queued messages at a task boundary.
 pub(crate) use product::{
@@ -42,7 +42,9 @@ mod retention;
 mod settings;
 pub mod settings_api;
 pub(crate) mod short_text;
+mod sprint_materialize;
 mod task_actions;
+pub(crate) mod task_auto_repair;
 pub(crate) mod task_facts;
 mod task_facts_attempts;
 mod task_facts_git;
@@ -51,7 +53,7 @@ mod task_facts_rerun;
 mod task_facts_shadow;
 mod task_facts_work;
 pub(crate) use task_facts_work::withdrawn as withdrawn_checks;
-mod task_lifecycle;
+pub(crate) mod task_lifecycle;
 mod task_merge;
 mod task_resolution;
 pub(crate) mod task_review;
@@ -90,6 +92,8 @@ const PROJECT_OPERATIONS: &[&str] = &[
     "product.facts",
     "product.task",
     "product.integrate",
+    "automatic.finish",
+    "automatic.queue",
     "product.sprint",
     "product.message",
     "product.comment",
@@ -157,7 +161,7 @@ impl crate::Service {
         let wakes = sprint_wake(&call);
         let project = call.project_id.clone();
         let call_action = call.params["action"].as_str().map(str::to_owned);
-        let reply = self.machine_helper(call).await;
+        let reply = self.machine_helper(call, false).await;
         // The sprint loop sleeps until something can move a sprint on: an owner or loop change of a sprint
         // or task record is one (a run mode, a queue state, an acceptance, a sprint membership).
         if let (true, Some(project), Ok(reply)) = (wakes, project.as_deref(), reply.as_ref()) {
@@ -178,11 +182,14 @@ impl crate::Service {
         let mut params = call.params.clone();
         params["action"] = json!("delete_prepare");
         let prepared = self
-            .machine_helper(MachineCall {
-                op: call.op.clone(),
-                project_id: call.project_id.clone(),
-                params: params.clone(),
-            })
+            .machine_helper(
+                MachineCall {
+                    op: call.op.clone(),
+                    project_id: call.project_id.clone(),
+                    params: params.clone(),
+                },
+                false,
+            )
             .await?;
         if prepared["ok"] != true || prepared["result"]["done"] == true {
             return Ok(prepared);
@@ -211,11 +218,14 @@ impl crate::Service {
         let until = tokio::time::Instant::now() + Duration::from_secs(15);
         loop {
             let reply = self
-                .machine_helper(MachineCall {
-                    op: call.op.clone(),
-                    project_id: call.project_id.clone(),
-                    params: params.clone(),
-                })
+                .machine_helper(
+                    MachineCall {
+                        op: call.op.clone(),
+                        project_id: call.project_id.clone(),
+                        params: params.clone(),
+                    },
+                    false,
+                )
                 .await?;
             if reply["ok"] != true
                 || reply["result"]["done"] == true
@@ -227,7 +237,34 @@ impl crate::Service {
         }
     }
 
-    async fn machine_helper(&self, call: MachineCall) -> io::Result<Value> {
+    // These operations are not accepted through the machine RPC. The scheduler
+    // invokes them via Rust, not by supplying a confirmation flag on the wire.
+    pub(crate) async fn automatic_sprint_action(
+        &self,
+        project: &str,
+        op: &str,
+        params: Value,
+    ) -> io::Result<Value> {
+        let reply = self
+            .machine_helper(
+                MachineCall {
+                    op: op.to_owned(),
+                    project_id: Some(project.to_owned()),
+                    params,
+                },
+                true,
+            )
+            .await?;
+        if reply["result"]["changed"] == true || reply["result"]["done"] == true {
+            self.sprint_wake.project(project);
+            let _ = self
+                .events
+                .send(json!({"projectId":project,"type":"invalidation"}));
+        }
+        Ok(reply)
+    }
+
+    async fn machine_helper(&self, call: MachineCall, scheduler: bool) -> io::Result<Value> {
         self.accepting()?;
         // A coordinator page is the session's own retained, cursor-paged history (see
         // `coordinator::read`); it is not one of the native owner's worker rows.
@@ -350,7 +387,9 @@ impl crate::Service {
                 }}));
             }
         }
-        let native_supported = native::supported(&call.op)
+        let native_supported = (scheduler
+            && matches!(call.op.as_str(), "automatic.finish" | "automatic.queue"))
+            || native::supported(&call.op)
             || matches!(call.op.as_str(), "product.read" | "product.facts")
             || call.op == "product.task" && task_actions::supported(&call.params)
             || call.op == "config.action"

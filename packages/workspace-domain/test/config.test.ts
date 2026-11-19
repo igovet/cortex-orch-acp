@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { capture, configIssues, coordinatorResolution, emptyWorkspace, machineDefaults, profileChanges, sessionsOf } from "../src";
+import { capture, configIssues, coordinatorResolution, emptyWorkspace, machineDefaults, profileChanges, sessionsOf, tierFor } from "../src";
+
+describe("automatic role tiers", () => {
+  it("scales planning, general work and exploration by complexity", () => {
+    const complexities = ["low", "normal", "high"] as const;
+    for (const role of ["worker-general", "worker-planner", "worker-technical-writer"]) {
+      expect(complexities.map(complexity => tierFor(role, false, complexity))).toEqual(["light", "standard", "deep"]);
+    }
+    for (const escalate of [false, true]) {
+      expect(complexities.map(complexity => tierFor("worker-explorer", escalate, complexity))).toEqual(["light", "light", "standard"]);
+    }
+  });
+});
 
 describe("task default routes", () => {
   it("keeps the exact configured connection route instead of picking the first model", () => {

@@ -1,7 +1,7 @@
 import { checkAcceptanceBlocker } from "@cortex/workspace-domain";
 import { repoOf, taskCheckout, worktreeWork } from "@cortex/workspace-domain";
 import type { Check, ConflictFile, DiffHunk, DiffLine, FileDiff, FolderEntry, FolderOverview, MergeState, ProjectRepo, RepoCheckout, Task, TaskChanges, WorkspaceState } from "@cortex/workspace-domain";
-import { checkCounts, type ProjectSummary, type TaskView, type WorkspaceIndex } from "./selectors";
+import { checkCounts, staleResult, type ProjectSummary, type TaskView, type WorkspaceIndex } from "./selectors";
 
 /** Read models for review, merge, Code and Git. Every count on those screens comes from here; nothing here changes state. */
 export const reviewFor = (state: WorkspaceState, taskId: string): TaskChanges | null => state.reviews.find(r => r.taskId === taskId) ?? null;
@@ -9,19 +9,19 @@ const baseName = (path: string) => path.split("/").at(-1) ?? path;
 export const fileName = baseName;
 export const dirName = (path: string) => path.split("/").slice(0, -1).join("/");
 
-export function checksLine(checks: Check[]) {
+export function checksLine(checks: Check[], options?: { includeManualSkips: boolean }) {
   const c = checkCounts(checks);
-  const parts = [c.passed ? `${c.passed} passed` : "", c.failed ? `${c.failed} failed` : "", c.not_run ? `${c.not_run} not run` : "", c.unverified ? `${c.unverified} unverified` : ""].filter(Boolean);
+  const notRun = c.not_run + (options?.includeManualSkips ? checks.filter(c => c.kind === "manual" && c.outcome === "not_run").length : 0);
+  const parts = [c.passed ? `${c.passed} passed` : "", c.failed ? `${c.failed} failed` : "", notRun ? `${notRun} not run` : "", c.unverified ? `${c.unverified} unverified` : ""].filter(Boolean);
   return parts.length ? parts.join(", ") : checks.some(c => c.kind === "manual") ? "Check manually" : "No checks reported";
 }
 export const openChecks = (checks: Check[]) => checks.filter(c => c.kind !== "manual" && c.outcome !== "passed");
 export const needsOverride = (checks: Check[]) => checks.length === 0 || openChecks(checks).length > 0;
-/** Accepting takes the owner's tick: the machine asks for it, or the result itself shows checks that did not pass. The machine
- *  may ask while every listed check passed (a worker's check that policy kept from running), so its word comes first. */
-export const acceptNeedsTick = (task: Task) => task.reviewActions?.acknowledgeOpenChecks === true
-  || (!!task.result && needsOverride(task.result.checks) && !(task.result.kind === "answer" && task.result.acceptanceAvailable && task.result.checks.length === 0));
+/** Prefer the machine's acknowledgement decision: some listed skips are informational only. */
+export const acceptNeedsTick = (task: Task) => task.reviewActions?.acknowledgeOpenChecks
+  ?? (!!task.result && needsOverride(task.result.checks) && !(task.result.kind === "answer" && task.result.acceptanceAvailable && task.result.checks.length === 0));
 
-export const stale = (task: Task) => !!task.result && (task.workspaceDigest !== task.result.digest || task.result.warnings?.includes("workspace_drift") === true);
+export const stale = staleResult;
 /** Why the owner cannot accept this version now, or null when they can. */
 export function acceptBlocked(task: Task): string | null {
   if (!task.result) return "Available once a result is published";
@@ -46,6 +46,7 @@ export const changesOffered = (task: Task) => (task.status === "review" || task.
 export const acceptOffered = (task: Task) => task.status !== "done" && task.status !== "working" && task.status !== "stopping";
 export function mergeBlocked(task: Task): string | null {
   if (task.status === "done") return task.work === "merged" ? "This task is already merged" : "This task is closed";
+  if (stale(task)) return "This result is stale. Request a new result or close the task as is";
   if (task.conflict !== "none") return "Resolve the conflict first";
   if (!task.acceptance) return task.result ? `Accept v${task.result.version} first. Accepting is your decision, merging is a Git action.` : "Available once this task has an accepted result";
   return task.status === "ready_to_merge" ? null : "Available in Ready to merge";
@@ -58,6 +59,7 @@ export const noCommitReason = (task: Task) => `Which files this task changed in 
  * records it for exactly this version first, so the only blockers are the ones that would refuse that acceptance.
  */
 export function finishBlocked(task: Task): string | null {
+  if (stale(task)) return "This result is stale. Request a new result or close the task as is";
   // Its files are still being checked against the target branch: nothing is offered from facts not yet known.
   if (task.integrationFacts?.pending) return task.integrationFacts.reason ?? "Checking this task’s files against its target branch…";
   if (task.integrationFacts?.alreadyInTarget) return `Already in ${task.integrationFacts.targetBranch}. Close the task instead.`;

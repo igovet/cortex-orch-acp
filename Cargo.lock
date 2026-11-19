@@ -7264,6 +7264,7 @@ dependencies = [
  "base64 0.22.1",
  "cortex-core",
  "cortex-engine",
+ "futures",
  "icu_normalizer",
  "icu_properties",
  "libc",

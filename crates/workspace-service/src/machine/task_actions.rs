@@ -125,6 +125,34 @@ pub async fn run(
     }
     let mut record = product["tasks"][task].clone();
     let action = p["action"].as_str().unwrap_or("");
+    let close_as_is = action == "close" && p["choice"] == "as_is";
+    let review_hold = product["sprints"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|sprint| {
+            sprint["id"] == record["sprintId"]
+                && private_product::automatic_sprint(sprint)
+                && sprint["queueState"] == "paused"
+                && sprint["automaticQueue"]["kind"] == "settlement_blocked"
+                && sprint["automaticQueue"]["taskId"] == task
+                && sprint["automaticQueue"]["needsOwner"] == true
+        })
+        .and_then(|sprint| sprint["automaticQueue"]["code"].as_str());
+    let result_is_stale = matches!(
+        review_hold,
+        Some("stale_result" | "workspace_drift" | "task_files_changed" | "task_content_unknown")
+    ) || record["workspaceDigest"]
+        .as_str()
+        .zip(record["result"]["digest"].as_str())
+        .is_some_and(|(current, result)| current != result)
+        || record["result"]["warnings"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|warning| warning == "workspace_drift"));
+    let stale_automatic_acceptance =
+        close_as_is && record["acceptance"]["automatic"] == true && result_is_stale;
+    let automatic_acceptance_close = stale_automatic_acceptance
+        || close_as_is && review_hold == Some("automatic_acceptance_blocked");
     let mut version = None;
     match action {
         "edit" => {
@@ -443,6 +471,15 @@ pub async fn run(
         }
         action if super::task_lifecycle::supported(action) => {
             super::task_lifecycle::apply(root, project, task, &mut record, p, git).await?;
+            if automatic_acceptance_close
+                && action == "close"
+                && record["acceptance"]["automatic"] == true
+            {
+                // The saved product record may be intentionally compact and omit
+                // the hydrated result/workspace digests. Preserve the stale
+                // automatic-acceptance fact explicitly across restart.
+                record["notVerifiedByCortex"] = json!(true);
+            }
         }
         _ => {
             return Err(refuse(
@@ -452,12 +489,20 @@ pub async fn run(
         }
     }
     product["tasks"][task] = record;
-    if super::task_lifecycle::external(p) {
+    if super::task_lifecycle::external(p) || automatic_acceptance_close {
         if let Some(store) = context::open(root, OpenMode::RuntimeValidate)? {
             // Recheck under Start arbitration and retain it through the private save.
             store
                 .write(|db| {
                     super::task_lifecycle::settled(db, root, project, task)?;
+                    if automatic_acceptance_close {
+                        let runtime: String = db.query_row(
+                            "SELECT e.runtime_task_id FROM workspace_tasks w JOIN workspace_executions e
+                             ON e.execution_id=w.execution_id AND e.task_id=w.task_id WHERE w.project_id=? AND w.task_id=?",
+                            (project, task), |row| row.get(0),
+                        )?;
+                        cortex_core::lifecycle::automatic::require_settled_execution(db, &runtime)?;
+                    }
                     settings::write_json(
                         &product_path(state, project)
                             .map_err(|e| cortex_core::CoreError::Refused(e.code))?,
@@ -467,6 +512,8 @@ pub async fn run(
                     Ok(())
                 })
                 .map_err(super::task_lifecycle::settle_error)?;
+        } else if automatic_acceptance_close {
+            return Err(super::task_lifecycle::unsettled());
         } else {
             settings::write_json(&product_path(state, project)?, &product)?;
         }

@@ -287,7 +287,9 @@ pub fn accept_routed_tx(
     plan: &Value,
     model_hints: &Value,
 ) -> CoreResult<Value> {
-    let canonical = validate(plan)?;
+    // A read-only sprint planning task's study names no commands: the runtime
+    // verifies its deliverable, the submitted plan (see `sprint_planning`).
+    let canonical = super::sprint_planning::validate_plan(db, task, plan, validate)?;
     request_tx(db, task, actor, key, "plan_submit", plan, || {
         let (state, revision) = domain::task_tx(db, task)?;
         if state != TaskState::Planning {
@@ -297,6 +299,8 @@ pub fn accept_routed_tx(
         if live {
             return refuse("workers_still_live_or_unknown");
         }
+        // A read-only sprint planning task dispatches only read-only specialists.
+        super::sprint_planning::require_read_only_plan(db, task, &canonical)?;
         // The owner's write denials in force (lifted ones excluded).
         let denied = super::steering::denials(db, task)?;
         for n in canonical["tasks"].as_array().unwrap() {
@@ -311,14 +315,18 @@ pub fn accept_routed_tx(
                 return refuse("write_denied");
             }
         }
+        super::automatic::require_failed_checks(db, task, &canonical["verification"])?;
+        super::completion::require_repair_commands(db, task, &canonical["verification"])?;
         let revision = revision + 1;
         let mut proposed = canonical["tasks"].as_array().unwrap().clone();
+        let automatic = super::automatic::consultation(db, task)?;
         let escalation:Option<String>=db.query_row("SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REPLAN_REQUEST_ACCEPTED' ORDER BY id DESC LIMIT 1",
             [task],|r|r.get(0)).optional()?;
+        let escalation = automatic.map(|v| v.to_string()).or(escalation);
         if let Some(raw) = escalation {
             let escalation: Value = serde_json::from_str(&raw)?;
             if escalation["operation"] == "escalation_request"
-                && escalation["revision"] == revision - 1
+                && (escalation["revision"] == revision - 1 || escalation["automatic"] == true)
             {
                 let proposal = &escalation["proposal"];
                 let objective = format!(

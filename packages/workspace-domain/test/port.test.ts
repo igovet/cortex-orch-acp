@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyFacts, applyMachineFacts, applyProjection, compareVersions, emptyWorkspace, LOCAL_MACHINE_ID, overlayTask, projectionKey, type Project, type ProjectFacts, type ProjectionUpdate, type Sprint, type Task, type WorkspaceState } from "../src";
+import { applyFacts, applyMachineFacts, applyProjection, compareVersions, emptyWorkspace, LOCAL_MACHINE_ID, overlayTask, projectionKey, runBlocker, type Project, type ProjectFacts, type ProjectionUpdate, type Sprint, type Task, type WorkspaceState } from "../src";
 import { canRun, capabilityOf, noCapabilities, WIRE_OPERATIONS } from "../src/capabilities";
 
 const project: Project = { id: "p", machineId: LOCAL_MACHINE_ID, name: "P", repository: "/p", openBranch: "", defaultBranch: "" };
@@ -28,6 +28,29 @@ it("does not add a message sent before the part of a conversation that was read 
   // Read to its beginning, the conversation holds every message it does not record.
   state.sessions = [{...state.sessions[0], historyEarlier: undefined}];
   expect(ids(applyFacts(state, facts))).toEqual(["h", "facts:message:old", "facts:message:new"]);
+});
+
+it("a cancelled or archived Hybrid member is skipped like the service skips it, so Continue queue stays open", () => {
+  const state = emptyWorkspace();
+  const sprint = { planning: "created", runMode: "hybrid", taskIds: ["a", "b"] } as Sprint;
+  state.tasks = [{ id: "a", title: "One", status: "done", closedAs: "cancel" } as Task, { id: "b", title: "Two", status: "draft", closedAs: null } as Task];
+  expect(runBlocker(state, sprint)).toBeNull();
+  state.tasks[0] = { id: "a", title: "One", status: "draft", closedAs: null, archive: { at: 1 } } as unknown as Task;
+  expect(runBlocker(state, sprint)).toBeNull();
+});
+
+it("keeps the Hybrid review blocker but uses recorded queue holds in Automatic", () => {
+  const state = emptyWorkspace();
+  const sprint = { planning: "created", runMode: "hybrid", taskIds: ["t"] } as Sprint;
+  state.tasks = [{ id: "t", title: "One", status: "draft" } as Task];
+  expect(runBlocker(state, sprint)).toBeNull();
+  expect(runBlocker(state, { ...sprint, runMode: "manual" })).toContain("Select Hybrid or Automatic");
+  state.tasks[0].status = "review";
+  expect(runBlocker(state, sprint)).toBe("Review One first");
+  const automatic: Sprint = {...sprint, runMode:"automatic"};
+  expect(runBlocker(state, automatic)).toBeNull();
+  automatic.automaticQueue = {kind:"continuation",taskId:"t",code:"external_blocker",reason:"External blocker is still present",needsOwner:false};
+  expect(runBlocker(state, automatic)).toBe("External blocker is still present");
 });
 
 describe("machine facts", () => {

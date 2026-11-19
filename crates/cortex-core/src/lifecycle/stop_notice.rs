@@ -17,6 +17,7 @@ pub const KINDS: &[&str] = &[
     "review_blocked",
     "review_incomplete",
     "review_cycle_limit",
+    "review_no_progress",
     "verification_failed",
     "verification_review_revision_changed",
     "verification_revision_unavailable",
@@ -260,32 +261,42 @@ pub fn explain_tx(db: &Transaction<'_>, task: &str, blocker: &str, ru: bool) -> 
     let what: String = match blocker {
         "review_incomplete" => {
             let (role, result) = review_tx(db, task)?.unwrap_or(("worker-code-reviewer".into(), Value::Null));
-            let (_, revision) = domain::task_tx(db, task)?;
-            let reviews: i64 = db.query_row(
-                "SELECT count(*) FROM runtime_nodes WHERE task_id=? AND revision=? AND stage='review' AND status='completed'",
-                (task, revision),
-                |r| r.get(0),
-            )?;
             if let Some(t) = report_target(&result, &role) {
                 targets.push(t);
             }
+            // The blocker category the reviewer named, in plain words.
+            let why = |kind: &str| -> &'static str {
+                match (kind, ru) {
+                    ("missing_access", false) => "needs access or a permission the reviewer does not have",
+                    ("missing_access", true) => "нужен доступ или разрешение, которого у ревьюера нет",
+                    ("owner_decision", false) => "needs your decision",
+                    ("owner_decision", true) => "нужно ваше решение",
+                    ("other_role_work", false) => "needs work by another role first",
+                    ("other_role_work", true) => "сначала нужна работа другой роли",
+                    ("tool_unavailable", false) => "a needed tool is unavailable",
+                    ("tool_unavailable", true) => "нужный инструмент недоступен",
+                    (_, false) => "no blocker named",
+                    (_, true) => "причина не названа",
+                }
+            };
             let items: Vec<String> = result["not_covered"]
                 .as_array()
                 .map(|a| {
                     a.iter()
                         .take(5)
-                        .map(|i| format!("{} ({})", short(i["item"].as_str().unwrap_or(""), 80), short(i["reason"].as_str().unwrap_or(""), 120)))
+                        .map(|i| format!("{} ({}: {})", short(i["item"].as_str().unwrap_or(""), 80),
+                            why(i["blocker"].as_str().unwrap_or("")), short(i["reason"].as_str().unwrap_or(""), 120)))
                         .collect()
                 })
                 .unwrap_or_default();
             let more = result["not_covered"].as_array().map(Vec::len).unwrap_or(0).saturating_sub(items.len());
             recommended = None;
             let mut out = l(
-                &format!("{} independent reviews of these files in a row could not cover the whole change, so the result is neither approved nor rejected.", reviews.max(1)),
-                &format!("Независимое ревью этих файлов {} подряд не смогло охватить всё изменение, поэтому результат не принят и не отклонён.", times(reviews.max(1), true)),
+                "The independent review reached parts of the change it cannot check itself, so the result is neither approved nor rejected. Another review of the same files would meet the same obstacle, so none was started.",
+                "Независимое ревью дошло до частей изменения, которые не может проверить само, поэтому результат не принят и не отклонён. Повторное ревью тех же файлов упёрлось бы в то же препятствие, поэтому оно не запускалось.",
             );
             if items.is_empty() {
-                out.push_str(&l(" The last review named no confirmed problem and did not say what it left uncovered.", " Последнее ревью не назвало подтверждённых проблем и не указало, что осталось непроверенным."));
+                out.push_str(&l(" The review named no confirmed problem and did not say what it left uncovered.", " Ревью не назвало подтверждённых проблем и не указало, что осталось непроверенным."));
             } else {
                 let mut list = items.join("; ");
                 if more > 0 {
@@ -294,11 +305,11 @@ pub fn explain_tx(db: &Transaction<'_>, task: &str, blocker: &str, ru: bool) -> 
                 out.push_str(&l(&format!(" Not covered: {list}."), &format!(" Не охвачено: {list}.")));
             }
             if let Some(report) = result["report_ref"].as_str() {
-                out.push_str(&l(&format!(" The last review report is {report}."), &format!(" Последний отчёт ревью — {report}.")));
+                out.push_str(&l(&format!(" The review report is {report}."), &format!(" Отчёт ревью — {report}.")));
             }
             cont = l(
-                "the coordinator decides how to get the uncovered parts reviewed, for example by splitting the work into smaller reviewable steps",
-                "координатор решит, как добиться проверки непокрытых частей, например разбив работу на меньшие шаги",
+                "the coordinator gets these obstacles and decides how to clear them (a plan step for another role, a question to you about the decision or access needed), after which the change is reviewed again",
+                "координатор получает эти препятствия и решает, как их устранить (шаг плана для другой роли, вопрос вам о нужном решении или доступе), после чего изменение проверяется заново",
             );
             finish = l(
                 "the task closes as is: changes already made stay in the project, and the result stays unreviewed and unverified",
@@ -306,7 +317,7 @@ pub fn explain_tx(db: &Transaction<'_>, task: &str, blocker: &str, ru: bool) -> 
             );
             out
         }
-        "review_blocked" | "review_cycle_limit" => {
+        "review_blocked" | "review_cycle_limit" | "review_no_progress" => {
             let (role, result) = review_tx(db, task)?.unwrap_or(("worker-code-reviewer".into(), Value::Null));
             let summary = result["summary"].as_str().map(|s| short(s, 320));
             let findings = result["findings"].as_array().map(Vec::len).unwrap_or(0);
@@ -322,6 +333,12 @@ pub fn explain_tx(db: &Transaction<'_>, task: &str, blocker: &str, ru: bool) -> 
                 l(
                     &format!("The independent reviewer ({}) did not accept the result (verdict BLOCK).", role_word(&role)),
                     &format!("Независимый ревьюер ({}) не принял результат (вердикт BLOCK).", role_word(&role)),
+                )
+            } else if blocker == "review_no_progress" {
+                recommended = None;
+                l(
+                    "The last round of fixes made no progress: the review found the same problems again, or the files did not change since the previous review. Another identical fix and review round would repeat the same result, so none was started.",
+                    "Последний раунд исправлений ничего не изменил: ревью снова нашло те же проблемы, или файлы не изменились с прошлого ревью. Ещё один такой же раунд исправлений и ревью дал бы тот же результат, поэтому он не запускался.",
                 )
             } else {
                 let cycles: i64 = db.query_row("SELECT review_cycle FROM runtime_tasks WHERE task_id=?", [task], |r| r.get(0))?;
@@ -848,71 +865,99 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// An incomplete review is neither approval nor a block: a fresh reviewer whose
-    /// brief lists exactly what was left uncovered reviews again, at most twice, and
-    /// only then is the owner asked, with what stayed uncovered. A BLOCK naming no
-    /// finding counts as incomplete; a BLOCK with findings stops without a rerun.
+    /// An incomplete review is neither approval nor a block. Its named dead ends are
+    /// routed at once as the run mode's stop (here Manual: the owner's question names
+    /// each part with its blocker); no second reviewer is scheduled for the same
+    /// revision. A BLOCK naming no finding takes the same stop; a BLOCK with findings
+    /// stops as review_blocked.
     #[test]
-    fn an_incomplete_review_is_rerun_twice_before_the_owner_is_asked() {
+    fn an_incomplete_review_routes_its_dead_ends_without_another_review() {
         let (root, store) = store();
         lifecycle::TaskMachine::new(&store)
             .create("t", "g", "o")
             .unwrap();
         let incomplete = json!({"verdict":"INCOMPLETE","summary":"Part of the change was not reviewed.","report_ref":"r_aaaaaaaaaaaa","checks":[],
-            "not_covered":[{"item":"backend/src/modules/auth/limiter.ts","reason":"not read before the turn ended"},
-                           {"item":"r_2d6f9f5a3bf0","reason":"only its first page was read"}]});
+            "not_covered":[{"item":"backend/src/modules/auth/limiter.ts","blocker":"missing_access","reason":"the file is on a host the reviewer cannot reach"},
+                           {"item":"retry policy","blocker":"owner_decision","reason":"whether retries may be dropped is the owner's call"}]});
         store
             .write(|db| {
                 db.execute("UPDATE runtime_tasks SET state='REVIEWING',revision=4,review_cycle=1,plan_json='{\"tasks\":[]}' WHERE task_id='t'", [])?;
                 db.execute("INSERT INTO runtime_nodes VALUES ('t',4,'trace','worker-security-auditor','Trace','[]','[\"traefik/**\"]','execution','completed','a1','{}')", [])?;
                 db.execute("INSERT INTO runtime_nodes VALUES ('t',4,'_review_1','worker-code-reviewer','Review','[\"trace\"]','[\"**\"]','review','completed','rv',?)", [incomplete.to_string()])?;
-                for (n, assignment) in [(1, "rv1"), (2, "rv2")] {
-                    lifecycle::review::advance_tx(db, "t")?;
-                    assert_eq!(domain::task_tx(db, "t")?.0, crate::TaskState::Reviewing);
-                    let node = format!("_review_1_rerun{n}");
-                    let (deps, status, objective): (String, String, String) = db.query_row(
-                        "SELECT dependencies_json,status,objective FROM runtime_nodes WHERE task_id='t' AND node_id=?", [&node], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-                    assert_eq!((deps.as_str(), status.as_str()), ("[\"trace\"]", "pending"));
-                    assert!(objective.contains("- backend/src/modules/auth/limiter.ts (not covered because: not read before the turn ended)"), "{objective}");
-                    assert!(objective.contains("- r_2d6f9f5a3bf0 (not covered because: only its first page was read)"), "{objective}");
-                    db.execute("UPDATE runtime_nodes SET status='completed',assignment_ref=?,result_json=? WHERE node_id=?", (assignment, incomplete.to_string(), &node))?;
-                }
-                let reasons: Vec<String> = db.prepare("SELECT json_extract(payload_json,'$.reason') FROM runtime_events WHERE type='REVIEW_RERUN' ORDER BY id")?
-                    .query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
-                assert_eq!(reasons, ["review_incomplete", "review_incomplete"]);
-                assert_eq!(db.query_row("SELECT count(*) FROM pending_questions", [], |r| r.get::<_, i64>(0))?, 0);
-                // The third incomplete review: the owner is asked, once, with what stayed uncovered.
                 lifecycle::review::advance_tx(db, "t")?;
                 assert_eq!(domain::task_tx(db, "t")?.0, crate::TaskState::WaitingUser);
+                assert_eq!(db.query_row("SELECT count(*) FROM runtime_nodes WHERE task_id='t' AND stage='review'", [], |r| r.get::<_, i64>(0))?, 1);
+                assert_eq!(db.query_row("SELECT count(*) FROM runtime_events WHERE type='REVIEW_RERUN'", [], |r| r.get::<_, i64>(0))?, 0);
+                let routed: String = db.query_row("SELECT payload_json FROM runtime_events WHERE task_id='t' AND type='REVIEW_DEAD_END_ROUTED'", [], |r| r.get(0))?;
+                let routed: Value = serde_json::from_str(&routed)?;
+                assert_eq!(routed["blocked"][0]["blocker"], "missing_access");
+                assert_eq!(routed["blocked"][1]["blocker"], "owner_decision");
                 let text: String = db.query_row("SELECT text FROM pending_questions WHERE status='open'", [], |r| r.get(0))?;
                 assert!(text.starts_with("The task stopped: the independent review could not cover the whole change."), "{text}");
-                assert!(text.contains("3 independent reviews") && text.contains("Not covered: backend/src/modules/auth/limiter.ts (not read before the turn ended)"), "{text}");
+                assert!(text.contains("none was started"), "{text}");
+                assert!(text.contains("Not covered: backend/src/modules/auth/limiter.ts (needs access or a permission the reviewer does not have: the file is on a host the reviewer cannot reach)"), "{text}");
+                assert!(text.contains("retry policy (needs your decision: "), "{text}");
                 Ok(())
             })
             .unwrap();
-        // A BLOCK naming no finding is incomplete; a BLOCK with findings stops at once.
+        // A concrete finding in an INCOMPLETE review is repairable now. The
+        // coverage gap is carried into the fix's objective, and the mandatory
+        // fresh review is scheduled only after that fix.
         lifecycle::TaskMachine::new(&store)
-            .create("b", "g", "o")
+            .create("f", "g", "o")
             .unwrap();
         store
             .write(|db| {
-                db.execute("UPDATE runtime_tasks SET state='REVIEWING',revision=1,plan_json='{\"tasks\":[]}' WHERE task_id='b'", [])?;
-                db.execute("INSERT INTO runtime_nodes VALUES ('b',1,'w','worker-backend-dev','Work','[]','[\"src\"]','execution','completed','b1','{}')", [])?;
-                db.execute("INSERT INTO runtime_nodes VALUES ('b',1,'_review_1','worker-code-reviewer','Review','[\"w\"]','[\"**\"]','review','completed','brv',?)",
-                    [json!({"verdict":"BLOCK","summary":"Not sure.","report_ref":"r_bbbbbbbbbbbb","checks":[]}).to_string()])?;
-                lifecycle::review::advance_tx(db, "b")?;
-                let reason: String = db.query_row("SELECT json_extract(payload_json,'$.reason') FROM runtime_events WHERE task_id='b' AND type='REVIEW_RERUN'", [], |r| r.get(0))?;
-                assert_eq!(reason, "block_without_findings");
-                let blocked = json!({"verdict":"BLOCK","summary":"Secrets are logged.","report_ref":"r_cccccccccccc","checks":[],
-                    "findings":[{"node":"w","files":["src/a.rs"],"cross_cutting":false,"fix":"Stop logging the token"}]});
-                db.execute("UPDATE runtime_nodes SET status='completed',assignment_ref='brv1',result_json=? WHERE task_id='b' AND node_id='_review_1_rerun1'", [blocked.to_string()])?;
-                lifecycle::review::advance_tx(db, "b")?;
-                assert_eq!(db.query_row("SELECT count(*) FROM runtime_events WHERE task_id='b' AND type='REVIEW_RERUN'", [], |r| r.get::<_, i64>(0))?, 1);
-                // The first blocking stop returns to the coordinator to address the findings.
-                assert_eq!(db.query_row("SELECT json_extract(payload_json,'$.blocker') FROM runtime_events WHERE task_id='b' AND type='ASK_USER_REQUIRED'", [], |r| r.get::<_, String>(0))?, "review_blocked");
+                db.execute("UPDATE runtime_tasks SET state='REVIEWING',revision=1,review_cycle=1,plan_json='{\"tasks\":[{\"id\":\"worker\"}]}' WHERE task_id='f'", [])?;
+                db.execute("INSERT INTO runtime_nodes VALUES ('f',1,'worker','worker-backend-dev','Work','[]','[\"src/**\"]','execution','completed','fw','{}')", [])?;
+                db.execute("INSERT INTO runtime_nodes VALUES ('f',1,'_review_1','worker-code-reviewer','Review','[\"worker\"]','[\"**\"]','review','completed','fr',?)", [json!({
+                    "verdict":"INCOMPLETE", "summary":"One finding is confirmed, another part needs the fix first.", "report_ref":"r_ffffffffffff",
+                    "findings":[{"node":"worker","files":["src/a.rs"],"cross_cutting":false,"fix":"Fix the unsafe branch."}],
+                    "not_covered":[{"item":"src/b.rs","blocker":"other_role_work","reason":"its behaviour depends on the fix to src/a.rs"}]
+                }).to_string()])?;
+                lifecycle::review::advance_tx(db, "f")?;
+                assert_eq!(domain::task_tx(db, "f")?.0, crate::TaskState::Executing);
+                let objective: String = db.query_row("SELECT objective FROM runtime_nodes WHERE task_id='f' AND node_id='_fix_1_worker'", [], |r| r.get(0))?;
+                assert!(objective.contains("Fix the unsafe branch."), "{objective}");
+                assert!(objective.contains("src/b.rs"), "{objective}");
+                assert_eq!(db.query_row("SELECT count(*) FROM runtime_events WHERE task_id='f' AND type IN ('REVIEW_RERUN','REVIEW_DEAD_END_ROUTED')", [], |r| r.get::<_, i64>(0))?, 0);
                 Ok(())
             })
             .unwrap();
+        // A (legacy) BLOCK naming no finding stops like an incomplete review, without
+        // a rerun; a BLOCK with findings stops as review_blocked.
+        for (task, result, blocker) in [
+            (
+                "b",
+                json!({"verdict":"BLOCK","summary":"Not sure.","report_ref":"r_bbbbbbbbbbbb","checks":[]}),
+                "review_incomplete",
+            ),
+            (
+                "c",
+                json!({"verdict":"BLOCK","summary":"Secrets are logged.","report_ref":"r_cccccccccccc","checks":[],
+                "findings":[{"node":"w","files":["src/a.rs"],"cross_cutting":false,"fix":"Stop logging the token"}]}),
+                "review_blocked",
+            ),
+        ] {
+            lifecycle::TaskMachine::new(&store)
+                .create(task, "g", "o")
+                .unwrap();
+            store
+                .write(|db| {
+                    db.execute("UPDATE runtime_tasks SET state='REVIEWING',revision=1,plan_json='{\"tasks\":[]}' WHERE task_id=?", [task])?;
+                    db.execute("INSERT INTO runtime_nodes VALUES (?,1,'w','worker-backend-dev','Work','[]','[\"src\"]','execution','completed',?,'{}')", (task, format!("{task}1")))?;
+                    db.execute("INSERT INTO runtime_nodes VALUES (?,1,'_review_1','worker-code-reviewer','Review','[\"w\"]','[\"**\"]','review','completed',?,?)",
+                        (task, format!("{task}rv"), result.to_string()))?;
+                    lifecycle::review::advance_tx(db, task)?;
+                    assert_eq!(db.query_row("SELECT count(*) FROM runtime_nodes WHERE task_id=? AND stage='review'", [task], |r| r.get::<_, i64>(0))?, 1);
+                    let stopped: String = db.query_row(
+                        "SELECT coalesce((SELECT json_extract(payload_json,'$.blocker') FROM runtime_events WHERE task_id=?1 AND type IN ('ASK_USER_REQUIRED','USER_QUESTION_REQUESTED') ORDER BY id DESC LIMIT 1),'')",
+                        [task], |r| r.get(0))?;
+                    assert_eq!(stopped, blocker, "{task}");
+                    Ok(())
+                })
+                .unwrap();
+        }
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -944,26 +989,46 @@ mod tests {
                 db.execute("UPDATE runtime_tasks SET state='EXECUTING' WHERE task_id='t'", [])?;
                 db.execute("UPDATE runtime_nodes SET status='running',result_json=NULL WHERE node_id='ops'", [])?;
                 let c = crate::channels::issue_tx(db, "t", &owner, crate::channels::Principal::Worker { assignment: "a1" })?;
+                lifecycle::event_tx(db, "t", "NATIVE_PROJECT_WRITTEN", json!({"channel_id":c.channel_id,"path":"scripts/check.sh","add":1,"del":1,"sha256":"old"}))?;
+                lifecycle::event_tx(db, "t", "NATIVE_PROJECT_WRITTEN", json!({"channel_id":c.channel_id,"path":"legacy.txt","add":1,"del":0,"sha256":"legacy"}))?;
                 db.execute("UPDATE runtime_nodes SET status='completed',result_json=? WHERE node_id='ops'", [json!({"report_ref":"r_aaaaaaaaaaaa","summary":"s","checks":[]}).to_string()])?;
-                db.execute("UPDATE runtime_tasks SET state='REVIEWING' WHERE task_id='t'", [])?;
-                lifecycle::event_tx(db, "t", "NATIVE_PROJECT_WRITTEN", json!({"channel_id":c.channel_id,"path":"scripts/check.sh","add":3,"del":0}))?;
+                lifecycle::event_tx(db, "t", "TASK_REOPENED", json!({"revision":1}))?;
+                db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=2 WHERE task_id='t'", [])?;
+                lifecycle::event_tx(db, "t", "EXECUTION_BASELINE", json!({"kind":"observed","revision_digest":"d1","ignored_digest":"i0","revision":2}))?;
+                lifecycle::reconciliation::record_baseline_manifest_tx(db, "t", "d1", &before)?;
+                db.execute("INSERT INTO runtime_nodes VALUES ('t',2,'ops2','worker-devops-engineer','Ops','[]','[\"scripts/**\"]','execution','completed','a2',?)",
+                    [json!({"report_ref":"r_aaaaaaaaaaaa","summary":"s","checks":[]}).to_string()])?;
+                db.execute("INSERT INTO runtime_nodes VALUES ('t',2,'_review_2','worker-code-reviewer','Review','[\"ops2\"]','[\"**\"]','review','running','rv2',NULL)", [])?;
+                db.execute("UPDATE runtime_nodes SET status='running',result_json=NULL WHERE node_id='ops2'", [])?;
+                let c2 = crate::channels::issue_tx(db, "t", &owner, crate::channels::Principal::Worker { assignment: "a2" })?;
+                lifecycle::event_tx(db, "t", "NATIVE_PROJECT_WRITTEN", json!({"channel_id":c2.channel_id,"path":"scripts/check.sh","add":3,"del":0,"sha256":"bad"}))?;
+                db.execute("UPDATE runtime_nodes SET status='completed',result_json=? WHERE node_id='ops2'", [json!({"report_ref":"r_aaaaaaaaaaaa","summary":"s","checks":[]}).to_string()])?;
                 let current: std::collections::BTreeMap<String, String> =
                     [("a.txt", "9"), ("same.txt", "3"), ("new.txt", "4"), ("scripts/check.sh", "5")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-                let p = lifecycle::reconciliation::review_packet_tx(db, "t", "_review_1", Some(&current), Some("i0"))?;
+                let current_raw: std::collections::BTreeMap<String, String> = current.clone();
+                let p = lifecycle::reconciliation::review_packet_tx(db, "t", "_review_2", Some(&current), Some("i0"), &current_raw)?;
                 let files = &p["changed_files"];
                 assert_eq!(files["complete"], true);
-                assert_eq!(files["total"], 4);
-                assert_eq!(files["files"], json!([
-                    {"path":"a.txt","change":"modified","by":[]},
-                    {"path":"gone.txt","change":"deleted","by":[]},
-                    {"path":"new.txt","change":"added","by":[]},
-                    {"path":"scripts/check.sh","change":"added","by":["ops"]}]));
-                assert_eq!(p["predecessor_reports"], json!([{"report_id":"r_aaaaaaaaaaaa","node":"ops","role":"devops-engineer","title":"T","size_bytes":9001,"pages_at_most":3,"page_characters":4000}]));
+                assert_eq!(files["total"], 5);
+                let paths: Vec<_> = files["files"].as_array().unwrap().iter().map(|f|f["path"].as_str().unwrap()).collect();
+                assert_eq!(paths, ["a.txt","gone.txt","legacy.txt","new.txt","scripts/check.sh"]);
+                assert_eq!(files["files"][4]["by"],json!(["ops","ops2"]));
+                assert_eq!(files["files"][2]["last_write"]["revision"],1);
+                assert_eq!(p["predecessor_reports"], json!([{"report_id":"r_aaaaaaaaaaaa","node":"ops2","role":"devops-engineer","title":"T","size_bytes":9001,"pages_at_most":3,"page_characters":4000}]));
                 assert_eq!((p["read_scope"].clone(), p["read_scope_covers_change"].clone()), (json!(["**"]), json!(true)));
+                assert!(p["change_boundary"]["baseline_event"].is_number());
+                let current_write = &files["files"][4]["last_write"];
+                assert_eq!(current_write["revision"], 2);
+                assert_eq!(current_write["node"], "ops2");
+                assert_eq!(current_write["sha256"], "bad");
+                assert_eq!(current_write["matches_current"], false);
+                assert!(files["files"][0]["last_write"].is_null());
                 // Without a trustworthy manifest only the recorded writes are listed, and it says so.
-                let p = lifecycle::reconciliation::review_packet_tx(db, "t", "_review_1", None, None)?;
+                let p = lifecycle::reconciliation::review_packet_tx(db, "t", "_review_2", None, None, &current_raw)?;
                 assert_eq!(p["changed_files"]["complete"], false);
-                assert_eq!(p["changed_files"]["files"], json!([{"path":"scripts/check.sh","change":"written","by":["ops"]}]));
+                assert_eq!(p["changed_files"]["total"], 2);
+                assert_eq!(p["changed_files"]["files"][0]["path"], "legacy.txt");
+                assert_eq!(p["changed_files"]["files"][1]["last_write"]["matches_current"],false);
                 assert!(p["changed_files"]["note"].as_str().unwrap().contains("files changed by commands are not listed"));
                 Ok(())
             })

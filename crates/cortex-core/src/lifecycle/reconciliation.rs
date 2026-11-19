@@ -363,8 +363,8 @@ const REPORT_PAGE_CHARS: i64 = 4000;
 /// The change list joins two runtime records: the difference between the per-file
 /// manifest of the first execution baseline since the task was last reopened and
 /// `current` (complete, including changes made by commands, when both manifests are
-/// trustworthy), and the file writes and changes the task's sessions recorded since
-/// that baseline (`NATIVE_PROJECT_WRITTEN`, `NATIVE_PROJECT_CHANGED`), which also
+/// trustworthy), and the file writes and changes the task's sessions recorded across all
+/// plans, including work preceding a recheck (`NATIVE_PROJECT_WRITTEN`, `NATIVE_PROJECT_CHANGED`), which also
 /// name the plan node that made them. Git is not used: project files may be
 /// untracked, or the project may have no repository. Without a usable manifest the
 /// list is the recorded writes only and says so (`complete: false`).
@@ -374,14 +374,14 @@ pub fn review_packet_tx(
     review_node: &str,
     current: Option<&BTreeMap<String, String>>,
     current_ignored: Option<&str>,
+    content_hashes: &BTreeMap<String, String>,
 ) -> CoreResult<Value> {
-    let since: i64 = db.query_row(
-        "SELECT coalesce((SELECT id FROM runtime_events WHERE task_id=?1 AND type='EXECUTION_BASELINE'
-            AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='TASK_REOPENED'),0) ORDER BY id LIMIT 1),0)",
-        [task],
-        |r| r.get(0),
-    )?;
+    let baseline_event: Option<i64> = db.query_row(
+        "SELECT min(id) FROM runtime_events WHERE task_id=?1 AND type='EXECUTION_BASELINE'
+         AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=?1 AND type='TASK_REOPENED'),0)",
+        [task], |r| r.get(0))?;
     let mut files: BTreeMap<String, (String, BTreeSet<String>)> = BTreeMap::new();
+    let mut last_writes = BTreeMap::new();
     let manifest = changed_files(db, task, current, current_ignored)?;
     if let (Some(changed), Some(current)) = (&manifest, current) {
         let stored: Option<String> = db
@@ -404,41 +404,65 @@ pub fn review_packet_tx(
             files.insert(path.clone(), (kind.into(), BTreeSet::new()));
         }
     }
-    let rows = db
-        .prepare(
-            "SELECT e.type,json_extract(e.payload_json,'$.path'),json_extract(e.payload_json,'$.operation'),
-                (SELECT n.node_id FROM trusted_channels c JOIN runtime_nodes n ON n.task_id=c.task_id AND n.assignment_ref=c.assignment_id
-                 WHERE c.task_id=e.task_id AND c.channel_id=json_extract(e.payload_json,'$.channel_id'))
-             FROM runtime_events e WHERE e.task_id=? AND e.id>? AND e.type IN ('NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED') ORDER BY e.id",
-        )?
-        .query_map((task, since), |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, Option<String>>(3)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    for (kind, path, operation, node) in rows {
-        let Some(path) = path.filter(|p| !p.is_empty()) else {
-            continue;
-        };
-        let entry = files.entry(path).or_insert_with(|| {
-            let kind = if kind == "NATIVE_PROJECT_WRITTEN" {
-                "written".to_owned()
-            } else {
-                operation.unwrap_or_else(|| "changed".into())
-            };
-            (kind, BTreeSet::new())
-        });
-        if let Some(node) = node {
-            entry.1.insert(node);
+    // A reopened task can ask for fresh review of work from earlier plans.
+    // Keep the latest concrete write per path alongside the current baseline delta.
+    let mut statement = db.prepare(
+        "SELECT e.id, json_extract(e.payload_json,'$.path'), coalesce(json_extract(e.payload_json,'$.operation'),'written'),
+                json_extract(e.payload_json,'$.sha256'), n.node_id, n.revision
+         FROM runtime_events e LEFT JOIN trusted_channels c ON c.task_id=e.task_id
+           AND c.channel_id=json_extract(e.payload_json,'$.channel_id')
+         LEFT JOIN runtime_nodes n ON n.task_id=c.task_id AND n.assignment_ref=c.assignment_id
+         WHERE e.task_id=? AND e.type IN ('NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED')
+           AND length(json_extract(e.payload_json,'$.path'))>0 ORDER BY e.id")?;
+    let mut rows = statement.query([task])?;
+    while let Some(row) = rows.next()? {
+        let path: String = row.get(1)?;
+        let operation: String = row.get(2)?;
+        let sha256: Option<String> = row.get(3)?;
+        let node: Option<String> = row.get(4)?;
+        let revision: Option<i64> = row.get(5)?;
+        let matches_current = sha256
+            .as_ref()
+            .zip(content_hashes.get(&path))
+            .map(|(written, observed)| written == observed);
+        let entry = files
+            .entry(path.clone())
+            .or_insert_with(|| (operation, BTreeSet::new()));
+        if let Some(author) = &node {
+            entry.1.insert(author.clone());
         }
+        last_writes.insert(
+            path,
+            json!({"event_id":row.get::<_,i64>(0)?, "node":node,
+            "revision":revision,"sha256":sha256,"matches_current":matches_current}),
+        );
     }
     let total = files.len();
-    let listed: Vec<Value> = files
+    let mut ordered: Vec<_> = files.iter().collect();
+    if total > REVIEW_PACKET_FILES {
+        // Keep directly observed task writes in view when the baseline delta is large.
+        ordered.sort_by_key(|(path, _)| !last_writes.contains_key(*path));
+    }
+    let listed: Vec<Value> = ordered
         .iter()
+        .copied()
         .take(REVIEW_PACKET_FILES)
-        .map(|(path, (change, by))| json!({"path":path,"change":change,"by":by}))
+        .map(|(path, (change, by))| {
+            let mut file = json!({"path":path,"change":change,"by":by});
+            // Bind the review obligation to the host's current manifest.  The
+            // reviewer still has to read the bytes through the channel; this
+            // value is only used by the runtime to reject stale/partial reads.
+            if let Some(current_sha256) = content_hashes.get(path) {
+                file["current_sha256"] = json!(current_sha256);
+            }
+            if let Some(last) = last_writes.get(path) {
+                file["last_write"] = last.clone();
+            }
+            file
+        })
         .collect();
     let mut folders: BTreeMap<String, usize> = BTreeMap::new();
-    for path in files.keys().skip(REVIEW_PACKET_FILES) {
+    for (path, _) in ordered.iter().skip(REVIEW_PACKET_FILES) {
         let folder = path.rsplit_once('/').map_or(".", |(d, _)| d);
         *folders.entry(folder.to_owned()).or_default() += 1;
     }
@@ -453,6 +477,9 @@ pub fn review_packet_tx(
             "by_folder":folders.iter().map(|(f, n)| json!({"folder":f,"files":n})).collect::<Vec<_>>(),
             "how":"read these folders with project_read to see the rest"});
     }
+    let boundary = json!({"baseline_event":baseline_event,
+        "recorded_task_paths":last_writes.len(),
+        "guidance":"Use the objective and task write receipts across plans to focus your review. A matching hash binds the observed file bytes to the latest recorded write. For changed or unobserved bytes, inspect the relevant file and predecessor reports. Manifest-only paths have no confirmed writer. A whole-checkout diff may include unrelated work."});
     let reports = db
         .prepare(
             "SELECT n.node_id,n.role,json_extract(n.result_json,'$.report_ref'),
@@ -500,7 +527,7 @@ pub fn review_packet_tx(
         })
         .collect();
     Ok(
-        json!({"changed_files":changed,"predecessor_reports":reports,"read_scope":scope,
+        json!({"changed_files":changed,"change_boundary":boundary,"predecessor_reports":reports,"read_scope":scope,
         "read_scope_covers_change":outside.is_empty(),"outside_read_scope":outside}),
     )
 }
@@ -631,6 +658,9 @@ pub fn compose_runtime_synthesis_tx(
     Ok(Some(text))
 }
 pub fn direct_answer_allowed(db: &Connection, task: &str) -> CoreResult<bool> {
+    if super::automatic::enabled(db, task)? {
+        return Ok(false);
+    }
     let (revision,informational):(i64,bool)=db.query_row("SELECT revision,plan_json IS NULL
         AND NOT EXISTS(SELECT 1 FROM runtime_nodes WHERE task_id=?)
         AND NOT EXISTS(SELECT 1 FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator')
@@ -724,6 +754,10 @@ pub fn submit_verification_tx(
         if state != TaskState::Planning || kind != "VERIFICATION_FAILED" || !ready {
             return refuse("verification_repair_not_expected");
         }
+        if super::automatic::consultation(db, task)?.is_some() {
+            return refuse("automatic_consultation_plan_required");
+        }
+        super::automatic::require_failed_checks(db, task, &args["verification"])?;
         let failed: Value = serde_json::from_str(&raw)?;
         let raw: String = db.query_row(
             "SELECT plan_json FROM runtime_tasks WHERE task_id=?",
@@ -735,15 +769,10 @@ pub fn submit_verification_tx(
         // whatever the list length. It stays an open obligation until the exact
         // command passes or the owner answers a task-global question.
         let mut dropped = vec![];
-        for c in failed["checks"].as_array().into_iter().flatten() {
-            if (c["exit_code"] != 0 || c["complete"] != true)
-                && !args["verification"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&c["argv"])
-                && !dropped.contains(&c["argv"])
+        for argv in super::completion::unresolved_commands(&failed, &plan["verification"]) {
+            if !args["verification"].as_array().unwrap().contains(&argv) && !dropped.contains(&argv)
             {
-                dropped.push(c["argv"].clone());
+                dropped.push(argv);
             }
         }
         // A trivial command that did not already belong to the plan cannot stand in

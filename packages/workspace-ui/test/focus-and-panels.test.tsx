@@ -157,7 +157,11 @@ describe("focus and panel styles", () => {
     // Real clicks are measured in focus.measure.mjs; this keeps the two rules that make them land.
     const body = (selector: string) => all.find(r => r.selector === selector)!.body;
     expect(body(".sw i")).toContain("pointer-events: none");
-    expect(body(".sw input")).toMatch(/inset: 0;.*width: 100%;.*height: 100%;/);
+    // The input covers the whole 30 by 18 track and 3 px above and below it: a 30 by 24 target on its own.
+    expect(body(".sw input")).toMatch(/top: -3px;.*left: 0;.*width: 100%;.*height: calc\(100% \+ 6px\);/);
+    expect(body(".sw")).toMatch(/width: 30px;.*height: 18px;/);
+    // A switch's label is as tall as that target, so nothing under it starts inside it.
+    expect(body(".sw-l")).toContain("min-height: 24px");
   });
   it("makes an open panel's icon lighter than a closed one's in both themes, and keeps both readable", () => {
     for (const theme of ["dark", "light"] as const) {

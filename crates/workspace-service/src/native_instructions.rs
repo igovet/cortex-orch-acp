@@ -47,7 +47,8 @@ pub(crate) fn supports(stage: Option<&str>, name: &str) -> bool {
         | "verification_submit"
         | "replan_request"
         | "scope_request"
-        | "escalation_request" => true,
+        | "escalation_request"
+        | "sprint_plan_submit" => true,
         "result_submit" => matches!(stage, Some("execution" | "review")),
         _ => {
             crate::native_documents::supports(name)

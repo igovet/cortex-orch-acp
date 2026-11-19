@@ -27,6 +27,11 @@ const QUEUE = "document.querySelector('[aria-label=\"Sprint queue\"]') && docume
 const LOGO = "document.querySelector('.l-startup-logo img')?.complete && document.querySelector('.l-startup-logo img').naturalWidth > 0";
 // The review screens: a result in the conversation, Changes with and without Git, Ready to merge. 33 checks, long Russian text.
 const review_at = path => "world=review&route=" + quote(`/m/<M>/t/${path}`);
+const automatic_board_at = "world=review&route=" + quote("/m/<M>/p/nogit/s/auto-sprint/board");
+const stale_automatic_at = review_at("auto-stale/changes");
+const stale_automatic_conversation_at = review_at("auto-stale");
+const automatic_owner_hold_conversation_at = review_at("auto-owner-hold");
+const automatic_finish_hold_conversation_at = review_at("auto-finish-hold");
 const RESULT = "document.querySelector('.rcard [data-bar=card]') && document.querySelector('.rcard .rv-checks')";
 const CHANGES = "document.querySelector('.rv-bar [data-bar=action]') && document.querySelector('.evid .l-row')";
 const READY = "document.querySelector('.ready .rcard [data-bar=card]')";
@@ -36,6 +41,13 @@ const SCREENS = [
   ["changes-git", review_at("rg/changes"), CHANGES + " && document.querySelector('.fhead')", OWNER],
   ["ready-review-and-merge", review_at("rm/changes"), READY, OWNER],
   ["ready-no-git", review_at("rn/changes"), READY, OWNER],
+  // Automatic settlement blocked on a required check. The task must explain the hold
+  // and keep an explicit Close as is action reachable from the linked task.
+  ["automatic-hold", review_at("auto-hold/changes"), CHANGES + " && document.querySelector('.rv-bar')", OWNER],
+  ["automatic-stale", stale_automatic_at, "document.querySelector('.rv-bar') && document.querySelector('.rv-stale') && document.querySelector('.rv-close')", OWNER],
+  ["automatic-stale-conversation", stale_automatic_conversation_at, "document.querySelector('.rcard .rv-stale') && document.querySelector('.rcard .rv-close')", OWNER],
+  ["automatic-owner-hold-conversation", automatic_owner_hold_conversation_at, "document.querySelector('.chat-review-hold') && document.querySelector('.chat-review-hold button')", OWNER],
+  ["automatic-finish-hold-conversation", automatic_finish_hold_conversation_at, "document.querySelector('.rcard') && document.querySelector('.rv-bar') && document.querySelector('.btn-primary')", OWNER],
   ["board-paused", board_at("b-pause"), QUEUE, [[960, 540], ...OWNER]],
   ["board-running", board_at("b-run"), QUEUE, [[960, 540], ...OWNER]],
   ["board-blocked", board_at("b-need"), QUEUE, OWNER],
@@ -117,11 +129,18 @@ for (const [name, query, ready] of TASKS) SCREENS.push([name + "-wide-sidebar", 
 // A running task with a long Russian message and a pasted image in its queue: the row stays one line, its files are not shown in it.
 const QUEUED_ROW = on(".queue .qrow .qrow-end");
 SCREENS.push(["task-queued", task_at("r-now") + "&queued=r-now", QUEUED_ROW, FULL], ["task-queued-dark", task_at("r-now") + "&queued=r-now&dark=1", QUEUED_ROW, [[1280, 800]]]);
+// Two real sidebar task rows with long automatic reasons. Their visible labels must retain width,
+// keep the owner status on the same row, avoid protocol underscores, and link to distinct tasks.
+const SIDEBAR_REASONS = "(()=>{const rows=[...document.querySelectorAll('.sidebar .task-row')].filter(r=>/\\/t\\/(auto-cont|auto-files)$/.test(r.getAttribute('href')||''));const data=rows.map(r=>{const title=r.querySelector('.trunc'),sig=r.querySelector('.sig'),rr=r.getBoundingClientRect(),tr=title?.getBoundingClientRect(),sr=sig?.getBoundingClientRect();return {href:r.getAttribute('href'),title:title?.textContent||'',sig:sig?.textContent||'',row:[rr.left,rr.right,rr.top,rr.bottom],titleBox:tr&&[tr.left,tr.right,tr.width],sigBox:sr&&[sr.left,sr.right,sr.width]}});const sb=document.querySelector('.sidebar .sb-scroll'),sideways=sb?sb.scrollWidth-sb.clientWidth:-1;return {data,sideways,ok:sideways===0&&data.length===2&&new Set(data.map(x=>x.href)).size===2&&data.every(x=>x.title.length>10&&x.titleBox&&x.titleBox[2]>20&&!x.sig.includes('_')&&x.sigBox&&x.sigBox[2]>20&&x.titleBox[1]<=x.sigBox[0]+1)}})()";
+SCREENS.push(["sidebar-automatic-reasons", at("/m/<M>/p/p/board") + "&sidebarRows=1", "document.querySelector('.sidebar .task-row a,.sidebar .task-row')", [[1280, 800], [960, 540]]]);
 // A working task's steps that recorded output far wider than any column, in Workers and in Conversation; OUTPUT_FLOWS opens them.
 const OUTPUT_SCREENS = [["task-output-workers", review_at("out/workers/w-out"), "document.querySelector('.stream button.fold')"], ["task-output-conversation", review_at("out"), "document.querySelector('.timeline button.fold')"]];
 for (const [name, query, ready] of OUTPUT_SCREENS) SCREENS.push([name, query, ready, [[1280, 800]]]);
 // The runtime's stop question with long consequences, a Recommended mark and its targets: each answer is one row inside the card.
 SCREENS.push(["stopq-conversation", "world=conversation&stopq=1&route=" + quote("/m/<M>/t/c-ask"), "document.querySelector('.dc-opts-rows .opt .sub') && document.querySelector('.ws-dc-targets .btn')", [...NARROW, ...OWNER]]);
+// A sprint planned by a runtime task: that task's conversation (question, steps, team bar, composer) and its Workers, on the sprint.
+SCREENS.push(["sprint-planning-task", "world=conversation&planningSprint=1&route=" + quote("/m/<M>/p/p/s/ps/planning"), "document.querySelector('section.task-panel[aria-label=Conversation] .dc-q') && document.querySelector('.ws-team')", [...NARROW, ...OWNER]],
+  ["sprint-planning-workers", "world=conversation&planningSprint=1&route=" + quote("/m/<M>/p/p/s/ps/workers"), "document.querySelector('.wlist .wcard') && document.querySelector('.livepane')", [...NARROW, [1280, 800]]]);
 // Connected service, unconfirmed task: one notice, its explanation and the real read-only refresh.
 const UNKNOWN_AT = review_at("unk") + "&dark=1";
 const UNKNOWN_READY = "document.querySelector('.l-task .l-strip .l-strip-a button') && document.querySelector('.composer textarea:disabled')";
@@ -192,6 +211,14 @@ const FLOWS = [
   ["dialog-accept-open-checks", review_at("rv/changes"), CHANGES, [[press(".rv-bar button", "Accept v1"), "document.querySelector('dialog[open][data-dialog=\"Accept with open checks\"] [data-bar=dialog]')"]], OWNER],
   ["dialog-merge", review_at("rm/changes"), READY, [[press(".ready button", "Review and merge…"), "document.querySelector('dialog[open][data-dialog=\"Finish task\"] [data-bar=dialog]')"]], OWNER],
   ["dialog-close", review_at("rn/changes"), READY, [[press(".ready button", "Close as is…"), "document.querySelector('dialog[open][data-dialog=\"Close task\"] [data-bar=dialog]')"]], OWNER],
+  ["automatic-hold-close", review_at("auto-hold/changes"), CHANGES, [[press(".rv-bar button", "Close as is…"), "document.querySelector('dialog[open][data-dialog=\"Close task\"] [data-bar=dialog]')"]], OWNER],
+  ["automatic-stale-actions", stale_automatic_at, "document.querySelector('.rv-bar') && document.querySelector('.rv-stale')", [[press(".rv-bar button", "Close as is…"), "document.querySelector('dialog[open][data-dialog=\"Close task\"] [data-bar=dialog]')"]], OWNER],
+  ["automatic-stale-ask-agent", stale_automatic_conversation_at, "document.querySelector('.rcard .rv-stale')", [[press(".rcard button", "Ask agent to fix"), "[...document.querySelectorAll('[role=status]')].some(e=>e.textContent.includes('Sending repair request'))"]], OWNER],
+  ["automatic-stale-conversation-close", stale_automatic_conversation_at, "document.querySelector('.rcard .rv-stale')", [[press(".rcard button", "Close as is…"), "document.querySelector('dialog[open][data-dialog=\"Close task\"] [data-bar=dialog]')"]], OWNER],
+  ["automatic-owner-hold-ask-agent", automatic_owner_hold_conversation_at, "document.querySelector('.chat-review-hold')", [[press(".chat-review-hold button", "Ask agent to fix"), "[...document.querySelectorAll('[role=status]')].some(e=>e.textContent.includes('Sending repair request'))"]], OWNER],
+  ["automatic-finish-hold-authorize", automatic_finish_hold_conversation_at, "document.querySelector('.rcard')", [[press(".rv-close button", "Allow Automatic to finish…"), "document.querySelector('dialog[open]')?.textContent.includes('Staging check') && document.querySelector('dialog[open]')?.textContent.includes('main')"]], [[960, 540], [1280, 800]]],
+  ["sidebar-automatic-reasons-check", at("/m/<M>/p/p/board") + "&sidebarRows=1", "document.querySelector('.sidebar .task-row')", [["window.__sidebarReasons=" + SIDEBAR_REASONS + ";return 1", "window.__sidebarReasons?.ok === true"]], [[1280, 800], [960, 540]]],
+  ["automatic-board-open-task", automatic_board_at, "document.querySelector('.l-strip a')", [[press(".l-strip a", "Open task"), "document.querySelector('.chat-review-hold')"]], OWNER],
 ];
 // The other screens' second states: what a press opens, at the owner's widths, on the same long names.
 const STATE_OF = Object.fromEntries(PAGES.map(([name, query, ready]) => [name, [query, ready]]));
@@ -574,6 +601,68 @@ return {label:(el.getAttribute('aria-label')||el.textContent).trim().slice(0,32)
   const TITLE_STRICT = STRICT.replace("const scope = document.querySelector('dialog[open]') || document.body;", "const scope = document.querySelector('.titlebar');");
   if (TITLE_STRICT === STRICT) throw Error("AssertionError: the title band scope was not found in the strict probe");
 
+  // The pinned owner card above the message box: what the owner sees for each kind of hold, at the usual and the smallest window.
+  // Rules: seen without scrolling and above the composer, buttons whole and unclipped, no text running out of its box, no sideways
+  // scroll, nothing like a code name in the words, and the card there even while the result is not loaded.
+  const OWNER_CARD = `const kind=KIND,want=WANT,problems=[];const vw=innerWidth,vh=innerHeight;
+const card=document.querySelector(kind==='quiet'?'.ws-hold-quiet':'.chat-review-hold');
+if(!card)return {problems:['the card is not on the page']};
+const r=card.getBoundingClientRect(),dock=document.querySelector('.dock');
+if(!(r.width>0&&r.height>0))problems.push('the card has no size');
+if(r.top<0||r.bottom>vh||r.left<0||r.right>vw)problems.push('the card is not whole in the window without scrolling '+JSON.stringify([r.left,r.top,r.right,r.bottom,vw,vh]));
+if(!dock)problems.push('no message box');else{const d=dock.getBoundingClientRect();if(r.bottom>d.top+1)problems.push('the card is not above the message box '+JSON.stringify([r.bottom,d.top]));if(!(d.top>=0&&d.bottom<=vh+1))problems.push('the message box is outside the window');
+ const ta=dock.querySelector('textarea,[contenteditable]');if(COMPOSER&&(!ta||ta.disabled||ta.getAttribute('aria-disabled')==='true'))problems.push('the message box is not enabled');}
+const buttons=[...card.querySelectorAll('button,a.btn,a[role=button]')];
+const names=buttons.map(b=>b.textContent.trim());
+if(JSON.stringify(names)!==JSON.stringify(want))problems.push('buttons are '+JSON.stringify(names)+', wanted '+JSON.stringify(want));
+for(const b of buttons){const q=b.getBoundingClientRect();
+ if(!(q.width>0&&q.height>0))problems.push('button has no size: '+b.textContent);
+ if(q.left<r.left-.5||q.right>r.right+.5||q.top<r.top-.5||q.bottom>r.bottom+.5)problems.push('button leaves the card: '+b.textContent);
+ if(q.left<0||q.right>vw||q.top<0||q.bottom>vh)problems.push('button leaves the window: '+b.textContent);
+ if(b.scrollWidth>b.clientWidth+1||b.scrollHeight>b.clientHeight+1)problems.push('button text is clipped: '+b.textContent);
+ const at=document.elementFromPoint(q.left+q.width/2,q.top+q.height/2);if(!b.contains(at))problems.push('button is covered: '+b.textContent);}
+for(const e of [card,...card.querySelectorAll('*')]){if(e.scrollWidth>e.clientWidth+1&&getComputedStyle(e).display!=='inline'&&e.clientWidth>0)problems.push('text runs out of its box: '+e.tagName+'.'+e.className+' '+JSON.stringify(e.textContent.slice(0,40)));}
+const se=document.scrollingElement;if(se.scrollWidth>se.clientWidth+1)problems.push('the page scrolls sideways');
+for(const e of document.querySelectorAll('.main,.chat,.l-task'))if(e.scrollWidth>e.clientWidth+1)problems.push('sideways scroll in '+e.className);
+const text=card.innerText+' '+[...document.querySelectorAll('.l-task button')].map(b=>b.textContent).join(' ');
+const bad=text.match(/\\b[A-Za-z]+_[A-Za-z_]+\\b/g);if(bad)problems.push('code-like words: '+bad.join(', '));
+const seeBtn=[...document.querySelectorAll('button')].filter(b=>b.textContent.trim()==='See what is needed');
+if(kind==='quiet'&&seeBtn.length)problems.push('the header asks the owner to look although nothing is needed');
+if(kind!=='quiet'&&HEADER&&seeBtn.length!==1)problems.push('the header button See what is needed is missing');
+return {problems,names,card:[r.left,r.top,r.right,r.bottom],text:card.innerText}`;
+  const OWNER_CARDS = [
+    ["allow", "oh-allow", "card", ["Allow Automatic to finish…", "Close as is…"], true, true],
+    ["allow-nores", "oh-allow-nores", "card", ["Allow Automatic to finish…", "Close as is…"], true, true],
+    ["repair", "oh-repair", "card", ["Let the agent fix it", "Close as is…"], true, true],
+    ["unknown", "oh-unknown", "card", ["Close as is…"], true, true],
+    ["agent", "oh-agent", "quiet", [], true, false],
+    ["manual", "oh-manual", "card", ["Ask the agent to try again", "Close as is…"], true, true],
+  ];
+  async function owner_card_gate(results, failures, wanted, narrow) {
+    for (const [name, task, kind, buttons, composer, header] of OWNER_CARDS) {
+      for (const [width, height] of wanted("owner-card-" + name) ? narrow([[1280, 800], MINIMUM]) : []) {
+        const key = `owner-card-${name}-${width}x${height}`;
+        await open_page(review_at(task), width, height, kind === "quiet" ? "document.querySelector('.ws-hold-quiet')" : "document.querySelector('.chat-review-hold button')");
+        const result = await js(sub(sub(sub(sub(OWNER_CARD, "KIND", json(kind)), "WANT", json(buttons)), "COMPOSER", json(composer)), "HEADER", json(header)));
+        results[key] = result;
+        const strict = await check_strict(results, key);
+        results[key] = {...result, strict: results[key]};
+        failures[key] = [...result.problems, ...strict];
+      }
+    }
+    // The header's See what is needed from the Changes tab brings the owner back to the card.
+    for (const [width, height] of wanted("owner-card-header") ? narrow([[1280, 800], MINIMUM]) : []) {
+      const key = `owner-card-header-${width}x${height}`;
+      await open_page(review_at("oh-allow/changes"), width, height, "[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='See what is needed')");
+      await js(press("button", "See what is needed") + ";return 1");
+      await wait("document.querySelector('.chat-review-hold button')");
+      await sleep(.4);
+      const result = await js(sub(sub(sub(sub(OWNER_CARD, "KIND", json("card")), "WANT", json(OWNER_CARDS[0][3])), "COMPOSER", "true"), "HEADER", "true"));
+      results[key] = result;
+      await capture(key);
+      failures[key] = result.problems;
+    }
+  }
   // Every page's title band at the narrow sizes, with the window's own controls: nothing overlaps, is cut off or runs out of it.
   async function title_gate(results, failures, wanted = () => true, narrow = sizes => sizes) {
     for (const [name, query, ready] of TITLE_BAND) {
@@ -861,6 +950,7 @@ return {label:(el.getAttribute('aria-label')||el.textContent).trim().slice(0,32)
         }
       }
       await title_gate(results, failures, wanted, narrow);
+      await owner_card_gate(results, failures, wanted, narrow);
       if (wanted("task-queued")) await queue_gate(results, failures, narrow);
       if (wanted("task-output")) await output_gate(results, failures, narrow);
       if (words.includes("fit")) await fit_gate(results, failures);

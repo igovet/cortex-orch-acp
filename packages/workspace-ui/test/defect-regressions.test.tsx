@@ -106,6 +106,20 @@ it("keeps a sprint whose queue is complete in the sidebar, as Done, until it is 
   expect(row()).toBeUndefined();
 });
 
+it("keeps two automatic task titles in the sidebar while showing continuation as status", async () => {
+  const s = world();
+  s.tasks = [
+    { ...s.tasks[0], id: "t", title: "Deploy_api gateway", status: "working", process: "live", automaticContinuation: { policy: "automatic_continuation", continuationCount: 1, lastContinuationReason: "review_incomplete", pause: null } },
+    { ...s.tasks[0], id: "u", title: "Verify_api gateway", status: "working", process: "live", automaticContinuation: { policy: "automatic_continuation", continuationCount: 2, lastContinuationReason: "review_incomplete", pause: null } },
+  ];
+  await mount(s, `/m/${LOCAL_MACHINE_ID}`);
+  const rows = [...document.querySelectorAll<HTMLElement>(".sidebar .task-row")].filter(r => r.querySelector(".sig") && !r.textContent?.startsWith("Sprint:"));
+  expect(rows.map(r => r.querySelector(".trunc")?.textContent)).toEqual(["Deploy_api gateway", "Verify_api gateway"]);
+  expect(rows.every(r => !r.querySelector(".sig")?.textContent?.includes("_"))).toBe(true);
+  expect(rows.every(r => r.querySelector(".sig")?.textContent === "Working")).toBe(true);
+  expect(rows.map(r => r.getAttribute("aria-label"))).toEqual(["Deploy_api gateway — Working", "Verify_api gateway — Working"]);
+});
+
 it("uses the editor's sprint membership for the scoped board and grouping", async () => {
   const s = world();
   const sprint: Sprint = { id: "sp", projectId: "p", title: "Release", description: "Release", runMode: "manual", targetBranch: null, planning: "created", conversation: [], plan: null, materializedVersion: 1, taskIds: ["t"], queueState: "idle", pauseReason: null };

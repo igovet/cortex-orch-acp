@@ -344,6 +344,11 @@ fn record_actions(
         actions["reason"] =
             json!("This task failed before it produced a result. Request changes to try again.");
         actions["unblockAction"] = json!("request_changes");
+        // Outside a queue the owner decides. In Hybrid and Automatic the scheduler
+        // sends the run back to its agent first and holds the queue with its own decision.
+        actions["nextActor"] = json!("owner");
+        actions["ownerActions"] = json!(["ask_agent", "close_as_is"]);
+        actions["asks"] = json!(["Ask the agent to try again. It continues from the recorded state, and review and verification run again before the task can finish."]);
     } else if status == Some("COMPLETED") {
         actions = match result_evidence(store, root, project, execution, native, own_writes(record))
         {
@@ -446,6 +451,7 @@ pub async fn read(root: &Path, state: &Path, project: &str, git: &mut Git) -> Re
             if let Some(map) = actions.as_object_mut() {
                 map.remove("workspaceChanged");
                 map.remove("reviewWarnings");
+                map.remove("notRunChecks");
                 map.remove("ownWritesOnly");
             }
             record["reviewActions"] = actions;
@@ -619,10 +625,14 @@ pub(super) fn integration_result(
     wanted: &Value,
     native: Option<&str>,
     record: &Value,
+    automatic: bool,
 ) -> Result<Value> {
-    let (actions, work, warnings, _) =
+    let (actions, work, warnings, counts) =
         result_evidence(store, root, project, execution, native, own_writes(record))?;
-    if actions["digest"] != *wanted || warnings {
+    if actions["digest"] != *wanted
+        || warnings
+        || (automatic && actions["version"] != record["acceptance"]["version"])
+    {
         return Err(refuse(
             "stale_result",
             "This result or its workspace changed. Rerun checks and review the new result.",
@@ -634,7 +644,14 @@ pub(super) fn integration_result(
             "This is an informational answer, not verified code for merging.",
         ));
     }
-    if actions["accept"] != true {
+    let owner_consented_open_checks = automatic
+        && record["acceptance"]["finishConsent"].is_object()
+        && record["acceptance"]["open"]["failed"] == counts[0]
+        && record["acceptance"]["open"]["not_run"] == counts[1]
+        && record["acceptance"]["open"]["unverified"] == counts[2];
+    if actions["accept"] != true
+        || (automatic && counts != [0, 0, 0] && !owner_consented_open_checks)
+    {
         return Err(refuse(
             "checks_required",
             actions["reason"]
@@ -659,9 +676,14 @@ fn result_evidence(
     own_writes: bool,
 ) -> Result<(Value, bool, bool, [u64; 3])> {
     store
-        .read(|db| result_evidence_db(db, store, root, project, execution, native, own_writes))
+        .read(|db| {
+            result_evidence_db(
+                db, store, root, project, execution, native, own_writes, false,
+            )
+        })
         .map_err(context::core)
 }
+#[allow(clippy::too_many_arguments)]
 pub(super) fn result_evidence_db(
     db: &rusqlite::Connection,
     store: &Store,
@@ -670,6 +692,7 @@ pub(super) fn result_evidence_db(
     execution: &str,
     native: Option<&str>,
     own_writes: bool,
+    automatic: bool,
 ) -> cortex_core::CoreResult<(Value, bool, bool, [u64; 3])> {
     let row:Option<(String,String,Option<String>,i64)>=db.query_row(
             "SELECT r.task_id,r.state,r.synthesis,coalesce((SELECT max(id) FROM runtime_events WHERE task_id=r.task_id),1)
@@ -713,6 +736,18 @@ pub(super) fn result_evidence_db(
             if evidence.blocking.len() == 1 { "that check" } else { "those checks" },
         )
     });
+    let acknowledgement = (automatic && evidence.acknowledge).then(|| {
+        let items = evidence
+            .blocking
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("{items} Open the task to review the recorded checks or close it as is.")
+            .trim()
+            .to_owned()
+    });
     let (reason, unblock) = if status != "COMPLETED" {
         (Some("Wait for Cortex to finish this result."), Some("wait"))
     } else if crate::native_owner_controls::receipts_partial(db, &task)? {
@@ -730,7 +765,14 @@ pub(super) fn result_evidence_db(
         )
     } else if evidence.work && (!evidence.verified || evidence.observed.is_none()) {
         (
-            Some("Run the current runtime verification checks before accepting work."),
+            Some(
+                if automatic {
+                    named_blockers.as_deref()
+                } else {
+                    None
+                }
+                .unwrap_or("Run the current runtime verification checks before accepting work."),
+            ),
             Some("rerun_checks"),
         )
     } else if !evidence.work && !answer {
@@ -740,6 +782,8 @@ pub(super) fn result_evidence_db(
         )
     } else if evidence.unexplained {
         (Some(named_blockers.as_deref().unwrap_or("Run the unpassed checks first, or request changes. Only recorded technical blockers may be acknowledged.")),Some("rerun_checks"))
+    } else if let Some(message) = acknowledgement.as_deref() {
+        (Some(message), None)
     } else {
         (None, None)
     };
@@ -767,6 +811,9 @@ pub(super) fn result_evidence_db(
     }
     if !notes.is_empty() {
         actions.0["reviewWarnings"] = json!(notes);
+    }
+    if !evidence.not_run_checks.is_empty() {
+        actions.0["notRunChecks"] = json!(evidence.not_run_checks);
     }
     Ok(actions)
 }

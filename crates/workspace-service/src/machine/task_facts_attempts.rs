@@ -21,6 +21,7 @@ pub(super) struct Attempt {
     pub id: i64,
     pub outcome: &'static str,
     pub closed: bool,
+    pub blocker: Option<String>,
 }
 #[derive(Default)]
 pub(super) struct Attempts(BTreeMap<(Option<String>, i64), Attempt>);
@@ -157,6 +158,7 @@ impl Attempts {
                                     id,
                                     outcome: "passed",
                                     closed: true,
+                                    blocker: None,
                                 },
                             );
                             continue;
@@ -228,6 +230,8 @@ impl Attempts {
                     id,
                     outcome,
                     closed: false,
+                    blocker: (outcome == "not_run" && !reason.is_empty())
+                        .then(|| reason.to_owned()),
                 },
             );
         }

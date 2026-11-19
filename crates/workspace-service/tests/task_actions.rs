@@ -1162,7 +1162,8 @@ async fn read(f: &Fixture) -> Value {
         .unwrap()
 }
 #[tokio::test]
-async fn a_task_the_owner_finished_through_the_runtime_reads_closed_and_archives_without_a_question() {
+async fn a_task_the_owner_finished_through_the_runtime_reads_closed_and_archives_without_a_question(
+) {
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/task_lifecycle_python.json")).unwrap();
     // A bound, consistent CANCELLED runtime task with no saved disposition.
@@ -1191,10 +1192,17 @@ async fn a_task_the_owner_finished_through_the_runtime_reads_closed_and_archives
         })
         .unwrap();
     fs::create_dir_all(f.path().parent().unwrap()).unwrap();
-    fs::write(f.path(), json!({"tasks":{"t1":{"title":"Kept"}}}).to_string()).unwrap();
+    fs::write(
+        f.path(),
+        json!({"tasks":{"t1":{"title":"Kept"}}}).to_string(),
+    )
+    .unwrap();
     // A run the runtime cancelled by itself is not the owner's close: Archive still refuses.
     let plain = read(&f).await;
-    assert!(plain["result"]["tasks"]["t1"]["status"].is_null(), "{plain}");
+    assert!(
+        plain["result"]["tasks"]["t1"]["status"].is_null(),
+        "{plain}"
+    );
     let refused = f.call(json!({"action":"archive","taskId":"t1"})).await;
     assert_eq!(refused["code"], "not_done", "{refused}");
     // Finish chosen on the runtime's stop question.
@@ -1230,7 +1238,10 @@ async fn a_task_the_owner_finished_through_the_runtime_reads_closed_and_archives
     )
     .unwrap();
     let kept = read(&f).await;
-    assert_eq!(kept["result"]["tasks"]["t1"]["closedAs"], "cancel", "{kept}");
+    assert_eq!(
+        kept["result"]["tasks"]["t1"]["closedAs"], "cancel",
+        "{kept}"
+    );
     assert_eq!(kept["result"]["tasks"]["t1"]["doneAt"], 7);
     f.service.stop().await.unwrap();
 }

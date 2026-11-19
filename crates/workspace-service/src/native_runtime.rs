@@ -7,6 +7,7 @@ use crate::{
 use cortex_core::{
     ownership::OwnerEpoch, CoreError, CoreResult, OpenMode, ProjectKey, Store, StoreChannel,
 };
+use futures::{stream::FuturesUnordered, StreamExt};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -24,6 +25,119 @@ static RETRY_WINDOW: std::sync::Mutex<Option<cortex_core::scheduler::retry::Retr
 #[doc(hidden)]
 pub fn set_retry_window(window: Option<cortex_core::scheduler::retry::RetryWindow>) {
     *RETRY_WINDOW.lock().unwrap_or_else(|e| e.into_inner()) = window;
+}
+
+#[cfg(test)]
+mod refill_tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    async fn fixture() -> (
+        Arc<Runtime>,
+        cortex_core::ownership::OwnerEpoch,
+        String,
+        std::path::PathBuf,
+    ) {
+        let root = std::env::temp_dir().join(format!("refill-{}", crate::identity().unwrap()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.clone();
+        let runtime = Arc::new(
+            tokio::task::spawn_blocking(move || {
+                Runtime::open(&path, "project", Arc::new(UnqualifiedRoutes))
+            })
+            .await
+            .unwrap()
+            .unwrap(),
+        );
+        let owner = runtime.host.executor.publication(|store| {
+            let owner = cortex_core::lifecycle::TaskMachine::new(store).create("t", "g", "owner")?;
+            store.write(|db| {
+                db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='t'", [])?;
+                db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'next','worker-devops-engineer','Work','[]','[\"src\"]','execution','pending',NULL,NULL)", [])?;
+                Ok(())
+            })?;
+            Ok(owner)
+        }).unwrap().await.unwrap().unwrap();
+        (runtime, owner, "t".into(), root)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refill_rejects_stale_revision_without_issuing() {
+        let (runtime, owner, task, root) = fixture().await;
+        let out = runtime
+            .host
+            .refill_execution(task.clone(), owner, 2)
+            .await
+            .unwrap();
+        assert!(out.is_empty());
+        let status = runtime
+            .host
+            .executor
+            .read(move |db| {
+                Ok(db.query_row(
+                    "SELECT status FROM runtime_nodes WHERE task_id='t' AND node_id='next'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )?)
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status, "pending");
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refill_claims_once_and_spends_budget_only_for_claim() {
+        let (runtime, owner, task, root) = fixture().await;
+        let first = runtime
+            .host
+            .refill_execution(task.clone(), owner.clone(), 1)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        let second = runtime
+            .host
+            .refill_execution(task.clone(), owner, 1)
+            .await
+            .unwrap();
+        assert!(second.is_empty());
+        let used: i64 = runtime.host.executor.read(|db| Ok(db.query_row(
+            "SELECT json_extract(result_json,'$.used') FROM runtime_requests WHERE task_id='t' AND actor='native-progress'", [], |r| r.get(0))?)).unwrap().await.unwrap().unwrap();
+        assert_eq!(used, 1);
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refill_does_not_claim_while_steering_is_pending() {
+        let (runtime, owner, task, root) = fixture().await;
+        runtime
+            .host
+            .executor
+            .write(|db| {
+                cortex_core::lifecycle::event_tx(
+                    db,
+                    "t",
+                    "USER_STEERING",
+                    json!({"request":"r","delivery":"boundary"}),
+                )
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let out = runtime.host.refill_execution(task, owner, 1).await.unwrap();
+        assert!(out.is_empty());
+        runtime.shutdown().await;
+        drop(runtime);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 pub(crate) fn retry_window() -> cortex_core::scheduler::retry::RetryWindow {
     RETRY_WINDOW
@@ -143,6 +257,19 @@ pub trait NativeRoutes: Send + Sync {
     fn connection_ids(&self) -> Vec<String> {
         Vec::new()
     }
+    /// A new, prompt-free qualified observation of the same connection.
+    fn authentication_observed_after(
+        &self,
+        _root: &Path,
+        _connection: &str,
+        _after: &str,
+    ) -> CoreResult<bool> {
+        Ok(false)
+    }
+    /// Automatic coordination respects the same observed quota as automatic worker routing.
+    fn automatic_coordinator_health(&self, _root: &Path, _route: &SessionRoute) -> CoreResult<()> {
+        Ok(())
+    }
     /// One prompt-free catalogue refresh of a registered connection (Python's
     /// per-session `_refresh_catalog_for_session`); true only when a new
     /// observation was published. Never a model prompt.
@@ -207,6 +334,16 @@ impl NativeRoutes for UnqualifiedRoutes {
         Err(CoreError::Refused("native_route_authorization_unavailable"))
     }
 }
+/// The answer to one request to send an Automatic task back to its coordinator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RepairAdmission {
+    /// The task was reopened and its coordinator continues it.
+    Started,
+    /// Nothing was decided now (another control, maintenance, or the service stopping).
+    Busy,
+    /// Not admitted: already spent, bounded, or the task is not in the expected state.
+    Declined,
+}
 pub(crate) struct Runtime {
     pub(super) host: Arc<NativeHost>,
     pub(super) maintenance_state: Option<PathBuf>,
@@ -219,6 +356,8 @@ pub(crate) struct Runtime {
     pub(super) wake: tokio::sync::Notify,
     jobs: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pub(super) stop: watch::Sender<bool>,
+    /// Backoff of the live re-check of unconfirmed exits (`native_recovery`).
+    pub(super) exit_recheck: std::sync::Mutex<crate::native_recovery::ExitRecheck>,
 }
 struct Pump {
     cancel: watch::Sender<bool>,
@@ -300,6 +439,7 @@ impl Runtime {
             wake: tokio::sync::Notify::new(),
             jobs: Mutex::new(Vec::new()),
             stop,
+            exit_recheck: Default::default(),
         })
     }
     pub(crate) fn with_maintenance_state(mut self, state: PathBuf) -> Self {
@@ -326,11 +466,56 @@ impl Runtime {
     ) -> io::Result<Value> {
         self.client_command(project, request, None).await
     }
+    pub(super) async fn start_automatic(
+        self: &Arc<Self>,
+        project: String,
+        request: Value,
+    ) -> io::Result<Value> {
+        use cortex_core::workspace::NativeExecutionPolicy;
+        if request["operation"] != "tasks.start" {
+            return Err(failure("native_operation_unavailable"));
+        }
+        self.command_with_policy(
+            project,
+            request,
+            None,
+            Some(NativeExecutionPolicy::AutomaticContinuation),
+        )
+        .await
+    }
+    /// Start a sprint's read-only planning task: bound in the Start transaction.
+    pub(super) async fn start_sprint_planning(
+        self: &Arc<Self>,
+        project: String,
+        request: Value,
+    ) -> io::Result<Value> {
+        use cortex_core::workspace::NativeExecutionPolicy;
+        if request["operation"] != "tasks.start" {
+            return Err(failure("native_operation_unavailable"));
+        }
+        self.command_with_policy(
+            project,
+            request,
+            None,
+            Some(NativeExecutionPolicy::SprintPlanning),
+        )
+        .await
+    }
     pub(super) async fn client_command(
         self: &Arc<Self>,
         project: String,
         request: Value,
         client: Option<(String, Value, Option<cortex_core::input::Capture>)>,
+    ) -> io::Result<Value> {
+        self.command_with_policy(project, request, client, None)
+            .await
+    }
+    async fn command_with_policy(
+        self: &Arc<Self>,
+        project: String,
+        request: Value,
+        client: Option<(String, Value, Option<cortex_core::input::Capture>)>,
+        policy: Option<cortex_core::workspace::NativeExecutionPolicy>,
     ) -> io::Result<Value> {
         if *self.stop.borrow() {
             return Err(failure("service_stopping"));
@@ -397,11 +582,12 @@ impl Runtime {
                     if incoming {
                         return Ok(None);
                     }
-                    cortex_core::workspace::replay_native_start(
+                    cortex_core::workspace::replay_native_start_with_policy(
                         store,
                         &replay_project,
                         &actor(),
                         &replay_request,
+                        policy,
                     )
                 }
             })
@@ -468,7 +654,7 @@ impl Runtime {
                             .map(crate::machine::maintenance::admission)
                             .transpose()
                             .map_err(|e| CoreError::Refused(e.code))?;
-                        cortex_core::workspace::start_native_input(
+                        cortex_core::workspace::start_native_input_with_policy(
                             store,
                             &project,
                             &actor(),
@@ -477,6 +663,7 @@ impl Runtime {
                                 .as_ref()
                                 .map(|(session, settings, _)| (session.as_str(), settings)),
                             client.as_ref().and_then(|(_, _, capture)| capture.as_ref()),
+                            policy,
                         )
                     })
                     .map_err(err)?
@@ -553,6 +740,17 @@ impl Runtime {
         self.task_settings(task).await?;
         if matches!(role, SessionRole::Coordinator) {
             route = self.coordinator_route(task, Some(route)).await?;
+            let t = task.to_owned();
+            if self
+                .host
+                .executor
+                .read(move |db| cortex_core::lifecycle::automatic::enabled(db, &t))?
+                .await
+                .map_err(|_| CoreError::Refused("native_host_closed"))??
+            {
+                self.routes
+                    .automatic_coordinator_health(&self.host.root, &route)?;
+            }
         }
         // The owner's language (an explicit en/ru setting, otherwise the goal's language)
         // is recorded in task_language and stated per role: owner-facing text follows it,
@@ -625,15 +823,19 @@ a question to the owner (question text and option labels). Write reports, report
         } else {
             tokio::select! {
                 result = async {
+                    let mut handled_refusal = if is_worker { driver.event_cursor().await? } else { 0 };
+                    let mut continuations = 0;
                     self.guided_prompt(&driver, &prompt, &mut guidance).await?;
                     loop {
                         let wake = self.wake.notified();
                         tokio::pin!(wake);
                         wake.as_mut().enable();
-                        match driver.wait_state().await?.as_deref() {
-                            Some("ready") => { driver.continue_answer().await?; },
-                            Some("open") => tokio::select! {
+                        use crate::native_sessions::SessionWait;
+                        match driver.wait_state().await? {
+                            SessionWait::Ready => { driver.continue_answer().await?; },
+                            SessionWait::Open(retry) => tokio::select! {
                                 _ = &mut wake => {},
+                                _ = tokio::time::sleep(retry.unwrap_or_default()), if retry.is_some() => {},
                                 // A worker process that dies while its question is open is
                                 // noticed now, not when the answer arrives. The turn ends
                                 // and the exited process is settled; the lost-worker path
@@ -645,6 +847,16 @@ a question to the owner (question text and option labels). Write reports, report
                                     result?;
                                 }
                             },
+                            _ if is_worker && continuations < 2 => {
+                                let next=tokio::select!{
+                                    result=driver.command_continuation(handled_refusal)=>result?,
+                                    _=driver.process_exited()=>break,
+                                };
+                                let Some((id,message))=next else {break;};
+                                handled_refusal=id;
+                                continuations+=1;
+                                self.guided_prompt(&driver,&message,&mut guidance).await?;
+                            }
                             _ => break,
                         }
                     }
@@ -677,7 +889,7 @@ a question to the owner (question text and option labels). Write reports, report
         Ok(())
     }
     /// Stop a driver that failed. A first completion gap returns the task to its
-    /// coordinator (`ASK_USER_REQUIRED` → RECOVERING) so that it asks the owner: drive
+    /// coordinator (`ASK_USER_REQUIRED`) so that it asks the owner: drive
     /// that coordinator turn here, or nothing ever asks and the task hangs. A second
     /// stop asks the owner directly (WAITING_USER); every round ends in a stop.
     pub(super) async fn stop_after_error(
@@ -698,6 +910,7 @@ a question to the owner (question text and option labels). Write reports, report
             // its concrete answers, never a silent RECOVERING hold with nothing to press.
             let gap = code.starts_with("completion_");
             let t = task.to_owned();
+            let owner_for_stop = owner.clone();
             let state = match self.host.executor.write(move |db| {
                 cortex_core::lifecycle::event_tx(
                     db,
@@ -719,6 +932,12 @@ a question to the owner (question text and option labels). Write reports, report
                 if current == cortex_core::TaskState::WaitingUser && asking {
                     return Ok(current);
                 }
+                if cortex_core::lifecycle::automatic::enabled(db, &t)? {
+                    cortex_core::ownership::check_tx(db, &t, &owner_for_stop)?;
+                    cortex_core::lifecycle::domain::stop_tx(db, &t, &code)?;
+                    // The host tick owns this relaunch after this driver exits.
+                    return Ok(cortex_core::TaskState::Paused);
+                }
                 let state = cortex_core::lifecycle::domain::stop_tx(db, &t, &code)?;
                 if !gap && state == cortex_core::TaskState::Recovering {
                     return cortex_core::lifecycle::domain::stop_tx(db, &t, &code);
@@ -728,7 +947,13 @@ a question to the owner (question text and option labels). Write reports, report
                 Ok(reply) => reply.await.ok().and_then(|r| r.ok()),
                 Err(_) => None,
             };
-            if round == 2 || !gap || state != Some(cortex_core::TaskState::Recovering) {
+            if round == 2
+                || !gap
+                || !matches!(
+                    state,
+                    Some(cortex_core::TaskState::Recovering | cortex_core::TaskState::Reconciling)
+                )
+            {
                 return;
             }
             match self.progress(task, owner, cancelled.clone()).await {
@@ -926,9 +1151,41 @@ a question to the owner (question text and option labels). Write reports, report
     ) -> CoreResult<()> {
         // SessionDriver rebuilds the capsule on its serial writer lane immediately
         // before delivery; never reuse a snapshot captured before replacement.
-        let goal="Coordinator recovery on a new engine session. The prior process has a confirmed terminal observation. Do not replay commands, permissions or claimed deliveries. Continue from the fresh retained-state capsule; missing outcomes remain unresolved.";
-        let route = self.routes.route(&self.host.root, "orchestrator")?;
-        self.drive(task, owner, goal, route, cancelled).await
+        let mut goal=String::from("Coordinator recovery on a new engine session. The prior process has a confirmed terminal observation. Do not replay commands, permissions or claimed deliveries. Continue from the fresh retained-state capsule; missing outcomes remain unresolved.");
+        goal.push_str(&self.recovery_failure_guidance(task).await?);
+        let task_id = task.to_owned();
+        let automatic = self
+            .host
+            .executor
+            .read(move |db| cortex_core::lifecycle::automatic::enabled(db, &task_id))?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        let route = if automatic {
+            self.coordinator_route(task, None).await?
+        } else {
+            self.routes.route(&self.host.root, "orchestrator")?
+        };
+        self.drive(task, owner, &goal, route, cancelled).await
+    }
+
+    /// Point the coordinator at durable failed reports. These are historical
+    /// references; the coordinator reads the actual checks before proposing a repair.
+    async fn recovery_failure_guidance(&self, task: &str) -> CoreResult<String> {
+        let task = task.to_owned();
+        self.host.executor.read(move |db| {
+            let mut stmt = db.prepare(
+                "SELECT json_extract(result_json,'$.report_ref') FROM runtime_nodes WHERE task_id=?
+                 AND status='failed' AND json_type(result_json,'$.report_ref')='text'
+                 ORDER BY revision DESC,rowid DESC LIMIT 9",
+            )?;
+            let mut reports = stmt.query_map([&task], |r| r.get::<_,String>(0))?
+                .collect::<Result<Vec<_>,_>>()?;
+            if reports.is_empty() { return Ok(String::new()); }
+            let more = reports.len() > 8;
+            reports.truncate(8);
+            Ok(format!("\nPreviously failed worker reports: {}. {}Read relevant reports, assign in-scope fixes to a writer, and rerun each outstanding check with the same argv and working directory. A passing final check can cover a project command at the same working directory.", reports.join(", "),
+                if more { "More reports are available in the task catalogue. " } else { "" }))
+        })?.await.map_err(|_| CoreError::Refused("native_host_closed"))?
     }
     pub(super) async fn install_pump(
         &self,
@@ -967,6 +1224,16 @@ a question to the owner (question text and option labels). Write reports, report
         loop {
             if *self.stop.borrow() || *cancelled.borrow() {
                 return Err(CoreError::Refused("native_service_stopped"));
+            }
+            let t = task.to_owned();
+            if self
+                .host
+                .executor
+                .read(move |db| cortex_core::lifecycle::automatic::held(db, &t))?
+                .await
+                .map_err(|_| CoreError::Refused("native_host_closed"))??
+            {
+                return Ok(());
             }
             self.spend_progress(task).await?;
             loop {
@@ -1008,6 +1275,9 @@ a question to the owner (question text and option labels). Write reports, report
                     .advance_step(task.into(), owner.clone(), true)
                     .await?;
                 // Verification just passed: take queued messages before reconciling.
+                if step["automaticHold"] == true {
+                    return Ok(());
+                }
                 if step["recheck"] == true {
                     continue;
                 }
@@ -1033,7 +1303,9 @@ a question to the owner (question text and option labels). Write reports, report
                     // A ready step whose files another task's worker still holds is
                     // queued behind that holding, never stopped as a dead end. The wait is
                     // recorded once per holder; it ends when the holding is released.
-                    if !self.wait_for_write_holding(task, owner, &cancelled).await? {
+                    let waited = self.wait_for_write_holding(task, owner, &cancelled).await?;
+                    // The holder may finish between the failed claim and this lookup.
+                    if !waited && step["writeConflict"] != true {
                         break step;
                     }
                     continue;
@@ -1061,9 +1333,17 @@ a question to the owner (question text and option labels). Write reports, report
                 // route, as a restart for a message did; the route is resolved before
                 // anything is recorded as delivered.
                 self.take_queued(task).await?;
-                let route = match self.owner_messages_waiting(task).await? {
-                    true => self.coordinator_route(task, None).await?,
-                    false => self.routes.route(&self.host.root, "orchestrator")?,
+                let t = task.to_owned();
+                let automatic = self
+                    .host
+                    .executor
+                    .read(move |db| cortex_core::lifecycle::automatic::enabled(db, &t))?
+                    .await
+                    .map_err(|_| CoreError::Refused("native_host_closed"))??;
+                let route = if automatic || self.owner_messages_waiting(task).await? {
+                    self.coordinator_route(task, None).await?
+                } else {
+                    self.routes.route(&self.host.root, "orchestrator")?
                 };
                 let t = task.to_owned();
                 let o = owner.clone();
@@ -1074,13 +1354,16 @@ a question to the owner (question text and option labels). Write reports, report
                     }
                     let count:i64=db.query_row("SELECT count(*) FROM runtime_events WHERE task_id=? AND type='NATIVE_COORDINATOR_CONTINUED'
                         AND id>coalesce((SELECT max(id) FROM runtime_events WHERE task_id=? AND type IN
-                        ('PLAN_ACCEPTED','VERIFICATION_PASSED','VERIFICATION_FAILED','REPLAN_REQUEST_ACCEPTED','USER_ANSWER_RECEIVED','USER_STEERING')),0)",(&t,&t),|r|r.get(0))?;
+                        ('PLAN_ACCEPTED','VERIFICATION_PASSED','VERIFICATION_FAILED','REPLAN_REQUEST_ACCEPTED','USER_ANSWER_RECEIVED','USER_STEERING','AUTOMATIC_RESUMED')),0)",(&t,&t),|r|r.get(0))?;
                     if count>=3 { return Err(CoreError::Refused("coordinator_no_progress_limit")); }
                     let messages=cortex_core::lifecycle::steering::deliver_tx(db,&t)?;
                     cortex_core::lifecycle::event_tx(db,&t,"NATIVE_COORDINATOR_CONTINUED",json!({"state":cortex_core::lifecycle::domain::task_tx(db,&t)?.0}))?;
                     Ok(messages)
                 })?.await.map_err(|_|CoreError::Refused("native_host_closed"))??;
-                let mut prompt = String::from("Continue from the retained-state capsule. Reconcile verified work with synthesis_submit, ask a structured user question if a decision remains, repair failed verification with verification_submit, or propose necessary new work. Never certify missing evidence.");
+                let mut prompt = String::from("Continue from the retained-state capsule. Reconcile verified work with synthesis_submit, ask a structured user question if a decision remains, propose a scoped repair plan for failing project code and keep each unresolved verification command in it. Use verification_submit only to correct the verification procedure or rerun the reviewed work. Never certify missing evidence.");
+                if step["state"] != "RECONCILING" {
+                    prompt.push_str(&self.recovery_failure_guidance(task).await?);
+                }
                 if !messages.is_empty() {
                     prompt.push_str("\n\n");
                     prompt.push_str(&cortex_core::lifecycle::steering::guidance_prompt(
@@ -1110,81 +1393,68 @@ a question to the owner (question text and option labels). Write reports, report
             // or a cancellation stops the others through `batch`; nothing is dropped mid-turn.
             let (batch, batch_cancelled) = watch::channel(false);
             let stale = std::sync::atomic::AtomicBool::new(false);
-            let batch_cancelled = &batch_cancelled;
-            let turns = assignments.iter().map(|assignment| {
-                let mut stop = batch_cancelled.clone();
+            let revision = step["revision"]
+                .as_i64()
+                .ok_or(CoreError::Refused("native_revision_missing"))?;
+            let turn = |assignment: Value| {
+                let stop = batch_cancelled.clone();
                 let batch = &batch;
                 let stale = &stale;
-                Box::pin(async move {
-                    // A turn that was never started when the batch is already cancelled
-                    // is skipped; its claimed node is settled by the usual lost-worker path.
-                    if *stop.borrow_and_update() {
+                async move {
+                    if *stop.borrow() {
                         return Ok(());
                     }
-                    let result = self
-                        .run_assignment(task, owner, assignment, batch_cancelled.clone())
-                        .await;
+                    let result = self.run_assignment(task, owner, &assignment, stop).await;
                     self.settle_batch_turn(task, result, batch, stale).await
-                })
-                    as std::pin::Pin<
-                        Box<dyn std::future::Future<Output = CoreResult<()>> + Send + '_>,
-                    >
-            });
-            let mut turns: Vec<_> = turns.map(Some).collect();
-            let mut results: Vec<Option<CoreResult<()>>> = (0..turns.len()).map(|_| None).collect();
+                }
+            };
+            let mut turns: FuturesUnordered<_> = assignments.iter().cloned().map(turn).collect();
             let mut parent = cancelled.clone();
-            let joined = std::future::poll_fn(|cx| {
-                let mut pending = false;
-                for (turn, result) in turns.iter_mut().zip(results.iter_mut()) {
-                    if let Some(future) = turn {
-                        match future.as_mut().poll(cx) {
-                            std::task::Poll::Ready(r) => {
-                                *result = Some(r);
-                                *turn = None;
-                            }
-                            std::task::Poll::Pending => pending = true,
-                        }
-                    }
-                }
-                if pending {
-                    std::task::Poll::Pending
-                } else {
-                    std::task::Poll::Ready(())
-                }
-            });
-            tokio::pin!(joined);
-            tokio::select! {
-                _ = &mut joined => {}
-                _ = async {
-                    loop {
-                        if *parent.borrow_and_update() {
-                            break;
-                        }
-                        if parent.changed().await.is_err() {
-                            std::future::pending::<()>().await;
-                        }
-                    }
-                } => {
-                    // Cancellation reaches every turn through the batch; each settles its own session.
-                    batch.send_replace(true);
-                    (&mut joined).await;
-                }
-            }
-            let stale = stale.load(std::sync::atomic::Ordering::SeqCst);
-            // The causal failure wins over siblings that were only interrupted because of it.
             let mut first: Option<CoreError> = None;
-            for result in results.into_iter().flatten() {
+            while !turns.is_empty() {
+                if *parent.borrow() || *self.stop.borrow() {
+                    batch.send_replace(true);
+                }
+                let result = tokio::select! {
+                    biased;
+                    Ok(()) = parent.changed(), if !*batch_cancelled.borrow() => continue,
+                    Some(result) = turns.next() => result,
+                };
                 if let Err(error) = result {
-                    if error.code() == "native_task_interrupted" && (stale || first.is_some()) {
-                        continue;
-                    }
                     if first
                         .as_ref()
-                        .is_none_or(|f| f.code() == "native_task_interrupted")
+                        .is_none_or(|e| e.code() == "native_task_interrupted")
                     {
                         first = Some(error);
                     }
+                    batch.send_replace(true);
                 }
+                // Always settle every launched session, including on a refill error.
+                if turns.is_empty()
+                    || *batch_cancelled.borrow()
+                    || *parent.borrow()
+                    || *self.stop.borrow()
+                {
+                    continue;
+                }
+                match self
+                    .host
+                    .refill_execution(task.into(), owner.clone(), revision)
+                    .await
+                {
+                    Ok(next) => turns.extend(next.into_iter().map(turn)),
+                    Err(error) => {
+                        first = Some(error);
+                        batch.send_replace(true);
+                    }
+                }
+            }
+            if stale.load(std::sync::atomic::Ordering::SeqCst)
+                && first
+                    .as_ref()
+                    .is_some_and(|e| e.code() == "native_task_interrupted")
+            {
+                first = None;
             }
             if let Some(error) = first {
                 return Err(error);
@@ -1374,14 +1644,39 @@ a question to the owner (question text and option labels). Write reports, report
             }
             Ok((node,cortex_core::routing::evidence(db,&t,&root)?,escalated,previous,revision))
         })?.await.map_err(|_|CoreError::Refused("native_host_closed"))??;
-        let (route, mut decision) = self.routes.worker_selection(
+        let (route, mut decision) = match self.routes.worker_selection(
             &self.host.root,
             role,
             &node,
             &evidence,
             escalated,
             previous.as_deref(),
-        )?;
+        ) {
+            Ok(selected) => selected,
+            Err(error) => {
+                if cortex_core::lifecycle::automatic::route_blocked(error.code()) {
+                    let t = task.to_owned();
+                    let probe = json!({"reason":error.code(),"revision":revision,"role":role,
+                        "node":node,"escalated":escalated,"previous":previous});
+                    self.host
+                        .executor
+                        .write(move |db| {
+                            if cortex_core::lifecycle::automatic::enabled(db, &t)? {
+                                cortex_core::lifecycle::event_tx(
+                                    db,
+                                    &t,
+                                    "NATIVE_WORKER_ROUTE_BLOCKED",
+                                    probe,
+                                )?;
+                            }
+                            Ok(())
+                        })?
+                        .await
+                        .map_err(|_| CoreError::Refused("native_host_closed"))??;
+                }
+                return Err(error);
+            }
+        };
         // Review independence facts come from the route actually chosen, whoever
         // produced it: the same model as the reviewed work is a visible warning.
         if let Some(avoid) = node["avoid_routes"].as_array().filter(|a| !a.is_empty()) {
@@ -1479,6 +1774,157 @@ a question to the owner (question text and option labels). Write reports, report
             done.send_replace(true);
         }));
         Ok(())
+    }
+
+    /// Relaunch an Automatic task after a runtime-owned result repair. This path
+    /// deliberately bypasses the owner-input admission used by `control_input`.
+    /// A scheduler repair is runtime evidence, never an owner message, permission
+    /// grant, or an acknowledgement of an unresolved outcome.
+    ///
+    /// With an expected result version, it reopens exactly that completed result.
+    /// Without one, it continues a run that ended as failed with every effect known.
+    /// The scheduler spends at most two such repairs per task; each owner consent on
+    /// the queue hold (`owner`) allows exactly one more, under its own fingerprint.
+    ///
+    /// `Busy` (another control, maintenance, or the service stopping) decides nothing:
+    /// the caller asks again on its next pass. `Declined` and an error are refusals.
+    pub(crate) async fn continue_automatic_repair(
+        self: &Arc<Self>,
+        project: &str,
+        execution: &str,
+        expected_source_version: Option<&str>,
+        prompt: String,
+        fingerprint: &str,
+        owner: bool,
+    ) -> CoreResult<RepairAdmission> {
+        let Ok(_controls) = self.controls.try_lock() else {
+            return Ok(RepairAdmission::Busy);
+        };
+        if *self.stop.borrow() {
+            return Ok(RepairAdmission::Busy);
+        }
+        let _maintenance = match self
+            .maintenance_state
+            .as_ref()
+            .map(|state| crate::machine::maintenance::admission(state))
+            .transpose()
+        {
+            Ok(guard) => guard,
+            Err(_) => return Ok(RepairAdmission::Busy),
+        };
+        let project_id = project.to_owned();
+        let binding_project = project_id.clone();
+        let execution_id = execution.to_owned();
+        let binding = self
+            .host
+            .executor
+            .publication(move |s| {
+                s.read(|db| {
+                    cortex_core::workspace::control::binding(
+                        db,
+                        &s.key().root().to_string_lossy(),
+                        &binding_project,
+                        &actor(),
+                        &execution_id,
+                    )
+                })
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        let task_id = binding.task.clone();
+        let expected_event: Option<i64> = expected_source_version
+            .map(|v| v.parse().map_err(|_| CoreError::Refused("stale_result")))
+            .transpose()?;
+        if expected_event.is_some_and(|e| e <= 0) {
+            return Err(CoreError::Refused("stale_result"));
+        }
+        let route = self.coordinator_route(&task_id, None).await?;
+        let fp = fingerprint.to_owned();
+        let guidance = prompt.clone();
+        let root = self.host.root.clone();
+        let project_for_settled = project.to_owned();
+        let draft = binding.draft.clone();
+        let current_execution = execution.to_owned();
+        let epoch = binding.owner.epoch;
+        let runtime_task = task_id.clone();
+        let reopened = self
+            .host
+            .executor
+            .write(move |db| {
+                // The caller (`task_auto_repair::dispatch`) admitted this task under the
+                // machine lock as a member of a queue-driven sprint (Hybrid or Automatic).
+                let already: bool = db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='AUTOMATIC_REPAIR_REQUESTED' AND json_extract(payload_json,'$.fingerprint')=?)",
+                    (&runtime_task, &fp),
+                    |r| r.get(0),
+                )?;
+                if already {
+                    return Ok(false);
+                }
+                let repairs: i64 = db.query_row(
+                    "SELECT count(*) FROM runtime_events WHERE task_id=? AND type='AUTOMATIC_REPAIR_REQUESTED'",
+                    [&runtime_task],
+                    |r| r.get(0),
+                )?;
+                if repairs >= 2 && !owner {
+                    return Ok(false);
+                }
+                let (state, _) = cortex_core::lifecycle::domain::task_tx(db, &runtime_task)?;
+                let expected_state = if expected_event.is_some() {
+                    cortex_core::TaskState::Completed
+                } else {
+                    cortex_core::TaskState::Failed
+                };
+                if state != expected_state {
+                    return Ok(false);
+                }
+                let current_event: i64 = db.query_row(
+                    "SELECT coalesce(max(id),0) FROM runtime_events WHERE task_id=?",
+                    [&runtime_task],
+                    |r| r.get(0),
+                )?;
+                if expected_event.is_some_and(|e| current_event != e) {
+                    return Ok(false);
+                }
+                crate::machine::task_lifecycle::settled(
+                    db,
+                    &root,
+                    &project_for_settled,
+                    &draft,
+                )?;
+                let current_binding = cortex_core::workspace::control::binding(
+                    db, &root.to_string_lossy(), &project_for_settled, &actor(), &current_execution,
+                )?;
+                if current_binding.task != runtime_task || current_binding.owner.epoch != epoch {
+                    return Ok(false);
+                }
+                cortex_core::lifecycle::automatic::require_settled_execution(db, &runtime_task)?;
+                let waiting: bool = db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pending_questions WHERE task_id=? AND status='open')",
+                    [&runtime_task], |r| r.get(0),
+                )?;
+                if waiting { return Ok(false); }
+                let reopened = cortex_core::lifecycle::domain::reopen_tx(db, &runtime_task)?;
+                if !reopened {
+                    return Ok(false);
+                }
+                cortex_core::lifecycle::domain::settle_recovery_tx(db, &runtime_task, cortex_core::TaskState::Planning)?;
+                cortex_core::lifecycle::event_tx(
+                    db,
+                    &runtime_task,
+                    "AUTOMATIC_REPAIR_REQUESTED",
+                    serde_json::json!({"fingerprint": fp, "prompt": guidance, "ownerAllowed": owner}),
+                )?;
+                Ok(true)
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))??;
+        if !reopened {
+            return Ok(RepairAdmission::Declined);
+        }
+        self.continue_task(task_id, binding.owner, prompt, route)
+            .await?;
+        Ok(RepairAdmission::Started)
     }
     pub(crate) async fn shutdown(&self) {
         self.stop.send_replace(true);

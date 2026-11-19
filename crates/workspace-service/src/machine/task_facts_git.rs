@@ -7,6 +7,20 @@ use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::Path};
 
 pub async fn read(root: &Path, record: &Value, task: &str, git: &mut Git) -> Result<Value> {
+    let mut facts = read_for_finish(root, record, task, git).await?;
+    // The scheduler uses these paths to request repair. Keep the public facts shape stable.
+    if let Some(fields) = facts.as_object_mut() {
+        fields.remove("repairPaths");
+    }
+    Ok(facts)
+}
+
+pub(super) async fn read_for_finish(
+    root: &Path,
+    record: &Value,
+    task: &str,
+    git: &mut Git,
+) -> Result<Value> {
     let has_git = git.is_repo(root).await?;
     let target = match record["targetBranch"].as_str().filter(|s| !s.is_empty()) {
         Some(s) => s.to_owned(),
@@ -421,6 +435,7 @@ async fn same_branch(
     facts["reason"] = if unknown.is_empty() {
         Value::Null
     } else {
+        facts["repairPaths"] = json!(unknown);
         json!("Task files changed again or their recorded content cannot be located. Finish in Git and use Done outside the app, or close as is.")
     };
     Ok(())

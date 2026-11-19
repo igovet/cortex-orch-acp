@@ -50,8 +50,23 @@ const REVIEW = [
 const REVIEWING = process.env.CW_SET === "review-fixes";
 const POLISH = process.env.CW_SET === "polish" || REVIEWING;
 // CW_SET=ui-fixes: the owner's three widths in both themes.
-const BOTH = POLISH || process.env.CW_SET === "ui-fixes";
-const SIZES = POLISH ? [[1920, 1080], [1280, 800], [960, 540], [820, 1180], [390, 844]] : [[1280, 800], [960, 540], [390, 844]];
+// CW_SET=settings-rework: every orchestration settings section and secondary page, and a few of their states, on a set-up
+// machine (world=settings), at desktop, tablet and phone width in both themes; at phone width also in the phone shell.
+const SETTING = process.env.CW_SET === "settings-rework";
+const PRESS_TEXT = (selector, text) => `const e = [...document.querySelectorAll(${JSON.stringify(selector)})].find(x => x.textContent.trim() === ${JSON.stringify(text)}); if (e) e.click(); return !!e;`;
+const SETTINGS = [
+  ["defaults", M + "/orchestration/defaults", "", null], ["models", M + "/orchestration/models", "", null], ["engines", M + "/orchestration/engines", "", null],
+  ["ceiling", M + "/orchestration/ceiling", "", null], ["routing", M + "/orchestration/routing", "", null], ["profiles", M + "/orchestration/profiles", "", null],
+  ["mcp", M + "/orchestration/tools", "", null], ["connections", M + "/connections", "", null],
+  ["route-preview", M + "/orchestration/effective", "", null], ["files", M + "/orchestration/files", "", null],
+  ["defaults-draft", M + "/orchestration/defaults", "", PRESS_TEXT(".seg button", "English")],
+  ["engines-details", M + "/orchestration/engines", "", "const e = document.querySelector(\"[aria-label='Details of Sonnet 5']\"); if (e) e.click(); return !!e;"],
+  ["ceiling-project", M + "/orchestration/ceiling", "", "const e = document.querySelectorAll('#m-scope-project .mi')[1]; if (e) e.click(); return !!e;"],
+  ["routing-policy", M + "/orchestration/routing?tab=policy:claude-agent-acp:opus", "", null],
+];
+const BOTH = POLISH || SETTING || process.env.CW_SET === "ui-fixes";
+const SIZES = SETTING ? [[1440, 900], [820, 1180], [390, 844], [390, 844, "&phone=1", "-phone"]] : POLISH ? [[1920, 1080], [1280, 800], [960, 540], [820, 1180], [390, 844]] : [[1280, 800], [960, 540], [390, 844]];
+const WORLD = SETTING ? "settings" : "pages";
 const THEMES = BOTH ? [["", ""], ["-dark", "&dark=1"]] : [["", ""]];
 const LABEL_FIT = process.env.CW_LABEL_FIT;
 if (!LABEL_FIT) throw Error("CW_LABEL_FIT is required");
@@ -87,6 +102,24 @@ function inkCentres(file, entries) {
   return found;
 }
 
+// The page's ground as painted: the commonest colour of every fourth pixel over the page's box, in screen pixels.
+function groundOf(file, box, scale) {
+  const [width, height, stride, channels] = file.shape, data = file.data, counts = new Map();
+  const x0 = Math.max(0, Math.round(box[0] * scale)), y0 = Math.max(0, Math.round(box[1] * scale));
+  const x1 = Math.min(width, Math.round(box[2] * scale)), y1 = Math.min(height, Math.round(box[3] * scale));
+  for (let y = y0; y < y1; y += 4) for (let x = x0; x < x1; x += 4) { const i = y * stride + x * channels, key = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2]; counts.set(key, (counts.get(key) ?? 0) + 1); }
+  let ground = null, best = -1;
+  for (const [key, n] of counts) if (n > best) { best = n; ground = key; }
+  return ground === null ? null : [(ground >> 16) & 255, (ground >> 8) & 255, ground & 255];
+}
+const hex = rgb => "#" + rgb.map(v => v.toString(16).padStart(2, "0")).join("");
+// What label-fit cannot see: the page in the theme the run asked for, each switch a 24 by 24 target of its own, and the settings
+// bars' middle zone, which hides what overflows it: something cut there (a state word under the Project picker) is a problem.
+const VIEW = "const pane = document.querySelector('.set-page') ?? document.querySelector('.l-page'); const r = pane && pane.getBoundingClientRect();"
+  + " const small = [...document.querySelectorAll('.sw input')].map(i => i.getBoundingClientRect()).filter(b => b.width && b.height && (b.width < 24 || b.height < 24)).map(b => Math.round(b.width) + 'x' + Math.round(b.height));"
+  + " const cut = [...document.querySelectorAll('.set-ctx > .l-z-mid, .set-prof > .l-z-mid')].filter(z => z.scrollWidth > z.clientWidth + 1).map(z => z.parentElement.className.split(' ').find(c => c.startsWith('set-')) + ' ' + z.scrollWidth + '>' + z.clientWidth);"
+  + " return {inner: innerWidth, pane: r ? [r.left, r.top, r.right, r.bottom] : null, small, cut};";
+
 await main(async () => {
   const display = await startXvfb();
   const host = await Host.start({width: 1280, height: 800, env: engineEnv(display)});
@@ -95,12 +128,12 @@ await main(async () => {
   const made = [];
   let problems = 0;
   try {
-    for (const [page, route, query, press] of REVIEWING ? REVIEW : PAGES.map(([p, r]) => [p, r, "", null])) {
+    for (const [page, route, query, press] of REVIEWING ? REVIEW : SETTING ? SETTINGS : PAGES.map(([p, r]) => [p, r, "", null])) {
       if (WANTED.size && !WANTED.has(page)) continue;
-      for (const [width, height] of SIZES) for (const [theme, more] of THEMES) {
+      for (const [width, height, shell = "", shellName = ""] of SIZES) for (const [theme, more] of THEMES) {
         loads++;
         await host.resize(width, height);
-        await host.load(base + "?world=pages&route=" + encodeURIComponent(route) + query + more + `&load=${loads}`);
+        await host.load(base + `?world=${WORLD}&route=` + encodeURIComponent(route) + query + shell + more + `&load=${loads}`);
         await wait(`window.fixture === '${loads}'`);
         await wait("document.querySelector('.ws-main, main, .l-page') && !document.querySelector('.l-startup')");
         await sleep(.8);
@@ -109,7 +142,8 @@ await main(async () => {
           await sleep(.6);
         }
         const facts = await js(MEASURE);
-        const name = `${page}-${width}x${height}${theme}`;
+        const view = await js(VIEW);
+        const name = `${page}-${width}x${height}${shellName}${theme}`;
         facts.file = name + ".png";
         await sleep(.3);
         const rawPath = join(evidence, ".pixels-" + process.pid);
@@ -123,10 +157,15 @@ await main(async () => {
         const entries = facts.entries; delete facts.entries;
         facts.drawn = inkCentres(pixels, entries.filter(e => !covers.some(c => under(e.box, c))));
         facts.labels.push(...facts.drawn.filter(d => Math.abs(d.off) > 1).map(d => `letters drawn off centre: ${d.kind} "${d.label}" ${d.off > 0 ? "low" : "high"} by ${Math.abs(d.off)}px`));
-        const bad = facts.sideways || facts.mixed.length || facts.named.length || facts.labels.length;
+        const want = theme === "-dark" ? "dark" : "light", ground = view.pane && groundOf(pixels, view.pane, shape[0] / view.inner);
+        const got = ground ? ((.2126 * ground[0] + .7152 * ground[1] + .0722 * ground[2]) / 255 < .5 ? "dark" : "light") : "unknown";
+        facts.theme = {want, got, ground: ground ? hex(ground) : null};
+        facts.smallSwitches = view.small;
+        facts.cut = view.cut;
+        const bad = facts.sideways || facts.mixed.length || facts.named.length || facts.labels.length || got !== want || view.small.length || view.cut.length;
         problems += bad ? 1 : 0;
         made.push(facts);
-        if (bad) console.log(JSON.stringify({file: facts.file, sideways: facts.sideways, mixed: facts.mixed, named: facts.named, labels: facts.labels}));
+        if (bad) console.log(JSON.stringify({file: facts.file, sideways: facts.sideways, mixed: facts.mixed, named: facts.named, labels: facts.labels, theme: facts.theme, smallSwitches: facts.smallSwitches, cut: facts.cut}));
       }
     }
     writeJson(join(evidence, "measurements.json"), made, 1);

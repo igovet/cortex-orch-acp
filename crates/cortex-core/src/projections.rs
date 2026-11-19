@@ -91,6 +91,7 @@ pub(super) fn task(
     let mut at = field(&t, "created_at").map(str::to_owned);
     let mut warnings = Vec::new();
     let mut route = None;
+    let mut automatic_continuation = None;
     if let Some(execution) = field(&t, "execution_id") {
         phase = "unknown";
         state = "unknown";
@@ -134,6 +135,13 @@ pub(super) fn task(
                         .is_some_and(|s| field(s, "state") == Some("unknown"));
                 if valid {
                     (phase, state) = mapped;
+                    automatic_continuation = crate::lifecycle::automatic::projection(db, runtime)?;
+                    if automatic_continuation
+                        .as_ref()
+                        .is_some_and(|v| v["pause"].is_object())
+                    {
+                        (phase, state) = ("paused", "paused");
+                    }
                     // Close task commits the owner's cancellation at admission with this
                     // exact blocker; its finish receipt (and OWNER_TASK_RESOLVED) can still
                     // be refused while an engine exit is unconfirmed. The closed task is the
@@ -158,8 +166,19 @@ pub(super) fn task(
                         [runtime],
                     )?
                     .and_then(|v| field(&v, "wait_reason").map(str::to_owned));
+                    if let Some(pause) = automatic_continuation
+                        .as_ref()
+                        .and_then(|v| v["pause"]["reason"].as_str())
+                    {
+                        reason = Some(pause.to_owned());
+                    }
                     if reason.is_none() && raw == "RECOVERING" {
                         reason = native_recovery_reason(db, runtime, r)?;
+                        if reason.is_none() {
+                            if let Some(hold) = native_exit_hold(db, runtime)? {
+                                warnings.push(hold.into());
+                            }
+                        }
                     }
                     // A step queued behind another task's files waits, visibly, for
                     // that task to release them; it is not stopped.
@@ -216,6 +235,7 @@ pub(super) fn task(
         wait_reason: reason,
         last_confirmed_at: at,
         coordinator_route: route,
+        automatic_continuation,
         warnings,
         description_availability: None,
     };
@@ -233,7 +253,11 @@ pub(super) fn task(
 /// with when the runtime last confirmed it in milliseconds. It is the same rule the task
 /// projection applies (`owner_resolved_without_certification` on a bound, consistent
 /// CANCELLED record), so the owner's records and the board can never disagree.
-pub fn owner_closed(db: &Connection, project: &str, root: &str) -> CoreResult<Vec<(String, Option<i64>)>> {
+pub fn owner_closed(
+    db: &Connection,
+    project: &str,
+    root: &str,
+) -> CoreResult<Vec<(String, Option<i64>)>> {
     let mut query = db.prepare(
         "SELECT t.task_id FROM workspace_tasks t
          JOIN workspace_executions e ON e.execution_id=t.execution_id AND e.task_id=t.task_id
@@ -253,7 +277,9 @@ pub fn owner_closed(db: &Connection, project: &str, root: &str) -> CoreResult<Ve
         };
         if t.phase == "stopped"
             && t.runtime_state.as_deref() == Some("CANCELLED")
-            && t.warnings.iter().any(|w| w == "owner_resolved_without_certification")
+            && t.warnings
+                .iter()
+                .any(|w| w == "owner_resolved_without_certification")
             && !t.warnings.iter().any(|w| w == "contradictory_evidence")
         {
             let at = t
@@ -343,6 +369,49 @@ fn native_recovery_reason(db: &Connection, runtime: &str, r: &Value) -> CoreResu
     )?
     .is_some();
     Ok((!live).then(|| "turn_interrupted".to_owned()))
+}
+/// Why a native recovery without a recorded reason is still not an ended turn: some
+/// owned process of the task is not confirmed gone. The task stays unconfirmed; this
+/// only names which of two observable cases holds, so the owner is never left without
+/// a way out:
+///
+/// - `process_exit_pending`: a session is still being stopped (its provisioning or
+///   reservation is still live). Its shutdown observation settles it, and the settled
+///   reservation republishes the task, so the runtime decides by itself.
+/// - `process_exit_unconfirmed`: every remaining row is this host's own recorded
+///   unconfirmed exit (`ambiguous`). The running service re-checks it on its
+///   scheduler passes with startup recovery's process evidence, and a settlement
+///   republishes the task. While that evidence stays inconclusive only the owner can
+///   end the task (Close as is, which replays nothing).
+fn native_exit_hold(db: &Connection, runtime: &str) -> CoreResult<Option<&'static str>> {
+    let native = row(
+        db,
+        "SELECT 1 AS native FROM runtime_events WHERE task_id=? AND type IN ('TASK_CREATED','NATIVE_TASK_ADOPTED')
+         AND json_extract(payload_json,'$.execution_host')='rust' LIMIT 1",
+        [runtime],
+    )?
+    .is_some();
+    if !native {
+        return Ok(None);
+    }
+    let Some(held) = row(
+        db,
+        "SELECT EXISTS(SELECT 1 FROM delegation_provisioning WHERE task_id=?1 AND status NOT IN ('terminated','ambiguous'))
+            OR EXISTS(SELECT 1 FROM capacity_reservations WHERE task_id=?1 AND state NOT IN ('released','ambiguous')) AS live,
+         EXISTS(SELECT 1 FROM delegation_provisioning WHERE task_id=?1 AND status!='terminated')
+            OR EXISTS(SELECT 1 FROM capacity_reservations WHERE task_id=?1 AND state!='released') AS held",
+        [runtime],
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(
+        match (number(&held, "held") != 0, number(&held, "live") != 0) {
+            (false, _) => None,
+            (true, true) => Some("process_exit_pending"),
+            (true, false) => Some("process_exit_unconfirmed"),
+        },
+    )
 }
 fn observed_route(
     db: &Connection,

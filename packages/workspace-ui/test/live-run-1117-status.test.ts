@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { emptyWorkspace, mapTask, type Task, type WorkspaceState } from "@cortex/workspace-domain";
-import { buildIndex, decisionOf, inboxItems, interruptedTurn, nothingToCommit, readyLabel, readyStep, refusalReason, sideWord, stopReason } from "../src/selectors";
+import { buildIndex, decisionOf, humanStatus, inboxItems, interruptedTurn, nothingToCommit, readyLabel, readyStep, refusalReason, sideWord, stopReason } from "../src/selectors";
+import { GENERIC_STATUS } from "../src/status-text";
 import { acceptBlocked } from "../src/review-model";
 import { stateChip, sessionModel } from "../src/session-model";
 import { withTask, wireTask } from "./support";
@@ -16,10 +17,16 @@ const state = (patch: Partial<Task>, project: Partial<WorkspaceState["projects"]
 const view = (s: WorkspaceState) => buildIndex(s, Date.now()).views[0];
 
 describe("held and stopped tasks", () => {
+  it("renders machine status reasons as human language without touching prose", () => {
+    expect(humanStatus("review_incomplete")).toBe("The review is incomplete");
+    expect(humanStatus("native_outside_outcome_unknown")).not.toContain("_");
+    expect(humanStatus("Automatic continuation: check_this_file")).toBe("Automatic continuation: check this file");
+    expect(humanStatus("review_needs_owner")).not.toMatch(/_|review_needs_owner/);
+  });
   it("a recovery code reads in words, never as the raw code", () => {
     expect(stopReason("native_session_outcome_unknown")).toBe("The app stopped while this task ran, so how its engine session ended is not known");
     expect(stopReason("completion_worker_check_unverified")).toBe("The work could not be confirmed as complete");
-    expect(stopReason("some_new_code")).toBe("Stopped for an internal reason (some new code)");
+    expect(stopReason("some_new_code")).toBe(GENERIC_STATUS);
     expect(stopReason("Задача остановлена: что дальше?")).toBe("Задача остановлена: что дальше?");
     const d = decisionOf(view(state({ status: "needs_you", issue: "native_session_outcome_unknown", process: "live", observedPhase: "recovery", executionId: "e" })));
     expect(d.ask).not.toContain("native_session_outcome_unknown");
@@ -88,6 +95,6 @@ describe("finishing words", () => {
 describe("refused worker results", () => {
   it("name why the runtime refused them", () => {
     expect(refusalReason("open_failed_check")).toBe("a check it cited failed and was still open");
-    expect(refusalReason("brand_new")).toBe("the runtime refused it (brand new)");
+    expect(refusalReason("brand_new")).toBe("the runtime refused it");
   });
 });

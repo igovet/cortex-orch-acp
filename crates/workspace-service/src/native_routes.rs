@@ -1021,6 +1021,39 @@ impl crate::native_runtime::NativeRoutes for ConfiguredRoutes {
     fn connection_ids(&self) -> Vec<String> {
         self.registered(|c| c["id"].as_str().unwrap_or_default().to_owned())
     }
+    fn authentication_observed_after(
+        &self,
+        root: &Path,
+        connection: &str,
+        after: &str,
+    ) -> CoreResult<bool> {
+        let key = super::native_runtime::key(root)?;
+        let current = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
+        Ok(current.candidates.iter().any(|c| {
+            c.connection_id() == connection
+                && c.entry["evidence"]["configured"]["source"] == "discovery"
+                && c.entry["evidence"]["configured"]["observed_at"]
+                    .as_str()
+                    .is_some_and(|at| at > after)
+        }))
+    }
+    fn automatic_coordinator_health(
+        &self,
+        root: &Path,
+        route: &crate::native_sessions::SessionRoute,
+    ) -> CoreResult<()> {
+        let key = super::native_runtime::key(root)?;
+        let current = RouteResolver::load(root, &key.directory(), self.environment.clone())?;
+        let candidate = current
+            .candidates
+            .iter()
+            .find(|c| c.connection_id() == route.connection && c.model() == route.model)
+            .ok_or(CoreError::Refused("native_task_route_unavailable"))?;
+        if current.usage(candidate)?.is_some_and(|used| used >= 100.0) {
+            return refuse("engine_quota_exhausted");
+        }
+        Ok(())
+    }
     fn refresh_catalog(&self, connection: &str) -> bool {
         crate::machine::config_action::catalog_refresh::observe_session_refresh(
             &self.environment,

@@ -78,6 +78,7 @@ pub fn refusal_hint(code: &str) -> &'static str {
         "writing_worker_required" | "worker_required" | "readonly_delete_refused" =>
             "This role or stage holds no write authority for this action. Report the need in the result or use the advertised request route.",
         "write_denied" => "The owner protected this path from writes. Choose another path or report the blocker; never work around it.",
+        "read_only_task_writer_refused" => "This task is read-only: plan only read-only specialists and change no file.",
         "private_or_invalid_path" => "Use a project-relative path without '..', empty components or private runtime storage (.git, .cortex).",
         "outside_cwd_denied" => "This working directory is not available in the current access mode.",
         "deletion_not_confirmed" | "outside_action_not_confirmed" | "skill_link_replace_not_confirmed" =>

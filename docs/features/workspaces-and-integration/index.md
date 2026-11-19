@@ -11,8 +11,7 @@ ready nodes remain pending until a worker slot is free. A connection's
 `max_concurrent_sessions` limit (default 4, configurable from 1 through 64) can
 further lower the session's worker capacity on that connection; coordinators
 are never limited and never take a worker slot. Overlapping write scopes are
-serialized, while review-stage nodes and READ_ONLY roles do not participate in
-scope-overlap conflicts. A finished worker keeps its session slot until its
+serialized. When a task finishes its execution steps, new writing assignments in the same checkout queue while existing writers drain. Independent review and final verification share the checkout with readers. Writers in separate worktrees can proceed. External digest drift during verification starts fresh independent review within the review-cycle limit. Each observed command output remains in the original run. A finished worker keeps its session slot until its
 engine is confirmed gone and the reservation is released or safely reclaimed.
 A finished, failed or cancelled worker's write scope is likewise held until
 its engine's reservation is released on a confirmed exit (or every delegation

@@ -460,12 +460,23 @@ async fn pull_request_requires_a_pushed_branch_and_records_one_attempt() {
     );
     git(
         &env.root,
-        &["remote", "add", "origin", "https://github.com/owner/repo.git"],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo.git",
+        ],
     );
     // Pushes go to the local bare repository; nothing contacts the remote host.
     git(
         &env.root,
-        &["remote", "set-url", "--push", "origin", remote.to_str().unwrap()],
+        &[
+            "remote",
+            "set-url",
+            "--push",
+            "origin",
+            remote.to_str().unwrap(),
+        ],
     );
     let digest = env.evidence(&[]).await;
     env.save(record(&env, &digest, json!({})));
@@ -514,18 +525,35 @@ async fn pull_request_requires_a_pushed_branch_and_records_one_attempt() {
         "https://github.com/owner/repo/pull/7"
     );
     let mut g = Git::new();
-    let found = pull_request_address(&env.root, "p1", &env.state, &json!({"pullRequest":"t1"}), &mut g)
-        .await
-        .unwrap();
+    let found = pull_request_address(
+        &env.root,
+        "p1",
+        &env.state,
+        &json!({"pullRequest":"t1"}),
+        &mut g,
+    )
+    .await
+    .unwrap();
     assert_eq!(found, json!({"url":"https://github.com/owner/repo/pull/7"}));
     // Checked again when it is opened: a remote moved to another host no longer vouches for it.
     git(
         &env.root,
-        &["remote", "set-url", "origin", "git@gitlab.example.invalid:owner/repo.git"],
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "git@gitlab.example.invalid:owner/repo.git",
+        ],
     );
-    let refused = pull_request_address(&env.root, "p1", &env.state, &json!({"pullRequest":"t1"}), &mut g)
-        .await
-        .unwrap_err();
+    let refused = pull_request_address(
+        &env.root,
+        "p1",
+        &env.state,
+        &json!({"pullRequest":"t1"}),
+        &mut g,
+    )
+    .await
+    .unwrap_err();
     assert_eq!(refused.code, "pull_request_unsafe");
     // A task without a recorded pull request has nothing to open.
     let mut saved = super::super::native::product(&env.state, "p1").unwrap();
@@ -535,10 +563,16 @@ async fn pull_request_requires_a_pushed_branch_and_records_one_attempt() {
         .remove("url");
     settings::write_json(&product_path(&env.state, "p1").unwrap(), &saved).unwrap();
     assert_eq!(
-        pull_request_address(&env.root, "p1", &env.state, &json!({"pullRequest":"t1"}), &mut g)
-            .await
-            .unwrap_err()
-            .code,
+        pull_request_address(
+            &env.root,
+            "p1",
+            &env.state,
+            &json!({"pullRequest":"t1"}),
+            &mut g
+        )
+        .await
+        .unwrap_err()
+        .code,
         "pull_request_unknown"
     );
 }
@@ -629,7 +663,10 @@ fn update_env(name: &str, main_file: (&str, &str)) -> (Env, PathBuf) {
     git(&env.root, &["commit", "-q", "-am", "Task edits a"]);
     git(&env.root, &["checkout", "-q", "main"]);
     let wt = env.base.join("task-wt");
-    git(&env.root, &["worktree", "add", "-q", wt.to_str().unwrap(), "task"]);
+    git(
+        &env.root,
+        &["worktree", "add", "-q", wt.to_str().unwrap(), "task"],
+    );
     fs::write(env.root.join(main_file.0), main_file.1).unwrap();
     git(&env.root, &["add", "."]);
     git(&env.root, &["commit", "-q", "-m", "Main moved"]);
@@ -656,7 +693,10 @@ async fn update_from_target_merges_the_target_into_the_task_branch_and_withdraws
     // Confirmation first, as for every integration.
     let mut unconfirmed = update(&digest, "u0");
     unconfirmed["confirmed"] = json!(false);
-    assert_eq!(env.run(unconfirmed).await.unwrap_err().code, "confirmation_required");
+    assert_eq!(
+        env.run(unconfirmed).await.unwrap_err().code,
+        "confirmation_required"
+    );
     assert_eq!(
         env.run(update(&digest, "u1")).await.unwrap(),
         json!({"done":true,"updated":true})
@@ -667,7 +707,10 @@ async fn update_from_target_merges_the_target_into_the_task_branch_and_withdraws
         git(&wt, &["show", "-s", "--format=%P", "HEAD"]),
         format!("{task_head} {main}")
     );
-    assert_eq!(fs::read_to_string(wt.join("other.txt")).unwrap(), "main moved\n");
+    assert_eq!(
+        fs::read_to_string(wt.join("other.txt")).unwrap(),
+        "main moved\n"
+    );
     assert_clean(&wt);
     let saved = env.overlay();
     assert_eq!(saved["acceptance"], Value::Null);
@@ -675,8 +718,14 @@ async fn update_from_target_merges_the_target_into_the_task_branch_and_withdraws
     assert!(saved["requiresFreshResult"]["resultId"].is_string());
     assert_eq!(saved["status"], "ready_to_merge");
     // Nothing left to bring in, and the withdrawn acceptance cannot be used to merge.
-    assert_eq!(env.run(update(&digest, "u2")).await.unwrap_err().code, "up_to_date");
-    assert_eq!(env.run(squash(&digest)).await.unwrap_err().code, "stale_result");
+    assert_eq!(
+        env.run(update(&digest, "u2")).await.unwrap_err().code,
+        "up_to_date"
+    );
+    assert_eq!(
+        env.run(squash(&digest)).await.unwrap_err().code,
+        "stale_result"
+    );
 }
 
 #[tokio::test]
@@ -690,32 +739,51 @@ async fn update_from_target_is_refused_before_any_change_when_it_could_lose_or_r
     let refused = env.run(update(&digest, "d1")).await.unwrap_err();
     assert_eq!(refused.code, "dirty_checkout", "{}", refused.message);
     assert_eq!(git(&wt, &["rev-parse", "HEAD"]), head);
-    assert_eq!(fs::read_to_string(wt.join("a.txt")).unwrap(), "uncommitted\n");
+    assert_eq!(
+        fs::read_to_string(wt.join("a.txt")).unwrap(),
+        "uncommitted\n"
+    );
     git(&wt, &["checkout", "-q", "--", "a.txt"]);
     // Not finished yet, or working in the shared project folder.
     let mut working = task_in(&env, &wt, &digest);
     working["status"] = json!("working");
     env.save(working);
-    assert_eq!(env.run(update(&digest, "d2")).await.unwrap_err().code, "not_finished");
+    assert_eq!(
+        env.run(update(&digest, "d2")).await.unwrap_err().code,
+        "not_finished"
+    );
     env.save(record(&env, &digest, json!({})));
-    assert_eq!(env.run(update(&digest, "d3")).await.unwrap_err().code, "same_branch");
+    assert_eq!(
+        env.run(update(&digest, "d3")).await.unwrap_err().code,
+        "same_branch"
+    );
     // A result other than the one reviewed is stale.
     env.save(task_in(&env, &wt, &digest));
     assert_eq!(
-        env.run(update(&"0".repeat(64), "d4")).await.unwrap_err().code,
+        env.run(update(&"0".repeat(64), "d4"))
+            .await
+            .unwrap_err()
+            .code,
         "stale_result"
     );
     // Workers running again: the run is not complete, so nothing is merged under them.
     let store = Store::open(context::key(&env.root).unwrap(), OpenMode::Initialize).unwrap();
     store
         .write(|db| {
-            db.execute("UPDATE runtime_tasks SET state='RUNNING' WHERE task_id='r1'", [])?;
+            db.execute(
+                "UPDATE runtime_tasks SET state='RUNNING' WHERE task_id='r1'",
+                [],
+            )?;
             Ok(())
         })
         .unwrap();
     let running = env.run(update(&digest, "d5")).await.unwrap_err();
     assert_eq!(running.code, "result_unavailable");
-    assert!(running.message.contains("still running"), "{}", running.message);
+    assert!(
+        running.message.contains("still running"),
+        "{}",
+        running.message
+    );
     assert_eq!(git(&wt, &["rev-parse", "HEAD"]), head);
     assert_clean(&wt);
 }
@@ -730,7 +798,11 @@ async fn an_update_conflict_is_the_tasks_own_and_abort_returns_the_reviewed_tree
     env.save(task_in(&env, &wt, &digest));
     let refused = env.run(update(&digest, "c1")).await.unwrap_err();
     assert_eq!(refused.code, "merge_conflict", "{}", refused.message);
-    assert!(refused.message.contains("1 conflicting file"), "{}", refused.message);
+    assert!(
+        refused.message.contains("1 conflicting file"),
+        "{}",
+        refused.message
+    );
     assert_eq!(git(&env.root, &["rev-parse", "main"]), main);
     let saved = env.overlay();
     assert_eq!(saved["conflict"], "conflict");
@@ -771,7 +843,10 @@ async fn a_resolved_update_conflict_finishes_as_a_merge_and_needs_a_fresh_result
     let main = git(&env.root, &["rev-parse", "main"]);
     let digest = env.evidence(&[]).await;
     env.save(task_in(&env, &wt, &digest));
-    assert_eq!(env.run(update(&digest, "f1")).await.unwrap_err().code, "merge_conflict");
+    assert_eq!(
+        env.run(update(&digest, "f1")).await.unwrap_err().code,
+        "merge_conflict"
+    );
     fs::write(wt.join("a.txt"), "task side\nmain side\n").unwrap();
     git(&wt, &["add", "a.txt"]);
     let mut product = super::super::native::product(&env.state, "p1").unwrap();
@@ -799,4 +874,26 @@ async fn a_resolved_update_conflict_finishes_as_a_merge_and_needs_a_fresh_result
     assert_eq!(saved["acceptance"], Value::Null);
     // The tree changed: the reviewed result is not current, so it cannot be accepted again as is.
     assert!(saved["requiresFreshResult"]["resultId"].is_string());
+}
+
+#[test]
+fn automatic_no_effect_finish_requires_complete_landing_facts() {
+    // Both certified no-op forms are eligible even when unrelated owner work is
+    // dirty: the task has no pending paths and no repair paths.
+    for facts in [
+        json!({"noChanges":true,"alreadyInTarget":true,"pendingPaths":[],"otherUncommitted":true}),
+        json!({"alreadyInTarget":true,"pendingPaths":[],"otherUncommitted":true}),
+    ] {
+        assert!(super::task_already_landed(&facts));
+    }
+    // Missing/ambiguous attribution and a recorded repair path are never a
+    // successful no-op, even if a partial fact says the target contains files.
+    for facts in [
+        json!({"alreadyInTarget":true}),
+        json!({"alreadyInTarget":true,"pendingPaths":["task.txt"]}),
+        json!({"alreadyInTarget":true,"pendingPaths":[],"repairPaths":["task.txt"]}),
+        json!({"alreadyInTarget":false,"pendingPaths":[],"noChanges":true}),
+    ] {
+        assert!(!super::task_already_landed(&facts));
+    }
 }

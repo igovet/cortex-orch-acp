@@ -147,6 +147,56 @@ fn with_sections(mut args: Value) -> Value {
     args["report"] = json!(report);
     args
 }
+/// A reviewer finishes its own coverage: the journey's changed file and every
+/// completed report of the current revision (implementation and earlier review) are read before the verdict, or
+/// result_submit refuses it with exactly what is still unread.
+async fn review_reads(
+    p: &Project,
+    review: &workspace_service::native_sessions::SessionDriver,
+    task: &str,
+    assignment: &str,
+) {
+    let (paths, reports): (Vec<String>, Vec<String>) = p
+        .store()
+        .read(|db| {
+            let packet: String = db.query_row(
+                "SELECT coalesce((SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REVIEW_PACKET'
+                 AND json_extract(payload_json,'$.assignment_ref')=? ORDER BY id DESC LIMIT 1),'{}')",
+                (task, assignment),
+                |r| r.get(0),
+            )?;
+            let packet: Value = serde_json::from_str(&packet)?;
+            let paths = packet["packet"]["changed_files"]["files"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|f| f["current_sha256"].is_string())
+                .filter_map(|f| f["path"].as_str().map(str::to_owned))
+                .collect();
+            let reports = db
+                .prepare(
+                    "SELECT json_extract(n.result_json,'$.report_ref') FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
+                     WHERE n.task_id=? AND n.revision=t.revision
+                     AND json_type(n.result_json,'$.report_ref')='text' ORDER BY n.rowid",
+                )?
+                .query_map([task], |r| r.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((paths, reports))
+        })
+        .unwrap();
+    for path in paths {
+        review
+            .prompt(&call("project_read", json!({"path":path})))
+            .await
+            .unwrap();
+    }
+    for report in reports {
+        review
+            .prompt(&call("read_report", json!({"report_id":report})))
+            .await
+            .unwrap();
+    }
+}
 /// Terminal result revocation may close ACP before end_turn. Only an exact
 /// durable host receipt confirms the result; transport loss alone never passes.
 async fn submit_result(
@@ -167,7 +217,7 @@ async fn submit_result(
         .result_receipt(task.into(), owner.clone(), assignment.into(), key)
         .await
         .unwrap()
-        .expect("exact result receipt missing");
+        .unwrap_or_else(|| panic!("exact result receipt missing for {assignment}"));
     assert_eq!(receipt["assignment_ref"], assignment);
     assert_eq!(receipt["outcome"], "recorded");
     assert_eq!(receipt["certified"], false);
@@ -3486,7 +3536,26 @@ async fn result_failure_and_review_refusal_are_not_acceptance() {
         );
         if stage == "review" {
             args["verdict"] = json!("APPROVE");
+        } else {
+            // A failure is accepted only as a named dead end: without its blocker it
+            // is refused, correctably, and the same assignment stays active.
+            d.prompt(&call("result_submit", args.clone()))
+                .await
+                .unwrap();
+            let refused: String = s
+                .read(|db| {
+                    Ok(db.query_row(
+                        "SELECT json_extract(payload_json,'$.code') FROM runtime_events
+                         WHERE type='WORKER_RESULT_REFUSED' ORDER BY id DESC LIMIT 1",
+                        [],
+                        |r| r.get(0),
+                    )?)
+                })
+                .unwrap();
+            assert_eq!(refused, "assignment_blocker_required");
         }
+        args["blocker"] = json!({"kind":"owner_decision",
+            "detail":"Which of the two retained formats to keep is the owner's decision."});
         if stage == "review" {
             assert_eq!(
                 d.prompt(&call("result_submit", args))
@@ -3640,15 +3709,11 @@ async fn native_plan_review_verification_journey(
         )
         .await
         .unwrap();
-    std::fs::write(
-        p.0.join("work.txt"),
-        if truncated {
-            "x".repeat(1048577)
-        } else {
-            "after".into()
-        },
-    )
-    .unwrap();
+    // The truncated case is about the verification output (dd, below). The changed
+    // file stays readable: a single line past project_read's line bound can never be
+    // read completely, which is a reviewer dead end, not an approval.
+    std::fs::write(p.0.join("work.txt"), "after").unwrap();
+    let _ = truncated;
     let result = json!({"report":"# Work\n\nFixture file changed.","summary":"Changed the fixture file.","checks":[],"request_key":"result"});
     submit_result(&h, &worker, "journey", &o, &a, result).await;
     // A report never stands in for a process wait or begins verification.
@@ -3710,6 +3775,13 @@ async fn native_plan_review_verification_journey(
             .await
             .unwrap();
     }
+    review_reads(
+        &p,
+        &review,
+        "journey",
+        step["assignments"][0]["assignment_ref"].as_str().unwrap(),
+    )
+    .await;
     let mut result = json!({"report":"# Independent review\n\nObserved fixture file and worker report.","summary":"Reviewed the fixture.",
         "checks":[],"verdict":if fix{"REQUEST_CHANGES"}else{"APPROVE"},"request_key":"review",
         "findings":if fix{json!([{"node":"work","files":["work.txt"],"fix":"Make the fixture correct.","cross_cutting":false}])}else{json!([])}});
@@ -3772,6 +3844,13 @@ async fn native_plan_review_verification_journey(
             )
             .await
             .unwrap();
+        review_reads(
+            &p,
+            &review,
+            "journey",
+            step["assignments"][0]["assignment_ref"].as_str().unwrap(),
+        )
+        .await;
         submit_result(&h,&review,"journey",&o,step["assignments"][0]["assignment_ref"].as_str().unwrap(),json!({"report":"# Review fix\n\nFix verified.","summary":"Approved the fix.","checks":[],"verdict":"APPROVE","request_key":"approve-fix"})).await;
         review.shutdown().await.unwrap();
         final_step = h.advance("journey".into(), o.clone()).await.unwrap();
@@ -3931,6 +4010,7 @@ async fn plain_folder_task_runs_its_whole_lifecycle() {
         )
         .await
         .unwrap();
+    review_reads(&p, &review, "plain", &review_ref).await;
     submit_result(&h, &review, "plain", &o, &review_ref,
         json!({"report":"# Independent review\n\nObserved the fixture file and the worker report.","summary":"Reviewed the fixture.",
             "checks":[],"verdict":"APPROVE","request_key":"review","findings":[]})).await;
@@ -3968,6 +4048,117 @@ async fn plain_folder_task_runs_its_whole_lifecycle() {
     }).unwrap();
     // The runtime never created a repository in the folder.
     assert!(std::fs::symlink_metadata(p.0.join(".git")).is_err());
+    close(h).await;
+}
+
+/// Two tasks sharing one checkout cannot let the second task mutate the tree while
+/// the first task is moving from execution into independent review. Releasing the
+/// sibling writer lets both tasks finish their own review and verification paths.
+async fn shared_checkout_writer_waits_until_review_and_both_verify() {
+    use cortex_core::ownership::OwnerEpoch;
+    let p = Project::new();
+    if !verification_available(&p.0) {
+        println!("native verification unavailable: shared checkout journey not run");
+        return;
+    }
+    let h = p.host().await;
+    let plan = async |task: &str, extra: bool| {
+        let owner = h
+            .create(task.into(), "Shared checkout".into(), "owner".into())
+            .await
+            .unwrap();
+        let coordinator = h
+            .dispatch(
+                task.into(),
+                owner.clone(),
+                SessionRole::Coordinator,
+                p.route(),
+            )
+            .await
+            .unwrap();
+        let mut nodes = vec![
+            json!({"id":"work","role":"backend-dev","objective":"Update a file","dependencies":[],"scope":[task],"model":"auto"}),
+        ];
+        if extra {
+            nodes.push(json!({"id":"more","role":"backend-dev","objective":"Finish the file","dependencies":["work"],"scope":[task],"model":"auto"}));
+        }
+        coordinator.prompt(&call("plan_submit",json!({"request_key":"plan","plan":{"tasks":nodes,"verification":[["/usr/bin/cmp","/dev/null","/dev/null"]]}}))).await.unwrap();
+        coordinator.shutdown().await.unwrap();
+        let work = h.advance(task.into(), owner.clone()).await.unwrap();
+        (owner, work)
+    };
+    let finish_step = async |task: &str, owner: &OwnerEpoch, step: &Value| {
+        let node = &step["assignments"][0];
+        let assignment = node["assignment_ref"].as_str().unwrap().to_owned();
+        let driver = h
+            .dispatch(
+                task.into(),
+                owner.clone(),
+                SessionRole::Worker {
+                    assignment: assignment.clone(),
+                },
+                p.route(),
+            )
+            .await
+            .unwrap();
+        let mut result = json!({"report":"# Report\n\nObserved the fixture change.","summary":"Observed the fixture change.","checks":[],"request_key":"submit"});
+        if node["stage"] == "review" {
+            result["verdict"] = json!("APPROVE");
+            result["findings"] = json!([]);
+            review_reads(&p, &driver, task, &assignment).await;
+        } else {
+            std::fs::write(p.0.join(task), node["node"].as_str().unwrap()).unwrap();
+        }
+        submit_result(&h, &driver, task, owner, &assignment, result).await;
+        driver.shutdown().await.unwrap();
+    };
+    let complete = async |task: &str, owner: &OwnerEpoch| {
+        let review = h.advance(task.into(), owner.clone()).await.unwrap();
+        assert_eq!(review["assignments"][0]["stage"], "review", "{review}");
+        finish_step(task, owner, &review).await;
+        let mut step = h.advance(task.into(), owner.clone()).await.unwrap();
+        if step["state"] == "RECONCILING" {
+            let coord = h
+                .dispatch(
+                    task.into(),
+                    owner.clone(),
+                    SessionRole::Coordinator,
+                    p.route(),
+                )
+                .await
+                .unwrap();
+            coord
+                .prompt(&call(
+                    "synthesis_submit",
+                    json!({"text":"Reviewed work and runtime verification reconciled."}),
+                ))
+                .await
+                .unwrap();
+            coord.shutdown().await.unwrap();
+            step = h.advance(task.into(), owner.clone()).await.unwrap();
+        }
+        assert_eq!(step["state"], "COMPLETED", "{step}");
+    };
+    let (a, work_a) = plan("a", false).await;
+    let (b, work_b) = plan("b", true).await;
+    finish_step("a", &a, &work_a).await;
+    let waiting = h.advance("a".into(), a.clone()).await.unwrap();
+    assert_eq!(waiting["writeConflict"], true, "{waiting}");
+    finish_step("b", &b, &work_b).await;
+    let queued = h.advance("b".into(), b.clone()).await.unwrap();
+    assert_eq!(queued["writeConflict"], true, "{queued}");
+    complete("a", &a).await;
+    let more = h.advance("b".into(), b.clone()).await.unwrap();
+    assert_eq!(more["assignments"][0]["node"], "more", "{more}");
+    finish_step("b", &b, &more).await;
+    complete("b", &b).await;
+    p.store().read(|db| {
+        for task in ["a", "b"] {
+            assert_eq!(db.query_row("SELECT count(*) FROM runtime_events WHERE task_id=? AND type='VERIFICATION_PASSED'", [task], |r| r.get::<_, i64>(0))?, 1);
+            assert_eq!(db.query_row("SELECT count(*) FROM runtime_events WHERE task_id=? AND type='USER_QUESTION_REQUESTED'", [task], |r| r.get::<_, i64>(0))?, 0);
+        }
+        Ok(())
+    }).unwrap();
     close(h).await;
 }
 
@@ -4405,10 +4596,30 @@ async fn native_workspace_binding_projects_activity_and_scoped_skills() {
 async fn configured_external_worker_grants() {
     for (role, stage, engine, expectation) in [
         ("worker-explorer", "execution", EngineKind::Codex, "read"),
-        ("worker-backend-dev", "execution", EngineKind::Codex, "write"),
-        ("worker-senior-consultant", "execution", EngineKind::Codex, "none"),
-        ("worker-code-reviewer", "review", EngineKind::Claude, "review-read"),
-        ("worker-code-reviewer", "review", EngineKind::Claude, "review-none"),
+        (
+            "worker-backend-dev",
+            "execution",
+            EngineKind::Codex,
+            "write",
+        ),
+        (
+            "worker-senior-consultant",
+            "execution",
+            EngineKind::Codex,
+            "none",
+        ),
+        (
+            "worker-code-reviewer",
+            "review",
+            EngineKind::Claude,
+            "review-read",
+        ),
+        (
+            "worker-code-reviewer",
+            "review",
+            EngineKind::Claude,
+            "review-none",
+        ),
     ] {
         let p = Project::new();
         let config = Project::new(); // Separate from the project; never owner configuration.
@@ -5332,16 +5543,23 @@ async fn verification_drift_blocks_the_pass() {
         )
         .await
         .unwrap();
+    review_reads(&p, &review, "drift", &r).await;
     submit_result(&h, &review, "drift", &o, &r, json!({"report":"# Review\n\nLooks right.","summary":"Approved.","checks":[],"verdict":"APPROVE","request_key":"review"})).await;
     review.shutdown().await.unwrap();
     let root = p.0.clone();
+    let observer = p.store();
     let writer = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !observer.read(|db| Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id='drift' AND type='NATIVE_COMMAND_STARTED' AND json_extract(payload_json,'$.revision') IS NOT NULL)", [], |r| r.get::<_,bool>(0))?)).unwrap() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("verifier did not start");
         std::fs::write(root.join("work.txt"), "changed while verifying").unwrap();
     });
-    let refused = h.advance("drift".into(), o.clone()).await.unwrap_err();
+    let fresh = h.advance("drift".into(), o.clone()).await.unwrap();
     writer.await.unwrap();
-    assert_eq!(refused.code(), "verification_review_revision_changed");
+    assert_eq!(fresh["state"], "REVIEWING", "{fresh}");
+    assert_eq!(fresh["assignments"][0]["stage"], "review", "{fresh}");
     p.store()
         .read(|db| {
             let passed: i64 = db.query_row(
@@ -5350,18 +5568,106 @@ async fn verification_drift_blocks_the_pass() {
                 |r| r.get(0),
             )?;
             assert_eq!(passed, 0);
+            let settled_outputs: i64 = db.query_row(
+                "SELECT count(*) FROM runtime_requests
+                 WHERE operation='native_command_output' AND json_extract(result_json,'$.observation.complete')=1 AND json_extract(result_json,'$.observation.exit_code')=0",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(settled_outputs, 1);
+            Ok(())
+        })
+        .unwrap();
+    let fresh_review_ref = fresh["assignments"][0]["assignment_ref"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let fresh_review = h
+        .dispatch(
+            "drift".into(),
+            o.clone(),
+            SessionRole::Worker {
+                assignment: fresh_review_ref.clone(),
+            },
+            p.route(),
+        )
+        .await
+        .unwrap();
+    review_reads(&p, &fresh_review, "drift", &fresh_review_ref).await;
+    submit_result(
+        &h,
+        &fresh_review,
+        "drift",
+        &o,
+        &fresh_review_ref,
+        json!({
+            "report":"# Fresh review\n\nThe changed checkout was reviewed again.",
+            "summary":"Fresh review approves the current checkout.",
+            "checks":[],
+            "verdict":"APPROVE",
+            "findings":[],
+            "request_key":"fresh-review"
+        }),
+    )
+    .await;
+    fresh_review.shutdown().await.unwrap();
+    let recheck = h
+        .advance_step("drift".into(), o.clone(), true)
+        .await
+        .unwrap();
+    assert_eq!(recheck["recheck"], true, "{recheck}");
+    p.store()
+        .read(|db| {
+            let passed: i64 = db.query_row(
+                "SELECT count(*) FROM runtime_events WHERE type='VERIFICATION_PASSED'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(passed, 1);
             let state: String = db.query_row(
                 "SELECT state FROM runtime_tasks WHERE task_id='drift'",
                 [],
                 |r| r.get(0),
             )?;
-            assert_eq!(state, "VERIFYING");
-            let ran: i64 = db.query_row(
-                "SELECT count(*) FROM runtime_requests WHERE operation='native_command_output'",
+            assert_eq!(state, "RECONCILING");
+            let changed: i64 = db.query_row(
+                "SELECT count(*) FROM runtime_events WHERE type='VERIFICATION_REVISION_CHANGED'",
                 [],
                 |r| r.get(0),
             )?;
-            assert_eq!(ran, 1);
+            assert_eq!(changed, 1);
+            let approved: i64 = db.query_row(
+                "SELECT count(*) FROM runtime_nodes WHERE stage='review' AND status='completed'
+                    AND json_extract(result_json,'$.verdict')='APPROVE'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(approved, 2);
+            let outputs: i64 = db.query_row(
+                "SELECT count(*) FROM runtime_requests
+                 WHERE operation='native_command_output' AND json_extract(result_json,'$.observation.complete')=1 AND json_extract(result_json,'$.observation.exit_code')=0",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(outputs, 2);
+            let reports: i64 = db.query_row(
+                "SELECT count(DISTINCT json_extract(result_json,'$.report_ref'))
+                 FROM runtime_nodes WHERE stage='review' AND status='completed'",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(reports, 2);
+            let unsettled: i64 = db.query_row(
+                "SELECT count(*) FROM runtime_requests
+                 WHERE operation='native_verification_intent'
+                   AND NOT EXISTS (SELECT 1 FROM runtime_requests finish
+                     WHERE finish.task_id=runtime_requests.task_id
+                       AND finish.actor='native-verifier-finish'
+                       AND finish.request_key=runtime_requests.request_key)",
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(unsettled, 0);
             Ok(())
         })
         .unwrap();
@@ -5484,7 +5790,12 @@ async fn recovery_project_operations_and_structured_tool_errors() {
             "/result/structuredContent/results/3/status":"ok"}), "end_turn").await;
     // A write, a decision, a probe and a recursive batch are not batchable: the advertised
     // item enum refuses them before anything runs, naming the exact field and constraint.
-    for tool in ["project_write", "plan_submit", "check_preflight", "read_batch"] {
+    for tool in [
+        "project_write",
+        "plan_submit",
+        "check_preflight",
+        "read_batch",
+    ] {
         checked(
             &d,
             "read_batch",
@@ -5498,7 +5809,10 @@ async fn recovery_project_operations_and_structured_tool_errors() {
     // Newly batchable reads run through their own handlers. A private path is refused
     // inside the batch exactly as a direct call refuses it; the other items still deliver.
     std::fs::write(p.0.join("notes.txt"), "batched line\n").unwrap();
-    checked(&d, "read_batch", json!({"calls":[
+    checked(
+        &d,
+        "read_batch",
+        json!({"calls":[
         {"id":"file","tool":"project_read","arguments":{"path":"notes.txt"}},
         {"id":"dir","tool":"project_read","arguments":{"path":"."}},
         {"id":"private","tool":"project_read","arguments":{"path":".cortex/cortex.sqlite3"}},
@@ -5512,9 +5826,18 @@ async fn recovery_project_operations_and_structured_tool_errors() {
             "/result/structuredContent/results/1/status":"ok",
             "/result/structuredContent/results/2/status":"error",
             "/result/structuredContent/results/2/error/code":"private_or_invalid_path",
-            "/result/structuredContent/results/3/status":"error"}), "end_turn").await;
-    checked(&d, "project_read", json!({"path":".cortex/cortex.sqlite3"}),
-        json!({"/result/isError":true,"/result/structuredContent/code":"private_or_invalid_path"}), "end_turn").await;
+            "/result/structuredContent/results/3/status":"error"}),
+        "end_turn",
+    )
+    .await;
+    checked(
+        &d,
+        "project_read",
+        json!({"path":".cortex/cortex.sqlite3"}),
+        json!({"/result/isError":true,"/result/structuredContent/code":"private_or_invalid_path"}),
+        "end_turn",
+    )
+    .await;
     // A batched project_read leaves the same channel read coverage as a direct read.
     checked(&d, "read_batch", json!({"calls":[{"id":"file","tool":"project_read","arguments":{"path":"notes.txt"}}]}),
         json!({"/result/isError":false,"/result/structuredContent/results/0/result/read_coverage_complete":true}), "end_turn").await;
@@ -5883,6 +6206,20 @@ fn main() {
         return;
     }
     tokio::runtime::Runtime::new().unwrap().block_on(async {
+        if mode == "verification-drift" {
+            verification_drift_blocks_the_pass().await;
+            return;
+        }
+        if mode == "shared-checkout" {
+            tokio::time::timeout(
+                Duration::from_secs(90),
+                shared_checkout_writer_waits_until_review_and_both_verify(),
+            )
+            .await
+            .expect("shared checkout journey exceeded deadline");
+            println!("shared checkout writer barrier passed");
+            return;
+        }
         if mode == "synthesis-feedback" {
             if tokio::time::timeout(Duration::from_secs(60), reopened_synthesis_feedback())
                 .await
@@ -5962,13 +6299,21 @@ fn main() {
             native_plan_review_verification_journey(false, false, true, false).await;
             native_plan_review_verification_journey(false, false, false, true).await;
             plain_folder_task_runs_its_whole_lifecycle().await;
+            shared_checkout_writer_waits_until_review_and_both_verify().await;
             verification_drift_blocks_the_pass().await;
         })
         .await
         .expect("native session scenarios exceeded deadline");
     });
-    if !["synthesis-feedback", "engine-modes", "plain-folder", "external-worker-grants"]
-        .contains(&mode.as_str())
+    if ![
+        "verification-drift",
+        "shared-checkout",
+        "synthesis-feedback",
+        "engine-modes",
+        "plain-folder",
+        "external-worker-grants",
+    ]
+    .contains(&mode.as_str())
     {
         println!("native source/project/command, read-only, Git and access/outside scenarios asserted with existing session regressions (fake ACP/relay processes, disposable stores; unavailable verification is reported above)");
     }

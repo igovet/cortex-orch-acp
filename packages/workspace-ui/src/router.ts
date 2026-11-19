@@ -3,10 +3,38 @@ export type ProjectView = typeof PROJECT_VIEWS[number];
 export const APP_SECTIONS = ["appearance", "voice", "updates", "shortcuts", "machines"] as const;
 export const MACHINE_SECTIONS = ["overview", "orchestration", "connections", "worktrees", "storage", "diagnostics", "remote"] as const;
 export type SettingsSection = typeof APP_SECTIONS[number] | typeof MACHINE_SECTIONS[number];
-export const ORCHESTRATION_PAGES = ["defaults", "models", "routing", "effective", "policy", "tools", "profiles", "files"] as const;
+/**
+ * Every page an orchestration link can name. `effective` (Route preview) and `files` (Files and sources) are secondary pages
+ * reached from a section; `policy` is the old Limits and fallback link, which now lands on Defaults or Project ceiling.
+ */
+export const ORCHESTRATION_PAGES = ["defaults", "models", "engines", "ceiling", "routing", "profiles", "tools", "effective", "files", "policy"] as const;
 export type OrchestrationPage = typeof ORCHESTRATION_PAGES[number];
-/** `planning` is the planning chat, `plan` the plan's List and Graph; each has the whole width. */
-export const SPRINT_TABS = ["planning", "plan", "summary"] as const;
+/**
+ * The eight orchestration sections, in the order of the Cortex settings panel. Connections is the machine's `connections`
+ * section shown inside the orchestration frame, so its old links keep working.
+ */
+export const ORCHESTRATION_SECTIONS = ["defaults", "models", "engines", "ceiling", "routing", "profiles", "tools", "connections"] as const;
+export type OrchestrationSection = typeof ORCHESTRATION_SECTIONS[number];
+export const ORCHESTRATION_LABELS: Record<OrchestrationSection, string> = {
+  defaults: "Defaults", models: "Models", engines: "Engines and models", ceiling: "Project ceiling", routing: "Routing", profiles: "Profiles", tools: "MCP servers", connections: "Connections",
+};
+/** Sections 2 to 5 act on a project file when a project is chosen; the others are machine-wide. */
+export const SCOPED_SECTIONS: readonly OrchestrationSection[] = ["models", "engines", "ceiling", "routing"];
+/** Which section a route belongs to: a secondary page counts as the section it opens from. */
+export function orchestrationSection(route: Route, projectScope: string | null): OrchestrationSection | null {
+  if (route.name !== "settings") return null;
+  if (route.section === "connections") return "connections";
+  if (route.section !== "orchestration") return null;
+  switch (route.page) {
+    case undefined: case "defaults": return "defaults";
+    case "policy": return projectScope ? "ceiling" : "defaults";
+    case "effective": case "files": return "routing";
+    default: return route.page;
+  }
+}
+/** `planning` is the planning conversation, `workers` its planning task's workers (one picked by `worker`), `plan` the plan's
+ *  List and Graph; each has the whole width. */
+export const SPRINT_TABS = ["planning", "workers", "plan", "summary"] as const;
 export type SprintTab = typeof SPRINT_TABS[number];
 export type Scope = { kind: "all" } | { kind: "standalone" } | { kind: "sprint"; id: string };
 export const TASK_TABS = ["workers", "changes", "code", "terminal"] as const;
@@ -21,7 +49,7 @@ export type Route =
   | { name: "archive"; machine: string }
   | { name: "new"; machine: string; kind: "task" | "sprint"; project: string | null; sprint?: string }
   | ({ name: "project"; machine: string; project: string; view: ProjectView | null; scope: Scope; checkout?: string } & CodeSpot)
-  | { name: "sprint"; machine: string; project: string; sprint: string; tab: SprintTab }
+  | { name: "sprint"; machine: string; project: string; sprint: string; tab: SprintTab; worker?: string }
   | ({ name: "task"; machine: string; task: string; tab?: TaskTab; worker?: string; live?: true; sub?: "diff" | "conflict" } & CodeSpot)
   | { name: "settings"; section: SettingsSection; machine: string | null; page?: OrchestrationPage; server?: string; tab?: string }
   | { name: "notfound"; path: string };
@@ -64,6 +92,7 @@ export function parseRoute(pathname: string, search = ""): Route {
   }
   if (rest[0] === "p" && rest[1]) {
     const project = rest[1], tail = rest.slice(2);
+    if (tail[0] === "s" && tail[1] && tail[2] === "workers" && tail[3] && tail.length === 4) return { name: "sprint", machine, project, sprint: tail[1], tab: "workers", worker: tail[3] };
     if (tail[0] === "s" && tail[1] && tail.length <= 3) {
       const view = tail[2] ?? "board";
       if (has(SPRINT_TABS, view)) return { name: "sprint", machine, project, sprint: tail[1], tab: view };
@@ -110,7 +139,7 @@ export function hrefOf(route: Route): string {
       if (route.checkout) q.set("checkout", route.checkout);
       return `${base}${route.view ? `/${route.view}` : ""}${spotQuery(route, q)}`;
     }
-    case "sprint": return `/m/${e(route.machine)}/p/${e(route.project)}/s/${e(route.sprint)}/${route.tab}`;
+    case "sprint": return `/m/${e(route.machine)}/p/${e(route.project)}/s/${e(route.sprint)}/${route.tab}${route.tab === "workers" && route.worker ? `/${e(route.worker)}` : ""}`;
     case "settings": return route.machine ? `/settings/machine/${e(route.machine)}/${route.section}${route.page ? `/${route.page}` : ""}${route.server ? `/${e(route.server)}` : ""}${route.tab ? `?tab=${e(route.tab)}` : ""}` : `/settings/app/${route.section}`;
     case "notfound": return route.path;
   }

@@ -215,6 +215,11 @@ export function overlayTask(task: Task, overlay: TaskOverlay | undefined, branch
     next.acceptance = { ...next.acceptance, version: next.result.version };
   }
   if (status) next.observedPhase = undefined;
+  // A recorded automatic finish is settled even if the native read is still catching up.
+  if (status === "done" && next.integration?.automatic === true) {
+    next.process = "stopped";
+    next.issue = null;
+  }
   if (automaticReady && next.result) next.result = { ...next.result, automaticReady: true };
   return next;
 }

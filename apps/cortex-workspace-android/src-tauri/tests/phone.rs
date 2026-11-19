@@ -46,9 +46,12 @@ impl Drop for Fixture {
 /// The owner's own request on the local socket.
 async fn owner(service: &Service, method: &str, params: Value) -> Value {
     let mut stream = connect(service.socket_path()).await.unwrap();
-    write_frame(&mut stream, &json!({"jsonrpc":"2.0","id":"1","method":method,"params":params}))
-        .await
-        .unwrap();
+    write_frame(
+        &mut stream,
+        &json!({"jsonrpc":"2.0","id":"1","method":method,"params":params}),
+    )
+    .await
+    .unwrap();
     let reply = read_frame(&mut stream).await.unwrap();
     assert!(reply.get("error").is_none(), "{method}: {reply}");
     reply["result"].clone()
@@ -74,7 +77,9 @@ async fn a_phone_pairs_opens_a_machine_and_forgets_it() {
 async fn scenario() {
     let f = Fixture::new();
     let service: Arc<Service> = Service::bind(f.config()).await.unwrap();
-    service.start_remote_with(vec!["127.0.0.1:0".parse().unwrap()], None).await;
+    service
+        .start_remote_with(vec!["127.0.0.1:0".parse().unwrap()], None)
+        .await;
     let runner = tokio::spawn(service.clone().serve());
     let machine_id = owner(&service, "remote.enable", json!({"enabled":true})).await["machineId"]
         .as_str()
@@ -96,7 +101,10 @@ async fn scenario() {
     assert_eq!(phone.state(), json!({"active":null,"machines":[]}));
 
     // A link that is not one is refused before anything is sent.
-    assert_eq!(phone.pair_begin("https://example.org").await.unwrap_err(), "invalid_link");
+    assert_eq!(
+        phone.pair_begin("https://example.org").await.unwrap_err(),
+        "invalid_link"
+    );
     // Waiting with nothing begun is a cancelled pairing, not a hang.
     assert_eq!(phone.pair_finish("x").await.unwrap_err(), "cancelled");
 
@@ -117,8 +125,16 @@ async fn scenario() {
         let phone = phone.clone();
         tokio::spawn(async move { phone.pair_finish("Workstation").await })
     };
-    owner(&service, "remote.pairing.decide", json!({"requestId":pending["requestId"],"allow":true})).await;
-    assert_eq!(waiting.await.unwrap().unwrap(), json!({"machineId":machine_id}));
+    owner(
+        &service,
+        "remote.pairing.decide",
+        json!({"requestId":pending["requestId"],"allow":true}),
+    )
+    .await;
+    assert_eq!(
+        waiting.await.unwrap().unwrap(),
+        json!({"machineId":machine_id})
+    );
 
     // The first machine becomes the open one, under the name the owner typed, and connects.
     let state = eventually("the machine connects", || {
@@ -129,38 +145,61 @@ async fn scenario() {
     assert_eq!(state["active"], machine_id.as_str());
     assert_eq!(state["machines"][0]["name"], "Workstation");
     assert_eq!(state["machines"][0]["path"], "direct", "{state}");
-    assert!(events.lock().unwrap().iter().any(|(name, _)| name == "phone-state"));
+    assert!(events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(name, _)| name == "phone-state"));
 
     // Its subscription reports the connection to the interface, named by machine.
     eventually("the transport reports connected", || {
-        events.lock().unwrap().iter().any(|(name, payload)| {
-            name == "workspace-transport"
-                && payload["machineId"] == machine_id.as_str()
-                && payload["event"]["type"] == "connection"
-                && payload["event"]["state"] == "connected"
-        })
-        .then_some(())
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(name, payload)| {
+                name == "workspace-transport"
+                    && payload["machineId"] == machine_id.as_str()
+                    && payload["event"]["type"] == "connection"
+                    && payload["event"]["state"] == "connected"
+            })
+            .then_some(())
     })
     .await;
 
     // A request reaches the real service; one for another machine does not leave the phone.
-    let status = phone.request(&machine_id, "service.status".into(), json!({})).await.unwrap();
+    let status = phone
+        .request(&machine_id, "service.status".into(), json!({}))
+        .await
+        .unwrap();
     assert_eq!(status["transport"], "unix", "{status}");
     assert_eq!(
-        phone.request("someone-else", "service.status".into(), json!({})).await.unwrap_err(),
+        phone
+            .request("someone-else", "service.status".into(), json!({}))
+            .await
+            .unwrap_err(),
         "machine_not_open"
     );
     // What a phone must not send is refused on the phone itself.
     for (operation, message) in [
         ("remote.status", json!({})),
-        ("terminal.open", json!({"projectId":"p","requestId":"r","cols":80,"rows":24})),
+        (
+            "terminal.open",
+            json!({"projectId":"p","requestId":"r","cols":80,"rows":24}),
+        ),
         ("native.pick_folder", json!({})),
-        ("machine.call", json!({"op":"repo.file.save","projectId":"p","params":{}})),
+        (
+            "machine.call",
+            json!({"op":"repo.file.save","projectId":"p","params":{}}),
+        ),
     ] {
         let refusal = phone.request(&machine_id, operation.into(), message).await;
         assert!(refusal.is_err(), "{operation} was sent: {refusal:?}");
     }
-    let projects = phone.request(&machine_id, "projects.list".into(), json!({})).await.unwrap();
+    let projects = phone
+        .request(&machine_id, "projects.list".into(), json!({}))
+        .await
+        .unwrap();
     assert_eq!(projects, json!([]));
 
     // The open machine survives a restart of the app.
@@ -173,7 +212,10 @@ async fn scenario() {
     .await;
     assert_eq!(state["active"], machine_id.as_str());
     assert_eq!(state["machines"][0]["name"], "Workstation");
-    assert_eq!(phone.rename(&machine_id, "\u{7}").unwrap_err(), "invalid_name");
+    assert_eq!(
+        phone.rename(&machine_id, "\u{7}").unwrap_err(),
+        "invalid_name"
+    );
     phone.rename(&machine_id, "Desk").unwrap();
     assert_eq!(phone.state()["machines"][0]["name"], "Desk");
     assert_eq!(phone.select("someone-else").unwrap_err(), "unknown_machine");
@@ -182,7 +224,10 @@ async fn scenario() {
     phone.forget(&machine_id).await.unwrap();
     assert_eq!(phone.state(), json!({"active":null,"machines":[]}));
     assert_eq!(
-        phone.request(&machine_id, "service.status".into(), json!({})).await.unwrap_err(),
+        phone
+            .request(&machine_id, "service.status".into(), json!({}))
+            .await
+            .unwrap_err(),
         "machine_not_open"
     );
 

@@ -191,6 +191,26 @@ included, so a closed task can be deleted):
   counts as such an engine, and so does an unreadable process table; while one
   exists the attempts stay fail-closed. Attempts with a process record are
   decided by the registry rules below.
+- **Unconfirmed exit, re-checked by the running service.** When a session's
+  shutdown is not confirmed, the running service records its delegation and
+  reservation `ambiguous`. It does not wait for a restart: the sprint
+  scheduler's passes (its safety tick, and task changes in a project with such
+  an exit) re-check an attempt whose every unsettled row is `ambiguous`, that
+  has no process record, whose task has a runtime record, and whose
+  provisioning row or channel names the task's current owner epoch (none names
+  another). The evidence is the same process-table read as above, inside the
+  transaction that settles: when no engine process works in the project or a
+  task's root, the attempt is settled with the same writes (observation
+  `no_engine_process`) and one `NATIVE_PROCESS_SETTLED` event with evidence
+  `unconfirmed_exit_and_no_engine_process_in_project`. Nothing is signalled,
+  killed or relaunched. While a candidate process exists nothing changes and
+  the re-check backs off (15 seconds, doubling to 10 minutes; a changed set of
+  such attempts is checked at once). A settled task no driver runs is an
+  ordinary interrupted turn; in Automatic, one held only by that exit (stopped
+  with no recorded reason, or paused `outcome_unknown` only for an unconfirmed
+  process exit) records an `AUTOMATIC_CONTINUATION` with reason
+  `native_process_exit_settled` and continues through the host's usual checks,
+  which still refuse while any dispatched effect is unknown.
 - **Never started by the retired Python host.** A `failed` or `in_progress`
   worker row with no engine session and no process record, whose capacity that
   host had already released (or, for `failed`, never reserved), is settled

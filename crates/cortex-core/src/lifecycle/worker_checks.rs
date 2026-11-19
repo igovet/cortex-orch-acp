@@ -23,7 +23,7 @@ impl Run {
             && self.receipt["cwd"].is_string()
             && self.receipt["profile"].is_string()
     }
-    fn same(&self, other: &Self) -> bool {
+    pub(super) fn same(&self, other: &Self) -> bool {
         self.identity()
             && other.identity()
             && self.receipt["argv"] == other.receipt["argv"]
