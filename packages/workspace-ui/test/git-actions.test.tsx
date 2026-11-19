@@ -166,6 +166,57 @@ const band = (root: HTMLElement) => root.querySelector<HTMLElement>(".titlebar .
 const gitPrimaryButton = (root: HTMLElement) => band(root).querySelector<HTMLButtonElement>('[aria-label="Git"] .hg-a')!;
 const menuLabels = (root: HTMLElement) => [...root.querySelectorAll<HTMLElement>("#m-git .mi")].map(b => b.querySelector(".grow")!.firstChild!.textContent);
 
+describe("View PR in the merge card", () => {
+  const url = "https://github.com/example/a-very-long-repository-name-for-a-recorded-pull-request/pull/123";
+  const state = (address?: string) => world(
+    checkout({ id: "p:wt", kind: "worktree", branch: "task/fix", taskId: "t", path: "/w" }),
+    { ...ready, integration: { method: "pr", targetBranch: "main", digest: "d", draft: true, ...(address ? { url: address } : {}) } },
+  );
+  const row = (root: HTMLElement) => root.querySelector<HTMLElement>(".ready .rv-pr")!;
+  const viewPr = (el: HTMLElement) => [...el.querySelectorAll("button")].find(b => b.textContent === "View PR");
+
+  it("shows the recorded address and opens it through the workspace command", async () => {
+    const { root, p } = await open(state(url), "/m/local/t/t/changes");
+    const pr = row(root);
+    expect(pr.querySelector(".l-row-d .mono")?.textContent).toBe(url);
+    expect(pr.textContent).toContain("Pull request created into main");
+    expect(pr.textContent).toContain("Draft. It is not merged, so this task stays here.");
+    expect(pr.textContent).toContain("GitHub CLI");
+    expect(menuLabels(root)).toContain("View PR");
+    const button = viewPr(pr)!;
+    expect(button.getAttribute("aria-disabled")).toBeNull();
+    expect(p.commands).toEqual([]);
+    button.click(); await settle();
+    expect(p.commands.map(c => c.payload)).toEqual([{ type: "open_pull_request", projectId: "p", taskId: "t" }]);
+  });
+
+  it("explains a missing address and has no dead button", async () => {
+    const { root, p } = await open(state(), "/m/local/t/t/changes");
+    expect(row(root).textContent).toContain(PR_UNKNOWN);
+    expect(viewPr(row(root))).toBeUndefined();
+    expect(root.querySelector("#m-git")?.textContent).toContain(PR_UNKNOWN);
+    expect(p.commands).toEqual([]);
+  });
+
+  it("shows an opener refusal and lets the owner retry with the same button", async () => {
+    const message = "No browser opener is installed on this machine.";
+    const p = port(c => c.payload.type === "open_pull_request" ? { ok: false, outcome: "refused", message } : {});
+    const { root } = await open(state(url), "/m/local/t/t/changes", p);
+    viewPr(row(root))!.click(); await settle();
+    expect(root.querySelector(".ws-receipt")?.textContent).toContain(message);
+    viewPr(row(root))!.click(); await settle();
+    expect(p.commands.filter(c => c.payload.type === "open_pull_request")).toHaveLength(2);
+  });
+
+  it("keeps the address visible when browser opening is not offered", async () => {
+    const p = port(() => ({}), undefined, MACHINE_COMMANDS.map(capabilityOf));
+    const { root } = await open(state(url), "/m/local/t/t/changes", p);
+    expect(row(root).textContent).toContain(url);
+    expect(viewPr(row(root))).toBeUndefined();
+    expect(menuLabels(root)).not.toContain("View PR");
+  });
+});
+
 describe("the band on screen", () => {
   it("commits from the band only through its dialog, with the drafted message, after the owner confirms", async () => {
     const s = world(checkout({ files: [file("src/a.ts", "staged"), file("b.ts")] }), { status: "review", result: { version: 1, digest: "d", summary: "Done", checks: [] } });
@@ -275,14 +326,24 @@ describe("the band on screen", () => {
     expect([...root.querySelectorAll("#m-open-in .mi")].map(b => b.textContent)).toEqual(expect.arrayContaining(["Open in Code tab"]));
   });
 
-  it("shows no Update from the target in the Merge dialog or the menu where the machine has no such operation", async () => {
+  it("opens Update from main and sends the update command only after confirmation", async () => {
     const s = world(checkout({ id: "p:wt", kind: "worktree", branch: "task/fix", taskId: "t", path: "/w", behindOf: { main: 2 } }), ready);
     const p = port(() => ({}), undefined, MACHINE_COMMANDS.map(capabilityOf));
     const { root } = await open(s, "/m/local/t/t", p);
-    expect(menuLabels(root)).not.toContain("Update from main");
+    expect(menuLabels(root)).toContain("Update from main…");
     gitPrimaryButton(root).click(); await settle();
-    const dialog = root.querySelector<HTMLDialogElement>("dialog[open]")!;
-    expect(dialog.textContent).toContain("Behind main by 2 commits");
-    expect([...dialog.querySelectorAll("button")].map(b => b.textContent)).not.toContain("Update from main");
+    const finish = root.querySelector<HTMLDialogElement>('dialog[open][data-dialog="Finish task"]')!;
+    expect(finish.textContent).toContain("Behind main by 2 commits");
+    expect(p.commands).toEqual([]);
+    [...finish.querySelectorAll("button")].find(b => b.textContent === "Update from main…")!.click(); await settle();
+
+    expect(p.commands).toEqual([]);
+    const update = root.querySelector<HTMLDialogElement>('dialog[open][data-dialog="Update from target"]')!;
+    expect(update?.querySelector("h2")?.textContent).toBe("Update task/fix from main?");
+    [...update.querySelectorAll("button")].find(b => b.textContent === "Update from main")!.click(); await settle();
+
+    expect(p.commands.map(c => c.payload)).toEqual([
+      { type: "update_from_target", taskId: "t", confirmed: true, digest: "d", now: expect.any(Number) },
+    ]);
   });
 });
