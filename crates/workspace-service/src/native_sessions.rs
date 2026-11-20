@@ -1735,7 +1735,9 @@ impl GatewayCore for CorePolicy {
         // Enforcement is unchanged; a non-authority failure after channel
         // authentication is reported as a structured, correctable tool error.
         Box::pin(async move {
-            let result = self.call(credentials, channel, name, arguments).await;
+            let result = self
+                .dispatch_call(credentials, channel, name, arguments, false)
+                .await;
             // result_submit keeps its own classification (native_results::correctable):
             // its other refusals stay named refusals, never a retryable tool error.
             if name == "result_submit" {
@@ -1800,7 +1802,14 @@ impl CorePolicy {
                 return Err(Error::Refused("channel_identity_changed"));
             }
             executed += 1;
-            let member = self.call(credentials, channel, &tool, call["arguments"].clone());
+            // Box the recursive dispatch: direct dispatch can itself call batch.
+            let member = Box::pin(self.dispatch_call(
+                credentials,
+                channel,
+                &tool,
+                call["arguments"].clone(),
+                true,
+            ));
             let reply = crate::native_tool_errors::finish(member.await)?;
             let i = self.identity(true).await?;
             if !same(&i, channel) {
@@ -1819,10 +1828,11 @@ impl CorePolicy {
                     ["structuredContent"]
                     .clone();
             } else {
-                let data = reply["structuredContent"].clone();
-                let bytes = serde_json::to_vec(&data).unwrap_or_default();
-                let size = bytes.len();
-                if size <= crate::native_batch::ITEM_BYTES {
+                let mut data = reply["structuredContent"].clone();
+                let mut bytes = serde_json::to_vec(&data)
+                    .map_err(CoreError::from)
+                    .map_err(tool_error)?;
+                if bytes.len() <= crate::native_batch::ITEM_BYTES {
                     item["status"] = json!("ok");
                     item["result"] = data;
                 } else if tool == "read_large_output" {
@@ -1831,6 +1841,16 @@ impl CorePolicy {
                         ["structuredContent"]
                         .clone();
                 } else {
+                    // A deferred project read didn't persist the proposed coverage.
+                    // Keep the page, but don't advertise an overwrite precondition.
+                    if let Some(fields) = data.as_object_mut().filter(|_| tool == "project_read") {
+                        fields.remove("read_coverage_complete");
+                        fields.remove("full_content_sha256");
+                        bytes = serde_json::to_vec(&data)
+                            .map_err(CoreError::from)
+                            .map_err(tool_error)?;
+                    }
+                    let result_sha256 = crate::native_project::digest(&bytes);
                     let c = self.credential.clone();
                     let expected = channel.clone();
                     let deferred = receive(
@@ -1842,12 +1862,8 @@ impl CorePolicy {
                                 if !same(&i, &expected) {
                                     return Err(CoreError::Refused("channel_identity_changed"));
                                 }
-                                crate::native_commands::defer_json_over(
-                                    store,
-                                    &i,
-                                    data,
-                                    crate::native_batch::ITEM_BYTES,
-                                )
+                                // Already classified as deferred.
+                                crate::native_commands::defer_json_over(store, &i, data, 0)
                             })
                             .map_err(tool_error)?,
                     )
@@ -1856,7 +1872,7 @@ impl CorePolicy {
                     item["status"] = json!("deferred");
                     item["large_output_id"] = deferred["large_output_id"].clone();
                     item["byte_count"] = deferred["byte_count"].clone();
-                    item["result_sha256"] = json!(crate::native_project::digest(&bytes));
+                    item["result_sha256"] = json!(result_sha256);
                 }
             }
             results.push(item);
@@ -1881,22 +1897,13 @@ impl CorePolicy {
             json!({"content":[{"type":"text","text":value.to_string()}],"structuredContent":value,"isError":!complete}),
         )
     }
-    /// Boxed so a read_batch member can re-enter the same dispatch.
-    fn call<'a>(
-        &'a self,
-        credentials: &'a Credentials,
-        channel: &'a Channel,
-        name: &'a str,
-        arguments: Value,
-    ) -> FutureResult<'a, Value> {
-        Box::pin(self.dispatch_call(credentials, channel, name, arguments))
-    }
     async fn dispatch_call(
         &self,
         credentials: &Credentials,
         channel: &Channel,
         name: &str,
         arguments: Value,
+        batched: bool,
     ) -> cortex_engine::Result<Value> {
         {
             if credentials.project != self.root
@@ -2005,7 +2012,9 @@ impl CorePolicy {
                                 return Err(CoreError::Refused("channel_identity_changed"));
                             }
                             if crate::native_project::supports(&name) {
-                                crate::native_project::execute(store, &i, &c, &name, &arguments)
+                                crate::native_project::execute(
+                                    store, &i, &c, &name, &arguments, batched,
+                                )
                             } else {
                                 crate::native_sources::execute(store, &i, &name, &arguments)
                             }

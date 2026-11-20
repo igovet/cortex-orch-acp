@@ -40,7 +40,8 @@ Native project-file writes distinguish hash conflicts, missing/partial read
 coverage and stale read coverage before replacement. Their structured errors
 report rejected writes and correction guidance, not authorization refusals.
 Existing-file replacement requires complete non-truncated same-channel coverage;
-a supplied digest alone grants nothing. Creation requires the absent-content
+a supplied digest alone grants nothing. Deferred batch reads do not add coverage
+for writes or independent review, even if their retained output is fetched. Creation requires the absent-content
 precondition. Exact edits may use a current partial text read but reject missing
 or ambiguous anchors, including overlapping Unicode matches, atomically.
 Actual private-path, role, channel and write-denial decisions remain final.

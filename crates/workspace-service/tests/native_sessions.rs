@@ -5878,7 +5878,7 @@ async fn recovery_project_operations_and_structured_tool_errors() {
         "end_turn",
     )
     .await;
-    // A batched project_read leaves the same channel read coverage as a direct read.
+    // An inline batched project_read leaves the same coverage as a direct read.
     checked(&d, "read_batch", json!({"calls":[{"id":"file","tool":"project_read","arguments":{"path":"notes.txt"}}]}),
         json!({"/result/isError":false,"/result/structuredContent/results/0/result/read_coverage_complete":true}), "end_turn").await;
     // At most eight items, unique ids, member arguments valid for that member.
@@ -5980,6 +5980,116 @@ async fn recovery_project_operations_and_structured_tool_errors() {
         "end_turn",
     )
     .await;
+    // A fully rendered text page exceeds the batch inline bound without
+    // crossing project_read's own paging/truncation limits.
+    let large_text = (0..5)
+        .map(|n| format!("{n}:{}\n", "x".repeat(1400)))
+        .collect::<String>();
+    let large_path = "src/batch-coverage.txt";
+    std::fs::write(p.0.join(large_path), &large_text).unwrap();
+    let sha = format!(
+        "{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(large_text.as_bytes())
+    );
+    checked(
+        &w,
+        "read_batch",
+        json!({"calls":[{"id":"file","tool":"project_read","arguments":{"path":large_path}}]}),
+        json!({"/result/isError":false,"/result/structuredContent/results/0/status":"deferred"}),
+        "end_turn",
+    )
+    .await;
+    let replacement = json!({"path":large_path,"content":"replacement\n","expected_sha256":sha});
+    checked(
+        &w,
+        "project_write",
+        replacement.clone(),
+        json!({"/result/isError":true,"/result/structuredContent/error":"gateway_complete_read_required"}),
+        "end_turn",
+    )
+    .await;
+    let output_id: String = s
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT min(id) FROM large_outputs
+                 WHERE task_id='t' AND owner_scope='a' AND source_kind='tool_result'
+                 HAVING count(*) = 1",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    checked(
+        &w,
+        "read_large_output",
+        json!({"large_output_id":output_id}),
+        json!({"/result/isError":false,"/result/structuredContent/complete":true,
+            "/result/structuredContent/integrity_verified":true}),
+        "end_turn",
+    )
+    .await;
+    checked(
+        &w,
+        "project_edit",
+        json!({"path":large_path,"edits":[{"old_string":"0:","new_string":"first:"}]}),
+        json!({"/result/isError":true,"/result/structuredContent/error":"gateway_read_required"}),
+        "end_turn",
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(p.0.join(large_path)).unwrap(),
+        large_text
+    );
+
+    // Smaller inline pages accumulate coverage normally, enabling replacement.
+    for (offset, limit, complete) in [(1, 4, false), (5, 1, true)] {
+        checked(
+            &w,
+            "read_batch",
+            json!({"calls":[{"id":"file","tool":"project_read",
+                "arguments":{"path":large_path,"offset":offset,"limit":limit}}]}),
+            json!({"/result/isError":false,"/result/structuredContent/results/0/status":"ok",
+                "/result/structuredContent/results/0/result/read_coverage_complete":complete}),
+            "end_turn",
+        )
+        .await;
+    }
+    checked(
+        &w,
+        "project_write",
+        replacement,
+        json!({"/result/isError":false,"/result/structuredContent/drastic_shrink":true}),
+        "end_turn",
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(p.0.join(large_path)).unwrap(),
+        "replacement\n"
+    );
+
+    // A multimodal item is refused in a batch and contributes no coverage.
+    let image = b"\x89PNG\r\n\x1a\n";
+    let image_path = "src/batch-coverage.png";
+    std::fs::write(p.0.join(image_path), image).unwrap();
+    checked(
+        &w,
+        "read_batch",
+        json!({"calls":[{"id":"image","tool":"project_read","arguments":{"path":image_path}}]}),
+        json!({"/result/isError":true,"/result/structuredContent/results/0/error/code":"batch_multimodal_unsupported"}),
+        "end_turn",
+    )
+    .await;
+    checked(
+        &w,
+        "project_write",
+        json!({"path":image_path,"content":"replacement","expected_sha256":
+            format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(image))}),
+        json!({"/result/isError":true,"/result/structuredContent/error":"gateway_complete_read_required"}),
+        "end_turn",
+    )
+    .await;
+    assert_eq!(std::fs::read(p.0.join(image_path)).unwrap(), image);
+
     // A coordinator-only tool stays a named authority refusal for a worker.
     checked(
         &w,
@@ -6246,6 +6356,11 @@ fn main() {
         return;
     }
     tokio::runtime::Runtime::new().unwrap().block_on(async {
+        if mode == "recovery-project-operations" {
+            recovery_project_operations_and_structured_tool_errors().await;
+            println!("recovery project operations, including batch read coverage, passed");
+            return;
+        }
         if mode == "verification-drift" {
             verification_drift_blocks_the_pass().await;
             return;
@@ -6346,6 +6461,7 @@ fn main() {
         .expect("native session scenarios exceeded deadline");
     });
     if ![
+        "recovery-project-operations",
         "verification-drift",
         "shared-checkout",
         "synthesis-feedback",

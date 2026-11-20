@@ -256,7 +256,13 @@ fn mime(b: &[u8]) -> Option<&'static str> {
         None
     }
 }
-fn read(store: &Store, i: &Identity, c: &Credential, args: &Value) -> CoreResult<Value> {
+fn read(
+    store: &Store,
+    i: &Identity,
+    c: &Credential,
+    args: &Value,
+    batched: bool,
+) -> CoreResult<Value> {
     let path = text(args, "path")?;
     safe(path)?;
     let root = store.key().root();
@@ -322,13 +328,16 @@ fn read(store: &Store, i: &Identity, c: &Credential, args: &Value) -> CoreResult
             return Err(CoreError::Refused("file_too_large"));
         }
         meta["mime"] = json!(mime);
-        save_coverage(
-            store,
-            i,
-            c,
-            path,
-            &json!({"sha256":hash,"lines":[],"complete":true}),
-        )?;
+        // The batch rejects image replies, so it must not grant image coverage.
+        if !batched {
+            save_coverage(
+                store,
+                i,
+                c,
+                path,
+                &json!({"sha256":hash,"lines":[],"complete":true}),
+            )?;
+        }
         let mut r = crate::native_sources::reply(meta);
         r["content"].as_array_mut().unwrap().push(json!({"type":"image","mimeType":mime,"data":base64::engine::general_purpose::STANDARD.encode(b)}));
         return Ok(r);
@@ -382,7 +391,6 @@ fn read(store: &Store, i: &Identity, c: &Credential, args: &Value) -> CoreResult
     }
     covered["lines"] = json!(seen);
     covered["complete"] = json!(prior_complete || seen.len() == lines.len());
-    save_coverage(store, i, c, path, &covered)?;
     meta["content"] = json!(content);
     meta["total_lines"] = json!(lines.len());
     meta["start_line"] = json!(start);
@@ -401,6 +409,11 @@ fn read(store: &Store, i: &Identity, c: &Credential, args: &Value) -> CoreResult
     } else {
         Value::Null
     };
+    // Use the same structured result and byte bound as batch delivery. A
+    // retained output lookup does not record which project lines were read.
+    if !batched || serde_json::to_vec(&meta)?.len() <= crate::native_batch::ITEM_BYTES {
+        save_coverage(store, i, c, path, &covered)?;
+    }
     Ok(crate::native_sources::reply(meta))
 }
 /// Settle only a hash-bound intent. A legacy intent, changed/aliased path or
@@ -639,7 +652,11 @@ pub(super) fn execute(
     c: &Credential,
     name: &str,
     args: &Value,
+    batched: bool,
 ) -> CoreResult<Value> {
+    if name == "project_read" {
+        return read(store, i, c, args, batched);
+    }
     let mut failed_field: Option<String> = None;
     let result = execute_inner(store, i, c, name, args, &mut failed_field);
     let error_reply = |code| match &failed_field {
@@ -697,9 +714,6 @@ fn execute_inner(
             &c.channel_id,
             text(args, "tool_call_ref")?,
         );
-    }
-    if name == "project_read" {
-        return read(store, i, c, args);
     }
     if name == "read_large_output" {
         return crate::native_commands::read_output(store, i, c, args);
@@ -1008,10 +1022,20 @@ pub(crate) fn review_line_ranges(root: &Path, base: &str, path: &str) -> Option<
     let literal = format!(":(literal){path}");
     run(&["cat-file", "-e", &format!("{base}:{path}")])?;
     let out = run(&[
-        "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--unified=0", base, "--", &literal,
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--unified=0",
+        base,
+        "--",
+        &literal,
     ])?;
     let text = String::from_utf8(out.stdout).ok()?;
-    let total = fs::read(root.join(path)).ok()?.split(|b| *b == b'\n').count() as u64;
+    let total = fs::read(root.join(path))
+        .ok()?
+        .split(|b| *b == b'\n')
+        .count() as u64;
     let mut ranges: Vec<[u64; 2]> = Vec::new();
     for line in text.lines().filter(|l| l.starts_with("@@ ")) {
         // @@ -a[,b] +c[,d] @@
@@ -1021,8 +1045,15 @@ pub(crate) fn review_line_ranges(root: &Path, base: &str, path: &str) -> Option<
             None => (new.parse::<u64>().ok()?, 1),
         };
         // A pure deletion (count 0) sits after line `start`: read around it.
-        let (first, last) = if count == 0 { (start, start + 1) } else { (start, start + count - 1) };
-        let range = [first.saturating_sub(CONTEXT).max(1), (last + CONTEXT).min(total.max(1))];
+        let (first, last) = if count == 0 {
+            (start, start + 1)
+        } else {
+            (start, start + count - 1)
+        };
+        let range = [
+            first.saturating_sub(CONTEXT).max(1),
+            (last + CONTEXT).min(total.max(1)),
+        ];
         match ranges.last_mut() {
             Some(prev) if range[0] <= prev[1] + 1 => prev[1] = prev[1].max(range[1]),
             _ => ranges.push(range),
@@ -1048,7 +1079,9 @@ pub(crate) fn add_review_lines(root: &Path, base: Option<&str>, packet: &mut Val
         if file["change"] != "modified" || !file["current_sha256"].is_string() {
             continue;
         }
-        let Some(path) = file["path"].as_str() else { continue };
+        let Some(path) = file["path"].as_str() else {
+            continue;
+        };
         if let Some(ranges) = base.and_then(|base| review_line_ranges(root, base, path)) {
             file["review_lines"] = json!(ranges);
             any = true;

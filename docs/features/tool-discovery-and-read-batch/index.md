@@ -36,10 +36,10 @@ naming the exact location, when the request exceeds its byte or depth bound
 `calls[i].tool`) or a member's arguments do not match that tool's own schema
 (`calls[i].arguments`). Each member then runs, one at a time and in order,
 through exactly the handler a direct call of that tool uses, so it has the same
-guards, path rules, paging and size bounds, leaves the same side records (a batched
-`project_read` grants the same channel read coverage; `project_git` retains its
-snapshot under its `request_key`) and returns the same result. A refusal of a
-member, such as a private path, is that item's error in the standard shape.
+guards, path rules, paging and size bounds. An inline `project_read` adds channel
+read coverage just like a direct read; `project_git` retains its snapshot under
+its `request_key`. A refusal of a member, such as a private path, is that item's
+error in the standard shape.
 Arguments are declarative JSON, not expressions or references to prior results.
 Writes, command launches, questions, submissions, access/scope/escalation
 requests, availability probes (`check_preflight`), external calls, publishing,
@@ -47,7 +47,8 @@ lifecycle actions and recursive batching are not batchable.
 
 Images returned by `read_source` or `project_read` require an individual MCP call; a batch returns
 an explicit `batch_multimodal_unsupported` item error instead of flattening an
-image block into apparent text evidence. Text/base64 source metadata is preserved.
+image block into apparent text evidence. A rejected image adds no project
+read coverage. Text/base64 source metadata is preserved.
 
 ## Bounds and delivery
 
@@ -85,6 +86,10 @@ response not an error, so a real report above the inline bound is read through
 (`isError: true` with the full envelope); successful siblings are
 still usable evidence, never proof of the failed item. Complete describes batch
 delivery, not complete document coverage or successful underlying command output.
+A deferred `project_read` adds no coverage and omits the coverage fields from
+the retained page. Fetching that page with `read_large_output` does not change
+coverage. For a write precondition or review coverage, use `project_read`
+directly or request smaller inline pages.
 
 ## Authority, cancellation and evidence
 

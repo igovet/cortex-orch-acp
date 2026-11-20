@@ -46,6 +46,9 @@ server Paseo injects into every session; an unconfigured stdio server still refu
 Cortex tool discovery lists only Cortex tools. For external MCP, use the exact
 tool name and description advertised by the engine for the current session;
 if a code index is not offered, use the available project reads instead.
+For file changes that require read coverage, use direct reads or inline batch
+pages; [deferred batch reads](docs/features/tool-discovery-and-read-batch/index.md#bounds-and-delivery)
+do not count toward coverage.
 Question cards use Python's Paseo card shape, and the cancel Paseo sends before a
 follow-up message is held for five seconds as in Python, so the message steers and
 `/cortex-answer` still answers instead of pausing the task.
