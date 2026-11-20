@@ -2647,16 +2647,21 @@ mod tests {
             .unwrap();
         let fresh = status_reads();
         assert!(fresh > 0);
+        // Model an unrelated Git write in another test. The spawned task does
+        // not inherit this test's task-local cache, so it invalidates the shared cache.
+        tokio::spawn(async { snapshot_reuse::invalidate() })
+            .await
+            .unwrap();
         let second = g
             .snapshot(&root, "p", &state, Some(&context))
             .await
             .unwrap();
-        assert_eq!(second, first);
         assert_eq!(
             status_reads(),
             fresh,
-            "an unchanged snapshot was read again"
+            "an unrelated invalidation caused an unchanged snapshot to be read again"
         );
+        assert_eq!(second, first);
         // A changed task context is not served from reuse.
         let other = json!({"tasks":{}});
         let changed = g.snapshot(&root, "p", &state, Some(&other)).await.unwrap();

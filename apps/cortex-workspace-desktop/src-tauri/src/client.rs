@@ -4,7 +4,7 @@
 use crate::opener;
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::Arc, time::Duration};
-use tokio::{net::UnixStream, time::timeout};
+use tokio::{net::UnixStream, process::Command, time::timeout};
 pub use workspace_client::bridge::{frame_failure, incoming, Incoming, Refused, ORDINARY_REQUESTS};
 use workspace_client::{BoxFuture, Connector, Stream};
 use workspace_service::connect;
@@ -33,7 +33,7 @@ impl Unix {
             return Ok(stream);
         }
         Bridge::start_service(
-            "/usr/bin/systemctl",
+            || Command::new("/usr/bin/systemctl"),
             &workspace_protocol::channel::current().unit,
         )
         .await?;
@@ -98,14 +98,14 @@ impl Bridge {
     async fn wait_for_socket(&self, grace: Duration) -> Result<UnixStream, String> {
         self.unix.wait_for_socket(grace).await
     }
-    async fn start_service(systemctl: &str, unit: &str) -> Result<(), String> {
+    async fn start_service(systemctl: impl Fn() -> Command, unit: &str) -> Result<(), String> {
         use std::process::Stdio;
         // Reload also handles first launch in a manager that predates package install.
         for args in [
             vec!["--user", "daemon-reload"],
             vec!["--user", "start", "--no-block", unit],
         ] {
-            let mut child = tokio::process::Command::new(systemctl)
+            let mut child = systemctl()
                 .args(args)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -317,13 +317,21 @@ impl Bridge {
 #[cfg(test)]
 mod tests {
     use super::Bridge;
-    use std::os::unix::fs::PermissionsExt;
+    use std::{
+        io::Write,
+        os::unix::fs::{DirBuilderExt, PermissionsExt},
+        path::Path,
+    };
+    use tokio::process::Command;
 
     #[tokio::test]
     async fn first_subscription_waits_for_a_late_socket_without_reporting_offline() {
-        let root = std::env::temp_dir().join(format!("cw-late-ready-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // The runner's TMPDIR can be too long for a filesystem Unix socket.
+        let root = Path::new("/tmp").join(format!("cw-late-ready-{}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
         let path = root.join("service.sock");
         let bridge = Bridge::new(path.clone());
         assert!(bridge
@@ -374,34 +382,34 @@ mod tests {
     #[tokio::test]
     async fn startup_reloads_and_starts_only_the_fixed_unit_and_retries_after_failure() {
         let root = std::env::temp_dir().join(format!("cw-start-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
         let script = root.join("systemctl");
         let trace = root.join("trace");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 1\n",
-                trace.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(
-            Bridge::start_service(script.to_str().unwrap(), "fixture.service")
-                .await
-                .is_err()
+        let mut fixture = std::fs::File::create(&script).unwrap();
+        fixture
+            .write_all(
+                b"trace=$1\nstatus=$2\nshift 2\nprintf '%s\\n' \"$*\" >> \"$trace\" || exit 2\nexit \"$status\"\n",
+            )
+            .unwrap();
+        // Invoke the fixture as data. A concurrent spawn can inherit a writer until exec
+        // and make directly executing the script fail with ETXTBSY. Keep a writer open
+        // across both attempts so this test exercises that condition deterministically.
+        let systemctl = |status: &str| {
+            let mut command = Command::new("/bin/sh");
+            command.arg(&script).arg(&trace).arg(status);
+            command
+        };
+        assert_eq!(
+            Bridge::start_service(|| systemctl("1"), "fixture.service").await,
+            Err("service_start_failed".into())
         );
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
-                trace.display()
-            ),
-        )
-        .unwrap();
-        Bridge::start_service(script.to_str().unwrap(), "fixture.service")
+        Bridge::start_service(|| systemctl("0"), "fixture.service")
             .await
             .unwrap();
+        drop(fixture);
         assert_eq!(
             std::fs::read_to_string(&trace).unwrap(),
             "--user daemon-reload\n--user daemon-reload\n--user start --no-block fixture.service\n"
