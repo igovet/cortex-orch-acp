@@ -9,7 +9,17 @@ const idOf = (v: unknown) => plain(v) ? v.id ?? v.taskId ?? v.key : undefined;
 function shareList(prev: unknown[], next: unknown[]) {
   const byId = new Map<unknown, unknown>();
   for (const item of prev) { const id = idOf(item); if (id !== undefined) byId.set(id, item); }
-  const out = next.map((item, i) => { const id = idOf(item); return share(id !== undefined && byId.has(id) ? byId.get(id) : prev[i], item); });
+  // Sequence is a separate key space and is safe only when unique on both sides.
+  const sequenceOf = (item: unknown) => idOf(item) === undefined && plain(item) && typeof item.sequence === "number" ? item.sequence : undefined;
+  const counts = (items: unknown[]) => { const m = new Map<number, number>(); for (const item of items) { const s = sequenceOf(item); if (s !== undefined) m.set(s, (m.get(s) ?? 0) + 1); } return m; };
+  const prevCounts = counts(prev), nextCounts = counts(next), bySequence = new Map<number, unknown>();
+  for (const item of prev) { const s = sequenceOf(item); if (s !== undefined && prevCounts.get(s) === 1) bySequence.set(s, item); }
+  const out = next.map((item, i) => {
+    const id = idOf(item), s = sequenceOf(item);
+    if (id !== undefined) return share(byId.has(id) ? byId.get(id) : prev[i], item);
+    if (s !== undefined) return share(prevCounts.get(s) === 1 && nextCounts.get(s) === 1 ? bySequence.get(s) : undefined, item);
+    return share(prev[i], item);
+  });
   return out.length === prev.length && out.every((item, i) => item === prev[i]) ? prev : out;
 }
 
