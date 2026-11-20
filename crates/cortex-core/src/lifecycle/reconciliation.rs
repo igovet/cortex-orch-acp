@@ -375,6 +375,124 @@ fn changed_files(
 }
 /// Changed files listed in a review brief; the rest are counted by folder.
 pub const REVIEW_PACKET_FILES: usize = 200;
+/// A review binds at most this many task files by their bytes; a larger change set
+/// binds the whole checkout instead (the same bound as a check's work set).
+pub const REVIEW_BINDING_FILES: usize = 20_000;
+/// Whether the task recorded every path its own commands and writing turns changed,
+/// and those paths with the plan node that changed them. A file a gateway tool
+/// wrote has a write receipt; the host also lists the checkout's dirty paths around
+/// each command (`NATIVE_COMMAND_FINISHED`, `changed_paths`) and around each turn of
+/// a writing worker whose engine could change files without a receipt
+/// (`NATIVE_WRITER_TURN_CHANGES`, `native_mutation`: an engine that writes inside
+/// its own sandbox, or a native or external tool the runtime allowed in that turn).
+/// A record counts from its start or finish after `since` (the execution baseline):
+/// earlier changes are part of the baseline itself. `Err` names why attribution is
+/// incomplete: a command or writing turn without a complete change record (an
+/// earlier build, a recovered or unknown outcome, a failed or oversized listing),
+/// or one started but never settled.
+fn recorded_changes(
+    db: &Connection,
+    task: &str,
+    since: Option<i64>,
+) -> CoreResult<(BTreeMap<String, BTreeSet<String>>, Result<(), String>)> {
+    let mut statement = db.prepare(
+        "SELECT e.id,e.type,e.payload_json,n.node_id,n.stage FROM runtime_events e
+         LEFT JOIN trusted_channels c ON c.task_id=e.task_id AND c.channel_id=json_extract(e.payload_json,'$.channel_id')
+         LEFT JOIN runtime_nodes n ON n.task_id=c.task_id AND n.assignment_ref=c.assignment_id
+         WHERE e.task_id=? AND e.type IN ('NATIVE_COMMAND_STARTED','NATIVE_COMMAND_FINISHED',
+           'NATIVE_WRITER_TURN_STARTED','NATIVE_WRITER_TURN_CHANGES','NATIVE_TURN_SETTLED') ORDER BY e.id",
+    )?;
+    let mut rows = statement.query([task])?;
+    let since = since.unwrap_or(0);
+    // A record's plan node comes from its start event, which names the channel.
+    let mut started: BTreeMap<(bool, String), (i64, Option<String>)> = BTreeMap::new();
+    let mut finished: BTreeSet<(bool, String)> = BTreeSet::new();
+    let mut paths: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut complete = Ok(());
+    let mut fail = |id: i64, reason: &str| {
+        if id > since && complete.is_ok() {
+            complete = Err(reason.to_owned());
+        }
+    };
+    while let Some(row) = rows.next()? {
+        let id: i64 = row.get(0)?;
+        let kind: String = row.get(1)?;
+        let payload: Value = serde_json::from_str(&row.get::<_, String>(2)?)?;
+        let node: Option<String> = row.get(3)?;
+        let stage: Option<String> = row.get(4)?;
+        let (turn, reference, observation) = match kind.as_str() {
+            "NATIVE_COMMAND_STARTED" | "NATIVE_WRITER_TURN_STARTED" => {
+                let turn = kind == "NATIVE_WRITER_TURN_STARTED";
+                let key = if turn {
+                    &payload["turn"]
+                } else {
+                    &payload["ref"]
+                };
+                if let Some(reference) = key.as_str() {
+                    started.insert((turn, reference.to_owned()), (id, node));
+                }
+                continue;
+            }
+            // A turn of an execution worker settled by an earlier build, which kept
+            // no record of whether its engine changed files.
+            "NATIVE_TURN_SETTLED" => {
+                if payload.get("writer").is_none() && stage.as_deref() == Some("execution") {
+                    fail(id, "turn_without_change_record");
+                }
+                continue;
+            }
+            "NATIVE_WRITER_TURN_CHANGES" => (true, payload["turn"].as_str(), &payload),
+            _ => (
+                false,
+                payload["receipt"]["tool_call_ref"].as_str(),
+                &payload["receipt"]["observation"],
+            ),
+        };
+        let reference = reference.map(|r| (turn, r.to_owned()));
+        let (start, started_by) = reference
+            .as_ref()
+            .and_then(|r| started.get(r))
+            .cloned()
+            .unwrap_or((id, None));
+        let node = node.or(started_by);
+        if let Some(reference) = reference {
+            finished.insert(reference);
+        }
+        // A writing turn whose engine could not change files without a receipt.
+        if turn && observation["native_mutation"] == false {
+            continue;
+        }
+        let changed = observation["changed_paths"].as_array();
+        if observation["changed_paths_complete"] != true || changed.is_none() {
+            let reason = observation["changed_paths_reason"]
+                .as_str()
+                .unwrap_or(if turn {
+                    "turn_without_change_record"
+                } else {
+                    "command_without_change_record"
+                });
+            fail(id.max(start), reason);
+            continue;
+        }
+        for path in changed.into_iter().flatten().filter_map(Value::as_str) {
+            let entry = paths.entry(path.to_owned()).or_default();
+            entry.extend(node.clone());
+        }
+    }
+    for ((turn, reference), (id, _)) in &started {
+        if !finished.contains(&(*turn, reference.clone())) {
+            fail(
+                *id,
+                if *turn {
+                    "turn_unsettled"
+                } else {
+                    "command_unsettled"
+                },
+            );
+        }
+    }
+    Ok((paths, complete))
+}
 /// `read_report` characters per page.
 const REPORT_PAGE_CHARS: i64 = 4000;
 /// What a reviewer is handed besides its objective: the files the work under review
@@ -388,6 +506,17 @@ const REPORT_PAGE_CHARS: i64 = 4000;
 /// name the plan node that made them. Git is not used: project files may be
 /// untracked, or the project may have no repository. Without a usable manifest the
 /// list is the recorded writes only and says so (`complete: false`).
+///
+/// A listed file is `required` (the review must read it) when this task wrote it:
+/// a write receipt, or a path one of the task's commands changed while it ran
+/// (`changed_paths` of `NATIVE_COMMAND_FINISHED`). Other changed files are listed
+/// as context only: a shared checkout holds other actors' uncommitted work. When a
+/// command since the baseline has no complete change record, attribution is
+/// incomplete and every listed file is required, as before. The packet's
+/// `review_binding` names what the review binds: the task's own files
+/// (`task_files`, their paths) or, when attribution is incomplete or too large,
+/// the whole checkout. The host keeps it with the recorded packet, not in the
+/// reviewer's brief.
 pub fn review_packet_tx(
     db: &Connection,
     task: &str,
@@ -457,18 +586,36 @@ pub fn review_packet_tx(
             "revision":revision,"sha256":sha256,"matches_current":matches_current}),
         );
     }
+    // Paths the task's own commands changed while they ran. With a complete
+    // baseline comparison they only name the writer of a listed change (a path a
+    // command touched and that now equals the baseline has nothing to review);
+    // without one they are listed like recorded writes.
+    let (commanded, attribution) = recorded_changes(db, task, baseline_event)?;
+    for (path, nodes) in &commanded {
+        let entry = match files.get_mut(path) {
+            Some(entry) => entry,
+            None if manifest.is_none() => files
+                .entry(path.clone())
+                .or_insert_with(|| ("modified".into(), BTreeSet::new())),
+            None => continue,
+        };
+        entry.1.extend(nodes.iter().cloned());
+    }
+    let attributed = |path: &str| last_writes.contains_key(path) || commanded.contains_key(path);
+    let attribution_complete = attribution.is_ok();
+    let required = |path: &str| !attribution_complete || attributed(path);
     let total = files.len();
     let mut ordered: Vec<_> = files.iter().collect();
     if total > REVIEW_PACKET_FILES {
-        // Keep directly observed task writes in view when the baseline delta is large.
-        ordered.sort_by_key(|(path, _)| !last_writes.contains_key(*path));
+        // Keep the task's own changes in view when the baseline delta is large.
+        ordered.sort_by_key(|(path, _)| (!attributed(path), !last_writes.contains_key(*path)));
     }
     let listed: Vec<Value> = ordered
         .iter()
         .copied()
         .take(REVIEW_PACKET_FILES)
         .map(|(path, (change, by))| {
-            let mut file = json!({"path":path,"change":change,"by":by});
+            let mut file = json!({"path":path,"change":change,"by":by,"required":required(path)});
             // Bind the review obligation to the host's current manifest.  The
             // reviewer still has to read the bytes through the channel; this
             // value is only used by the runtime to reject stale/partial reads.
@@ -487,10 +634,20 @@ pub fn review_packet_tx(
         *folders.entry(folder.to_owned()).or_default() += 1;
     }
     let complete = manifest.is_some();
+    let required_total = files.keys().filter(|p| required(p)).count();
     let mut changed = json!({"files":listed,"total":total,"complete":complete,
+        "required":required_total,"attribution_complete":attribution_complete,
         "source":if complete {"execution baseline manifest and recorded writes"} else {"recorded writes only"}});
     if !complete {
-        changed["note"] = json!("The folder could not be compared with the execution baseline, so files changed by commands are not listed; inspect the predecessor reports and the folder for them.");
+        changed["note"] = json!(if attribution_complete {
+            "The folder could not be compared with the execution baseline, so only this task's recorded writes and the files its own commands changed are listed; inspect the predecessor reports for other changes."
+        } else {
+            "The folder could not be compared with the execution baseline, so files changed by commands are not listed; inspect the predecessor reports and the folder for them."
+        });
+    }
+    if let Err(reason) = &attribution {
+        changed["attribution"] = json!({"reason":reason,
+            "note":"Some of this task's commands have no complete record of the files they changed, so every listed file is required and the review binds the whole checkout."});
     }
     match manifest.as_ref().map(|m| m.ignored) {
         Some(IgnoredChange::Changed) => {
@@ -502,13 +659,29 @@ pub fn review_packet_tx(
         _ => {}
     }
     if total > listed.len() {
-        changed["more"] = json!({"count":total - listed.len(),
+        let unlisted_required = ordered
+            .iter()
+            .skip(REVIEW_PACKET_FILES)
+            .filter(|(p, _)| required(p))
+            .count();
+        changed["more"] = json!({"count":total - listed.len(),"required":unlisted_required,
             "by_folder":folders.iter().map(|(f, n)| json!({"folder":f,"files":n})).collect::<Vec<_>>(),
             "how":"read these folders with project_read to see the rest"});
     }
     let boundary = json!({"baseline_event":baseline_event,
         "recorded_task_paths":last_writes.len(),
-        "guidance":"Use the objective and task write receipts across plans to focus your review. A matching hash binds the observed file bytes to the latest recorded write. For changed or unobserved bytes, inspect the relevant file and predecessor reports. Manifest-only paths have no confirmed writer. A whole-checkout diff may include unrelated work."});
+        "command_changed_paths":commanded.len(),
+        "guidance":"Use the objective and task write receipts across plans to focus your review. Files with required true are this task's own changes (a write receipt, or a path changed while one of its commands ran): read each of them. Files with required false changed in the checkout without a writer from this task; they are context only and never required. A matching hash binds the observed file bytes to the latest recorded write. For changed or unobserved bytes, inspect the relevant file and predecessor reports. Manifest-only paths have no confirmed writer. A whole-checkout diff may include unrelated work."});
+    // What the review binds: the bytes of the task's own files, unless attribution
+    // is incomplete or the set is too large to hash, when it is the whole checkout.
+    let bound: Vec<&String> = files.keys().filter(|p| required(p)).collect();
+    let binding = match &attribution {
+        Err(reason) => json!({"kind":"checkout","reason":reason}),
+        Ok(()) if bound.len() > REVIEW_BINDING_FILES => {
+            json!({"kind":"checkout","reason":"too_many_task_files"})
+        }
+        Ok(()) => json!({"kind":"task_files","paths":bound}),
+    };
     let reports = db
         .prepare(
             "SELECT n.node_id,n.role,json_extract(n.result_json,'$.report_ref'),
@@ -547,8 +720,10 @@ pub fn review_packet_tx(
         .map(|s| serde_json::from_str(&s))
         .transpose()?
         .unwrap_or_default();
+    // The read scope must cover what the review is required to read.
     let outside: Vec<&String> = files
         .keys()
+        .filter(|p| required(p))
         .filter(|p| {
             !scope
                 .iter()
@@ -557,7 +732,7 @@ pub fn review_packet_tx(
         .collect();
     Ok(
         json!({"changed_files":changed,"change_boundary":boundary,"predecessor_reports":reports,"read_scope":scope,
-        "read_scope_covers_change":outside.is_empty(),"outside_read_scope":outside}),
+        "read_scope_covers_change":outside.is_empty(),"outside_read_scope":outside,"review_binding":binding}),
     )
 }
 /// Characters that are control or invisible formatting (Unicode Cc/Cf) but not

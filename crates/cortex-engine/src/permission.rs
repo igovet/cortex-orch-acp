@@ -165,8 +165,13 @@ pub fn classify(request: &Value, facts: &Facts<'_>) -> Verdict {
     if targets.paths.iter().any(|(_, c)| *c == PathClass::Private) {
         return verdict(refuse, "cortex_private");
     }
-    // Read-only channels never write, delete or execute natively, in any mode.
-    if facts.read_only && !read {
+    // Read-only channels never write, delete or execute natively, in any mode. A web
+    // fetch only reads (the session keeps WebFetch for exactly that), so it is not
+    // refused here: it follows the ordinary fetch rule below (Auto and Development
+    // allow it, Guarded asks the owner). Refusing it made every read-only fetch fail
+    // before any owner could be asked.
+    let fetch = kind == Some("fetch");
+    if facts.read_only && !read && !fetch {
         return verdict(refuse, "read_only");
     }
     let auto = facts.access == "auto";
@@ -679,10 +684,27 @@ mod tests {
                         Action::Cancel
                     }
                 );
-                for kind in ["execute", "delete", "move", "fetch"] {
+                for kind in ["execute", "delete", "move"] {
                     assert_eq!(
                         classify(&json!({"toolCall":{"kind":kind}}), &f).rule,
                         "read_only"
+                    );
+                }
+                // A web fetch only reads: it follows the fetch rule of the mode.
+                let fetch = json!({"toolCall":{"kind":"fetch","rawInput":{"url":"https://github.com/x/y"}}});
+                let v = classify(&fetch, &f);
+                assert_ne!(v.rule, "read_only", "{access}");
+                if answers {
+                    assert_eq!(
+                        v.action,
+                        match access {
+                            "guarded" => Action::Ask {
+                                deletion: false,
+                                fallback: Fallback::Refuse
+                            },
+                            _ => Action::Allow,
+                        },
+                        "{access}"
                     );
                 }
                 assert_ne!(

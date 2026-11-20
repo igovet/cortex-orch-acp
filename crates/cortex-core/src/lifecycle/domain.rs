@@ -83,6 +83,35 @@ pub fn native_recovery_required_tx(
     state_tx(db, task, target, Some(&reason))
 }
 
+/// Recovery held the task for the outcome-unknown barrier `settled`, and the runtime
+/// has since settled exactly that evidence itself (for example a legacy command
+/// start whose receipt completed). That barrier no longer stands: the hold now names
+/// `reason`, what the task's current facts still show. It never clears a hold, never
+/// drives the task, and leaves any other barrier and every terminal task unchanged.
+pub fn native_barrier_settled_tx(
+    db: &Transaction<'_>,
+    task: &str,
+    settled: &str,
+    reason: &str,
+) -> CoreResult<bool> {
+    let state = task_tx(db, task)?.0;
+    let current: Option<String> = db.query_row(
+        "SELECT blocker FROM runtime_tasks WHERE task_id=?",
+        [task],
+        |r| r.get(0),
+    )?;
+    if state.terminal() || current.as_deref() != Some(settled) || reason.trim().is_empty() {
+        return Ok(false);
+    }
+    let target = if matches!(state, TaskState::Paused | TaskState::WaitingUser) {
+        state
+    } else {
+        TaskState::Recovering
+    };
+    state_tx(db, task, target, Some(reason))?;
+    Ok(true)
+}
+
 /// Engine assignment identity and work-graph attempt identity are distinct.
 /// Resolve the explicit delegation event binding, never guess one from the other.
 /// Python: recovery/worker_reconciliation.py:49-84.
@@ -223,6 +252,10 @@ fn owner_readable_blocker(blocker: &str, ru: bool) -> String {
         ),
         "native_progress_limit" => ("the task reached its limit of steps", "задача достигла предела шагов"),
         "coordinator_no_progress_limit" => ("the coordinator stopped making progress", "координатор перестал продвигаться"),
+        "native_turn_degenerate" => (
+            "the model produced unusable output twice in a row",
+            "модель дважды подряд выдала непригодный ответ",
+        ),
         "no_runnable_nodes" => ("no planned step can run", "ни один запланированный шаг не может выполниться"),
         "scheduler_capacity_timeout" => ("no capacity became free for the next step in time", "для следующего шага вовремя не освободилась мощность"),
         // What held the step is stated from recorded facts by `stop_notice`, never guessed here.

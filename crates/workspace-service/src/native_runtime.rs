@@ -730,7 +730,90 @@ impl Runtime {
             .await
             .map_err(|_| failure("native_start_outcome_unknown"))?
     }
+    /// One runtime turn with the degenerate-turn watchdog's single retry (see
+    /// `native_sessions::degenerate`). A coordinator turn that degenerated without
+    /// changing the task's state or plan revision runs once more, with the same
+    /// prompt, in a fresh engine session. A worker's degenerate turn ends with its node
+    /// still open and its session terminated, so the lost-worker path replaces it in a
+    /// fresh session at the next step. A second degenerate turn (the coordinator's
+    /// retry, or the same node again in the same plan revision) stops the task with
+    /// the `native_turn_degenerate` blocker.
     async fn turn(
+        &self,
+        task: &str,
+        owner: &OwnerEpoch,
+        role: SessionRole,
+        route: SessionRoute,
+        prompt: &str,
+        cancelled: watch::Receiver<bool>,
+    ) -> CoreResult<()> {
+        const DEGENERATE: &str = "native_turn_degenerate";
+        let assignment = match &role {
+            SessionRole::Worker { assignment } => Some(assignment.clone()),
+            SessionRole::Coordinator => None,
+        };
+        let retry = route.clone();
+        let before = self.turn_marker(task).await?;
+        match self
+            .turn_once(task, owner, role, route, prompt, cancelled.clone())
+            .await
+        {
+            Err(error) if error.code() == DEGENERATE => {}
+            other => return other,
+        }
+        if let Some(assignment) = assignment {
+            let t = task.to_owned();
+            let repeated: i64 = self.host.executor.read(move |db| {
+                Ok(db.query_row(
+                    "SELECT count(*) FROM runtime_events e JOIN runtime_nodes n ON n.task_id=e.task_id
+                     AND json_extract(e.payload_json,'$.node')=n.node_id AND json_extract(e.payload_json,'$.revision')=n.revision
+                     WHERE e.task_id=? AND e.type='NATIVE_TURN_DEGENERATE' AND n.assignment_ref=?",
+                    (&t, &assignment),
+                    |r| r.get(0),
+                )?)
+            })?.await.map_err(|_| CoreError::Refused("native_host_closed"))??;
+            return if repeated >= 2 {
+                Err(CoreError::Refused(DEGENERATE))
+            } else {
+                Ok(())
+            };
+        }
+        // A degenerate turn that still changed the task (a plan, a question) stands;
+        // the driver continues from that state as after any other turn.
+        if self.turn_marker(task).await? != before {
+            return Ok(());
+        }
+        match self
+            .turn_once(
+                task,
+                owner,
+                SessionRole::Coordinator,
+                retry,
+                prompt,
+                cancelled,
+            )
+            .await
+        {
+            Err(error) if error.code() == DEGENERATE => Err(CoreError::Refused(DEGENERATE)),
+            other => other,
+        }
+    }
+    /// The task's state and plan revision: what a turn changed, if anything.
+    async fn turn_marker(&self, task: &str) -> CoreResult<(String, i64)> {
+        let t = task.to_owned();
+        self.host
+            .executor
+            .read(move |db| {
+                Ok(db.query_row(
+                    "SELECT state,revision FROM runtime_tasks WHERE task_id=?",
+                    [&t],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))?
+    }
+    async fn turn_once(
         &self,
         task: &str,
         owner: &OwnerEpoch,
@@ -820,6 +903,7 @@ a question to the owner (question text and option labels). Write reports, report
                 return Err(error);
             }
         };
+        driver.treat_refusal_as_degenerate();
         let mut stop = self.stop.subscribe();
         let turn = if *stop.borrow_and_update() || *cancelled.borrow() {
             Err(CoreError::Refused("native_service_stopped"))

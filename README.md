@@ -50,7 +50,9 @@ tool name and description advertised by the engine for the current session;
 if a code index is not offered, use the available project reads instead.
 For file changes that require read coverage, use direct reads or inline batch
 pages; [deferred batch reads](docs/features/tool-discovery-and-read-batch/index.md#bounds-and-delivery)
-do not count toward coverage.
+do not count toward coverage. A line longer than 2000 characters is read in
+segments: continue it with the page's `next_offset` and `next_column`, and it
+counts toward coverage once every segment was returned.
 Question cards use Python's Paseo card shape, and the cancel Paseo sends before a
 follow-up message is held for five seconds as in Python, so the message steers and
 `/cortex-answer` still answers instead of pausing the task.
@@ -179,14 +181,24 @@ boot/PID/start identities and private output/status files. After a service resta
 the same command can be observed or owner-stopped without relaunch; lost or
 mismatched supervisors stay unknown until their process is provably gone, when the
 receipt is settled with an unknown outcome (a launch whose payload was never released
-settles as not started), so no lost call blocks close or repair. Recovered output and exit status never
+settles as not started), so no lost call blocks close or repair. A lost worker is retried
+only when its receipts are complete or settled with an observed end (an owner stop, a final
+supervisor status, a launch that never started); one settled with an unknown outcome still
+goes to the coordinator or owner. A command start of an earlier host left without its exit
+event is settled from its own receipt or a later event of another boot, so it no longer holds
+its task on every restart. Recovered output and exit status never
 invent a project-revision binding or certify a passed check.
 Worker results derive evidence strength and check retained output, project-digest
-bindings, duplicate references and non-shell trivial commands, including confirmed
-outside-command receipts. Failed check history now derives exact latest-rerun
-closures, explicit probe retractions and supported invocation corrections; unknown
-or trivial passed claims stay unverified. General inline-shell status-flow
-analysis remains unfinished.
+or work-set bindings (a `command_run` pass whose own scope and written files were
+unchanged across the run and at submission verifies even when another task changed
+other files of the shared checkout), duplicate references and trivial commands,
+including confirmed outside-command receipts. Failed check history now derives exact
+latest-rerun closures, explicit probe retractions and supported invocation
+corrections; unknown or trivial passed claims stay unverified, and an open failed
+check is refused naming the check, its receipt and the gap that keeps it open.
+Inline shell scripts verify only as `umask`/`export`/`cd`/`set` setup followed by
+one simple check command; other inline-shell status-flow analysis remains
+unfinished.
 Engine containment, unconfigured client stdio servers, Python's worker-card presentation
 and automatic engine-permission policy, and confirmed `/cortex-clear` deletion remain
 unfinished. See [native incoming ACP](docs/project/native-incoming-acp.md)
@@ -343,7 +355,9 @@ Native-owned task controls now use the same Rust host through the ordinary
 service handlers: send/steer, Stop/Pause/Resume, question answers, explicit Retry
 and confirmed Mark resolved/Close as is. Stop settles the owned process before
 replying; Resume continues the retained task (questions and worker waits stay answerable), while retry, and a message to a task that waits for the owner, is held or was reopened, use a fresh coordinator and plan; neither revives a revoked
-channel. A message to a working task interrupts nothing: workers, review and verification continue, and the coordinator receives it once at its next boundary; an explicit `deny-write: <path>` in it takes effect at once
+channel. A worker turn still running 10 seconds after the runtime revoked its channel is cancelled with `session/cancel` and, without a reply within 25 seconds, terminated, so recovery never waits for that engine to finish on its own
+(see [recovery cancels only live assignments](docs/features/failures-and-cancellation/index.md#recovery-cancels-only-live-assignments)). A coordinator or worker turn that echoes its own prompt, loops on the same text, writes one message of 16,000 characters without acting, or refuses is cancelled the same way, recorded as `NATIVE_TURN_DEGENERATE` (rule and size, never the text) and retried once in a fresh session; a second one stops the task with the `native_turn_degenerate` blocker
+(see [degenerate model turns](docs/features/failures-and-cancellation/index.md#degenerate-model-turns)). A message to a working task interrupts nothing: workers, review and verification continue, and the coordinator receives it once at its next boundary; an explicit `deny-write: <path>` in it takes effect at once
 (see [steering](docs/features/steering-and-questions/index.md)). Answers continue the same waiting worker session. Exact request retries
 return receipts without replaying effects; incomplete intents remain unknown.
 Owner resolution closes unfinished work without certifying it. Versioned deltas
@@ -548,7 +562,7 @@ Workspace Git keeps the last known checkout visible while refreshing repository 
 
 In Hybrid and Automatic sprints every queue hold has one next actor. Anything the assigned agents can fix (a stale result, an unfinished check, a run that failed with every effect known) goes back to the coordinator by itself, bounded and deduplicated, and continues with fresh review and verification. Only a real owner decision pins a card above the task's message box: what you are asked to allow, a primary action after which the queue finishes by itself, and a separate **Close as is…** with confirmation. A held task whose command outcome is not yet confirmed waits for the runtime to settle it; an effect the runtime can never confirm is offered only the actions the service accepts, and its **Close as is…** records that effect as unknown, never as done. A refused card action stays on the card in plain words and is not offered again for the same hold.
 
-Ready desktop results that are not yet accepted retain an explicit Accept control in Conversation and the diff review, separate from committing or merging; an Automatic-sprint result that the queue accepted shows its automatic acceptance instead. Same-branch tasks use Finish and Commit wording in review, the sidebar and inspector as well as their action controls; completed inspector outcomes appear once. Finished worker summaries unescape prose consistently, and worker notes use the full activity column rather than the icon column.
+Ready desktop results that are not yet accepted retain an explicit Accept control in Conversation and the diff review, separate from committing or merging; an Automatic-sprint result that the queue accepted shows its automatic acceptance instead. While the runtime is still finishing a result, early check observations show a waiting state and leave Accept off. Same-branch tasks use Finish and Commit wording in review, the sidebar and inspector as well as their action controls; completed inspector outcomes appear once. Finished worker summaries unescape prose consistently, and worker notes use the full activity column rather than the icon column.
 
 Workspace's local data API exposes retained coordinator messages and tool activity
 with bounded continuation, plus confirmed model/effort labels for task and worker
@@ -580,7 +594,8 @@ local Commit, squash merge and task closure need no remote. Local-only repositor
 withdrawn probes do not count as failed worker checks. Check programs are probed in the real verification
 environment before accepting a plan, a bare name on the same search path worker commands use (project tool
 folders, then the owner's tool search path: the `PATH` read once from the owner's login shell plus folders
-added under Diagnostics, Tool search path, so nvm's `node`/`npm` and `~/.local/bin` tools resolve as in
+added under Diagnostics, Tool search path, then the existing usual per-user tool folders it lacks such as
+`~/.cargo/bin`, `~/.local/bin` and the default nvm/fnm/Volta Node, so `cargo`, `node`/`npm` resolve as in
 the owner's terminal); workers can declare checks early through the same preflight. Probe launch failures
 remain unavailable observations, not false missing-program diagnoses. Missing tools require
 project-private installation or an executable alternative, with an immediate owner question when neither
@@ -680,7 +695,7 @@ See [service-owned work](docs/cortex-workspace/local-task-execution.md#archive-a
 
 Routing marks stored references to disabled models as inactive without deleting them; its enabled-model picker excludes denied models. Routing settings use each exact model's observed effort levels, including ordered effort ladders. Unknown levels are marked; saved unsupported values remain visible and unchanged. See [configuration](docs/configuration.md#manage-settings-in-paseo).
 
-Workspace queues writers during independent review and verification of the same checkout. If an external edit changes the reviewed files, Cortex schedules fresh review within its review-cycle limit. A worker that ends its turn with a pending command can receive the final receipt in the same session. Reopened reviews include the task’s recorded writes from earlier plans and identify paths whose contents have since changed. Changes to git-ignored files (build outputs, dependencies, caches) do not make a review's change list incomplete; when the list still cannot be enumerated, the reviewer approves what it read and the result carries a "Check manually" limitation instead of a refusal. Local desktop builds reuse Cargo artifacts and npm downloads across invocations. See [desktop packaging](docs/project/packaging.md).
+Workspace queues writers during independent review and verification of the same checkout. A review requires and binds only the task's own changes: files its tools wrote and paths that changed while its commands or writing-engine turns ran. Other uncommitted files in the checkout are listed as context and never refused, re-bound or invalidated; an edit of one of the task's files, by anyone, still makes Cortex schedule fresh review within its review-cycle limit. When a command's changes cannot be recorded completely, the review requires every changed file and binds the whole checkout, as before. A worker that ends its turn with a pending command can receive the final receipt in the same session. Reopened reviews include the task’s recorded writes from earlier plans and identify paths whose contents have since changed. Changes to git-ignored files (build outputs, dependencies, caches) do not make a review's change list incomplete; when the list still cannot be enumerated, the reviewer approves what it read and the result carries a "Check manually" limitation instead of a refusal. Local desktop builds reuse Cargo artifacts and npm downloads across invocations. See [desktop packaging](docs/project/packaging.md).
 
 ## Table of contents
 

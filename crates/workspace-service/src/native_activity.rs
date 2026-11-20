@@ -332,6 +332,16 @@ fn display(
             selected(update, &mut safe, prior);
             Some(Display::Update(safe))
         }
+        // The runtime's own marker of a completed compaction (see `record_update`):
+        // a divider in the Workspace conversation. The call-style identity keeps a
+        // worker's compaction on that worker's page.
+        Some("compaction_update") if update["status"] == "completed" => update["compactionId"]
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 512)
+            .map(|id| {
+                Display::Update(json!({"sessionUpdate":"compaction_update",
+                    "toolCallId":format!("{attempt}:compaction:{id}"),"status":"completed"}))
+            }),
         _ => None,
     })
 }
@@ -379,6 +389,14 @@ fn prior_call(
         .unwrap_or(json!({}));
     Ok(json!({"title":v["title"],"kind":v["kind"]}))
 }
+/// Records one engine update in display history. A message chunk is not committed on
+/// its own: its row is a deferred writer job ([`StoreExecutor::write_deferred`]) that
+/// commits within 250 ms in one transaction with the other pending display rows, and
+/// always before any later ordinary write (a tool update, the turn's settle event, an
+/// owner message). Each chunk still runs the same statement in the same order, so seq
+/// allocation, message identities and the turn boundary are decided exactly as for a
+/// chunk committed at once. Only display text is at risk: a process killed before the
+/// commit loses at most that window's streamed chunks, never authority or lifecycle state.
 pub(crate) async fn record(
     executor: &Arc<StoreExecutor>,
     credential: &Credential,
@@ -387,33 +405,101 @@ pub(crate) async fn record(
 ) -> CoreResult<()> {
     let credential = credential.clone();
     let engine_session = engine_session.to_owned();
-    executor.write(move |db| {
-        // Final updates may arrive after result_submit revoked the channel. Bind
-        // them to the persisted exact attempt/session/current epoch, not readiness
-        // or task state. An old owner can never append into a replacement session.
-        let rows = db.prepare("SELECT c.task_id,c.attempt_id,p.role_id FROM trusted_channels c
+    // Classification needs no store: an update with no display row writes nothing.
+    match display(&params, &engine_session, "", "", &json!({}))? {
+        None => Ok(()),
+        Some(Display::Message(text, engine_id)) => {
+            executor.write_deferred(move |db| {
+                record_tx(
+                    db,
+                    &credential,
+                    &engine_session,
+                    &Value::Null,
+                    Some((text, engine_id)),
+                )
+            })?;
+            Ok(())
+        }
+        Some(Display::Update(_)) => executor
+            .write(move |db| record_tx(db, &credential, &engine_session, &params, None))?
+            .await
+            .map_err(|_| CoreError::Refused("native_host_closed"))?,
+    }
+}
+/// One display row in every display session of the bound task: `message` is a
+/// streamed message's text and engine identity; otherwise `params` is the update.
+fn record_tx(
+    db: &rusqlite::Transaction<'_>,
+    credential: &Credential,
+    engine_session: &str,
+    params: &Value,
+    message: Option<(String, Option<String>)>,
+) -> CoreResult<()> {
+    // Final updates may arrive after result_submit revoked the channel. Bind
+    // them to the persisted exact attempt/session/current epoch, not readiness
+    // or task state. An old owner can never append into a replacement session.
+    let rows = db
+        .prepare(
+            "SELECT c.task_id,c.attempt_id,p.role_id FROM trusted_channels c
                 JOIN task_owners o ON o.task_id=c.task_id AND o.epoch=c.owner_epoch
                 JOIN delegation_provisioning p ON p.channel_id=c.channel_id AND p.task_id=c.task_id
                     AND p.attempt_id=c.attempt_id AND p.owner_epoch=c.owner_epoch
-                WHERE c.channel_id=? AND p.engine_session_ref=?")?
-                .query_map((&credential.channel_id,&engine_session), |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?
-                .collect::<Result<Vec<_>,_>>()?;
-        if rows.len() != 1 { return Err(CoreError::Refused("native_activity_binding_invalid")); }
-        let (task,attempt,role) = &rows[0];
-        let prior = prior_call(db, task, attempt, &params["update"])?;
-        let Some(item) = display(&params,&engine_session,attempt,role,&prior)? else { return Ok(()); };
-        // Every chunk the engine emits is recorded in every display session (the
-        // Workspace `cortex-native` and the incoming ACP `cortex-rust-acp`), also
-        // after the coordinator's question commit: a message is never cut short.
-        let sessions = db.prepare("SELECT s.session_id FROM acp_host_sessions s
+                WHERE c.channel_id=? AND p.engine_session_ref=?",
+        )?
+        .query_map((&credential.channel_id, &engine_session), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if rows.len() != 1 {
+        return Err(CoreError::Refused("native_activity_binding_invalid"));
+    }
+    let (task, attempt, role) = &rows[0];
+    let item = match message {
+        Some((text, engine_id)) => Display::Message(text, engine_id),
+        None => {
+            let prior = prior_call(db, task, attempt, &params["update"])?;
+            let Some(item) = display(params, engine_session, attempt, role, &prior)? else {
+                return Ok(());
+            };
+            item
+        }
+    };
+    // Every chunk the engine emits is recorded in every display session (the
+    // Workspace `cortex-native` and the incoming ACP `cortex-rust-acp`), also
+    // after the coordinator's question commit: a message is never cut short.
+    let sessions = db.prepare("SELECT s.session_id FROM acp_host_sessions s
             WHERE s.task_id=? AND (s.client_info=? OR json_extract(s.client_info,'$.name')='cortex-rust-acp')")?
             .query_map((task,r#"{"name":"cortex-native"}"#),|r|r.get::<_,String>(0))?
             .collect::<Result<Vec<_>,_>>()?;
-        if sessions.len() > 2 { return Err(CoreError::Refused("native_activity_binding_ambiguous")); }
-        for session in &sessions {
-        let seq: i64 = db.query_row("SELECT coalesce(max(seq),-1)+1 FROM (
+    if sessions.len() > 2 {
+        return Err(CoreError::Refused("native_activity_binding_ambiguous"));
+    }
+    // The compaction divider is not an ACP v1 session update: incoming ACP sessions
+    // replay their stored updates to the client verbatim, so only the Workspace
+    // session keeps it.
+    let workspace_only =
+        matches!(&item, Display::Update(u) if u["sessionUpdate"] == "compaction_update");
+    for session in &sessions {
+        if workspace_only
+            && !db.query_row(
+                "SELECT client_info=? FROM acp_host_sessions WHERE session_id=?",
+                (r#"{"name":"cortex-native"}"#, session),
+                |r| r.get::<_, bool>(0),
+            )?
+        {
+            continue;
+        }
+        let seq: i64 = db.query_row(
+            "SELECT coalesce(max(seq),-1)+1 FROM (
             SELECT seq FROM host_transcript WHERE session_id=? UNION ALL
-            SELECT seq FROM host_updates WHERE session_id=?)", (session,session), |r| r.get(0))?;
+            SELECT seq FROM host_updates WHERE session_id=?)",
+            (session, session),
+            |r| r.get(0),
+        )?;
         match &item {
             Display::Message(text, engine_id) => {
                 // One streamed message is one identity: chunks that follow each
@@ -435,18 +521,241 @@ pub(crate) async fn record(
                     (session,seq,text,message_id,cortex_core::now()))?;
             }
             Display::Update(update) => {
-                db.execute("INSERT INTO host_updates VALUES (?,?,?,?)",
-                    (session,seq,update.to_string(),cortex_core::now()))?;
+                db.execute(
+                    "INSERT INTO host_updates VALUES (?,?,?,?)",
+                    (session, seq, update.to_string(), cortex_core::now()),
+                )?;
             }
         }
-        }
-        Ok(())
-    })?.await.map_err(|_| CoreError::Refused("native_host_closed"))?
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cortex_core::{
+        channels::{self, Principal},
+        lifecycle::{self, TaskMachine},
+        OpenMode, ProjectKey, Store, StoreChannel,
+    };
+    /// A coordinator channel bound to engine session `wire` and one Workspace display
+    /// session `display`, served by a real store executor.
+    struct Streaming {
+        root: std::path::PathBuf,
+        key: ProjectKey,
+        executor: Option<Arc<StoreExecutor>>,
+        credential: Credential,
+    }
+    impl Streaming {
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let root = std::env::temp_dir().join(format!(
+                "activity-stream-{}",
+                crate::native_effects::identity().unwrap()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let key = ProjectKey::new(&root, StoreChannel::Dev).unwrap();
+            let store = Store::open(key.clone(), OpenMode::Initialize).unwrap();
+            let owner = TaskMachine::new(&store)
+                .create("t", "stream", "owner")
+                .unwrap();
+            let credential = store
+                .write(|db| {
+                    db.execute("UPDATE runtime_tasks SET state='PLANNING' WHERE task_id='t'", [])?;
+                    let c = channels::issue_tx(db, "t", &owner, Principal::Coordinator)?;
+                    channels::bind_session_tx(db, &c, "wire")?;
+                    db.execute("INSERT INTO acp_host_sessions(session_id,project_root,task_id,client_info,client_capabilities,mcp_servers,created_at)
+                        VALUES ('display',?,'t','{\"name\":\"cortex-native\"}','{}','[]',?)", (root.to_str(), cortex_core::now()))?;
+                    Ok(c)
+                })
+                .unwrap();
+            drop(store);
+            let executor = Some(Arc::new(StoreExecutor::open(key.clone()).unwrap()));
+            Self {
+                root,
+                key,
+                executor,
+                credential,
+            }
+        }
+        fn executor(&self) -> &Arc<StoreExecutor> {
+            self.executor.as_ref().unwrap()
+        }
+        async fn chunk(&self, text: &str) {
+            let update = json!({"sessionId":"wire","update":{"sessionUpdate":"agent_message_chunk",
+                "content":{"type":"text","text":text}}});
+            record(self.executor(), &self.credential, "wire", update)
+                .await
+                .unwrap();
+        }
+        async fn tool(&self, call: &str) {
+            let update = json!({"sessionId":"wire","update":{"sessionUpdate":"tool_call",
+                "toolCallId":call,"title":"Read","status":"pending"}});
+            record(self.executor(), &self.credential, "wire", update)
+                .await
+                .unwrap();
+        }
+        /// Every display row, read by an ordinary writer job: deferred rows commit first.
+        async fn rows(&self) -> Vec<(i64, String, Option<String>)> {
+            self.executor()
+                .write(|db| {
+                    let rows = db
+                        .prepare(
+                            "SELECT seq,coalesce(text,update_json),message_id FROM (
+                        SELECT seq,text,NULL AS update_json,message_id FROM host_transcript WHERE session_id='display'
+                        UNION ALL SELECT seq,NULL,json_extract(update_json,'$.toolCallId'),NULL FROM host_updates WHERE session_id='display')
+                        ORDER BY seq",
+                        )?
+                        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Ok(rows)
+                })
+                .unwrap()
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    }
+    impl Drop for Streaming {
+        fn drop(&mut self) {
+            self.executor.take();
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+    /// Streamed chunks no longer commit one by one: they wait in deferred writes that
+    /// commit together, still one row per chunk with the identity a chunk committed at
+    /// once would get, and every later ordinary write (here a tool update) finds them
+    /// committed and ordered before itself.
+    #[tokio::test]
+    async fn streamed_chunks_commit_deferred_in_order_before_the_next_update() {
+        let s = Streaming::new();
+        for _ in 0..200 {
+            s.chunk("ab").await;
+        }
+        s.tool("read-1").await;
+        s.chunk("after").await;
+        let attempt: String = s
+            .executor()
+            .read(|db| {
+                Ok(db.query_row("SELECT attempt_id FROM trusted_channels", [], |r| r.get(0))?)
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+        let rows = s.rows().await;
+        assert_eq!(rows.len(), 202, "{rows:?}");
+        let first = Some(format!("{attempt}:display:0"));
+        for (seq, row) in rows[..200].iter().enumerate() {
+            assert_eq!(*row, (seq as i64, "ab".into(), first.clone()));
+        }
+        assert_eq!(rows[200], (200, format!("{attempt}:read-1"), None));
+        // A row after another update starts a new message, exactly as before.
+        assert_eq!(
+            rows[201],
+            (201, "after".into(), Some(format!("{attempt}:display:201")))
+        );
+    }
+    /// The settle event of a turn is an ordinary write: the turn's streamed text commits
+    /// before it, so the next turn's first chunk starts a new message.
+    #[tokio::test]
+    async fn a_settled_turn_ends_the_streamed_message_and_its_text_commits_first() {
+        let s = Streaming::new();
+        s.chunk("first ").await;
+        s.chunk("turn").await;
+        let channel = s.credential.channel_id.clone();
+        s.executor()
+            .write(move |db| {
+                lifecycle::event_tx(
+                    db,
+                    "t",
+                    "NATIVE_TURN_SETTLED",
+                    json!({"channel_id":channel,"stop_reason":"end_turn"}),
+                )?;
+                // Committed in this very transaction's view: the turn's text came first.
+                Ok(db.query_row(
+                    "SELECT group_concat(text,'') FROM (SELECT text FROM host_transcript WHERE session_id='display' ORDER BY seq)",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )?)
+            })
+            .unwrap()
+            .await
+            .unwrap()
+            .map(|text| assert_eq!(text, "first turn"))
+            .unwrap();
+        s.chunk("second").await;
+        let rows = s.rows().await;
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[0].2, rows[1].2, "one message within the turn");
+        assert_ne!(rows[1].2, rows[2].2, "a new turn starts a new message");
+        assert_eq!(rows[2].1, "second");
+    }
+    /// Deferred text commits on its own within the window, and on executor shutdown.
+    /// Only a process killed inside the window loses it (display text only).
+    #[tokio::test]
+    async fn deferred_text_commits_after_the_window_and_on_shutdown() {
+        let mut s = Streaming::new();
+        s.chunk("windowed").await;
+        tokio::time::sleep(cortex_core::store::executor::DEFER_WINDOW * 4).await;
+        let count = |executor: &Arc<StoreExecutor>| {
+            executor
+                .read(|db| {
+                    Ok(
+                        db.query_row("SELECT count(*) FROM host_transcript", [], |r| {
+                            r.get::<_, i64>(0)
+                        })?,
+                    )
+                })
+                .unwrap()
+        };
+        assert_eq!(count(s.executor()).await.unwrap().unwrap(), 1);
+        s.chunk("at shutdown").await;
+        let executor = s.executor.take().unwrap();
+        tokio::task::spawn_blocking(move || drop(executor))
+            .await
+            .unwrap();
+        let store = Store::open(s.key.clone(), OpenMode::Initialize).unwrap();
+        let texts: Vec<String> = store
+            .read(|db| {
+                Ok(db
+                    .prepare("SELECT text FROM host_transcript ORDER BY seq")?
+                    .query_map([], |r| r.get(0))?
+                    .collect::<Result<_, _>>()?)
+            })
+            .unwrap();
+        assert_eq!(texts, ["windowed", "at shutdown"]);
+    }
+    #[test]
+    fn only_a_completed_compaction_marker_becomes_a_divider_update() {
+        let wrap = |u| json!({"sessionId":"s","update":u});
+        let Some(Display::Update(u)) = display(
+            &wrap(json!({"sessionUpdate":"compaction_update",
+            "compactionId":"k","status":"completed","summary":[{"type":"text","text":"private"}]})),
+            "s",
+            "a",
+            "r",
+            &json!({}),
+        )
+        .unwrap() else {
+            panic!("no divider")
+        };
+        assert_eq!(
+            u,
+            json!({"sessionUpdate":"compaction_update","toolCallId":"a:compaction:k","status":"completed"})
+        );
+        for update in [
+            json!({"sessionUpdate":"compaction_update","compactionId":"k","status":"in_progress"}),
+            json!({"sessionUpdate":"compaction_update","status":"completed"}),
+            json!({"sessionUpdate":"compaction_summary_chunk","compactionId":"k","content":{"type":"text","text":"private"}}),
+        ] {
+            assert!(display(&wrap(update), "s", "a", "r", &json!({}))
+                .unwrap()
+                .is_none());
+        }
+    }
     #[test]
     fn only_public_messages_and_minimal_tool_activity_are_projected() {
         let wrap = |u| json!({"sessionId":"s","update":u});

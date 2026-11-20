@@ -172,6 +172,50 @@ async fn a_named_core_refusal_keeps_authority_and_its_code() {
         .unwrap()
         .contains("protected"));
 }
+/// Each tool definition is keyed by the sha256 of its canonical JSON (object keys
+/// sorted, no whitespace), and every catalogue entry names an existing key. A
+/// definition edited in place must be re-keyed, together with its catalogue
+/// references; otherwise the key no longer identifies the advertised contract.
+#[test]
+fn tool_definition_keys_are_the_sha256_of_their_content() {
+    use sha2::{Digest, Sha256};
+    fn canonical(v: &Value) -> String {
+        match v {
+            Value::Object(m) => {
+                let mut keys: Vec<_> = m.keys().collect();
+                keys.sort();
+                let fields: Vec<String> = keys
+                    .into_iter()
+                    .map(|k| format!("{}:{}", Value::String(k.clone()), canonical(&m[k])))
+                    .collect();
+                format!("{{{}}}", fields.join(","))
+            }
+            Value::Array(a) => format!(
+                "[{}]",
+                a.iter().map(canonical).collect::<Vec<_>>().join(",")
+            ),
+            other => other.to_string(),
+        }
+    }
+    let d: Value = serde_json::from_str(include_str!("../schema/tools.json")).unwrap();
+    let tools = d["tools"].as_object().unwrap();
+    for (key, tool) in tools {
+        let digest = format!("{:x}", Sha256::digest(canonical(tool).as_bytes()));
+        assert_eq!(
+            &digest, key,
+            "tool {} is keyed {key} but its content hashes to {digest}; re-key it and its catalogue references",
+            tool["name"]
+        );
+    }
+    for (name, ids) in d["catalogues"].as_object().unwrap() {
+        for id in ids.as_array().unwrap() {
+            assert!(
+                tools.contains_key(id.as_str().unwrap()),
+                "catalogue {name} names unknown tool key {id}"
+            );
+        }
+    }
+}
 #[test]
 fn catalogues_all_profiles_review_and_no_legacy_mutation_route() {
     let d: Value = serde_json::from_str(include_str!("../schema/tools.json")).unwrap();

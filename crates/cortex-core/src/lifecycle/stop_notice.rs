@@ -36,6 +36,7 @@ pub const KINDS: &[&str] = &[
     "coordinator_session_start_failed",
     "native_progress_limit",
     "coordinator_no_progress_limit",
+    "native_turn_degenerate",
     "project_revision_unavailable",
     "project_unobservable_",
 ];
@@ -398,7 +399,14 @@ pub fn explain_tx(db: &Transaction<'_>, task: &str, blocker: &str, ru: bool) -> 
                         .take(3)
                         .map(|c| {
                             let argv = c["argv"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")).unwrap_or_default();
-                            let code = c["exit_code"].as_i64().map(|c| c.to_string()).unwrap_or_else(|| l("no exit code", "без кода выхода"));
+                            let mut code = c["exit_code"].as_i64().map(|c| c.to_string()).unwrap_or_else(|| l("no exit code", "без кода выхода"));
+                            // The retained cause of the run (a timeout, a signal), when known.
+                            if let Some(failure) = c["failure"].as_str() {
+                                code.push_str(&format!(", {failure}"));
+                            }
+                            if let Some(signal) = c["signal"].as_i64() {
+                                code.push_str(&format!(", {} {signal}", l("signal", "сигнал")));
+                            }
                             format!("`{}` ({code})", short(&argv, 80))
                         })
                         .collect()
@@ -601,6 +609,13 @@ pub fn explain_tx(db: &Transaction<'_>, task: &str, blocker: &str, ru: bool) -> 
             l(
                 "The coordinator ended three turns in a row without a plan, a result or a question.",
                 "Координатор трижды подряд завершил ход без плана, результата или вопроса.",
+            )
+        }
+        "native_turn_degenerate" => {
+            recommended = None;
+            l(
+                "The model's turn was stopped twice in a row because its output was unusable: it repeated the runtime's own prompt text back, looped on the same text, wrote one very long message without acting, or refused. The first such turn was retried once in a fresh session. Continuing tries again on the same route; choosing another model for this role in the task's settings first is more likely to help.",
+                "Ход модели был дважды подряд остановлен, потому что её ответ был непригоден: она повторяла текст собственного запроса runtime, зацикливалась на одном и том же тексте, писала одно очень длинное сообщение без действий или отказывалась отвечать. Первый такой ход один раз повторялся в новой сессии. Продолжение повторит попытку на том же маршруте; вероятнее поможет сначала выбрать для этой роли другую модель в настройках задачи.",
             )
         }
         // The project observation that binds the baseline, review and checks to the files.
@@ -1023,13 +1038,18 @@ mod tests {
                 assert_eq!(current_write["sha256"], "bad");
                 assert_eq!(current_write["matches_current"], false);
                 assert!(files["files"][0]["last_write"].is_null());
+                // Only the task's own writes are required; manifest-only changes are context.
+                let required: Vec<_> = files["files"].as_array().unwrap().iter().map(|f| f["required"].as_bool().unwrap()).collect();
+                assert_eq!(required, [false, false, true, false, true]);
+                assert_eq!((files["required"].clone(), files["attribution_complete"].clone()), (json!(2), json!(true)));
+                assert_eq!(p["review_binding"], json!({"kind":"task_files","paths":["legacy.txt","scripts/check.sh"]}));
                 // Without a trustworthy manifest only the recorded writes are listed, and it says so.
                 let p = lifecycle::reconciliation::review_packet_tx(db, "t", "_review_2", None, None, &current_raw)?;
                 assert_eq!(p["changed_files"]["complete"], false);
                 assert_eq!(p["changed_files"]["total"], 2);
                 assert_eq!(p["changed_files"]["files"][0]["path"], "legacy.txt");
                 assert_eq!(p["changed_files"]["files"][1]["last_write"]["matches_current"],false);
-                assert!(p["changed_files"]["note"].as_str().unwrap().contains("files changed by commands are not listed"));
+                assert!(p["changed_files"]["note"].as_str().unwrap().contains("the files its own commands changed are listed"));
                 Ok(())
             })
             .unwrap();

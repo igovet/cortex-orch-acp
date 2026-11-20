@@ -25,7 +25,8 @@ describe("held and stopped tasks", () => {
   });
   it("a recovery code reads in words, never as the raw code", () => {
     expect(stopReason("native_session_outcome_unknown")).toBe("The app stopped while this task ran, so how its engine session ended is not known");
-    expect(stopReason("completion_worker_check_unverified")).toBe("The work could not be confirmed as complete");
+    expect(stopReason("completion_worker_check_unverified")).toBe("A worker's check could not be verified, so the work could not be confirmed as complete");
+    expect(stopReason("completion_some_new_code")).toBe("The work could not be confirmed as complete");
     expect(stopReason("some_new_code")).toBe(GENERIC_STATUS);
     expect(stopReason("Задача остановлена: что дальше?")).toBe("Задача остановлена: что дальше?");
     const d = decisionOf(view(state({ status: "needs_you", issue: "native_session_outcome_unknown", process: "live", observedPhase: "recovery", executionId: "e" })));

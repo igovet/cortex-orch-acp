@@ -31,6 +31,8 @@ export function createPanels() {
   const [lastMachine, setLastMachine] = persisted<string>("cw.ws.machine", "", v => typeof v === "string");
   const [notifications, setNotifications] = persisted<boolean>("cw.ws.notifications", true, isBool);
   const [autosave, setAutosave] = persisted<boolean>("cw.ws.autosave", false, isBool);
+  // Whether timelines also show the runtime's own steps (command status, skills, report drafts); off keeps them simple.
+  const [showAllTools, setShowAllTools] = persisted<boolean>("cw.ws.allTools", false, isBool);
   const [voice, setVoice] = persisted<VoicePrefs>("cw.ws.voice", { provider: "none", language: "same", microphone: "default" }, isRecord);
   const [advanced, setAdvanced] = persisted<Record<string, boolean>>("cw.ws.advanced", {}, isRecord);
   const [planView, setPlanView] = persisted<PlanView>("cw.plan.view", "list", v => v === "list" || v === "graph");
@@ -52,7 +54,7 @@ export function createPanels() {
   onCleanup(() => query?.removeEventListener?.("change", onWidth));
   return {
     sidebarHidden, sidebarWidth, inspectorHidden, overlayOpen, terminalOpen, expanded, pins, sort, setSort, lastMachine, setLastMachine, wide,
-    notifications, setNotifications, autosave, setAutosave, voice, setVoice, advanced,
+    notifications, setNotifications, autosave, setAutosave, showAllTools, setShowAllTools, voice, setVoice, advanced,
     planView, setPlanView, convHidden, setConvHidden, minimap, setMinimap, links, setLinks, graph,
     setAdvanced(id: string, open: boolean) { setAdvanced({ ...untrack(advanced), [id]: open }); },
     /** The sidebar as drawn: the owner's choice, unless a screen holds it away for now. */

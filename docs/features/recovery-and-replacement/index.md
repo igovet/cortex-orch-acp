@@ -229,7 +229,9 @@ included, so a closed task can be deleted):
   `outside_command` receipt ends settled. A brokered launch that fails, or
   whose call ends (a refused or ended reviewer, a revoked channel, a stopped
   session), before its supervisor receives the final launch grant is settled
-  at once as `command_not_started` (`launched: false`): the payload is released
+  at once as `command_not_started` (`launched: false`, with a fixed-code `cause`
+  such as `sandbox_unavailable:setup_timeout` or `store_busy`, see
+  [permissions and containment](../permissions-and-containment/index.md)): the payload is released
   only after the supervisor's handle commits. A receipt left unsettled any
   other way is settled by startup recovery and by the sprint scheduler's live
   passes (same 15-second to 10-minute backoff as the exit re-check), but only
@@ -249,6 +251,22 @@ included, so a closed task can be deleted):
   writing supervisor without a recorded process group, keeps the receipt
   unknown; so does a Guarded or Development payload that outlives its lost
   supervisor (it has no PID namespace), until its process group is empty.
+- **Command starts of earlier hosts.** Earlier hosts recorded a command as a
+  start event (`COMMAND_PROCESS_STARTED`) and an exit event; a service that
+  died between them left the start without its exit, and recovery holds the
+  task (`legacy_effect_outcome_unknown`). Recovery records the missing exit
+  once (`COMMAND_PROCESS_EXITED` with `recovered: true` and its `evidence`)
+  when the command's own receipt (same task, channel and call reference) is
+  complete (`receipt_complete`, with that receipt's exit code) or settled
+  (`receipt_settled`), or when the runtime recorded an event in another boot
+  after the start (`previous_boot`: outcome `outcome_not_recorded`, no exit
+  code). A start without a call reference or such evidence stays unknown. A
+  task held only for such starts is then held for what its facts still show
+  (for example an outside write with an unknown outcome,
+  `native_outside_outcome_unknown`), or otherwise as an interrupted turn
+  (`native_session_outcome_unknown`), with one `NATIVE_RECOVERY_REQUIRED`
+  event naming `settled_barrier`. It is never driven on by itself, and later
+  restarts record nothing new.
 
 A dead service never removes its sessions' broker directories
 (`cortex-mcp-` and 24 hex digits, in the project's store directory). Recovery

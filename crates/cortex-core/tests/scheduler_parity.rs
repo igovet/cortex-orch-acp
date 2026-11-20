@@ -583,6 +583,91 @@ fn retry_needs_exact_absence_and_refuses_ambiguous_mutation_or_published_result(
             VALUES ('t','worker_result','xa','r','{}','runtime','now')",[])?;Ok(())}).unwrap();
     assert_eq!(retry(&s).unwrap_err().code(), "lost_worker_result_changed");
 }
+/// Production stores held lost workers for the owner (`lost_worker_action_outcome_unknown`)
+/// although every receipt of the attempt was settled with a known end: commands the
+/// owner stopped (`owner_stopped`, signal 9) and commands that provably never launched
+/// (`not_started`, `no_supervisor_bound`). Those no longer block a retry. A receipt
+/// settled only because its process is gone, with no observed end, still blocks.
+#[test]
+fn lost_worker_retry_ignores_settled_receipts_with_a_known_end_only() {
+    let known = [
+        json!({"complete":false,"settled":true,"exit_code":null,"signal":9,"failure":"owner_stopped"}),
+        json!({"complete":false,"settled":true,"exit_code":null,"signal":9,"failure":"output_incomplete"}),
+        json!({"complete":false,"settled":true,"exit_code":1,"failure":null}),
+        json!({"complete":false,"settled":true,"exit_code":null,"failure":"timeout"}),
+        json!({"complete":false,"settled":true,"exit_code":null,"failure":"command_not_started",
+            "launched":false,"outcome":"not_started","settlement_evidence":"no_supervisor_bound"}),
+        json!({"complete":false,"settled":true,"exit_code":2,"failure":"outcome_not_recorded",
+            "outcome":"unknown","settlement_evidence":"supervisor_finished"}),
+        json!({"complete":false,"settled":true,"exit_code":null,"failure":"outcome_not_recorded",
+            "outcome":"unknown","settlement_evidence":"supervisor_gone_pid_namespace"}),
+    ];
+    let unknown = [
+        json!({"complete":false}),
+        json!({"complete":false,"settled":false}),
+        json!({"complete":false,"settled":true,"exit_code":null,"failure":"outcome_not_recorded",
+            "outcome":"unknown","settlement_evidence":"supervisor_and_process_group_gone"}),
+        json!({"complete":false,"settled":true,"exit_code":null,"failure":"outcome_not_recorded",
+            "outcome":"unknown","settlement_evidence":"previous_boot"}),
+        json!({"complete":false,"settled":true,"failure":"command_outcome_unknown"}),
+        json!({"complete":false,"settled":true,"outcome_unknown":true,"settled_by":"owner_retry"}),
+        json!({"complete":false,"settled":true,"outcome":"not_started"}),
+    ];
+    for (receipt, retried) in known
+        .iter()
+        .map(|r| (r, true))
+        .chain(unknown.iter().map(|r| (r, false)))
+    {
+        assert_eq!(action_outcome_known(receipt), retried, "{receipt}");
+        let (_p, s, _) = setup();
+        s.write(|db| {
+            node(db, "t", "n", "worker-backend-dev", &["src"], &[])?;
+            bind(db, "t", "n", "a", "xa", "c")?;
+            db.execute(
+                "INSERT INTO runtime_requests VALUES ('t','owner-stop','c','command_run','digest','{\"complete\":true}')",
+                [],
+            )?;
+            db.execute(
+                "INSERT INTO runtime_requests VALUES ('t','cmd','c','command_run','digest',?)",
+                [receipt.to_string()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let outcome = s.write(|db| {
+            retry_lost_tx(
+                db,
+                "t",
+                &RetryObservation {
+                    assignment: "a",
+                    attempt: Some("xa"),
+                    process: ProcessObservation::ConfirmedExited,
+                    now: 1.0,
+                    window: RetryWindow::default(),
+                },
+            )
+        });
+        if retried {
+            outcome.unwrap_or_else(|e| panic!("{receipt}: {}", e.code()));
+            let status: String = s
+                .read(|db| {
+                    Ok(db.query_row(
+                        "SELECT status FROM runtime_nodes WHERE node_id='n'",
+                        [],
+                        |r| r.get(0),
+                    )?)
+                })
+                .unwrap();
+            assert_eq!(status, "pending", "{receipt}");
+        } else {
+            assert_eq!(
+                outcome.unwrap_err().code(),
+                "lost_worker_action_outcome_unknown",
+                "{receipt}"
+            );
+        }
+    }
+}
 // Mirrors tests/test_runtime_task_machine.py::test_scope_overlap_never_treats_a_wildcard_prefix_as_a_directory.
 #[test]
 fn conservative_wildcards_do_not_justify_parallel_writers() {

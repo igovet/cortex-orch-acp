@@ -77,6 +77,7 @@ export const STATUS_TEXT: Record<string, string> = {
   continuation_required: "The task has to continue before it can finish",
   answer_continuation_unconfirmed: "Whether your answer let the task continue could not be confirmed",
   external_blocker: "Something outside the task is blocking it",
+  owner_blocker: "Another automatic attempt would not change this",
   settlement_blocked: "The task cannot be settled yet",
   queue_blocked: "The queue cannot continue yet",
   start_refused: "The task could not be started",
@@ -104,6 +105,18 @@ export const STATUS_TEXT: Record<string, string> = {
   engine_launch_retrying: "Starting the engine again",
   connection_unavailable: "The connection is not available",
   lost_worker_termination_unconfirmed: "A worker process was lost and its end could not be confirmed",
+  lost_worker_action_outcome_unknown: "Whether an action of a lost worker finished is not known",
+  native_answer_delivery_unconfirmed: "Whether your answer reached the task could not be confirmed",
+  native_guidance_delivery_unknown: "Whether your message reached the worker is not known",
+  verification_failed: "The final verification failed",
+  verification_review_revision_changed: "The project changed after the review, so the result has to be reviewed and verified again",
+  project_revision_unavailable: "The current state of the project could not be read",
+  unsafe_storage: "The task's saved records are not stored safely, so they are not used",
+  completion_unresolved_worker_check: "A worker's failed check was never resolved, so the work could not be confirmed as complete",
+  completion_dropped_failed_check: "A failed check was left out of the final result, so the work could not be confirmed as complete",
+  completion_worker_check_unverified: "A worker's check could not be verified, so the work could not be confirmed as complete",
+  coordinator_prompt_failed: "The coordinator's engine failed while it was working",
+  cancelled_worker_stopping: "Waiting for a cancelled worker to stop. The coordinator cancelled it to change the plan",
   check_preflight_unavailable: "A check could not be prepared",
   check_blocker_required: "A check marked not run gave no reason",
   not_run: "Not run",
@@ -140,21 +153,45 @@ export function scrubCodes(text: string): string {
   return text.replace(EMBEDDED_CODE, word => inSentence(word));
 }
 
+/** `code:detail`, such as `coordinator_prompt_failed:RuntimeError` or `cancelled_worker_stopping:qa-engineer`: a code with a
+ *  machine detail (an error class, the roles it names), never with spaces. */
+const DETAILED = /^([A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+):(\S+)$/;
+const names = (list: string[]) => list.length < 2 ? list.join("") : `${list.slice(0, -1).join(", ")} and ${list.at(-1)}`;
+/** A detailed code in words: the roles a replan waits for are named; any other detail (an error class) is the code's own
+ *  sentence, which never shows the detail. Null when it is not a detailed code the table knows. */
+function detailed(text: string): string | null {
+  const match = DETAILED.exec(text);
+  if (!match) return null;
+  const code = match[1].toLowerCase();
+  if (code === "cancelled_worker_stopping") {
+    const roles = match[2].split(",").map(r => r.trim()).filter(Boolean);
+    return roles.length ? `Waiting for ${names(roles)} to stop. The coordinator cancelled ${roles.length === 1 ? "it" : "them"} to change the plan` : STATUS_TEXT[code];
+  }
+  return Object.hasOwn(STATUS_TEXT, code) ? STATUS_TEXT[code] : null;
+}
+
 /** A recorded reason for a person. A known code is its sentence; an unknown bare code is `GENERIC_STATUS` (or `fallback`
  *  when one is given); prose has any embedded code spelled out. The result never contains an underscore token. */
 export function plainReason(value: string | null | undefined, fallback = ""): string {
   const text = (value ?? "").trim();
   if (!text) return fallback;
   if (Object.hasOwn(STATUS_TEXT, text)) return STATUS_TEXT[text];
-  if (BARE_CODE.test(text) || /^[a-z]+:[a-z0-9_]+$/.test(text)) return fallback || GENERIC_STATUS;
+  const coded = detailed(text);
+  if (coded) return coded;
+  if (BARE_CODE.test(text) || /^[a-z]+:[a-z0-9_]+$/.test(text) || DETAILED.test(text)) return fallback || GENERIC_STATUS;
   return scrubCodes(text);
 }
+
+/** The same text for a place inside the task, where "Open the task for details" points nowhere. */
+export const inTask = (text: string) => text.replace(/\.?\s*Open the task for details\.?$/, "");
 
 /** A wait or stop reason: an empty one is a lost turn, otherwise as `plainReason`. */
 export function plainStop(reason: string | null | undefined): string {
   const code = (reason ?? "").trim();
   if (!code) return STATUS_TEXT.turn_interrupted;
   if (Object.hasOwn(STATUS_TEXT, code)) return STATUS_TEXT[code];
+  const coded = detailed(code);
+  if (coded) return coded;
   if (code.startsWith("completion_")) return "The work could not be confirmed as complete";
   if (code.startsWith("lost_worker_")) return "A worker process was lost";
   return plainReason(code);

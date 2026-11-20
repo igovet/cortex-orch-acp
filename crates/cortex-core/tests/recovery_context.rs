@@ -75,6 +75,64 @@ fn capsule_rebuild_preserves_constraints_answers_and_exact_fences() {
     assert!(s.write(|db| delivery_tx(db, &next)).is_err());
 }
 #[test]
+fn a_confirmed_capsule_is_not_repeated_until_the_next_context_generation() {
+    let p = Project::new();
+    let s = p.open();
+    let o = TaskMachine::new(&s).create("t", "goal δ", "owner").unwrap();
+    let c = s
+        .write(|db| {
+            db.execute(
+                "UPDATE runtime_tasks SET state='PLANNING' WHERE task_id='t'",
+                [],
+            )?;
+            let c = channels::issue_tx(db, "t", &o, Principal::Coordinator)?;
+            channels::bind_session_tx(db, &c, "wire")?;
+            generation_tx(db, &c, "session_open", None)?;
+            Ok(c)
+        })
+        .unwrap();
+    let confirm = |id: &str| {
+        s.write(|db| {
+            db.execute(
+                "UPDATE capsule_deliveries SET state='delivery_confirmed' WHERE id=?",
+                [id],
+            )?;
+            Ok(())
+        })
+        .unwrap()
+    };
+    // Built or transmitted but never confirmed: the full capsule is sent again.
+    let (first, body) = s.write(|db| delivery_tx(db, &c)).unwrap();
+    assert!(body.contains("goal δ"));
+    let (again, body) = s.write(|db| delivery_tx(db, &c)).unwrap();
+    assert_eq!(first, again);
+    assert!(body.contains("goal δ"));
+    // Confirmed in this generation: only a short reference, naming the read tool.
+    confirm(&first);
+    let (reference, body) = s.write(|db| delivery_tx(db, &c)).unwrap();
+    assert_eq!(reference, first);
+    assert!(!body.contains("goal δ"));
+    assert!(!body.contains('{'));
+    assert!(body.contains("read_capsule"));
+    assert!(body.contains("PLANNING"));
+    assert!(body.contains("unchanged since then"));
+    s.write(|db| {
+        lifecycle::event_tx(db, "t", "USER_STEERING", json!({"text":"constraint ε"}))?;
+        Ok(())
+    })
+    .unwrap();
+    let (_, body) = s.write(|db| delivery_tx(db, &c)).unwrap();
+    assert!(!body.contains("constraint ε"));
+    assert!(body.contains("changed since then"));
+    // A compaction starts a new generation: the full, current capsule is sent once more.
+    s.write(|db| generation_tx(db, &c, "observed_compaction", Some("compact-δ")))
+        .unwrap();
+    let (fresh, body) = s.write(|db| delivery_tx(db, &c)).unwrap();
+    assert_ne!(fresh, first);
+    assert!(body.contains("goal δ"));
+    assert!(body.contains("constraint ε"));
+}
+#[test]
 fn compaction_burst_is_bounded_and_old_events_age_out() {
     let p = Project::new();
     let s = p.open();
@@ -464,4 +522,75 @@ fn brief_lists_predecessor_reports_constraints_and_acceptance() {
         "a review reads its review_packet"
     );
     assert_eq!(review["report"]["sections"][0]["heading"], "## Verdict");
+}
+#[test]
+fn per_call_chatter_never_fills_retained_decisions_and_coordinators_get_no_capacity() {
+    let p = Project::new();
+    let s = p.open();
+    TaskMachine::new(&s)
+        .create("t", "Chatter goal", "owner")
+        .unwrap();
+    seed_nodes(&s, 1, "objective", 1, "result");
+    s.write(|db| {
+        lifecycle::event_tx(
+            db,
+            "t",
+            "VERIFICATION_FAILED",
+            json!({"command":"cargo test"}),
+        )?;
+        // The shapes of a busy worker turn: every channel tool call is permitted, pages
+        // are read and external tools run. None of them is a recovery decision.
+        for n in 0..300 {
+            lifecycle::event_tx(
+                db,
+                "t",
+                "NATIVE_PERMISSION_REQUESTED",
+                json!({"request":n,"tool":{"title":"cortex project_read"}}),
+            )?;
+            lifecycle::event_tx(
+                db,
+                "t",
+                "NATIVE_PERMISSION_DECIDED",
+                json!({"request":n,"decision":{"allowed":true,"decider":"mode:auto"}}),
+            )?;
+            lifecycle::event_tx(
+                db,
+                "t",
+                "NATIVE_PERMISSION_AUTO_ALLOWED",
+                json!({"request":n,"decision":{"allowed":true,"decider":"mode:auto"}}),
+            )?;
+            lifecycle::event_tx(db, "t", "REPORT_PAGE_READ", json!({"report":"r0","page":n}))?;
+            lifecycle::event_tx(db, "t", "EXTERNAL_TOOL_AUTHORIZED", json!({"call":n}))?;
+            lifecycle::event_tx(db, "t", "EXTERNAL_TOOL_RESULT", json!({"call":n}))?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let v = s.read(|db| snapshot(db, "t")).unwrap();
+    let decisions = v["retained_decisions"].as_array().unwrap();
+    assert!(decisions.iter().any(|d| d["type"] == "VERIFICATION_FAILED"));
+    for chatter in [
+        "NATIVE_PERMISSION_REQUESTED",
+        "NATIVE_PERMISSION_DECIDED",
+        "NATIVE_PERMISSION_AUTO_ALLOWED",
+        "REPORT_PAGE_READ",
+        "EXTERNAL_TOOL_AUTHORIZED",
+        "EXTERNAL_TOOL_RESULT",
+    ] {
+        assert!(decisions.iter().all(|d| d["type"] != chatter), "{chatter}");
+    }
+    assert!(v["clipping"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|n| n["section"] != "retained_decisions"));
+    assert!(
+        v.get("capacity").is_none(),
+        "a coordinator capsule carries no capacity"
+    );
+    let own = s.read(|db| snapshot_for(db, "t", Some("a0"))).unwrap();
+    assert!(
+        own["capacity"].is_array(),
+        "a worker capsule keeps its capacity"
+    );
 }

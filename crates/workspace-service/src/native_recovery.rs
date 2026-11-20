@@ -861,11 +861,112 @@ fn settle_previous_boot_tx(
     Ok(())
 }
 
+/// The hold recovery records for a command an earlier host started
+/// (`COMMAND_PROCESS_STARTED`) with no recorded exit.
+const LEGACY_EFFECT: &str = "legacy_effect_outcome_unknown";
+
+/// Earlier hosts recorded a command's start and exit as two events; a service that
+/// died between them left the start without its exit, and recovery held the task
+/// for it on every restart, forever. Such a start is settled, and its missing exit
+/// recorded once (`COMMAND_PROCESS_EXITED` with `recovered: true` and its
+/// `evidence`), when real evidence shows the process can no longer run:
+/// - its own receipt (same task, channel and call reference) is complete
+///   (`receipt_complete`, with the receipt's exit code) or settled
+///   (`receipt_settled`; its outcome stays what the receipt says, never a success);
+/// - or the runtime recorded an event in another boot after the start
+///   (`previous_boot`): a process of an earlier boot cannot run in this one. Its
+///   outcome is not known (`outcome_not_recorded`, no exit code).
+///
+/// A start without a call reference, or with none of this evidence, stays unknown.
+fn settle_legacy_starts_tx(
+    db: &rusqlite::Transaction<'_>,
+    task: &str,
+    boot: Option<&str>,
+) -> CoreResult<usize> {
+    use rusqlite::OptionalExtension;
+    let starts = db
+        .prepare(
+            "SELECT i.id,i.actor,json_extract(i.payload_json,'$.tool_call_ref') FROM runtime_events i
+             WHERE i.task_id=?1 AND i.type='COMMAND_PROCESS_STARTED'
+             AND json_type(i.payload_json,'$.tool_call_ref')='text'
+             AND NOT EXISTS(SELECT 1 FROM runtime_events f WHERE f.task_id=i.task_id AND f.id>i.id
+                AND f.type='COMMAND_PROCESS_EXITED'
+                AND json_extract(f.payload_json,'$.tool_call_ref')=json_extract(i.payload_json,'$.tool_call_ref'))
+             ORDER BY i.id",
+        )?
+        .query_map([task], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut settled = 0;
+    for (start, actor, reference) in starts {
+        let receipt: Option<String> = db
+            .query_row(
+                "SELECT result_json FROM runtime_requests WHERE task_id=? AND actor=?
+                 AND operation IN ('command_run','outside_command') AND json_valid(result_json)
+                 AND ?3 IN (json_extract(result_json,'$.tool_call_ref'),json_extract(result_json,'$.receipt.tool_call_ref'))
+                 AND (json_extract(result_json,'$.complete') IS 1 OR json_extract(result_json,'$.status') IS 'complete'
+                    OR json_extract(result_json,'$.settled') IS 1)
+                 ORDER BY rowid DESC LIMIT 1",
+                (task, &actor, &reference),
+                |r| r.get(0),
+            )
+            .optional()?;
+        let exit = if let Some(raw) = receipt {
+            let receipt: Value = serde_json::from_str(&raw)?;
+            let field = |name: &str| {
+                Some(&receipt[name])
+                    .filter(|v| !v.is_null())
+                    .or_else(|| Some(&receipt["receipt"][name]).filter(|v| !v.is_null()))
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            };
+            let complete = receipt["complete"] == true || receipt["status"] == "complete";
+            let exit_code = field("exit_code");
+            let failure = match field("failure") {
+                Value::Null if !complete || !exit_code.is_i64() => json!("outcome_not_recorded"),
+                failure => failure,
+            };
+            json!({"exit_code":exit_code,"failure":failure,
+                "evidence":if complete {"receipt_complete"} else {"receipt_settled"}})
+        } else {
+            let earlier_boot = match boot {
+                Some(boot) => db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_events b WHERE b.id>?1 AND (
+                        (b.type='NATIVE_PROCESS_UNCONFIRMED'
+                            AND coalesce(json_extract(b.payload_json,'$.boot_id'),'') NOT IN ('',?2))
+                        OR (b.type='NATIVE_COMMAND_PROCESS'
+                            AND coalesce(json_extract(b.payload_json,'$.process_identity.boot_id'),'') NOT IN ('',?2))))",
+                    (start, boot),
+                    |r| r.get::<_, bool>(0),
+                )?,
+                None => false,
+            };
+            if !earlier_boot {
+                continue;
+            }
+            json!({"exit_code":null,"failure":"outcome_not_recorded","evidence":"previous_boot"})
+        };
+        let mut payload = exit;
+        payload["tool_call_ref"] = json!(reference);
+        payload["recovered"] = json!(true);
+        payload["start_event"] = json!(start);
+        lifecycle::event_tx(db, task, "COMMAND_PROCESS_EXITED", payload)?;
+        settled += 1;
+    }
+    Ok(settled)
+}
+
 /// Recovers one unfinished task from its durable checkpoints. Returns the task to
 /// drive when nothing about it is unknown. A held task is recorded once: a restart
 /// that finds it already held for the same reason adds no new event. `interrupted`:
 /// this recovery settled the task's attempts because the service that ran them died
 /// ([`settle_without_engine_tx`]); the task is held for the owner, never driven on.
+#[allow(clippy::too_many_arguments)]
 fn recover_task_tx(
     db: &rusqlite::Transaction<'_>,
     task: &str,
@@ -874,6 +975,7 @@ fn recover_task_tx(
     epoch: i64,
     legacy: bool,
     interrupted: bool,
+    boot: Option<&str>,
 ) -> CoreResult<Option<(String, OwnerEpoch, TaskState)>> {
     let state: TaskState = state.parse().map_err(CoreError::Refused)?;
     let owner = if legacy {
@@ -913,6 +1015,7 @@ fn recover_task_tx(
         (&task, &task),
         |r| r.get(0),
     )?;
+    settle_legacy_starts_tx(db, task, boot)?;
     let legacy_effect_unknown: bool = db.query_row("SELECT EXISTS(
             SELECT 1 FROM runtime_events i WHERE i.task_id=?
             AND ((i.type='CHECK_EXECUTION_STARTED' AND NOT EXISTS(
@@ -1013,17 +1116,30 @@ fn recover_task_tx(
     let outside_unknown:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=?
             AND operation IN ('outside_command','outside_write','command_run','project_write','project_edit','project_mkdir','project_delete','project_skill_link','draft_write','external_call') AND json_extract(result_json,'$.complete') IS NOT 1 AND json_extract(result_json,'$.status') IS NOT 'complete' AND json_extract(result_json,'$.settled') IS NOT 1)",
             [&task],|r|r.get(0))?;
+    let held: Option<String> = db.query_row(
+        "SELECT blocker FROM runtime_tasks WHERE task_id=?",
+        [task],
+        |r| r.get(0),
+    )?;
+    // An earlier restart held the task only for a legacy command start that the
+    // evidence now settles ([`settle_legacy_starts_tx`]). That barrier no longer
+    // stands: the task is held for what its facts still show, and otherwise as the
+    // interrupted turn it is (the owner's message, Retry, Resume and Close work).
+    let legacy_settled = held.as_deref() == Some(LEGACY_EFFECT) && !legacy_effect_unknown;
     let reason = if delivery_unknown {
         Some("native_answer_delivery_outcome_unknown")
     } else if legacy_effect_unknown {
-        Some("legacy_effect_outcome_unknown")
+        Some(LEGACY_EFFECT)
     } else if outside_unknown {
         Some("native_outside_outcome_unknown")
     } else if verification_unknown {
         Some("native_verification_outcome_unknown")
     } else if control_unknown {
         Some("native_control_outcome_unknown")
-    } else if unknown || (interrupted && !lifecycle::automatic::enabled(db, task)?) {
+    } else if unknown
+        || legacy_settled
+        || (interrupted && !lifecycle::automatic::enabled(db, task)?)
+    {
         Some("native_session_outcome_unknown")
     } else {
         None
@@ -1034,13 +1150,8 @@ fn recover_task_tx(
         }
         // Already held for exactly this (the effective) reason in the state it
         // would be held in: an earlier restart recorded it; record nothing again.
-        let held: Option<String> = db.query_row(
-            "SELECT blocker FROM runtime_tasks WHERE task_id=?",
-            [task],
-            |r| r.get(0),
-        )?;
         let effective = match held.as_deref() {
-            Some(existing) if existing.ends_with("outcome_unknown") => existing,
+            Some(existing) if existing.ends_with("outcome_unknown") && !legacy_settled => existing,
             _ => reason,
         };
         let target = if matches!(state, TaskState::Paused | TaskState::WaitingUser) {
@@ -1049,13 +1160,15 @@ fn recover_task_tx(
             TaskState::Recovering
         };
         if !(state == target && held.as_deref() == Some(effective)) {
-            lifecycle::event_tx(
-                db,
-                &task,
-                "NATIVE_RECOVERY_REQUIRED",
-                json!({"reason":reason,"previous":state,"replayed":false}),
-            )?;
-            domain::native_recovery_required_tx(db, &task, reason)?;
+            let mut required = json!({"reason":reason,"previous":state,"replayed":false});
+            if legacy_settled {
+                required["settled_barrier"] = json!(LEGACY_EFFECT);
+                lifecycle::event_tx(db, &task, "NATIVE_RECOVERY_REQUIRED", required)?;
+                domain::native_barrier_settled_tx(db, &task, LEGACY_EFFECT, reason)?;
+            } else {
+                lifecycle::event_tx(db, &task, "NATIVE_RECOVERY_REQUIRED", required)?;
+                domain::native_recovery_required_tx(db, &task, reason)?;
+            }
         }
     } else if interrupted
         && !matches!(state, TaskState::Paused | TaskState::WaitingUser)
@@ -1245,6 +1358,11 @@ impl Runtime {
             .host
             .executor
             .write(move |db| {
+                // The boot this recovery runs in: evidence that a process of another one has ended.
+                let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                    .map(|b| b.trim().to_owned())
+                    .ok()
+                    .filter(|b| !b.is_empty());
                 let rows = db
                     .prepare(
                         "SELECT t.task_id,t.state,o.owner_ref,o.epoch,
@@ -1271,7 +1389,16 @@ impl Runtime {
                     // One task's recovery never fails the project: its writes roll back alone.
                     let held = interrupted.contains(&task);
                     match isolated(db, || {
-                        recover_task_tx(db, &task, &state, owner, epoch, legacy, held)
+                        recover_task_tx(
+                            db,
+                            &task,
+                            &state,
+                            owner,
+                            epoch,
+                            legacy,
+                            held,
+                            boot.as_deref(),
+                        )
                     }) {
                         Ok(Some(driven)) => ready.push(driven),
                         Ok(None) => {}

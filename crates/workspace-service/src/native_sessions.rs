@@ -898,6 +898,7 @@ impl NativeHost {
             engine_kind,
             policy,
             delivered_attachments: std::sync::Mutex::new(std::collections::HashSet::new()),
+            refusal_is_degenerate: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -905,6 +906,7 @@ pub enum SessionRole {
     Coordinator,
     Worker { assignment: String },
 }
+#[derive(Clone)]
 pub struct SessionRoute {
     pub launch: LaunchSpec,
     pub relay: PathBuf,
@@ -921,6 +923,23 @@ pub struct Turn {
     pub updates: usize,
     pub compacted: bool,
 }
+/// An open writing-worker turn: its identity, its start event and the checkout's
+/// dirty paths before the prompt (`SessionDriver::open_writer_turn`).
+struct WriterTurn {
+    turn: String,
+    since: i64,
+    before: crate::native_change_set::Snapshot,
+}
+/// How often an active worker prompt checks whether its authority was revoked.
+const REVOCATION_POLL: Duration = Duration::from_secs(1);
+/// How long a revoked worker turn may keep running to end by itself (its closing
+/// reply after its own accepted replan or escalation) before it is cancelled.
+const REVOKED_FINISH_GRACE: Duration = Duration::from_secs(10);
+/// How long a revoked worker's engine has to answer `session/cancel` with its prompt
+/// reply before the turn ends as outcome-unknown and the session is terminated. ACP
+/// agents reply once they have aborted in-flight tool calls, normally within seconds;
+/// the margin covers a slow abort while staying far below a model's own run time.
+const REVOKED_CANCEL_GRACE: Duration = Duration::from_secs(25);
 pub(crate) enum SessionWait {
     Open(Option<Duration>),
     Ready,
@@ -941,6 +960,9 @@ pub struct SessionDriver {
     policy: Arc<CorePolicy>,
     /// Retained attachment bodies already delivered to this engine session.
     delivered_attachments: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Whether an ACP `refusal` stop ends a turn as degenerate (set for runtime-driven
+    /// turns; see [`SessionDriver::treat_refusal_as_degenerate`]).
+    refusal_is_degenerate: std::sync::atomic::AtomicBool,
 }
 impl SessionDriver {
     fn root_for_input(&self) -> PathBuf {
@@ -970,12 +992,14 @@ impl SessionDriver {
         if self.engine_kind == cortex_engine::environment::EngineKind::OpenCode {
             prompt = format!("{}\n\n{prompt}", self.instructions);
         }
-        let task = self
+        let identity = self
             .policy
             .check(true)
             .await
-            .map_err(engine_error_to_core)?
-            .task;
+            .map_err(engine_error_to_core)?;
+        let worker = identity.role == "worker";
+        let writer = worker && !crate::native_engine_policy::read_only(&identity);
+        let task = identity.task;
         let root = self.root_for_input();
         let stored = receive(self.executor.read(move|db|{
             use std::io::Read;
@@ -1023,22 +1047,82 @@ impl SessionDriver {
             cortex_core::recovery_context::record_delivery_tx(db,&c,&transmitted,&bundle,&capsule,&brief,&catalogue)?;
             Ok(())
         })?).await?;
+        // A writing worker's engine may change files without a receipt: its turn is
+        // bracketed by dirty-path listings (`native_change_set`).
+        let window = if writer {
+            Some(self.open_writer_turn().await?)
+        } else {
+            None
+        };
         let pending = self.engine.prompt_content(&self.session, blocks);
         tokio::pin!(pending);
         let mut updates = 0;
         let mut compacted = false;
+        // A worker turn whose authority the runtime has revoked can do nothing more,
+        // yet the engine may keep generating for minutes while the attempt's capacity
+        // stays reserved and recovery waits for it. Once the revocation is observed on
+        // an active prompt, ask the engine to cancel; a prompt that does not reply
+        // within the grace ends here with its outcome unknown, and the caller's
+        // shutdown terminates and settles the session process.
+        let revocation = tokio::time::sleep(REVOCATION_POLL);
+        tokio::pin!(revocation);
+        let mut cancel_sent = false;
+        let mut revoked_since: Option<tokio::time::Instant> = None;
+        // The degenerate-turn watchdog (see `degenerate`) reads every agent message of
+        // this turn as it streams. A trip records which rule fired, cancels the turn
+        // through the same bounded cancel-and-grace path as a revoked worker, and keeps
+        // the rest of the degenerate text out of the conversation.
+        let mut watch = degenerate::Watch::default();
+        let mut tripped = false;
         let result = loop {
             tokio::select! {
                 result=&mut pending=>break result,
                 event=self.engine.next_event()=>{
                     match event {
                         Some(Event::Update(params))=>{
-                            compacted |= self.record_update(params).await?;
                             updates+=1;
+                            if !tripped && params["sessionId"] == self.session.id() {
+                                if let Some(trip) = watch.observe(&params["update"]) {
+                                    tripped = true;
+                                    self.record_degenerate(&trip, worker).await?;
+                                    if self.prompt_active() {
+                                        let _ = self.engine.cancel(&self.session).await;
+                                    }
+                                    cancel_sent = true;
+                                    revocation.as_mut().reset(tokio::time::Instant::now() + REVOKED_CANCEL_GRACE);
+                                    continue;
+                                }
+                            }
+                            if tripped && degenerate::agent_text(&params["update"]) {
+                                continue;
+                            }
+                            compacted |= self.record_update(params).await?;
                         }
                         Some(Event::TransportClosed)|None=>break Err(Error::Closed),
                         _=>{}
                     }
+                }
+                _=&mut revocation, if worker || cancel_sent=>{
+                    if cancel_sent {
+                        break Err(Error::Closed);
+                    }
+                    // Cancelling before the prompt is active would poison the session.
+                    // A revoked turn first gets a short chance to end by itself: the
+                    // revocation is often the turn's own accepted request (a replan or
+                    // escalation), and its closing reply should not be cut off.
+                    let next = if self.prompt_active() && self.authority_revoked().await {
+                        let since = *revoked_since.get_or_insert_with(tokio::time::Instant::now);
+                        if since.elapsed() >= REVOKED_FINISH_GRACE {
+                            let _ = self.engine.cancel(&self.session).await;
+                            cancel_sent = true;
+                            REVOKED_CANCEL_GRACE
+                        } else {
+                            REVOCATION_POLL
+                        }
+                    } else {
+                        REVOCATION_POLL
+                    };
+                    revocation.as_mut().reset(tokio::time::Instant::now() + next);
                 }
             }
         };
@@ -1046,9 +1130,29 @@ impl SessionDriver {
         // queued. Persist those too; never count a reply as activity evidence.
         for event in self.engine.drain_events().await {
             if let Event::Update(params) = event {
-                compacted |= self.record_update(params).await?;
                 updates += 1;
+                if !tripped && params["sessionId"] == self.session.id() {
+                    if let Some(trip) = watch.observe(&params["update"]) {
+                        tripped = true;
+                        self.record_degenerate(&trip, worker).await?;
+                        continue;
+                    }
+                }
+                if tripped && degenerate::agent_text(&params["update"]) {
+                    continue;
+                }
+                compacted |= self.record_update(params).await?;
             }
+        }
+        // A degenerate turn is never settled as an ordinary reply, whether the engine
+        // answered the cancel or the grace ran out; the caller retries it once in a
+        // fresh session (see `native_runtime`).
+        // A turn that did not end normally may still act after this point: its
+        // change record is incomplete.
+        self.settle_writer_turn(window.as_ref(), !tripped && result.is_ok())
+            .await?;
+        if tripped {
+            return Err(CoreError::Refused("native_turn_degenerate"));
         }
         let result = result.map_err(|_| CoreError::Refused("native_turn_outcome_unknown"))?;
         self.delivered_attachments.lock().unwrap().extend(fresh);
@@ -1066,20 +1170,102 @@ impl SessionDriver {
                 [&credential.channel_id],
                 |r| r.get(0),
             )?;
+            // `writer` says whether the turn kept a change record
+            // (`NATIVE_WRITER_TURN_CHANGES`).
             lifecycle::event_tx(
                 db,
                 &task,
                 "NATIVE_TURN_SETTLED",
-                json!({"channel_id":credential.channel_id,"stop_reason":recorded}),
+                json!({"channel_id":credential.channel_id,"stop_reason":recorded,"writer":writer}),
             )?;
             Ok(())
         })?)
         .await?;
+        // An ACP `refusal` stop is the model declining the turn (claude-agent-acp reports
+        // a refused turn with it). In a runtime-driven turn it counts as degenerate.
+        if reason == "refusal"
+            && self
+                .refusal_is_degenerate
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.record_degenerate(&degenerate::Trip::refusal(), worker)
+                .await?;
+            return Err(CoreError::Refused("native_turn_degenerate"));
+        }
         Ok(Turn {
             stop_reason: reason,
             updates,
             compacted,
         })
+    }
+    /// Open a writing worker's turn window: a start record naming the turn, then the
+    /// checkout's dirty paths before the prompt is sent.
+    async fn open_writer_turn(&self) -> CoreResult<WriterTurn> {
+        let turn = crate::native_effects::identity()?[..24].to_owned();
+        let c = self.credential.clone();
+        let t = turn.clone();
+        let since = receive(self.executor.write(move |db| {
+            let task: String = db.query_row(
+                "SELECT task_id FROM trusted_channels WHERE channel_id=?",
+                [&c.channel_id],
+                |r| r.get(0),
+            )?;
+            lifecycle::event_tx(
+                db,
+                &task,
+                "NATIVE_WRITER_TURN_STARTED",
+                json!({"channel_id":c.channel_id,"turn":t}),
+            )
+        })?)
+        .await?;
+        let before = crate::native_change_set::snapshot(self.policy.root.clone()).await;
+        Ok(WriterTurn {
+            turn,
+            since,
+            before,
+        })
+    }
+    /// Close a writing turn's window with its change record. Whether the engine could
+    /// change files without a receipt in this turn (`native_mutation`): codex-acp and
+    /// OpenCode can write inside their own sandbox without asking, so always; Claude
+    /// Code runs with its native shell and file tools disallowed and asks for every
+    /// other tool, so only when the runtime allowed a request in this turn other
+    /// than a Cortex gateway tool or a read.
+    async fn settle_writer_turn(&self, window: Option<&WriterTurn>, ended: bool) -> CoreResult<()> {
+        let Some(window) = window else {
+            return Ok(());
+        };
+        let record = if ended {
+            let after = crate::native_change_set::snapshot(self.policy.root.clone()).await;
+            crate::native_change_set::record(&window.before, &after)
+        } else {
+            crate::native_change_set::incomplete("turn_outcome_unknown")
+        };
+        let c = self.credential.clone();
+        let (turn, since) = (window.turn.clone(), window.since);
+        let claude = self.engine_kind == cortex_engine::environment::EngineKind::Claude;
+        receive(self.executor.write(move |db| {
+            let task: String = db.query_row(
+                "SELECT task_id FROM trusted_channels WHERE channel_id=?",
+                [&c.channel_id],
+                |r| r.get(0),
+            )?;
+            let native = !claude
+                || db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND id>?
+                     AND type IN ('NATIVE_PERMISSION_REQUESTED','NATIVE_PERMISSION_AUTO_ALLOWED')
+                     AND json_extract(payload_json,'$.channel_id')=?
+                     AND coalesce(json_extract(payload_json,'$.tool'),'') NOT LIKE 'mcp\\_\\_cortex\\_\\_%' ESCAPE '\\'
+                     AND coalesce(json_extract(payload_json,'$.kind'),'') NOT IN ('read','search','fetch','think','switch_mode'))",
+                    (&task, since, &c.channel_id),
+                    |r| r.get::<_, bool>(0),
+                )?;
+            let mut payload = json!({"channel_id":c.channel_id,"turn":turn,"native_mutation":native});
+            crate::native_change_set::add(&mut payload, &record);
+            lifecycle::event_tx(db, &task, "NATIVE_WRITER_TURN_CHANGES", payload)?;
+            Ok(())
+        })?)
+        .await
     }
     async fn record_update(&self, params: Value) -> CoreResult<bool> {
         if params["sessionId"] != self.session.id() {
@@ -1110,7 +1296,8 @@ impl SessionDriver {
                 return Ok(false);
             }
             let c = self.credential.clone();
-            return receive(self.executor.write(move|db|{
+            let id = evidence.clone();
+            let fresh = receive(self.executor.write(move|db|{
                 let i=channels::authenticate(db,&c.channel_id,c.secret(),true)?;
                 let session=format!("native:{}:{}",i.attempt,i.session.as_deref().unwrap());
                 let seen:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM compaction_events_seen WHERE engine_session_ref=? AND evidence_id=? AND generation_id IS NOT NULL)",(&session,&evidence),|r|r.get(0))?;
@@ -1120,7 +1307,21 @@ impl SessionDriver {
                 }
                 cortex_core::recovery_context::generation_tx(db,&c,"observed_compaction",Some(&evidence))?;
                 Ok(!seen)
-            })?).await;
+            })?).await?;
+            if fresh {
+                // One divider in the Workspace conversation per completed compaction. It is
+                // display history only: a failure to record it never fails the turn.
+                let marker = json!({"sessionId":self.session.id(),"update":{
+                    "sessionUpdate":"compaction_update","compactionId":id,"status":"completed"}});
+                let _ = crate::native_activity::record(
+                    &self.executor,
+                    &self.credential,
+                    self.session.id(),
+                    marker,
+                )
+                .await;
+            }
+            return Ok(fresh);
         }
         crate::native_activity::record(&self.executor, &self.credential, self.session.id(), params)
             .await?;
@@ -1173,6 +1374,72 @@ impl SessionDriver {
     }
     pub(crate) fn prompt_active(&self) -> bool {
         self.session.prompt_active()
+    }
+    /// Count an ACP `refusal` stop as a degenerate turn, as the runtime's own turn loop
+    /// does. Off by default, so a direct driver caller still sees the stop reason.
+    pub(crate) fn treat_refusal_as_degenerate(&self) {
+        self.refusal_is_degenerate
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    /// Durable record of a degenerate turn: the rule, the engine message id and the
+    /// message size, never its text. A worker's record names its node and plan
+    /// revision, which bound the runtime's single retry of that node.
+    async fn record_degenerate(&self, trip: &degenerate::Trip, worker: bool) -> CoreResult<()> {
+        let channel = self.credential.channel_id.clone();
+        let session = self.session.id().to_owned();
+        let trip = trip.clone();
+        receive(self.executor.write(move |db| {
+            let (task, assignment): (String, Option<String>) = db.query_row(
+                "SELECT task_id,assignment_id FROM trusted_channels WHERE channel_id=?",
+                [&channel],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let node: Option<(String, i64)> = match &assignment {
+                Some(a) => db
+                    .query_row(
+                        "SELECT node_id,revision FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",
+                        (&task, a),
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?,
+                None => None,
+            };
+            lifecycle::event_tx(
+                db,
+                &task,
+                "NATIVE_TURN_DEGENERATE",
+                json!({"channel_id":channel,"session":session,
+                    "role":if worker {"worker"} else {"coordinator"},
+                    "assignment_ref":assignment,"node":node.as_ref().map(|n|&n.0),"revision":node.as_ref().map(|n|n.1),
+                    "rule":trip.rule,"message_id":trip.message_id,"chars":trip.chars,
+                    "repeated_share":trip.repeated_share}),
+            )?;
+            Ok(())
+        })?)
+        .await
+    }
+    /// The runtime durably withdrew this worker channel's authority: the channel is
+    /// revoked or its owner epoch replaced. Never true for a coordinator channel, and
+    /// an unreadable store is not taken as a revocation. Checked on the writer lane,
+    /// which is serialized with the revoking transaction and is the lane the turn's own
+    /// activity records already wait on.
+    async fn authority_revoked(&self) -> bool {
+        let channel = self.credential.channel_id.clone();
+        let Ok(reply) = self.executor.write(move |db| {
+            Ok(db
+                .query_row(
+                    "SELECT c.revoked_at IS NOT NULL OR o.epoch IS NOT c.owner_epoch
+                     FROM trusted_channels c LEFT JOIN task_owners o ON o.task_id=c.task_id
+                     WHERE c.channel_id=? AND c.role='worker'",
+                    [&channel],
+                    |r| r.get::<_, bool>(0),
+                )
+                .optional()?
+                .unwrap_or(false))
+        }) else {
+            return false;
+        };
+        receive(reply).await.unwrap_or(false)
     }
     pub async fn cancel(&self) -> CoreResult<()> {
         self.engine
@@ -1358,13 +1625,20 @@ impl SessionDriver {
             self.prompt(&text).await?;
             return Ok(true);
         }
-        let delivery = receive(self.executor.write(move |db| {
+        let claimed = receive(self.executor.write(move |db| {
             let i = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
             let assignment = i.assignment.ok_or(CoreError::Refused("worker_required"))?;
-            waits::claim_tx(db, &i.task, &assignment, &session)
+            // The channel's last request before the answer is sent: any later one was
+            // made by the engine in the answer's own turn (it makes none between turns).
+            let before: i64 = db.query_row(
+                "SELECT coalesce(max(rowid),0) FROM runtime_requests WHERE task_id=? AND actor=?",
+                (&i.task, &c.channel_id),
+                |r| r.get(0),
+            )?;
+            Ok(waits::claim_tx(db, &i.task, &assignment, &session)?.map(|d| (d, before)))
         })?)
         .await?;
-        let Some(delivery) = delivery else {
+        let Some((delivery, before)) = claimed else {
             return Ok(false);
         };
         let text = delivery["answer"]
@@ -1394,22 +1668,45 @@ impl SessionDriver {
                 AND e.id>(SELECT max(id) FROM runtime_events WHERE task_id=r.task_id AND type='WORKER_CONTINUATION_STARTED'
                 AND json_extract(payload_json,'$.delivery_id')=?))",
                     (&task,&c.channel_id,delivery["wait"]["delivery_id"].as_str()), |r|r.get::<_,bool>(0))?;
+            // The engine acted in the answer's turn (a tool call through this channel
+            // after the answer was sent): it received the answer, even when that call
+            // (a replan request, a stop) ended the turn before ACP replied.
+            let acted: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE task_id=? AND actor=? AND rowid>?)",
+                (&task, &c.channel_id, before),
+                |r| r.get(0),
+            )?;
             let current = channels::authenticate(db, &c.channel_id, c.secret(), true).is_ok();
-            let failure = if delivered && current || recorded {
+            let failure = if delivered && current || recorded || acted {
                 None
             } else {
                 Some("answer_delivery_unknown")
             };
-            let finished = waits::finish_tx(
-                db,
-                &task,
+            let (wait_id, delivery_id) = (
                 delivery["wait"]["wait_id"].as_str().unwrap(),
                 delivery["wait"]["delivery_id"].as_str().unwrap(),
-                failure,
-            )?;
-            Ok(finished && failure.is_none())
+            );
+            let finished = waits::finish_tx(db, &task, wait_id, delivery_id, failure)?;
+            // A call made in the answer's own turn can end the assignment before ACP
+            // replies: a replan request cancels it, and the cancellation closes this
+            // delivery's wait as `cancelled`. With the answer proven received, the
+            // runtime's own close is that delivery's outcome, never an unconfirmed one.
+            let closed = !finished
+                && failure.is_none()
+                && waits::projection_tx(db, &task)?.iter().any(|w| {
+                    w["wait_id"] == wait_id
+                        && w["delivery_id"] == delivery_id
+                        && w["status"] == "cancelled"
+                });
+            Ok((finished || closed) && failure.is_none())
         })?)
         .await?;
+        // A degenerate answer turn is retried like any other degenerate turn.
+        if let Err(error) = &result {
+            if error.code() == "native_turn_degenerate" {
+                return Err(CoreError::Refused("native_turn_degenerate"));
+            }
+        }
         if !settled {
             return Err(CoreError::Refused("native_answer_delivery_unconfirmed"));
         }
@@ -1515,6 +1812,48 @@ impl CorePolicy {
         .map_err(engine_error)
     }
 }
+/// The allow option of a request the access mode allows because it names a
+/// channel-bound MCP tool (rule `channel_mcp`), from the same classification the
+/// decision path applies; `None` for every other request, including a channel tool
+/// whose request offers no allow option.
+fn auto_channel_allow(
+    request: &Value,
+    i: &Identity,
+    access: &str,
+    engine: cortex_engine::environment::EngineKind,
+    root: &std::path::Path,
+    mcp_servers: &[String],
+) -> Option<String> {
+    use cortex_engine::permission::{self, Action};
+    let read_only = i.role != "worker"
+        || cortex_core::scheduler::policy::read_only(
+            i.profile.as_deref().unwrap_or(""),
+            i.stage.as_deref().unwrap_or(""),
+        );
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|h| h.is_absolute());
+    let class = |p: &std::path::Path| crate::native_engine_policy::path_class(root, p);
+    let verdict = permission::classify(
+        request,
+        &permission::Facts {
+            access,
+            read_only,
+            consultant: matches!(
+                i.profile.as_deref(),
+                Some("worker-senior-consultant" | "senior-consultant")
+            ),
+            runtime_answers_native: engine != cortex_engine::environment::EngineKind::OpenCode,
+            root,
+            home: home.as_deref(),
+            mcp_servers,
+            class: &class,
+        },
+    );
+    (matches!(verdict.action, Action::Allow) && verdict.rule == "channel_mcp")
+        .then(|| permission::allow_option(request))
+        .flatten()
+}
 impl PermissionPolicy for CorePolicy {
     fn authority(&self) -> FutureResult<'_, ()> {
         Box::pin(async move { self.check(false).await.map(|_| ()) })
@@ -1534,6 +1873,8 @@ impl PermissionPolicy for CorePolicy {
             let id = request_id.clone();
             let tool = permission::tool_name(request).map(str::to_owned);
             let kind = permission::tool_kind(request).map(str::to_owned);
+            let (owned, root, engine) = (request.clone(), self.root.clone(), self.engine);
+            let mcp_servers = self.mcp_servers.lock().unwrap().clone();
             let incoming = receive(self.executor.write(move |db| {
                 let i=channels::authenticate(db,&c.channel_id,c.secret(),true)?;
                 if i.session.as_deref()!=Some(&session) {return Err(CoreError::Refused("session_mismatch"));}
@@ -1541,12 +1882,29 @@ impl PermissionPolicy for CorePolicy {
                     AND json_extract(client_info,'$.name')='cortex-rust-acp'")?;
                 let sessions=q.query_map([&i.task],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
                 if sessions.len()>1 {return Err(CoreError::Refused("incoming_session_binding_conflict"));}
+                let access=cortex_core::access::current(db,&i.task)?;
+                // A channel-bound tool (the Cortex gateway or an attached external server,
+                // both re-checking the channel and operation inside the call) is allowed by
+                // the access mode alone. It is the bulk of all requests, so its request and
+                // allowance are one record, written in this one transaction with the channel,
+                // session and access mode it was decided under. Every other request keeps
+                // its request record here and its decision record once decided.
+                if let Some(option) = auto_channel_allow(&owned, &i, &access, engine, &root, &mcp_servers) {
+                    lifecycle::event_tx(db,&i.task,"NATIVE_PERMISSION_AUTO_ALLOWED",
+                        json!({"channel_id":c.channel_id,"session":session,"request_id":id,"turn_generation":generation,
+                            "tool":tool,"kind":kind,"outcome":{"outcome":"selected","optionId":option},
+                            "rule":"channel_mcp","decider":format!("mode:{access}")}))?;
+                    return Ok(Err(option));
+                }
                 lifecycle::event_tx(db,&i.task,"NATIVE_PERMISSION_REQUESTED",
                     json!({"channel_id":c.channel_id,"session":session,"request_id":id,"turn_generation":generation,
                         "tool":tool,"kind":kind}))?;
-                Ok((sessions.into_iter().next(),cortex_core::access::current(db,&i.task)?))
+                Ok(Ok((sessions.into_iter().next(),access)))
             }).map_err(engine_error)?).await.map_err(engine_error)?;
-            let (incoming, access) = incoming;
+            let (incoming, access) = match incoming {
+                Ok(pending) => pending,
+                Err(option) => return Ok(PermissionDecision::Selected(option)),
+            };
             let i = self.check(true).await?;
             let read_only = i.role != "worker"
                 || cortex_core::scheduler::policy::read_only(
@@ -2427,4 +2785,297 @@ fn gap_reply(
     };
     Ok(json!({"content":[{"type":"text","text":value.to_string()}],
         "structuredContent":value,"isError":is_error}))
+}
+/// The degenerate-turn watchdog: rules over the agent text one turn streams, measured
+/// against retained production sessions. Ordinary messages stay far from every bound
+/// (largest ordinary message 4,748 characters, one legitimate consultant message
+/// 13,121; largest repeated-shingle share 0.045), while the degenerate turns observed
+/// echoed the runtime's own prompt text, looped on the same few words, or streamed
+/// tens of kilobytes without acting.
+pub(crate) mod degenerate {
+    use serde_json::Value;
+    use std::collections::HashSet;
+    use std::hash::{Hash, Hasher};
+
+    /// Text only the runtime's own prompt carries (the recovery capsule header, the
+    /// host's reminder wrapper, the runtime status line). An agent message quoting
+    /// it is the model replaying its prompt as its reply.
+    pub(crate) const ECHO_MARKERS: &[&str] = &[
+        "Cortex retained-state recovery capsule",
+        "<system-reminder>",
+        "Runtime status:",
+    ];
+    /// A marker starting within this many characters of the message start is an echo
+    /// (the observed replays began with a few stray characters before the header).
+    pub(crate) const ECHO_OPENING: usize = 80;
+    /// The repetition rule applies once a message has this many characters.
+    pub(crate) const REPETITION_FLOOR: usize = 1_000;
+    /// Share of sampled 16-character shingles already seen earlier in the message.
+    pub(crate) const REPETITION_SHARE: f64 = 0.30;
+    const SHINGLE: usize = 16;
+    const STRIDE: usize = 4;
+    /// One agent message with no tool call between its parts.
+    pub(crate) const LENGTH_CEILING: usize = 16_000;
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) struct Trip {
+        pub rule: &'static str,
+        pub message_id: Option<String>,
+        pub chars: usize,
+        pub repeated_share: Option<f64>,
+    }
+    impl Trip {
+        pub(crate) fn refusal() -> Self {
+            Trip {
+                rule: "refusal",
+                message_id: None,
+                chars: 0,
+                repeated_share: None,
+            }
+        }
+    }
+
+    /// An agent text chunk (message or thought) of an ACP `session/update`.
+    pub(crate) fn agent_text(update: &Value) -> bool {
+        matches!(
+            update["sessionUpdate"].as_str(),
+            Some("agent_message_chunk" | "agent_thought_chunk")
+        )
+    }
+
+    /// The current agent message of one turn. A message is the run of
+    /// `agent_message_chunk` updates with one `messageId` (or, without ids, the run
+    /// between tool calls); a tool call ends it.
+    #[derive(Default)]
+    pub(crate) struct Watch {
+        id: Option<String>,
+        chars: Vec<char>,
+        seen: HashSet<u64>,
+        sampled: usize,
+        repeated: usize,
+        /// Character positions where an echo marker starts in this message.
+        echoes: std::collections::BTreeSet<usize>,
+    }
+    impl Watch {
+        pub(crate) fn observe(&mut self, update: &Value) -> Option<Trip> {
+            match update["sessionUpdate"].as_str() {
+                Some("agent_message_chunk") => {}
+                Some("tool_call" | "tool_call_update") => {
+                    self.start(None);
+                    return None;
+                }
+                _ => return None,
+            }
+            let text = update["content"]["text"].as_str()?;
+            let id = update["messageId"].as_str().map(str::to_owned);
+            if id.is_some() && id != self.id {
+                self.start(id);
+            }
+            self.push(text)
+        }
+        fn start(&mut self, id: Option<String>) {
+            *self = Watch {
+                id,
+                ..Watch::default()
+            };
+        }
+        fn share(&self) -> f64 {
+            if self.sampled == 0 {
+                0.0
+            } else {
+                self.repeated as f64 / self.sampled as f64
+            }
+        }
+        fn trip(&self, rule: &'static str) -> Trip {
+            Trip {
+                rule,
+                message_id: self.id.clone(),
+                chars: self.chars.len(),
+                repeated_share: (rule == "repetition")
+                    .then(|| (self.share() * 1000.0).round() / 1000.0),
+            }
+        }
+        pub(crate) fn push(&mut self, text: &str) -> Option<Trip> {
+            let start = self.chars.len();
+            self.chars.extend(text.chars());
+            // Only the new text, and the tail a marker could straddle, is searched.
+            let longest = ECHO_MARKERS
+                .iter()
+                .map(|m| m.chars().count())
+                .max()
+                .unwrap_or(1);
+            let from = start.saturating_sub(longest - 1);
+            let window: String = self.chars[from..].iter().collect();
+            for marker in ECHO_MARKERS {
+                for (byte, _) in window.match_indices(marker) {
+                    self.echoes.insert(from + window[..byte].chars().count());
+                }
+            }
+            // A replayed prompt opens the message with a marker (after a few stray
+            // characters) or repeats markers; a reply that quotes one once inside its
+            // own prose (likely when the project is this runtime's own source) is not.
+            if self.echoes.iter().any(|&at| at < ECHO_OPENING) || self.echoes.len() >= 2 {
+                return Some(self.trip("echo"));
+            }
+            while self.sampled * STRIDE + SHINGLE <= self.chars.len() {
+                let at = self.sampled * STRIDE;
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                self.chars[at..at + SHINGLE].hash(&mut hasher);
+                if !self.seen.insert(hasher.finish()) {
+                    self.repeated += 1;
+                }
+                self.sampled += 1;
+            }
+            if self.chars.len() >= REPETITION_FLOOR && self.share() >= REPETITION_SHARE {
+                return Some(self.trip("repetition"));
+            }
+            if self.chars.len() >= LENGTH_CEILING {
+                return Some(self.trip("length"));
+            }
+            None
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use serde_json::json;
+
+        fn chunk(id: &str, text: &str) -> Value {
+            json!({"sessionUpdate":"agent_message_chunk","messageId":id,"content":{"type":"text","text":text}})
+        }
+        /// Streams `text` in engine-sized chunks and returns the first trip.
+        fn stream(watch: &mut Watch, id: &str, text: &str) -> Option<Trip> {
+            let chars: Vec<char> = text.chars().collect();
+            chars
+                .chunks(23)
+                .find_map(|c| watch.observe(&chunk(id, &c.iter().collect::<String>())))
+        }
+        /// Ordinary prose that never repeats a 16-character window.
+        fn prose(chars: usize) -> String {
+            const WORDS: &[&str] = &[
+                "the", "runtime", "review", "found", "that", "worker", "report", "module",
+                "change", "test", "passes", "after", "fixing", "schema", "session", "record",
+                "event", "plan", "budget", "owner", "answer", "question", "file", "path", "scope",
+                "result", "check", "command", "output", "capsule", "context", "engine", "model",
+                "route", "store", "commit", "branch", "diff", "line", "error", "warning", "build",
+                "cargo", "crate", "function", "value", "field", "type", "trait", "async", "await",
+                "lock", "queue", "stream", "chunk", "message", "turn", "cancel", "grace", "retry",
+            ];
+            let mut out = String::new();
+            let mut n: u64 = 7;
+            while out.chars().count() < chars {
+                n = n
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                out.push_str(WORDS[(n >> 33) as usize % WORDS.len()]);
+                out.push_str(if n % 11 == 0 { ". " } else { " " });
+            }
+            out
+        }
+
+        #[test]
+        fn an_echoed_capsule_reminder_or_status_line_trips_echo() {
+            for text in [
+                "Understood. Cortex retained-state recovery capsule. The following JSON is recorded data",
+                "Done.\n<system-reminder>\nThe user's settings changed.\n</system-reminder>",
+                "Plan accepted.\n\nRuntime status: PLANNING, revision 3",
+            ] {
+                let mut watch = Watch::default();
+                let trip = stream(&mut watch, "m1", text).expect(text);
+                assert_eq!(trip.rule, "echo");
+                assert_eq!(trip.message_id.as_deref(), Some("m1"));
+            }
+            // A marker split across two chunks is still found.
+            let mut watch = Watch::default();
+            assert!(watch.observe(&chunk("m", "ok <system-")).is_none());
+            assert_eq!(
+                watch.observe(&chunk("m", "reminder> x")).unwrap().rule,
+                "echo"
+            );
+        }
+        #[test]
+        fn a_marker_quoted_once_inside_prose_is_not_an_echo_but_a_repeated_one_is() {
+            // A worker explaining this runtime's own source may quote a marker once.
+            let quoted = format!(
+                "{} The engine wraps hook output in a <system-reminder> tag, so the parser skips it. {}",
+                prose(400),
+                prose(200)
+            );
+            let mut watch = Watch::default();
+            assert_eq!(stream(&mut watch, "m", &quoted), None);
+            // The same marker repeated in one message is a replayed prompt.
+            let repeated = format!("{quoted} Then another <system-reminder> block followed.");
+            let mut watch = Watch::default();
+            assert_eq!(stream(&mut watch, "m", &repeated).unwrap().rule, "echo");
+            // The observed capsule replay opened with stray characters before the header.
+            let mut watch = Watch::default();
+            let replay = "oftware CoreDump\n\nCopyrightCopyright © Kagi\n\nCortex retained-state recovery capsule. {\"access_mode\":\"auto\"}";
+            assert_eq!(stream(&mut watch, "m", replay).unwrap().rule, "echo");
+        }
+        #[test]
+        fn a_looping_message_trips_repetition_but_ordinary_text_does_not() {
+            // The observed loop: one handle repeated without end.
+            let mut watch = Watch::default();
+            let trip = stream(&mut watch, "m", &"guner@guner@".repeat(400)).unwrap();
+            assert_eq!(trip.rule, "repetition");
+            assert!(
+                trip.chars >= REPETITION_FLOOR && trip.chars < 1_100,
+                "{trip:?}"
+            );
+            assert!(trip.repeated_share.unwrap() >= REPETITION_SHARE);
+            // A paragraph pasted again and again, as a stuck model repeats itself.
+            let mut watch = Watch::default();
+            let paragraph = prose(300);
+            assert_eq!(
+                stream(&mut watch, "m", &paragraph.repeat(12)).unwrap().rule,
+                "repetition"
+            );
+            // A long ordinary message, with a little repeated markup, stays clear.
+            let mut watch = Watch::default();
+            let ordinary = format!(
+                "{}\n| a | b |\n| --- | --- |\n| 1 | 2 |\n{}",
+                prose(6_000),
+                prose(6_000)
+            );
+            assert_eq!(stream(&mut watch, "m", &ordinary), None);
+            assert!(watch.share() < 0.1, "{}", watch.share());
+            // Under the floor even a short repeated phrase is left alone.
+            let mut watch = Watch::default();
+            assert_eq!(stream(&mut watch, "m", &"ok ".repeat(300)), None);
+        }
+        #[test]
+        fn one_long_message_without_a_tool_call_trips_length() {
+            let mut watch = Watch::default();
+            // The 13,121-character consultant message is legitimate.
+            assert_eq!(stream(&mut watch, "c", &prose(13_121)), None);
+            let mut watch = Watch::default();
+            let trip = stream(&mut watch, "m", &prose(20_000)).unwrap();
+            assert_eq!(trip.rule, "length");
+            assert!((LENGTH_CEILING..LENGTH_CEILING + 23).contains(&trip.chars));
+            // A tool call between the parts ends the message: no single message is long.
+            let mut watch = Watch::default();
+            for _ in 0..3 {
+                assert_eq!(stream(&mut watch, "m", &prose(9_000)), None);
+                assert!(watch
+                    .observe(&json!({"sessionUpdate":"tool_call","toolCallId":"t","status":"in_progress"}))
+                    .is_none());
+            }
+            // So does a new message id.
+            let mut watch = Watch::default();
+            assert_eq!(stream(&mut watch, "a", &prose(9_000)), None);
+            assert_eq!(stream(&mut watch, "b", &prose(9_000)), None);
+        }
+        #[test]
+        fn only_agent_message_text_is_watched() {
+            let mut watch = Watch::default();
+            let thought = json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"<system-reminder>"}});
+            assert!(watch.observe(&thought).is_none());
+            let tool =
+                json!({"sessionUpdate":"tool_call","toolCallId":"t","title":"Runtime status:"});
+            assert!(watch.observe(&tool).is_none());
+            assert!(agent_text(&thought));
+            assert!(!agent_text(&tool));
+        }
+    }
 }

@@ -437,17 +437,26 @@ rendered Desktop evidence.
 
 ## Paid live verification on request
 
-Default verification is no-paid. A paid live check runs only when the owner
-explicitly requests it for the current work and names the mode, `cli` or
-`desktop`; without a request, report each applicable live check as not run with
-the blocker "paid live check not requested by the owner". Run a requested check
-only through the isolated dev Paseo environment described in
-[`docs/project/dev-environment.md`](dev-environment.md):
+Default verification is no-paid. Run a paid live check only on an explicit
+owner request for the current work naming the mode (`cli` or `desktop`) and
+the surface. Record an approval reference naming that request. Otherwise,
+report each applicable live check as not run with the blocker "paid live check
+not requested by the owner". Authorization is not transferable between
+surfaces or modes. Use only the owner-selected engine/model route supported
+by current settings and observed host/catalog capabilities; do not substitute
+or automatically escalate. Heavy models remain prohibited in routine live
+qualification. Use existing production native accounts, check native login
+status without printing credentials, and do not copy credentials, create test
+accounts or log in.
+
+### Paseo `cli` and `desktop`
+
+Run Paseo checks only through the [isolated dev Paseo environment](dev-environment.md):
 the permanent `~/.paseo-dev` daemon, separate `~/.config/Paseo-dev` Electron
 profile, a disposable project, and the Cortex runtime launched by that daemon
 from the explicit absolute checkout plugin path. Do not use production
-`~/.paseo` or the production Cortex agent. Keep the existing production
-Codex/Claude account and credential-isolation rules. Check native login status without printing credentials. Use an explicit owner-selected route supported by current settings and verified host/catalog capabilities; do not substitute or automatically escalate to the deep coordinator. Heavy models remain prohibited in routine live qualification.
+`~/.paseo` or the production Cortex agent. `cli` is headless; Paseo `desktop`
+uses the isolated Electron app.
 
 The paid probes retain their safety guard and require both flags, with an
 approval reference naming the owner's request:
@@ -515,6 +524,94 @@ isolated Desktop qualification and record actual rendered outcomes separately.
 The actual Desktop owner-selected route was `codex-acp/gpt-6-luna`; do not
 substitute another route. Package identity and the full executable scenario
 must be handed to the Desktop QA owner after final stamping.
+
+### Standalone Cortex Workspace desktop
+
+This second paid route is `desktop` only, when explicitly requested for the
+standalone Cortex Workspace 1.0.6 app. Record the exact candidate archive and
+digest (install only in an isolated environment), or the exact built desktop
+and service binaries from this checkout and their build identity. Use a
+separate disposable project, never this checkout or an existing owner project.
+Run on a private disposable virtual screen (private Xvfb or equivalent), never
+the owner's DISPLAY or WAYLAND session. Use a private session bus and prevent
+fallback to the owner's user manager or graphical session, including through
+external openers and desktop portals.
+
+**Before launching:**
+
+1. Record the approval reference and take a metadata-only baseline outside the
+   production roots. Inventory known production Cortex/Workspace config, state,
+   data, cache and runtime locations, including actual production XDG roots
+   and HOME fallbacks. Check `~/.config/cortex`, `~/.local/state/cortex`, and
+   `cortex-workspace` / `cortex-workspace-dev` under `~/.config`,
+   `~/.local/state`, `~/.local/share`, and `~/.cache`. Include the desktop's
+   channel identifiers `dev.cortex.workspace` and
+   `dev.cortex.workspace.development` when checking toolkit data and caches,
+   known user-unit paths and production project store roots. Record missing
+   paths as missing; compare the same paths after shutdown. Record path,
+   type, owner/mode, inode, size and modification/change times without
+   reading file contents, traversing symlinks or recording credentials.
+2. Give **both** desktop and service the owner's real `HOME` for native
+   accounts, and distinct, absolute, disposable `XDG_CONFIG_HOME`,
+   `XDG_STATE_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` and `XDG_RUNTIME_DIR`
+   roots shared by that pair. Keep root ownership private, exclude production
+   overrides such as `CORTEX_ROUTING`, and register only the disposable project.
+   Leave remote access off. Do not connect to, modify or reuse the owner's
+   production Workspace installation, user service, config or stores, or
+   production `~/.paseo`. If the selected route requires production
+   Cortex-managed connection storage, stop; real HOME allows use of existing
+   native account directories, not reuse of production Cortex app state.
+3. Verify the candidate service and desktop use the private socket and the
+   expected project and runtime roots **before any paid call**. Verify native
+   login status for the selected connection without printing credentials.
+   If current host/account configuration prevents or leaves isolation or
+   the selected route unverified, stop before paying and record the blocker.
+
+**Path and launch details.** The release desktop talks over a Unix socket,
+not a configurable local TCP port: `$XDG_RUNTIME_DIR/cortex-workspace/service.sock`.
+Dev uses `cortex-workspace-dev` in the same place. The service keeps its
+registry and other machine state under `$XDG_STATE_HOME/<channel namespace>`.
+Release route config and state are under `$XDG_CONFIG_HOME/cortex` and
+`$XDG_STATE_HOME/cortex`; Dev uses the `cortex` subdirectory of
+`$XDG_CONFIG_HOME/cortex-workspace-dev` and
+`$XDG_STATE_HOME/cortex-workspace-dev/state`, respectively. Config/state
+roots otherwise fall back to `$HOME/.config` and `$HOME/.local/state`; the
+desktop requires an absolute runtime directory and the service has no
+public socket fallback. Keep data and cache roots disposable for the app
+and toolkit as well. These settings are not a filesystem sandbox: the
+service probes the owner's shell for PATH, and engine children receive the
+service's HOME and the selected native account directory, not the app's
+XDG isolation. See the [channel table](../../crates/workspace-protocol/channels.json),
+[service startup](../../crates/workspace-service/src/main.rs),
+[route environment](../../crates/workspace-service/src/native_routes.rs) and
+[engine environment](../../crates/cortex-engine/src/environment.rs).
+
+On socket failure the [desktop bridge](../../apps/cortex-workspace-desktop/src-tauri/src/client.rs)
+can run `systemctl --user daemon-reload` and start the channel unit
+(`cortex-workspace.service` or `cortex-workspace-dev.service`). Changing
+XDG roots alone is not sufficient to isolate the user manager. Use an
+isolated manager and candidate filesystem for an installed run, or start
+the matching candidate service explicitly before launching the desktop
+and keep production user-manager access unavailable even if the service
+dies. For a built-binary run, service arguments are the disposable allowed
+root and the absolute source checkout as a runtime asset root only. A
+candidate extracted to an arbitrary directory does not make that directory
+an accepted installed runtime root: the service accepts a source checkout
+or the channel's canonical `/usr/lib/<package>/runtime` with the payload
+manifest. Never satisfy that requirement with the production bundle.
+
+**Evidence and cleanup.** Observe the actual app window using real input
+and screenshots or recordings of the relevant states; logs or protocol data
+alone cannot establish rendered behavior. Apply
+[Qualification evidence discipline](../../AGENTS.md#qualification-evidence-discipline)
+to each scenario. Bind each outcome to the exact artifact, session and
+observed action; retain failures and identify unrun or unverifiable cases.
+Stop only the disposable processes, take the after snapshot, and report
+every stray write and any missing snapshot coverage. An unchanged metadata
+snapshot is a check for stray writes in the listed paths, not proof of
+filesystem containment. This route does not replace the
+[installed desktop real-input gate](#installed-desktop-real-input-gate) or
+qualify a physical device, the owner's session or a release by itself.
 
 ## Paseo plugin (`integrations/paseo/`)
 

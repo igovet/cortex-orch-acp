@@ -1,5 +1,5 @@
 import { render } from "solid-js/web";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LOCAL_MACHINE_ID, type Activity, type FileDiff, type ProjectRepo, type WorkspaceState } from "@cortex/workspace-domain";
 import { Workspace } from "../src";
 import { pagesWorld } from "./pages-world";
@@ -56,14 +56,14 @@ function news(taskId: string): WorkspaceState {
   return s;
 }
 
-async function mount(path: string) {
+async function mount(path: string, state = world()) {
   const p = scriptedPort({ capabilities: { everything: true, operations: [] } });
   p.port.listProjectSkills = async () => ({ skills, omitted: 0 });
   p.port.readFile = async () => ({ text: LONG, revision: "r1", readOnly: null, writer: null });
   history.replaceState(null, "", path.replaceAll("<M>", M));
   const root = document.createElement("div"); document.body.append(root);
   dispose = render(() => <Workspace port={p.port} />, root);
-  await settle(); p.emit(projection("1", world())); await settle();
+  await settle(); p.emit(projection("1", state)); await settle();
   return p;
 }
 /** A scroller left at `at`, as if the owner scrolled there. A rebuilt node starts again at 0. */
@@ -190,6 +190,78 @@ describe("a background update keeps every screen as the owner left it", () => {
       expect(document.getElementById("diff-b.ts")).toBe(diffB);
       expect(allConnected(lines)).toBe(true);
     });
+  });
+
+  it("restores both Changes scrollers after a trip to Conversation", async () => {
+    await mount("/m/<M>/t/c-done/changes");
+    $(".flist")!.scrollTop = 90;
+    $(".dview")!.scrollTop = 500;
+
+    $<HTMLAnchorElement>(".td-back")!.click(); await settle();
+    expect($(".dview")).toBeNull();
+    $<HTMLAnchorElement>('a.td-link[href$="/changes"]')!.click(); await settle();
+
+    expect([$(".flist")!.scrollTop, $(".dview")!.scrollTop]).toEqual([90, 500]);
+  });
+
+  it("restores the Changes page body for a result with evidence but no diff", async () => {
+    const state = world();
+    state.reviews[0].files = [];
+    state.tasks.find(t => t.id === "c-done")!.result!.checks = Array.from({ length: 30 }, (_, i) => ({
+      name: `Check ${i + 1}`, detail: "Expected output was not found.", outcome: "failed", source: "runtime",
+    }));
+    await mount("/m/<M>/t/c-done/changes", state);
+    const selector = '.rv-panel .l-page-body[data-scroll="vertical"]';
+    const body = $(selector)!;
+    expect($(".dview")).toBeNull();
+    expect(body.textContent).toContain("Check 30");
+    // jsdom has no layout; give this populated page an overflowing viewport.
+    scrolledTo(body, 420);
+    expect(body.scrollHeight).toBeGreaterThan(body.clientHeight);
+
+    $<HTMLAnchorElement>(".td-back")!.click(); await settle();
+    expect(body.isConnected).toBe(false);
+    $<HTMLAnchorElement>('a.td-link[href$="/changes"]')!.click(); await settle();
+
+    expect($(selector)!.scrollTop).toBe(420);
+  });
+
+  it("restores a worker's paused reading position, but follows the bottom after resuming", async () => {
+    let height = 4000;
+    const viewport = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(200);
+    const content = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(() => height);
+    try {
+      await mount("/m/<M>/t/c-work/workers/w-be2");
+      const stream = () => $(".stream")!;
+      const following = () => $<HTMLInputElement>('[aria-label="Follow new activity"]')!;
+      const pick = async (id: string) => {
+        const select = $<HTMLSelectElement>(".ws-worker-picker select")!;
+        select.value = id;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        await settle();
+      };
+      const other = [...$<HTMLSelectElement>(".ws-worker-picker select")!.options]
+        .map(option => option.value).find(id => !["w-be2", "verification", "cortex"].includes(id))!;
+      expect(other).toBeDefined();
+      expect(stream().scrollTop).toBe(3800);
+      scrolledTo(stream(), 250);
+      await pick(other);
+      expect(location.pathname).toContain(`/workers/${other}`);
+      expect(stream()).toBeNull(); // The other fixture worker has not started yet.
+      await pick("w-be2");
+      expect(stream().scrollTop).toBe(250);
+      expect(following().checked).toBe(false);
+
+      following().click();
+      expect(stream().scrollTop).toBe(3800);
+      await pick(other);
+      height = 4700;
+      await pick("w-be2");
+      expect(following().checked).toBe(true);
+      expect(stream().scrollTop).toBe(4500);
+    } finally {
+      content.mockRestore(); viewport.mockRestore();
+    }
   });
 
   it("Code: a folded folder stays folded, the open file and its preview's scroll stay", async () => {

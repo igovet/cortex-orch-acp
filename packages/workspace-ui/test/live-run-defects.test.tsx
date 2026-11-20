@@ -141,18 +141,18 @@ it("names a read of the project root in words and opens Code on it", async () =>
   expect(document.querySelector(".step-sub [role=alert]")).toBeNull();
 });
 
-it("says why the runtime refused a plan, in words, on the failed row", async () => {
-  const reason = "No plan was recorded (plan_invalid). Correct the proposal and submit it again.";
+it("says why the runtime refused a change, in words, on the failed row", async () => {
+  const reason = "The file was not changed (scope_denied). Ask for access to the path and try again.";
   const rows = [
-    row(1, "tool", step({ title: "orchestrator: mcp__cortex__plan_submit", callId: "xa_c:p1", kind: "other", status: "pending" }), "pending"),
+    row(1, "tool", step({ title: "orchestrator: mcp__cortex__project_edit", callId: "xa_c:p1", kind: "other", status: "pending", path: "src/a.ts" }), "pending"),
     row(2, "tool", step({ callId: "xa_c:p1", kind: "other", status: "failed", failure: reason }), "failed"),
   ];
   const [fold] = conversationOf(rows, { description: "", answers: [] });
   if (fold.entry.kind !== "fold") throw new Error("not a fold");
-  expect(fold.entry.text).toBe("Used 1 other tool, 1 tool call needs attention");
+  expect(fold.entry.text).toBe("Edited 1 file, 1 tool call needs attention");
   await mount(world([fold.entry]));
   await openFold();
-  const plan = stepRow("Submit plan");
+  const plan = stepRow("Edit");
   expect(plan.tagName).toBe("BUTTON");
   expect(plan.querySelector(".i")?.getAttribute("class")).toContain("st-bad");
   plan.click(); await settle();

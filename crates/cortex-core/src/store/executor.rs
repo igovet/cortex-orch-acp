@@ -57,8 +57,82 @@ fn idle(store: &Store) -> bool {
         .unwrap_or(false)
 }
 struct Lane {
-    sender: Option<SyncSender<Job>>,
+    sender: Option<SyncSender<Item>>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// The writer lane's deferred display writes; `None` on read lanes.
+    deferred: Option<Arc<Deferred>>,
+}
+/// What a lane receives: an ordinary job with its submission ticket, or a nudge to
+/// re-examine the deferred writes (a first deferral, or a full deferral batch).
+enum Item {
+    Job(u64, Job),
+    Wake,
+}
+/// A display-only write committed later, together with others (see
+/// [`StoreExecutor::write_deferred`]).
+type DeferredBody = Box<dyn FnOnce(&rusqlite::Transaction<'_>) -> CoreResult<()> + Send + 'static>;
+/// How long a deferred write may wait for companions before it commits.
+pub const DEFER_WINDOW: Duration = Duration::from_millis(250);
+/// A batch this large commits at once.
+pub const DEFER_LIMIT: usize = 64;
+#[derive(Default)]
+struct Deferred {
+    state: std::sync::Mutex<DeferredState>,
+}
+#[derive(Default)]
+struct DeferredState {
+    /// One counter orders ordinary jobs and deferred writes alike.
+    ticket: u64,
+    pending: Vec<(u64, DeferredBody)>,
+    since: Option<Instant>,
+}
+impl Deferred {
+    fn lock(&self) -> std::sync::MutexGuard<'_, DeferredState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Deferred writes submitted before `ticket`, or all of them.
+    fn take(&self, before: Option<u64>) -> Vec<DeferredBody> {
+        let mut state = self.lock();
+        let split = match before {
+            Some(ticket) => state.pending.partition_point(|(t, _)| *t < ticket),
+            None => state.pending.len(),
+        };
+        let taken: Vec<_> = state.pending.drain(..split).map(|(_, b)| b).collect();
+        if state.pending.is_empty() {
+            state.since = None;
+        } else if !taken.is_empty() {
+            // The remaining writes were deferred after the ones taken; restart their window.
+            state.since = Some(Instant::now());
+        }
+        taken
+    }
+    /// Time until the oldest pending write is due, when there is one.
+    fn due_in(&self) -> Option<Duration> {
+        let state = self.lock();
+        let since = state.since?;
+        Some(if state.pending.len() >= DEFER_LIMIT {
+            Duration::ZERO
+        } else {
+            DEFER_WINDOW.saturating_sub(since.elapsed())
+        })
+    }
+}
+/// One transaction for a batch of deferred writes. Each runs inside its own
+/// savepoint: one that fails is rolled back alone and the rest still commit.
+fn commit_deferred(store: CoreResult<&Store>, bodies: Vec<DeferredBody>) {
+    let Ok(store) = store else { return };
+    let _ = store.write(|tx| {
+        for body in bodies {
+            tx.execute_batch("SAVEPOINT cortex_deferred")?;
+            match body(tx) {
+                Ok(()) => tx.execute_batch("RELEASE cortex_deferred")?,
+                Err(_) => {
+                    tx.execute_batch("ROLLBACK TO cortex_deferred; RELEASE cortex_deferred")?
+                }
+            }
+        }
+        Ok(())
+    });
 }
 impl Lane {
     fn start(
@@ -69,8 +143,10 @@ impl Lane {
         orphaned: Arc<AtomicBool>,
         name: &str,
     ) -> CoreResult<Self> {
-        let (send, recv) = sync_channel::<Job>(128);
+        let (send, recv) = sync_channel::<Item>(128);
         let (ready, wait) = sync_channel(1);
+        let deferred = owner.then(|| Arc::new(Deferred::default()));
+        let pending = deferred.clone();
         let thread = std::thread::Builder::new()
             .name(name.into())
             .spawn(move || {
@@ -96,26 +172,7 @@ impl Lane {
                         if ready.send(Ok(())).is_err() {
                             return;
                         }
-                        loop {
-                            let job = if shared {
-                                match recv.recv_timeout(IDLE_RELEASE) {
-                                    Ok(job) => job,
-                                    Err(RecvTimeoutError::Timeout) => {
-                                        // Release only with every task finished: the
-                                        // next job retakes the fences or is refused.
-                                        if lease.is_some() && idle(&store) {
-                                            lease = None;
-                                        }
-                                        continue;
-                                    }
-                                    Err(RecvTimeoutError::Disconnected) => break,
-                                }
-                            } else {
-                                match recv.recv() {
-                                    Ok(job) => job,
-                                    Err(_) => break,
-                                }
-                            };
+                        let run = |job: Job, lease: &mut Option<Fences>| {
                             if shared && owner && lease.is_none() {
                                 match fences_waiting(&key) {
                                     // A live process never releases the lease with an
@@ -126,15 +183,65 @@ impl Lane {
                                         if !idle(&store) {
                                             orphaned.store(true, Ordering::SeqCst);
                                         }
-                                        lease = Some(taken)
+                                        *lease = Some(taken)
                                     }
                                     Err(e) => {
                                         job(Err(e));
-                                        continue;
+                                        return;
                                     }
                                 }
                             }
                             job(Ok(&store));
+                        };
+                        // Deferred writes submitted before `before` (all when `None`)
+                        // commit first, as one transaction through the same lease path.
+                        let flush = |before: Option<u64>, lease: &mut Option<Fences>| {
+                            let Some(deferred) = &pending else { return };
+                            let bodies = deferred.take(before);
+                            if !bodies.is_empty() {
+                                run(Box::new(move |store| commit_deferred(store, bodies)), lease);
+                            }
+                        };
+                        loop {
+                            let due = pending.as_ref().and_then(|d| d.due_in());
+                            let wait = match (due, shared) {
+                                (Some(due), true) => Some(due.min(IDLE_RELEASE)),
+                                (Some(due), false) => Some(due),
+                                (None, true) => Some(IDLE_RELEASE),
+                                (None, false) => None,
+                            };
+                            let received = match wait {
+                                Some(wait) => recv.recv_timeout(wait),
+                                None => recv.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                            };
+                            let (ticket, job) = match received {
+                                Ok(Item::Job(ticket, job)) => (ticket, job),
+                                Ok(Item::Wake) => continue,
+                                Err(RecvTimeoutError::Timeout) => {
+                                    if due.is_some() {
+                                        if pending.as_ref().and_then(|d| d.due_in())
+                                            == Some(Duration::ZERO)
+                                        {
+                                            flush(None, &mut lease);
+                                        }
+                                        continue;
+                                    }
+                                    // Release only with every task finished: the
+                                    // next job retakes the fences or is refused.
+                                    if lease.is_some() && idle(&store) {
+                                        lease = None;
+                                    }
+                                    continue;
+                                }
+                                Err(RecvTimeoutError::Disconnected) => {
+                                    // Shutdown commits every write still deferred.
+                                    flush(None, &mut lease);
+                                    break;
+                                }
+                            };
+                            // Never reorder: what was deferred before this job commits first.
+                            flush(Some(ticket), &mut lease);
+                            run(job, &mut lease);
                         }
                     }
                     Err(error) => {
@@ -146,6 +253,7 @@ impl Lane {
             Ok(Ok(())) => Ok(Self {
                 sender: Some(send),
                 thread: Some(thread),
+                deferred,
             }),
             Ok(Err(error)) => {
                 let _ = thread.join();
@@ -158,16 +266,49 @@ impl Lane {
         }
     }
     fn submit(&self, job: Job) -> CoreResult<()> {
-        self.sender
+        let sender = self
+            .sender
             .as_ref()
-            .ok_or(CoreError::Refused("storage_executor_closed"))?
-            .try_send(job)
+            .ok_or(CoreError::Refused("storage_executor_closed"))?;
+        // The ticket is taken and the job queued under the deferral lock, so a write
+        // deferred after this job can never commit ahead of it, nor one before it after.
+        let mut state = self.deferred.as_ref().map(|d| d.lock());
+        let ticket = state.as_mut().map_or(0, |s| {
+            s.ticket += 1;
+            s.ticket
+        });
+        sender
+            .try_send(Item::Job(ticket, job))
             .map_err(|e| match e {
                 std::sync::mpsc::TrySendError::Full(_) => CoreError::Refused("busy"),
                 std::sync::mpsc::TrySendError::Disconnected(_) => {
                     CoreError::Refused("storage_executor_closed")
                 }
             })
+    }
+    fn defer(&self, body: DeferredBody) -> CoreResult<u64> {
+        let (Some(sender), Some(deferred)) = (self.sender.as_ref(), self.deferred.as_ref()) else {
+            return refuse("storage_executor_closed");
+        };
+        let (wake, ticket) = {
+            let mut state = deferred.lock();
+            state.ticket += 1;
+            let ticket = state.ticket;
+            state.pending.push((ticket, body));
+            let first = state.since.is_none();
+            if first {
+                state.since = Some(Instant::now());
+            }
+            (first || state.pending.len() == DEFER_LIMIT, ticket)
+        };
+        if wake {
+            // A full queue already keeps the writer busy and re-examining its batch.
+            if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) = sender.try_send(Item::Wake)
+            {
+                return refuse("storage_executor_closed");
+            }
+        }
+        Ok(ticket)
     }
 }
 impl Drop for Lane {
@@ -253,6 +394,26 @@ impl StoreExecutor {
             let _ = send.send(store.and_then(|store| store.write(body)));
         }))?;
         Ok(recv)
+    }
+    /// Queue a display-only write on the writer lane without waiting for it. Writes
+    /// deferred together commit in ONE transaction (each in its own savepoint, so a
+    /// failing one is rolled back alone): after at most [`DEFER_WINDOW`], at once when
+    /// [`DEFER_LIMIT`] are pending, before any ordinary writer job submitted after them
+    /// (so every later write, a turn's settle event included, sees them committed and
+    /// ordered first), and when the executor shuts down. The outcome is never reported.
+    /// A process killed before the commit loses the pending writes, at most one window's
+    /// worth: never use this for authority, lifecycle or any state another write relies on.
+    /// Returns the write's ticket (see [`Self::submitted`]).
+    pub fn write_deferred(
+        &self,
+        body: impl FnOnce(&rusqlite::Transaction<'_>) -> CoreResult<()> + Send + 'static,
+    ) -> CoreResult<u64> {
+        self.writer.defer(Box::new(body))
+    }
+    /// The ticket of the newest job or deferred write submitted to the writer lane. A
+    /// deferred write whose ticket is still the newest has nothing ordered after it yet.
+    pub fn submitted(&self) -> u64 {
+        self.writer.deferred.as_ref().map_or(0, |d| d.lock().ticket)
     }
     pub fn read<T: Send + 'static>(
         &self,

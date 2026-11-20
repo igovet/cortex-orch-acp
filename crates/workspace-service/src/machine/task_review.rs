@@ -1359,8 +1359,9 @@ mod native_acceptance_tests {
     }
 
     /// Owner store 2026-11-17: a worker card read "This worker reported no result" with
-    /// no reason after its result submissions were refused. Its recorded refusals (code
-    /// only) are on the card; a worker with none keeps its recorded shape.
+    /// no reason after its result submissions were refused. Its recorded refusals (each
+    /// distinct code and up to three items the latest named) are on the card; a worker
+    /// with none keeps its recorded shape.
     #[tokio::test]
     async fn a_workers_refused_results_are_on_its_card() {
         let (root, runtime, _) = completed().await;
@@ -1374,9 +1375,12 @@ mod native_acceptance_tests {
                         [],
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )?;
-                    for code in ["open_failed_check", "omitted_failed_check"] {
+                    for code in ["open_failed_check", "omitted_failed_check", "open_failed_check"] {
                         lifecycle::event_tx(db, &task, "WORKER_RESULT_REFUSED", json!({"channel_id":"c","attempt":attempt,"assignment_ref":"a","code":code}))?;
                     }
+                    // The latest refusal names what was outstanding; up to three items ride with it.
+                    lifecycle::event_tx(db, &task, "WORKER_RESULT_REFUSED", json!({"channel_id":"c","attempt":attempt,"assignment_ref":"a",
+                        "code":"review_file_coverage_required","missing":["README.md (current complete read is missing or stale)","a.rs","b.rs","c.rs"]}))?;
                     Ok(())
                 })?;
                 Ok(())
@@ -1397,7 +1401,9 @@ mod native_acceptance_tests {
         let work = workers.iter().find(|w| w["role"] == "backend-dev").unwrap();
         assert_eq!(
             work["resultRefusals"],
-            json!({"count":2,"code":"omitted_failed_check"})
+            json!({"count":4,"code":"review_file_coverage_required",
+                "codes":["open_failed_check","omitted_failed_check","review_file_coverage_required"],
+                "missing":["README.md (current complete read is missing or stale)","a.rs","b.rs"]})
         );
         let review = workers
             .iter()
@@ -2039,7 +2045,7 @@ mod native_acceptance_tests {
                 .unwrap()
         };
         set(
-            "UPDATE runtime_nodes SET status='failed', result_json='{\"assignment_outcome\":\"failed\",\"checks\":[],\"report_ref\":\"r_a408f1d4976c\",\"summary\":\"The documentation update remains incomplete.\"}' WHERE assignment_ref='a-work'",
+            "UPDATE runtime_nodes SET status='failed', result_json='{\"assignment_outcome\":\"failed\",\"blocker\":{\"kind\":\"tool_unavailable\",\"detail\":\"No browser here.\"},\"checks\":[],\"report_ref\":\"r_a408f1d4976c\",\"summary\":\"The documentation update remains incomplete.\"}' WHERE assignment_ref='a-work'",
             None,
         )
         .await
@@ -2074,6 +2080,8 @@ mod native_acceptance_tests {
         );
         assert_eq!(work["result"]["checks"], json!([]));
         assert!(work.get("endedReason").is_none());
+        // The dead-end kind it named, so the card can say it could not run here rather than "Failed".
+        assert_eq!(work["blockerKind"], "tool_unavailable");
         let review = workers
             .iter()
             .find(|w| w["role"] == "code-reviewer")
@@ -2097,6 +2105,24 @@ mod native_acceptance_tests {
             .unwrap()
             .clone();
         assert_eq!(review["endedReason"], "cancelled_by_coordinator");
+        // Its session is not confirmed as stopped yet: the card says it is stopping.
+        assert_eq!(review["stopping"], true);
+        set(
+            "UPDATE delegation_provisioning SET status='terminated' WHERE idempotency_key='a-review'",
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let all = facts().await.unwrap();
+        let review = all["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|w| w["role"] == "code-reviewer")
+            .unwrap()
+            .clone();
+        assert!(review.get("stopping").is_none());
         // A failed worker whose retry records a lost session.
         set(
             "UPDATE runtime_nodes SET status='failed' WHERE assignment_ref='a-review'",
@@ -2221,6 +2247,11 @@ mod native_acceptance_tests {
         );
         assert_eq!(next["result"]["checks"][0]["name"], "/bin/false");
         assert_eq!(next["result"]["acceptanceAvailable"], false);
+        // This check-only snapshot can ride alongside a newer board that already
+        // shows the task in Review. It must not imply that the result failed review.
+        assert_eq!(next["reviewActions"]["pending"], true, "{next}");
+        assert_eq!(next["reviewActions"]["accept"], false);
+        assert_eq!(next["reviewActions"]["unblockAction"], "wait");
         runtime.shutdown().await;
         drop(runtime);
         std::fs::remove_dir_all(root).unwrap();

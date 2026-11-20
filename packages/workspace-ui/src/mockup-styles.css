@@ -476,6 +476,7 @@ body[data-tab="workers"] .detail { display: flex; }
 .wlist { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px 8px 12px; }
 .wg { display: flex; align-items: center; gap: 6px; height: 28px; padding: 6px 8px 0; font-size: var(--t-cap); color: var(--fg-3); }
 .wg .n { margin-left: auto; }
+.ws-attempts { display: block; margin: 0 8px 4px 30px; font-size: var(--t-cap); }
 .wcard { display: block; width: 100%; padding: 7px 8px; border-radius: 7px; text-align: left; }
 .wcard:hover { background: var(--bg-hover); }
 .wcard[aria-selected="true"] { background: var(--bg-selected); }

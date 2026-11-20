@@ -37,16 +37,14 @@ it("names a native coordinator's Cortex calls by what they are, not by the role 
   expect(rows).toHaveLength(1);
   const fold = rows[0].entry;
   if (fold.kind !== "fold") throw new Error("not a fold");
-  expect(fold.steps.map(s => viewOfText(s).label)).toEqual(["Read", "Read", "Read skill", "Read skill", "Read", "Read", "Submit plan"]);
-  // Submitting a plan edits no file.
-  expect(fold.text).toBe("Read 4 files and used 3 other tools");
+  expect(fold.steps.map(s => viewOfText(s).label)).toEqual(["Read", "Read", "Read", "Read"]);
+  // Loading a skill and submitting a plan are the runtime's own steps: they are not shown or counted.
+  expect(fold.text).toBe("Read 4 files");
   expect(fold.text).not.toMatch(/edited/i);
 });
 
 it.each([
   ["read", "Read", "src/app.ts", "read"],
-  ["skill", "Read skill: orchestrator-protocol", "", "other"],
-  ["plan", "Submit plan", "", "other"],
   ["edit", "Edit", "src/a.ts", "edit"],
   ["write", "Edit", "notes.md", "edit"],
   ["command", "Shell", "git status --short", "shell"],
@@ -83,13 +81,13 @@ async function mountFold(steps: string[]) {
 }
 
 it("shows a read's file on its row and opens it in Code from there", async () => {
-  const [read, skill] = await mountFold([detailed.read, detailed.skill]);
+  const [read, skill] = await mountFold([detailed.read, detailed.report]);
   expect(read.tagName).toBe("DIV");
   expect(read.querySelector(".step-l")?.textContent).toBe("Read");
   const open = read.querySelector<HTMLButtonElement>("button.step-t")!;
   expect(open.textContent).toBe("src/app.ts");
   expect(open.getAttribute("aria-label")).toBe("Open src/app.ts in Code");
-  expect(skill.querySelector(".step-l")?.textContent).toBe("Read skill: orchestrator-protocol");
+  expect(skill.querySelector(".step-l")?.textContent).toBe("Read report: r_0123456789ab");
   expect(skill.querySelector("button")).toBeNull();
   open.click(); await settle();
   expect(location.search).toContain("file=src%2Fapp.ts");

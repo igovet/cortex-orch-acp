@@ -75,14 +75,17 @@ impl Sandbox {
         )
     }
 
+    /// `timings` receives per-stage durations (milliseconds) and counts, also when
+    /// preparation fails: numbers only, never paths or names.
     pub(crate) fn prepare_authorized(
         root: &Path,
         profile: Profile,
         writes: &[PathBuf],
         protected: &[PathBuf],
         before_write: &mut dyn FnMut() -> io::Result<()>,
+        timings: &mut BTreeMap<&'static str, u64>,
     ) -> io::Result<Self> {
-        Self::with_environment_authorized(
+        Self::with_environment_timed(
             root,
             profile,
             writes,
@@ -91,6 +94,7 @@ impl Sandbox {
             // In the per-command supervisor this is the PATH the service resolved for it.
             crate::tool_path::environment(),
             before_write,
+            timings,
         )
     }
 
@@ -103,12 +107,36 @@ impl Sandbox {
         environment: BTreeMap<OsString, OsString>,
         before_write: &mut dyn FnMut() -> io::Result<()>,
     ) -> io::Result<Self> {
+        Self::with_environment_timed(
+            root,
+            profile,
+            writes,
+            protected,
+            network,
+            environment,
+            before_write,
+            &mut BTreeMap::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_environment_timed(
+        root: &Path,
+        profile: Profile,
+        writes: &[PathBuf],
+        protected: &[PathBuf],
+        network: bool,
+        environment: BTreeMap<OsString, OsString>,
+        before_write: &mut dyn FnMut() -> io::Result<()>,
+        timings: &mut BTreeMap<&'static str, u64>,
+    ) -> io::Result<Self> {
         let binary = ["/usr/bin/bwrap", "/bin/bwrap"]
             .into_iter()
             .map(PathBuf::from)
             .find(|p| p.is_file())
             .ok_or_else(|| unavailable("bubblewrap_missing"))?;
-        Self::with_binary_authorized(
+        let started = Instant::now();
+        let result = Self::with_binary_authorized(
             binary,
             root,
             profile,
@@ -117,7 +145,10 @@ impl Sandbox {
             network,
             environment,
             before_write,
-        )
+            timings,
+        );
+        timings.insert("preparation_ms", started.elapsed().as_millis() as u64);
+        result
     }
 
     #[cfg(test)]
@@ -139,9 +170,11 @@ impl Sandbox {
             network,
             environment,
             &mut || Ok(()),
+            &mut BTreeMap::new(),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn with_binary_authorized(
         binary: PathBuf,
         root: &Path,
@@ -151,7 +184,9 @@ impl Sandbox {
         network: bool,
         environment: BTreeMap<OsString, OsString>,
         before_write: &mut dyn FnMut() -> io::Result<()>,
+        timings: &mut BTreeMap<&'static str, u64>,
     ) -> io::Result<Self> {
+        let millis = |since: Instant| since.elapsed().as_millis() as u64;
         let root = root.canonicalize()?;
         let scratch = std::env::temp_dir().join(format!(
             "cortex-command-{}",
@@ -210,9 +245,11 @@ impl Sandbox {
             .get(std::ffi::OsStr::new("HOME"))
             .map(PathBuf::from)
             .filter(|p| p.is_absolute() && p.is_dir());
+        let controls = Instant::now();
         let mut protected = policy::expand(&root, protected)?;
         protected.extend(policy::controls(&root, &s.environment)?);
         let git_dirs = policy::git_dirs(&root)?;
+        timings.insert("controls_ms", millis(controls));
         protected.extend(git_dirs.iter().cloned());
         policy::home(&mut s, &root, profile, &protected)?;
         for p in &protected {
@@ -222,7 +259,9 @@ impl Sandbox {
         let project_mount = s.args.len();
         s.mount("--ro-bind", &root, &root)?;
         if profile == Profile::ReadOnly {
+            let overlay = Instant::now();
             s.discard_project_writes(project_mount, &root)?;
+            timings.insert("overlay_probe_ms", millis(overlay));
             let options = s
                 .environment
                 .get(std::ffi::OsStr::new("PYTEST_ADDOPTS"))
@@ -243,13 +282,13 @@ impl Sandbox {
             .filter(|p| !git_dirs.contains(p))
             .cloned()
             .collect();
-        let link_overlays = policy::links(
-            &root,
-            profile,
-            writes,
-            &materialization_denials,
-            before_write,
-        )?;
+        let walked = Instant::now();
+        let tree = policy::scan(&root, writes, &materialization_denials)?;
+        timings.insert("tree_walk_ms", millis(walked));
+        timings.insert("tree_entries", tree.entries as u64);
+        let hardlinks = Instant::now();
+        let link_overlays = policy::links_from(&tree, &root, profile, before_write)?;
+        timings.insert("hardlink_policy_ms", millis(hardlinks));
         for p in writes {
             let p = match p.canonicalize() {
                 Ok(p) => p,
@@ -262,15 +301,16 @@ impl Sandbox {
             s.mount("--bind", &p, &p)?;
         }
         // Private controls and owner denials always follow writable grants.
-        let mut remaining = 2_000_000;
-        s.private_tree(&root, &mut remaining)?;
+        s.private_entries(&tree.private)?;
         for p in &protected {
             if p.starts_with(&root) && !git_dirs.contains(p) {
                 s.protect(p)?;
             }
         }
         let whole = writes.iter().any(|p| p == &root);
-        policy::git(&mut s, &root, profile, whole)?;
+        let git = Instant::now();
+        policy::git(&mut s, &root, &git_dirs, profile, whole)?;
+        timings.insert("git_policy_ms", millis(git));
         for p in link_overlays {
             s.mount("--ro-bind", &p, &p)?;
         }
@@ -310,7 +350,10 @@ impl Sandbox {
         ssh::configure(&mut s, home.as_deref())?;
         s.args
             .extend([OsString::from("--chdir"), root.into_os_string()]);
-        s.probe()?;
+        let probe = Instant::now();
+        let probed = s.probe();
+        timings.insert("probe_ms", millis(probe));
+        probed?;
         Ok(s)
     }
 
@@ -381,7 +424,9 @@ impl Sandbox {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut child = probe.spawn()?;
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Generous for a loaded host: a probe that merely ran slowly must not leave a
+        // read-only command without its discarded project overlay.
+        let deadline = Instant::now() + Duration::from_secs(20);
         let supported = loop {
             match child.try_wait()? {
                 Some(status) => break status.success(),
@@ -442,35 +487,15 @@ impl Sandbox {
         Ok(())
     }
 
-    fn private_tree(&mut self, root: &Path, remaining: &mut usize) -> io::Result<()> {
-        for e in fs::read_dir(root)? {
-            if *remaining == 0 {
-                return Err(unavailable("project_tree_limit"));
-            }
-            *remaining -= 1;
-            let e = e?;
-            let p = e.path();
-            if [
-                ".git",
-                ".cortex",
-                ".cortex-dev",
-                ".cortex-dev-owner.json",
-                ".cortex-workspace-dev.json",
-            ]
-            .iter()
-            .any(|n| e.file_name() == *n)
+    /// Hides every private-named entry the preparation scan found at any depth.
+    fn private_entries(&mut self, entries: &[PathBuf]) -> io::Result<()> {
+        for p in entries {
+            if p.file_name()
+                .is_some_and(|n| n == ".cortex-dev-owner.json" || n == ".cortex-workspace-dev.json")
             {
-                if e.file_name() == ".cortex-dev-owner.json"
-                    || e.file_name() == ".cortex-workspace-dev.json"
-                {
-                    self.mount("--ro-bind", Path::new("/dev/null"), &p)?;
-                } else {
-                    self.protect(&p)?;
-                }
-            } else if e.file_type()?.is_dir() {
-                self.private_tree(&p, remaining)?;
+                self.mount("--ro-bind", Path::new("/dev/null"), p)?;
             } else {
-                // Hardlink policy is applied over the complete writable set.
+                self.protect(p)?;
             }
         }
         Ok(())
@@ -484,7 +509,7 @@ impl Sandbox {
         let mut child = command
             .spawn()
             .map_err(|_| unavailable("bubblewrap_launch_failed"))?;
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(20);
         loop {
             match child.try_wait()? {
                 Some(s) if s.success() => return Ok(()),
@@ -677,7 +702,7 @@ pub(crate) fn ignored_directories(root: &Path) -> io::Result<Vec<PathBuf>> {
         .stderr(Stdio::null())
         .stdout(file.try_clone()?)
         .spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let status = loop {
         match child.try_wait()? {
             Some(status) => break status,
@@ -1109,6 +1134,45 @@ mod tests {
             r#"test "$(cortex-fixture-node)" = fixture-node-tool; ! touch "$1/injected""#,
             &[&bin],
         );
+    }
+    /// Manual benchmark of command preparation on a real project, never run by default:
+    /// `CORTEX_PREPARATION_BENCH_ROOT=<project> cargo test -p workspace-service --lib
+    /// preparation_benchmark -- --ignored --nocapture`. It uses the read-only profile
+    /// with the whole project as its write set, so every regular file is inspected
+    /// for hard links, yet nothing in the project is ever written.
+    #[test]
+    #[ignore]
+    fn preparation_benchmark() {
+        let Some(root) = std::env::var_os("CORTEX_PREPARATION_BENCH_ROOT").map(PathBuf::from)
+        else {
+            return;
+        };
+        let root = root.canonicalize().unwrap();
+        let mut environment = BTreeMap::new();
+        environment.insert(
+            "HOME".into(),
+            std::env::var_os("HOME").unwrap_or_else(|| "/nonexistent".into()),
+        );
+        for round in 0..5 {
+            let mut timings = BTreeMap::new();
+            let started = Instant::now();
+            let s = Sandbox::with_environment_timed(
+                &root,
+                Profile::ReadOnly,
+                &[root.clone()],
+                &[],
+                false,
+                environment.clone(),
+                &mut || Ok(()),
+                &mut timings,
+            )
+            .unwrap();
+            eprintln!(
+                "round {round}: full preparation {} ms, stages {timings:?}",
+                started.elapsed().as_millis(),
+            );
+            drop(s);
+        }
     }
     #[test]
     fn failed_setup_never_executes_payload() {

@@ -212,6 +212,60 @@ it("automatically reads every history page and retains live arrivals",async()=>{
   expect(document.querySelector(".stream")?.textContent).toMatch(/First page.*Middle page.*Latest page.*Live arrival/);
 });
 
+it("restores the saved worker scroll offset after a failed history read is retried", async () => {
+  const state = withTask(emptyWorkspace(), "Paged worker");
+  const note = (sequence: number, text: string) => ({ sequence, kind: "note" as const, text, at: null });
+  const fullPage = { activity: [note(1, "Earlier observation")], activityCursor: null, messages: [] };
+  state.workers = [
+    feedWorker({ status: "working", result: null, activityCursor: "older", activity: [note(2, "Latest observation")] }),
+    feedWorker({ id: "other", role: "reviewer", status: "working", result: null }),
+  ];
+  const cursors: (string | undefined)[] = [];
+  let failHistory!: (error: Error) => void;
+  await mount(`/m/${LOCAL_MACHINE_ID}/t/t/workers/w`, state, p => {
+    p.port.readWorkerActivity = async (_task, _worker, cursor) => {
+      cursors.push(cursor);
+      if (cursors.length === 2) return new Promise((_resolve, reject) => { failHistory = reject; });
+      return fullPage;
+    };
+  });
+  const stream = () => document.querySelector<HTMLElement>(".livepane .stream")!;
+  const pick = async (id: string) => {
+    const select = document.querySelector<HTMLSelectElement>(".ws-worker-picker select")!;
+    select.value = id;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+  };
+  const original = stream();
+  original.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+  original.scrollTop = 700;
+  original.dispatchEvent(new Event("scroll"));
+  await pick("other");
+  await pick("w");
+  const returned = stream();
+  expect(returned).not.toBe(original);
+  expect(cursors).toEqual(["older", "older"]);
+
+  // jsdom has no layout. Model WebKit clamping the offset until the earlier rows are back.
+  let top = 0;
+  Object.defineProperties(returned, {
+    clientHeight: { get: () => 400 },
+    scrollHeight: { get: () => returned.textContent?.includes("Earlier observation") ? 1400 : 500 },
+    scrollTop: { get: () => top, set: (value: number) => { top = Math.min(value, returned.scrollHeight - returned.clientHeight); } },
+  });
+  failHistory(new Error("Activity read interrupted"));
+  await settle();
+  const alert = returned.querySelector('[role="alert"]')!;
+  expect(alert.textContent).toContain("Activity read interrupted");
+  alert.querySelector<HTMLButtonElement>("button")!.click();
+  await settle();
+  expect(cursors).toEqual(["older", "older", "older"]);
+  expect(returned.querySelector('[role="alert"]')).toBeNull();
+  expect(returned.textContent).toContain("Earlier observation");
+  expect(returned.scrollTop).toBe(700);
+  expect(document.querySelector<HTMLInputElement>('[aria-label="Follow new activity"]')?.checked).toBe(false);
+});
+
 it("opens the worker result on a card with its report, without a disclosure triangle",async()=>{
   const state=withTask(emptyWorkspace(),"Feed task");
   state.tasks[0].status="review"; state.workers=[feedWorker({status:"failed",result:{summary:"Could not finish.",checks:[],reportId:"r_1"} as Worker["result"]})];
@@ -264,7 +318,7 @@ it("shows the recorded model and effort wherever an agent is named, and omits th
 it("shows the coordinator's recorded feed instead of an empty note",async()=>{
   const state=withTask(emptyWorkspace(),"Coordinator");
   state.tasks[0].status="working"; state.tasks[0].process="live"; state.tasks[0].coordinatorRoute={model:"gpt-6-luna",effort:"high"};
-  let page={activity:[{sequence:1,kind:"note",text:"Planning the work.",at:null},{sequence:2,kind:"tool",text:"mcp__cortex__plan_submit",at:null}],activityCursor:null,messages:[]} as Awaited<ReturnType<NonNullable<ReturnType<typeof scriptedPort>["port"]["readWorkerActivity"]>>>;
+  let page={activity:[{sequence:1,kind:"note",text:"Planning the work.",at:null},{sequence:2,kind:"tool",text:"mcp__cortex__project_read",at:null},{sequence:9,kind:"tool",text:"mcp__cortex__plan_submit",at:null}],activityCursor:null,messages:[]} as Awaited<ReturnType<NonNullable<ReturnType<typeof scriptedPort>["port"]["readWorkerActivity"]>>>;
   const ids:string[]=[];
   const p=await mount(`/m/${LOCAL_MACHINE_ID}/t/t/workers/cortex`,structuredClone(state),x=>{x.port.readWorkerActivity=async(taskId,id)=>{ids.push(`${taskId}:${id}`);return page;};});
   await settle();
@@ -274,7 +328,8 @@ it("shows the coordinator's recorded feed instead of an empty note",async()=>{
   expect(pane.querySelector('[aria-label="Find in this activity"]')).not.toBeNull();
   expect(pane.textContent).toContain("Planning the work.");
   expect(pane.textContent).not.toContain("Nothing to report");
-  expect(pane.querySelector("button.fold")?.textContent).toContain("Used 1 other tool");
+  expect(pane.textContent).not.toContain("Submit plan");
+  expect(pane.querySelector("button.fold")?.textContent).toContain("Read 1 file");
   expect(pane.querySelector(".composer")).toBeNull();
   page={...page,activity:[...page.activity!,{sequence:3,kind:"note",text:"Second step.",at:null}]};
   state.tasks[0].title="Coordinator renamed";
@@ -286,7 +341,7 @@ it("reads the coordinator's streamed pieces as one message, not one paragraph pe
   const state=withTask(emptyWorkspace(),"Coordinator");
   state.tasks[0].status="working"; state.tasks[0].process="live";
   const note=(sequence:number,text:string)=>({sequence,kind:"note" as const,text,at:null});
-  const page={activity:[note(1,"Начинаю "),note(2,"делать поля "),note(3,"ввода."),{sequence:4,kind:"tool" as const,text:"mcp__cortex__plan_submit",at:null},note(5,"Изменения "),note(6,"готовы.")],activityCursor:null,messages:[]} as Awaited<ReturnType<NonNullable<ReturnType<typeof scriptedPort>["port"]["readWorkerActivity"]>>>;
+  const page={activity:[note(1,"Начинаю "),note(2,"делать поля "),note(3,"ввода."),{sequence:4,kind:"tool" as const,text:"mcp__cortex__plan_submit",at:null}/* hidden plumbing still ends a message */,note(5,"Изменения "),note(6,"готовы.")],activityCursor:null,messages:[]} as Awaited<ReturnType<NonNullable<ReturnType<typeof scriptedPort>["port"]["readWorkerActivity"]>>>;
   await mount(`/m/${LOCAL_MACHINE_ID}/t/t/workers/cortex`,structuredClone(state),x=>{x.port.readWorkerActivity=async()=>page;});
   await settle();
   const notes=[...document.querySelectorAll(".livepane .ev-note")].map(n=>n.textContent?.trim());

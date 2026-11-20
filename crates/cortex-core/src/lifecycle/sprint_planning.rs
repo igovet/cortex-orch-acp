@@ -100,11 +100,13 @@ pub fn submit_tx(
         // review-cycle budget of other tasks. The owner's answer to a review-cycle
         // stop ("continue") therefore grants a fresh budget at the first submission
         // after it; without this every later submission stopped again at once.
+        // The stop reaches the owner either as the runtime's own question (WAITING_USER
+        // with the blocker) or, the first time, through the coordinator's question
+        // after `ASK_USER_REQUIRED` with the blocker: an answer after either grants.
         let granted: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM runtime_events a WHERE a.task_id=?1 AND a.type='USER_ANSWER_RECEIVED'
-             AND a.id>(SELECT coalesce(max(id),0) FROM runtime_events WHERE task_id=?1 AND type='TASK_STATE_CHANGED'
-                 AND json_valid(payload_json) AND json_extract(payload_json,'$.blocker')='review_cycle_limit')
-             AND EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?1 AND type='TASK_STATE_CHANGED'
+             AND a.id>(SELECT max(id) FROM runtime_events WHERE task_id=?1
+                 AND type IN ('TASK_STATE_CHANGED','ASK_USER_REQUIRED')
                  AND json_valid(payload_json) AND json_extract(payload_json,'$.blocker')='review_cycle_limit')
              AND NOT EXISTS(SELECT 1 FROM runtime_events r WHERE r.task_id=?1
                  AND r.type='SPRINT_PLAN_REVIEW_SCHEDULED' AND r.id>a.id))",

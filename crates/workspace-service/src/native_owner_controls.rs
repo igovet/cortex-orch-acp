@@ -1067,7 +1067,17 @@ impl Runtime {
                         synthesis.as_deref().unwrap_or("Native result summary unavailable.")
                     } else {"Native host command observations; owner reruns do not certify completion."});
                     result["version"]=json!(ordinal);
-                    product["tasks"][&draft]["result"]=result;
+                    let presented = &mut product["tasks"][&draft];
+                    presented["result"] = result;
+                    // These are check observations, not a refusal of the final result.
+                    // The independently read board can already be in Review by the time
+                    // these facts are displayed. Preserve any recorded owner decision.
+                    if matches!(state.as_str(), "EXECUTING" | "REVIEWING" | "VERIFYING" | "RECONCILING")
+                        && presented["reviewActions"].is_null()
+                    {
+                        presented["reviewActions"] = json!({"accept":false,"pending":true,
+                            "reason":"Waiting for Cortex to finish this result…","unblockAction":"wait"});
+                    }
                 }
                 }
                 // The newest queued guidance messages ride with the product; older ones are read, per worker,
@@ -1076,10 +1086,10 @@ impl Runtime {
                 let guidance_floor=if more_queued {oldest} else {None};
                 if !workers_only {product["messages"].as_array_mut().ok_or(CoreError::Refused("state_unreadable"))?.extend(queued);}
                 if !wanted {continue;}
-                let nodes=db.prepare("SELECT n.assignment_ref,n.role,n.objective,n.status,p.status,n.scope_json,n.result_json,n.revision,p.attempt_id FROM runtime_nodes n
+                let nodes=db.prepare("SELECT n.assignment_ref,n.role,n.objective,n.status,p.status,n.scope_json,n.result_json,n.revision,p.attempt_id,n.node_id FROM runtime_nodes n
                     JOIN delegation_provisioning p ON p.task_id=n.task_id AND p.idempotency_key=n.assignment_ref
                     WHERE n.task_id=? ORDER BY n.rowid DESC LIMIT 1001")?
-                    .query_map([&task],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,i64>(7)?,r.get::<_,Option<String>>(8)?)))?
+                    .query_map([&task],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?,r.get::<_,Option<String>>(6)?,r.get::<_,i64>(7)?,r.get::<_,Option<String>>(8)?,r.get::<_,Option<String>>(9)?)))?
                     .collect::<Result<Vec<_>,_>>()?;
                 let mut nodes=nodes;
                 if nodes.len()>1000 {nodes.truncate(1000);partial.insert("workers".into(),json!(true));}
@@ -1131,7 +1141,9 @@ impl Runtime {
                 }
                 // The task's command receipts, read once for all its workers (each worker filters its own below).
                 let mut command_rows:Option<Vec<(i64,String,Value,Option<String>,Option<i64>,Option<String>)>>=None;
-                for (id,role,goal,status,process,scope,node_result,revision,attempt) in nodes {
+                // The plan revisions the workers ran under: a superseded worker names the one that replaced it.
+                let revisions:std::collections::BTreeSet<i64>=nodes.iter().map(|n|n.7).collect();
+                for (id,role,goal,status,process,scope,node_result,revision,attempt,node) in nodes {
                     if params["workerId"].as_str().is_some_and(|w|w!=id) {continue;}
                     let superseded=revision<current_revision || reopened.is_some_and(|r|revision<=r);
                     let mut activity=Vec::new();
@@ -1224,12 +1236,14 @@ impl Runtime {
                     // with their receipts, so only a refused one is repeated as a step. The
                     // newest steps fill what the bound leaves; a cut keeps `activityPartial` and its `activityCursor`.
                     // Refusals of this attempt's result submissions, by code only, oldest first.
-                    let refusals:Vec<String>=match attempt.as_deref() {
-                        Some(a)=>db.prepare("SELECT json_extract(payload_json,'$.code') FROM runtime_events WHERE task_id=? AND type='WORKER_RESULT_REFUSED'
+                    // With each code, the outstanding items it named (paths, report ids or parts), if any.
+                    let refusal_rows:Vec<(String,Option<String>)>=match attempt.as_deref() {
+                        Some(a)=>db.prepare("SELECT json_extract(payload_json,'$.code'),CASE WHEN json_type(payload_json,'$.missing')='array' THEN json_extract(payload_json,'$.missing') END FROM runtime_events WHERE task_id=? AND type='WORKER_RESULT_REFUSED'
                             AND json_extract(payload_json,'$.attempt')=? AND json_type(payload_json,'$.code')='text' ORDER BY id LIMIT 101")?
-                            .query_map((&task,a),|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?,
+                            .query_map((&task,a),|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?)))?.collect::<Result<Vec<_>,_>>()?,
                         None=>Vec::new(),
                     };
+                    let refusals:Vec<String>=refusal_rows.iter().map(|(code,_)|code.clone()).collect();
                     if let (Some(session),Some(own))=(&session,attempt.as_deref().and_then(|a|calls.get(a))) {
                         let mut steps=Vec::new();
                         for (call,first,last,stamp) in own {
@@ -1326,7 +1340,12 @@ impl Runtime {
                             info.insert("verdict".into(),json!(verdict));
                         }
                         if let Some(items)=recorded.as_ref().and_then(|r|r["not_covered"].as_array()) {
-                            let covered=items.iter().filter_map(|item|Some(json!({"item":item["item"].as_str()?.to_owned(),"reason":item["reason"].as_str()?.to_owned()}))).collect::<Vec<_>>();
+                            let covered=items.iter().filter_map(|item|{
+                                let mut part=json!({"item":item["item"].as_str()?.to_owned(),"reason":item["reason"].as_str()?.to_owned()});
+                                // The dead-end kind the reviewer named (for example `tool_unavailable`), when it named one.
+                                if let Some(kind)=item["blocker"].as_str().or(item["blocker"]["kind"].as_str()) {part["blocker"]=json!(kind);}
+                                Some(part)
+                            }).collect::<Vec<_>>();
                             if !covered.is_empty() { info.insert("notCovered".into(),json!(covered)); }
                         }
                         if let Some(event)=outgoing.or(incoming) {
@@ -1357,7 +1376,28 @@ impl Runtime {
                         let ended=if stopped {Some("stopped_by_owner")} else if status=="cancelled" {Some("cancelled_by_coordinator")} else if lost {Some("worker_lost")} else {None};
                         if let Some(ended) = ended {worker["endedReason"]=json!(ended);}
                     }
-                    if let Some(last)=refusals.last() {worker["resultRefusals"]=json!({"count":refusals.len(),"code":last});}
+                    // Every distinct refusal code (oldest first) and up to three items the latest
+                    // refusal named, so the owner reads why it was sent back, not only that it was.
+                    if let Some(last)=refusals.last() {
+                        let mut codes:Vec<&String>=Vec::new();
+                        for code in &refusals { if !codes.contains(&code) {codes.push(code);} }
+                        let missing:Vec<String>=refusal_rows.last().and_then(|(_,m)|m.as_deref())
+                            .and_then(|m|serde_json::from_str::<Vec<Value>>(m).ok()).unwrap_or_default()
+                            .iter().filter_map(Value::as_str).take(3).map(|s|s.chars().take(300).collect()).collect();
+                        worker["resultRefusals"]=json!({"count":refusals.len(),"code":last,"codes":codes});
+                        if !missing.is_empty() {worker["resultRefusals"]["missing"]=json!(missing);}
+                    }
+                    // A worker the coordinator cancelled whose session is still being stopped.
+                    if status=="cancelled" && !matches!(process.as_str(),"terminated"|"ambiguous") {worker["stopping"]=json!(true);}
+                    // The plan node this worker ran (its retries share it) and, for a worker of an
+                    // earlier plan, the plan revision that replaced it.
+                    if let Some(node)=&node {worker["node"]=json!(node);}
+                    if revision<current_revision {worker["replacedIn"]=json!(revisions.range(revision+1..).next().copied().unwrap_or(current_revision));}
+                    // The dead-end kind of a worker that reported its assignment failed.
+                    if status=="failed" {
+                        if let Some(kind)=node_result.as_deref().and_then(|raw|serde_json::from_str::<Value>(raw).ok())
+                            .and_then(|r|r["blocker"]["kind"].as_str().map(str::to_owned)) {worker["blockerKind"]=json!(kind);}
+                    }
                 }
             }
             let mut value=json!({"product":product,"workers":workers});
@@ -1800,6 +1840,11 @@ impl NativeHost {
             receipt["observation"]["complete"] = json!(false);
             receipt["observation"]["failure"] = json!("owner_stopped");
         }
+        // The verifier sandbox mounts deliverable files read-only.
+        crate::native_change_set::add(
+            &mut receipt["observation"],
+            &crate::native_change_set::unchanged("read_only"),
+        );
         let t = task.to_owned();
         let raw = receipt.clone();
         let recorded = recv(self.executor.write(move |db| {

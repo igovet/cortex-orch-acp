@@ -962,7 +962,10 @@ mod recent_tests {
         let fresh = native_observation(&root).await.unwrap();
         assert_ne!(fresh, first);
         assert_eq!(recent_observation(root.clone()).await.unwrap(), fresh);
-        assert!(slot.lock().await.is_none(), "recent metadata must not be reused");
+        assert!(
+            slot.lock().await.is_none(),
+            "recent metadata must not be reused"
+        );
         OBSERVED.lock().unwrap().remove(&root);
         std::fs::remove_dir_all(root).unwrap();
     }

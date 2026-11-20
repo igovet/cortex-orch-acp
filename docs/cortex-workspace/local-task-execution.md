@@ -993,7 +993,7 @@ Machine connectivity and task process confirmation are separate. An unconfirmed 
 
 An unconfirmed task never leaves the owner without a decision. A native `RECOVERING` task with no recorded reason is unconfirmed only while one of its owned processes is not confirmed gone, and its projection names which case holds:
 
-- `process_exit_pending`: a session of the task is still being stopped (its delegation or capacity reservation is still live). Its own shutdown observation settles it, and a settled reservation republishes the task (capacity reservations are hooked into the change outbox), so the task becomes an ended turn by itself. The conversation shows one quiet line and asks nothing; an Automatic or Hybrid queue waits for it without a hold.
+- `process_exit_pending`: a session of the task is still being stopped (its delegation or capacity reservation is still live). Its own shutdown observation settles it, and a settled reservation republishes the task (capacity reservations are hooked into the change outbox), so the task becomes an ended turn by itself. The conversation shows one quiet line and asks nothing; an Automatic or Hybrid queue waits for it without a hold. When a replan cancelled a live worker and no `LIVE_CANCELLATIONS_SETTLED` covers that cancellation yet, the projection also carries `cancelled_worker_stopping`, and `waitReason` names the still-live cancelled roles as `cancelled_worker_stopping:<roles>` (comma-separated, without `worker-`); the hold is unchanged, and the quiet line reads "Waiting for <role> to stop. The coordinator cancelled it to change the plan."
 - `process_exit_unconfirmed`: the host recorded that the process did not confirm its exit (delegation and
   reservation `ambiguous`). The running service checks it again by itself on its scheduler passes (on the
   30-second safety tick and on task changes, in any project that has such an exit), with the same process
@@ -1166,7 +1166,9 @@ The sidebar keeps the task title visible during recovery. A short status appears
 **Continuations and pauses.** When a process stop ends a task in an Automatic sprint (for example a driver stop, a session that fails to start, a lost worker, or a failed or unobserved check), the runtime records a continuation with its reason and evidence, and resumes planning without asking you. Each continuation is counted per task:
 
 - The fourth continuation asks the senior consultant once. Its answer joins the next plan through the ordinary consultation path.
-- After eight continuations, the next stop pauses the queue (`continuation_cap`). The task's decision card offers **Allow more attempts**. It starts fresh planning with a renewed bounded retry budget only after the runtime confirms the previous processes and effects have settled. It does not reset the lifetime continuation count or ask the consultant again.
+- After eight continuations, the next stop pauses the queue (`continuation_cap`). The task's decision card offers **Allow more attempts**. It starts fresh planning with a renewed bounded retry budget only after the runtime confirms the previous processes and effects have settled. It does not reset the lifetime continuation count or ask the consultant again. The card says what the counted attempts went to, each stop reason with how often (for example "the review is incomplete (7 times)").
+- A review that cannot be completed is said to the owner before the attempts run out: when the reviewer reports the same item unreachable with its tools (`tool_unavailable`) in two dead-end reviews since the budget was last renewed, the task resumed or reopened, and its newest dead end still names it, the task pins "This review cannot be completed" with "The reviewer cannot read <item> with its tools, so this review cannot be completed. Close as is, or change the file so it can be read." and **Close as is…**. At that stop the runtime pauses the task as `owner_blocker` (the pause records the item and its count; only the owner resumes it, with Allow more attempts, which renews the budget, or Close as is…) instead of spending another automatic attempt on a review that cannot change; after the owner resumes, two new dead ends on the item are needed to pause again (`repeated_review_dead_end` in `crates/cortex-core/src/lifecycle/automatic.rs`, which the projection shares).
+- A model that produced unusable output twice in a row, or a review dead end repeated on the same unreadable item, pauses the task as `owner_blocker`: the runtime never resumes it by itself, and the decision card offers **Allow more attempts** (which renews the budget) and **Close as is…**.
 - A route, connection, quota or authentication problem pauses the task as `external_blocker`. The service resumes it by itself only after the route is observed qualified again. It does not log in or make a paid model call to do so.
 - An effect whose outcome cannot be confirmed pauses the task as `outcome_unknown`. It is never replayed and does not resume by itself; the decision card offers **I checked it, continue** and **Close as is…**.
 
@@ -1292,8 +1294,10 @@ pass. Acceptance observes the checkout again. `results.get.acceptanceAvailable` 
 rather than an always-false placeholder. `product.read.tasks[taskId].reviewActions` supplies
 Accept/Request changes availability, a readable blocking reason and the unblocking action (`wait`,
 `request_changes`, `rerun_checks` or `refresh`), plus current result identity/version/digest and whether
-technical blockers require explicit acknowledgement. The mutation rechecks these facts and the result
-version. Request changes uses the existing owning-execution prompt control; it does not require acceptance
+technical blockers require explicit acknowledgement. Check observations can arrive before
+the final result facts: the card keeps Accept off and shows a waiting message, not an
+evidence failure. A settled read can still report missing evidence or changed files.
+The mutation rechecks these facts and the result version. Request changes uses the existing owning-execution prompt control; it does not require acceptance
 or Git. For a settled completed result, the service restores its exact durable session automatically
 before capturing owner guidance, including after restart; a live stale or differently bound session still
 refuses. An informational answer with no checks can be accepted when its runtime evidence permits it; this
@@ -1377,7 +1381,9 @@ studied evidence (coverage of the description, self-contained items, sane
 dependencies, nothing the evidence contradicts). Findings return the task to its
 coordinator for a revised plan under the usual bounded review rounds and
 coordinator returns; repeated findings or the round limit stop the task the
-run-mode way. An approved plan passes the runtime verification
+run-mode way. When the owner answers after a round-limit stop (the runtime's
+own stop question, or the coordinator's question that the first such stop
+asks for), the next submitted plan starts a fresh review budget. An approved plan passes the runtime verification
 (`VERIFICATION_PASSED` with `runtime: sprint_plan`) only when it is the newest
 plan and the one that review approved; the task then completes through the
 ordinary completion gate.

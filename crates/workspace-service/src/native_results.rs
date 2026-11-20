@@ -74,6 +74,31 @@ fn validate_result(
             }
         }
     }
+    // A cited pass whose run did not observe the exact submitted checkout may still be
+    // bound to its own work set: the host compares that set's files now with the
+    // stable observation retained across the run (`native_work_set`).
+    let mut digests = std::collections::BTreeMap::new();
+    for run in &mut runs {
+        let reference = run.receipt["tool_call_ref"].as_str().unwrap_or("");
+        let cited = submitted
+            .iter()
+            .any(|c| c["outcome"] == "passed" && c["tool_call_ref"] == reference);
+        let exact = run.receipt["revision_digest"]
+            .as_str()
+            .is_some_and(|d| d.len() == 64 && Some(d) == evidence.project_digest.as_deref());
+        if !cited || exact || reference.is_empty() || run.operation != "command_run" {
+            continue;
+        }
+        if let Some(assignment) = i.assignment.as_deref() {
+            run.work_set = crate::native_work_set::binding_at_submission(
+                store,
+                &i.task,
+                assignment,
+                reference,
+                &mut digests,
+            )?;
+        }
+    }
     // Retain only this attempt's observed failures/pending receipts, including
     // citations whose explicit correction will subsequently be refused.
     let presented_now: Vec<_> = submitted
@@ -102,14 +127,23 @@ fn validate_result(
     let checks = worker_checks::evaluate(submitted, &runs, evidence.project_digest.as_deref())?;
     let presented:Vec<String>=store.read(|db|Ok(db.prepare("SELECT json_extract(payload_json,'$.ref') FROM runtime_events WHERE task_id=? AND type='CHECK_FAILURE_PRESENTED' AND json_extract(payload_json,'$.attempt')=?")?
         .query_map((&i.task,&i.attempt),|r|r.get(0))?.collect::<Result<Vec<_>,_>>()?))?;
-    if presented.iter().any(|r| {
-        runs.iter()
-            .any(|run| run.receipt["tool_call_ref"] == *r && run.verified_failure())
-            && !submitted.iter().any(|c| {
+    let omitted: Vec<String> = presented
+        .iter()
+        .filter_map(|r| {
+            let run = runs
+                .iter()
+                .find(|run| run.receipt["tool_call_ref"] == *r && run.verified_failure())?;
+            let cited = submitted.iter().any(|c| {
                 matches!(c["outcome"].as_str(), Some("passed" | "failed"))
                     && c["tool_call_ref"] == *r
-            })
-    }) {
+            });
+            let program = run.receipt["argv"][0].as_str().unwrap_or("command");
+            let program: String = program.rsplit('/').next().unwrap_or(program).chars().take(40).collect();
+            (!cited).then(|| format!("[{r}] ({program}, exit {}): an earlier submission cited this failed run; cite it again as a failed check (a verified exact passing rerun, cited as passed under the same name, closes it)", run.receipt["exit_code"]))
+        })
+        .collect();
+    if !omitted.is_empty() {
+        refusal_details(&c.channel_id, "omitted_failed_check", omitted);
         return Err(CoreError::Refused("omitted_failed_check"));
     }
     // A reviewer that does not approve (REQUEST_CHANGES, BLOCK or INCOMPLETE) may cite
@@ -126,6 +160,11 @@ fn validate_result(
             && args["assignment_outcome"] != "failed"
             && !review_requests_changes
         {
+            refusal_details(
+                &c.channel_id,
+                "open_failed_check",
+                worker_checks::open_items(&checks, &runs),
+            );
             return Err(CoreError::Refused("open_failed_check"));
         }
         if matches!(check["outcome"].as_str(), Some("not_run" | "unverified"))
@@ -276,6 +315,18 @@ pub(super) fn outstanding(
     }
     Ok(None)
 }
+/// The items of an open or omitted failed check, computed by `validate_result` from
+/// the evaluation it refused (the checkout and work-set observations it used are not
+/// repeatable afterwards), by channel. Taken once by `refusal_missing` in the same
+/// serial publication step.
+static REFUSAL_DETAILS: std::sync::Mutex<
+    std::collections::BTreeMap<String, (&'static str, Vec<String>)>,
+> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+fn refusal_details(channel: &str, code: &'static str, items: Vec<String>) {
+    if let Ok(mut details) = REFUSAL_DETAILS.lock() {
+        details.insert(channel.to_owned(), (code, items));
+    }
+}
 /// The items a refusal names in its `missing` field, recomputed from the refused
 /// arguments: report sections, or what the worker has still to do.
 pub(super) fn refusal_missing(
@@ -287,6 +338,15 @@ pub(super) fn refusal_missing(
 ) -> Option<Vec<String>> {
     if code == cortex_core::assignment_brief::SECTIONS_MISSING {
         return Some(missing_sections(store, i, args));
+    }
+    let detail = REFUSAL_DETAILS
+        .lock()
+        .ok()
+        .and_then(|mut d| d.remove(&c.channel_id));
+    if matches!(code, "open_failed_check" | "omitted_failed_check") {
+        return detail
+            .filter(|(refused, items)| *refused == code && !items.is_empty())
+            .map(|(_, items)| items);
     }
     match outstanding(store, c, i, args) {
         Ok(Some((found, items))) if found == code && !items.is_empty() => Some(items),
@@ -370,7 +430,7 @@ mod evidence_tests {
         assert!(reply["structuredContent"]["message"]
             .as_str()
             .unwrap()
-            .contains("rerun the exact same command"));
+            .contains("Each item in missing names the check"));
         // A structural refusal names exactly the missing headings and is correctable.
         let reply = refusal_reply_with("report_sections_missing", Some(vec!["## Changes".into()]));
         assert_eq!(reply["structuredContent"]["missing"], json!(["## Changes"]));
@@ -724,6 +784,18 @@ mod evidence_tests {
                 .code(),
             "open_failed_check"
         );
+        // The refusal names the open check, its receipt and what keeps it open.
+        let items = refusal_missing(&store, &c, &i, &failed_args, "open_failed_check").unwrap();
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(
+            items[0].starts_with("tests [native-command:failed]: no_passing_rerun:"),
+            "{items:?}"
+        );
+        // Taken once: a later unrelated refusal does not repeat it.
+        assert_eq!(
+            refusal_missing(&store, &c, &i, &failed_args, "open_failed_check"),
+            None
+        );
         let mut explicit_failure = failed_args.clone();
         explicit_failure["assignment_outcome"] = json!("failed");
         let mut reader = i.clone();
@@ -765,6 +837,11 @@ mod evidence_tests {
                 .code(),
             "omitted_failed_check"
         );
+        let items = refusal_missing(&store, &c, &i, &success_args, "omitted_failed_check").unwrap();
+        assert!(
+            items[0].starts_with("[native-command:failed] (cargo, exit 1)"),
+            "{items:?}"
+        );
         failed_args["checks"]
             .as_array_mut()
             .unwrap()
@@ -791,6 +868,123 @@ mod evidence_tests {
                 .unwrap_err()
                 .code(),
             "open_failed_check"
+        );
+        // The item names the actual gap (both runs share the tampered output here).
+        let items = refusal_missing(&store, &c, &i, &failed_args, "open_failed_check").unwrap();
+        assert!(
+            items[0].starts_with("tests [native-command:failed]: call_incomplete:"),
+            "{items:?}"
+        );
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// A pass whose run saw the shared checkout change elsewhere (another task's
+    /// writes) verifies against its own unchanged work set, and only that.
+    #[test]
+    fn a_pass_binds_to_its_unchanged_work_set_while_other_files_change() {
+        let root = std::env::temp_dir().join(format!(
+            "native-work-set-submit-{}",
+            crate::native_effects::identity().unwrap()
+        ));
+        std::fs::create_dir_all(root.join("ui")).unwrap();
+        std::fs::create_dir_all(root.join("core")).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(root.join(".gitignore"), ".cortex-dev/\n").unwrap();
+        std::fs::write(root.join("ui/a.ts"), "a").unwrap();
+        std::fs::write(root.join("core/x.rs"), "x").unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "."],
+            vec!["commit", "-qm", "base"],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let store = Store::open(
+            ProjectKey::new(&root, StoreChannel::Dev).unwrap(),
+            OpenMode::Initialize,
+        )
+        .unwrap();
+        let machine = TaskMachine::new(&store);
+        let owner = machine.create("t", "checks", "owner").unwrap();
+        machine
+            .transition(
+                "t",
+                &owner,
+                "planning",
+                TaskState::Planning,
+                None,
+                &FoundationGuards,
+            )
+            .unwrap();
+        let c = store
+            .write(|db| channels::issue_tx(db, "t", &owner, channels::Principal::Coordinator))
+            .unwrap();
+        let i = Identity {
+            task: "t".into(),
+            attempt: "fixture".into(),
+            principal: "fixture".into(),
+            epoch: 1,
+            role: "worker".into(),
+            profile: Some("worker-frontend-dev".into()),
+            stage: Some("execution".into()),
+            assignment: Some("a".into()),
+            session: None,
+        };
+        let dir = store.key().directory().join("t").join(".native-output");
+        cortex_core::store::locks::private_directory(dir.parent().unwrap(), true).unwrap();
+        cortex_core::store::locks::private_directory(&dir, true).unwrap();
+        let mut file =
+            cortex_core::store::locks::open_private(&dir.join("lo_fixture.bin"), true, false)
+                .unwrap();
+        use std::io::Write;
+        file.write_all(b"complete output").unwrap();
+        file.sync_all().unwrap();
+        let hash = crate::native_project::digest(b"complete output");
+        // The checkout changed during the run: the receipt has no checkout digest.
+        let receipt = json!({"tool_call_ref":"native-command:fixture","argv":["npm","test"],
+            "cwd":root,"profile":"development","complete":true,"settled":true,"exit_code":0,"failure":null,
+            "revision_digest":null,"large_output_id":"lo_fixture","byte_count":15});
+        let set = vec!["ui/**".to_owned()];
+        let observed = crate::native_work_set::digest(&root, &set).unwrap();
+        store.write(|db|{
+            db.execute("INSERT INTO large_outputs VALUES ('lo_fixture','t',?,'terminal',?,'lo_fixture.bin',15,0,0,NULL,NULL,'fixture')",
+                (&c.channel_id,&hash))?;
+            db.execute("INSERT INTO runtime_requests VALUES ('t','command',?,'command_run','bound',?)",(&c.channel_id,receipt.to_string()))?;
+            lifecycle::event_tx(db, "t", "NATIVE_COMMAND_STARTED", json!({"ref":"native-command:fixture"}))?;
+            lifecycle::worker_checks::record_work_set_tx(db, "t", "native-command:fixture", "a", &set, &observed, &observed)
+        }).unwrap();
+        let args = json!({"report":"# Evidence","summary":"checked","checks":[{"name":"tests","outcome":"passed","tool_call_ref":"native-command:fixture"}]});
+        let evidence = EvidenceSnapshot {
+            project_digest: Some("b".repeat(64)),
+            ..Default::default()
+        };
+        // Another writer's file changes: the work set is unchanged.
+        std::fs::write(root.join("core/x.rs"), "changed by another task").unwrap();
+        let checks = validate_result(&store, &c, &i, &args, &evidence).unwrap();
+        assert_eq!(checks[0]["outcome"], "passed");
+        assert_eq!(checks[0]["evidence_strength"], "verified");
+        assert_eq!(
+            checks[0]["revision_binding"],
+            json!({"kind":"work_set","work_set":["ui/**"],"digest":observed})
+        );
+        // Another assignment's record never binds this one.
+        let mut other = i.clone();
+        other.assignment = Some("b".into());
+        assert_eq!(
+            validate_result(&store, &c, &other, &args, &evidence).unwrap()[0]["evidence_gap"],
+            "revision_mismatch"
+        );
+        // A change inside the work set after the run unbinds it.
+        std::fs::write(root.join("ui/a.ts"), "edited after the run").unwrap();
+        assert_eq!(
+            validate_result(&store, &c, &i, &args, &evidence).unwrap()[0]["evidence_gap"],
+            "revision_mismatch"
         );
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
@@ -913,7 +1107,7 @@ pub(super) fn refusal_reply_with(code: &str, missing: Option<Vec<String>>) -> Va
         "draft_guidance_remaining" => "The report still contains a report template's guidance comment line (<!-- ... -->). Replace it with the content it asks for.",
         "report_sections_missing" => "The report lacks required sections of its template (listed in missing). Add each as a level-two heading with its exact English text, keep the rest, and submit again; the request_key may stay the same.",
         "review_project_revision_changed" => "The project changed while you reviewed it; the review is now bound to the current state. Re-read what changed, then submit with a fresh request_key.",
-        "review_project_revision_unstable" => "The project kept changing during the review. Re-read the current state and submit with a fresh request_key once it is stable, or report the instability.",
+        "review_project_revision_unstable" => "The project kept changing during the review, so nothing was recorded and the review stays bound to an earlier state. Submit again with a fresh request_key once the other writers have stopped: a submission that finds the project unchanged since this refusal re-binds the review to that state and is refused review_project_revision_changed; then re-read what changed and submit once more. If it never settles, submit INCOMPLETE naming the instability.",
         "review_resubmit_required" => "This request_key belongs to a refused submission of this review. Submit again with a fresh request_key.",
         "review_predecessor_reports_required" => "Read each required predecessor report listed in missing (your review packet's predecessor_reports; optional_reports are not required) through its final page with read_report. A report the runtime cannot read is not required and is retained on your result instead. This review stays active in this session; then submit again.",
         "review_coverage_unfinished" => "The not_covered parts listed in missing name no dead end, so you can still cover them. Review each one now in this session, then submit again; keep in not_covered only parts you cannot reach yourself, each with its blocker.",
@@ -921,9 +1115,9 @@ pub(super) fn refusal_reply_with(code: &str, missing: Option<Vec<String>>) -> Va
         "review_block_findings_required" => "A BLOCK must name each confirmed problem in findings. Name them, or finish the review and choose the verdict your evidence supports.",
         "review_not_covered_required" => "not_covered goes with verdict INCOMPLETE only, and INCOMPLETE needs at least one not_covered part with its blocker.",
         "assignment_blocker_required" => "A failed assignment needs blocker: the dead end (kind and concrete detail) you cannot clear within your role and permissions. If you can still finish the work, finish it and submit the completed result instead.",
-        "open_failed_check" => "A cited check failed and is still open. Fix the cause and rerun the exact same command so a later passing run closes it, or, at a genuine dead end, submit assignment_outcome \"failed\" with its blocker.",
+        "open_failed_check" => "A cited check failed and is still open. Each item in missing names the check, its tool_call_ref, the gap that keeps it open and what closes it: only a verified passing rerun of the same argv, cwd and profile, cited as passed under the same name, closes a failure. At a genuine dead end, submit assignment_outcome \"failed\" with its blocker instead.",
         "failed_check_repair_required" => "A project check failed. Repair the cause in your scope, rerun the exact same command, and submit the result again. Only a genuine dead end, submitted as a failure with its blocker, goes to the coordinator.",
-        "omitted_failed_check" => "A failed check run that an earlier submission cited is missing. Cite it again as passed (after an exact passing rerun) or failed, or, at a genuine dead end, submit assignment_outcome \"failed\" with its blocker.",
+        "omitted_failed_check" => "A failed check run that an earlier submission cited is missing (each is named in missing by its tool_call_ref). Cite each again as a failed check; a verified exact passing rerun cited as passed under the same name closes it. At a genuine dead end, submit assignment_outcome \"failed\" with its blocker.",
         "check_blocker_required" => "Every not_run or unverified check needs a concrete blocker.",
         "native_inline_report_required" => "The report must be the complete Markdown report, or the exact report_id of a report published by this attempt.",
         "native_summary_required" => "The summary must not be empty.",
@@ -1054,12 +1248,15 @@ fn refresh_rebound_review_packet_tx(
             )
             .optional()?)
     };
-    let (Some((bound, _)), Some((recorded, raw))) =
+    let (Some((bound, started)), Some((recorded, raw))) =
         (latest("REVIEW_STARTED")?, latest("REVIEW_PACKET")?)
     else {
         return Ok(());
     };
-    if bound < recorded {
+    // The first binding follows its packet (the packet names what it binds); only
+    // a re-binding newer than the packet refreshes it.
+    let rebound = serde_json::from_str::<Value>(&started)?["rebind"].is_number();
+    if bound < recorded || !rebound {
         return Ok(());
     }
     let mut event: Value = serde_json::from_str(&raw)?;
@@ -1071,8 +1268,8 @@ fn refresh_rebound_review_packet_tx(
             let Some(path) = file["path"].as_str() else {
                 continue;
             };
-            file["current_sha256"] = crate::native_project::current_sha256(root, path)
-                .map_or(Value::Null, Value::from);
+            file["current_sha256"] =
+                crate::native_project::current_sha256(root, path).map_or(Value::Null, Value::from);
         }
     }
     let base = crate::native_project::review_base(db, task, &event["packet"])?;
@@ -1107,6 +1304,14 @@ pub(super) fn submit(
         .assignment
         .as_deref()
         .ok_or(CoreError::Refused("worker_required"))?;
+    // A review verdict is compared with what its review binds: the current bytes
+    // of the task's own files (`native_change_set`), or the whole checkout.
+    if i.stage.as_deref() == Some("review") {
+        let root = store.key().root().to_path_buf();
+        store.read(|db| {
+            crate::native_change_set::bind_task_files_tx(db, &root, &i.task, &mut evidence)
+        })?;
+    }
     let key = text(args, "request_key")?;
     let intent_actor = format!("native-publication:{}", credential.channel_id);
     // Conflict-check the complete payload before any file effect. This committed
@@ -1359,10 +1564,19 @@ mod rebound_packet_tests {
         };
         store
             .write(|db| {
-                lifecycle::event_tx(db, "t", "REVIEW_STARTED",
-                    json!({"assignment_ref":"a1","revision_digest":"r1"}))?;
-                lifecycle::event_tx(db, "t", "REVIEW_PACKET", json!({"assignment_ref":"a1",
-                    "node":"_review_1","packet":{"changed_files":{"complete":true,"files":files}}}))?;
+                lifecycle::event_tx(
+                    db,
+                    "t",
+                    "REVIEW_STARTED",
+                    json!({"assignment_ref":"a1","revision_digest":"r1"}),
+                )?;
+                lifecycle::event_tx(
+                    db,
+                    "t",
+                    "REVIEW_PACKET",
+                    json!({"assignment_ref":"a1",
+                    "node":"_review_1","packet":{"changed_files":{"complete":true,"files":files}}}),
+                )?;
                 Ok(())
             })
             .unwrap();
@@ -1375,8 +1589,13 @@ mod rebound_packet_tests {
 
         store
             .write(|db| {
-                lifecycle::event_tx(db, "t", "REVIEW_STARTED", json!({"assignment_ref":"a1",
-                    "revision_digest":"r2","rebound_from":"r1","rebind":1}))?;
+                lifecycle::event_tx(
+                    db,
+                    "t",
+                    "REVIEW_STARTED",
+                    json!({"assignment_ref":"a1",
+                    "revision_digest":"r2","rebound_from":"r1","rebind":1}),
+                )?;
                 Ok(())
             })
             .unwrap();

@@ -1,12 +1,16 @@
 import { createEffect, createSignal, onCleanup, onMount, type Accessor } from "solid-js";
 
+/** An undefined offset means follow the current end, not the old bottom offset. */
+export type FollowPosition = { top?: number };
+
 /** Normal-flow scrolling: keep the bottom pinned, or keep the reader's visible row still.
  * ResizeObserver runs after Markdown/layout changes, even when no new event arrived, and when the scroller itself resizes:
  * the dock is the scroller's flow sibling below it, so the dock growing or shrinking changes the scroller's own height.
  * Native anchoring is disabled on these scrollers so there is only one scroll owner.
  */
-export function createFollow(el: () => HTMLElement | undefined, size: Accessor<number>) {
-  const [following, setFollowing] = createSignal(true), [missed, setMissed] = createSignal(0);
+export function createFollow(el: () => HTMLElement | undefined, size: Accessor<number>, restore?: { position: FollowPosition; ready: Accessor<boolean> }) {
+  let pendingTop = restore?.position.top;
+  const [following, setFollowing] = createSignal(pendingTop === undefined), [missed, setMissed] = createSignal(0);
   let seen = size(), dragging = false, anchor: { node: Element; y: number } | undefined;
   // When the reader last pressed a key or moved focus inside the feed: a scroll soon after is theirs (Tab onto a control above).
   let intent = -Infinity;
@@ -28,17 +32,26 @@ export function createFollow(el: () => HTMLElement | undefined, size: Accessor<n
   const sync = () => {
     const box = el();
     if (!box || dragging) return;
-    if (following()) box.scrollTop = bottom(box);
+    if (pendingTop !== undefined) {
+      // Applying the offset to only the recent tail would clamp it before the older rows arrive.
+      if (!restore?.ready()) return;
+      box.scrollTop = pendingTop;
+      pendingTop = undefined;
+    } else if (following()) box.scrollTop = bottom(box);
     else if (anchor?.node.isConnected) {
       const delta = anchor.node.getBoundingClientRect().top - anchor.y;
       if (Math.abs(delta) > .1) box.scrollTop += delta;
     }
     remember();
   };
-  const jump = () => { setFollowing(true); setMissed(0); sync(); };
+  const jump = () => { pendingTop = undefined; setFollowing(true); setMissed(0); sync(); };
   const onScroll = () => {
     const box = el();
     if (!box) return;
+    if (pendingTop !== undefined) {
+      if (!dragging && performance.now() - intent > 1000) return;
+      pendingTop = undefined;
+    }
     const atEnd = Math.abs(bottom(box) - box.scrollTop) <= 2;
     // While following, only the reader leaves the end. Wheel, key and touch input pause before the browser scrolls and a
     // scrollbar drag is `dragging`; any other scroll away from the end is the engine's own: content or the dock's height that changed,
@@ -62,7 +75,7 @@ export function createFollow(el: () => HTMLElement | undefined, size: Accessor<n
     const mark = () => { intent = performance.now(); };
     // A smooth or kinetic scroll can first land within the end, which follows again: the marked intent lets it leave again.
     const pause = () => { mark(); setFollowing(false); remember(); };
-    const wheel = (e: WheelEvent) => { if (e.deltaY < 0) pause(); };
+    const wheel = (e: WheelEvent) => { if (e.deltaY < 0) pause(); else if (pendingTop !== undefined) mark(); };
     // Focus a pointer press gave is not a move by the keyboard.
     const focus = () => { if (!dragging) mark(); };
     const key = (e: KeyboardEvent) => {
@@ -84,7 +97,9 @@ export function createFollow(el: () => HTMLElement | undefined, size: Accessor<n
     document.addEventListener("pointerup", up);
     document.addEventListener("pointercancel", up);
     sync();
+    if (pendingTop !== undefined && restore) createEffect(() => { if (restore.ready()) sync(); });
     onCleanup(() => {
+      if (restore) restore.position.top = following() ? undefined : pendingTop ?? box.scrollTop;
       resize?.disconnect(); box.removeEventListener("pointerdown", down);
       box.removeEventListener("wheel", wheel); box.removeEventListener("keydown", key); box.removeEventListener("focusin", focus);
       box.removeEventListener("touchstart", touchStart); box.removeEventListener("touchmove", touchMove);
@@ -98,6 +113,7 @@ export function createFollow(el: () => HTMLElement | undefined, size: Accessor<n
   const reveal = (node: Element, inset: number | (() => number) = 0) => {
     const box = el();
     if (!box) return;
+    pendingTop = undefined;
     setFollowing(false);
     const cover = typeof inset === "function" ? inset() : inset;
     const view = box.getBoundingClientRect(), row = node.getBoundingClientRect();

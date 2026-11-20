@@ -8,13 +8,14 @@ import { Confirmed, createBodyMark, createTicker, ScreenActive } from "./freshne
 import { A, closePop, Count, createFollow, I, Keyed, Loading, MenuItem, Pop, useWantOverview } from "./kit";
 import { ConflictPanel, ReadyPanel } from "./merge";
 import { Answered, QuestionForm, type Ask, type AskAnswer } from "./questions";
-import { AcceptBlocker, ChangesPanel, ResultCard } from "./review";
+import { AcceptBlocker, ChangesPanel, ResultCard, type ChangesViewState } from "./review";
 import { ActionBar, Page, StatusLane, Toolbar, Whole, type StripItem } from "./layout";
 import { taskWhyId, titleBlock } from "./task-chrome";
 import { inConflict, repoOf, sentence, taskCheckout } from "./review-model";
 import type { Route, TaskTab } from "./router";
-import { age, clock, humanStatus, ownerHold, sprintRoute, stopReason, type OwnerHold } from "./selectors";
-import { closeBlocked, contextOf, coordinatorLine, duration, elapsedOf, isFinished, messageDelivery, reviewLine, workersOutcome, phases, recordedCoordinatorRoute, sessionModel, tokens, unconfirmedState, verificationFace, workerFace, workerState, workingNow, type SessionModel } from "./session-model";
+import { age, attemptsSpentOn, clock, humanStatus, ownerHold, replanStopping, reviewDeadEnd, sprintRoute, stopReason, type OwnerHold } from "./selectors";
+import { inTask } from "./status-text";
+import { attemptsByNode, closeBlocked, contextOf, coordinatorLine, duration, elapsedOf, isFinished, messageDelivery, reviewLine, workersOutcome, phases, recordedCoordinatorRoute, sessionModel, tokens, unconfirmedState, verificationFace, workerFace, workerState, workingNow, type SessionModel } from "./session-model";
 import { CORTEX, Pill, StopCommand, VERIFICATION, WorkerPane, WaitingIndicator, WorkingIndicator } from "./worker";
 import { createOpenState, Fold, TextSteps } from "./feed";
 
@@ -432,11 +433,14 @@ export function OwnerHoldCard(props: { m: SessionModel; route: TaskRoute }) {
           onClick={e => run(p.a, p.h, e.currentTarget)}>{HOLD_ACTION_LABEL[p.a]}</button>;
   };
   return <Show when={hold()}>{h => <Show when={h().nextActor === "owner"} fallback={
-    <div class="answered ws-hold-quiet" role="status"><I n="loader" s={14} /><span>{h().nextActor === "agent" ? "The agent is fixing this: " : "This continues by itself: "}{sentence(humanStatus(h().reason))}</span></div>}>
+    <div class="answered ws-hold-quiet" role="status"><I n="loader" s={14} /><span>{h().nextActor === "agent" ? "The agent is fixing this: " : "This continues by itself: "}{sentence(inTask(humanStatus(h().reason)))}</span></div>}>
     <section class="chat-review-hold" aria-label="Your decision is needed"><div class="chat-review-box">
       <div class="chat-review-decision" role="status">
         <h3>{title(h())}</h3>
-        <p class="chat-review-reason">{sentence(humanStatus(h().reason, view().fact.text))}</p>
+        <p class="chat-review-reason">{sentence(inTask(humanStatus(h().reason, view().fact.text)))}</p>
+        {/* A used-up attempt budget says what the attempts went to, and a review that cannot be completed says why. */}
+        <Show when={h().code === "continuation_cap" && attemptsSpentOn(view().task)}>{spent => <p class="cap">{spent()}</p>}</Show>
+        <Show when={(h().code === "continuation_cap" || h().code === "owner_blocker") && reviewDeadEnd(view().task)}>{end => <p class="cap">{end()}</p>}</Show>
         <Show when={h().asks.length}><p>What you are asked to allow:</p><ul class="chat-review-asks"><For each={h().asks}>{ask => <li>{ask}</li>}</For></ul></Show>
         <Show when={h().allowed}><p class="cap muted">You allowed this. The queue acts on it in its next step.</p></Show>
       </div>
@@ -447,6 +451,28 @@ export function OwnerHoldCard(props: { m: SessionModel; route: TaskRoute }) {
       </ActionBar>
     </div></section>
   </Show>}</Show>;
+}
+
+/**
+ * A review that cannot be completed (`reviewDeadEnd`): the reviewer reported the same item unreachable with its tools in two
+ * reviews. One more dead end on it pauses the task for the owner, so this says what will not change and what the owner can do: Close as is…, or
+ * change what the reviewer cannot read. A pinned hold of the owner already says it, so this card then stays away.
+ */
+export function DeadEndCard(props: { m: SessionModel }) {
+  const ws = useWs();
+  const text = () => props.m.open.length || ownerHold(props.m.view)?.nextActor === "owner" || props.m.mode === "unconfirmed" ? null : reviewDeadEnd(props.m.view.task);
+  const blocked = () => closeBlocked(props.m);
+  return <Show when={text()}>{t => <section class="chat-review-hold" aria-label="Your decision is needed">
+    <div class="chat-review-decision" role="status">
+      <h3>This review cannot be completed</h3>
+      <p class="chat-review-reason">{t()}</p>
+      <p class="cap muted">If the reviewer reaches this item again, the task pauses here for you instead of spending more automatic attempts.</p>
+    </div>
+    <ActionBar place="card">
+      <button class="btn btn-primary btn-sm" {...ws.needs("close_task")} aria-disabled={blocked() ? "true" : undefined} data-why={blocked() ?? undefined}
+        onClick={() => { if (!blocked()) ws.closeTask(props.m.view.id); }}>Close as is…</button>
+    </ActionBar>
+  </section>}</Show>;
 }
 
 /**
@@ -478,7 +504,7 @@ export function UnconfirmedCard(props: { m: SessionModel; route: TaskRoute }) {
   const workers = (): Route => ({ name: "task", machine: props.route.machine, task: props.route.task, tab: "workers" });
   const blocked = () => closeBlocked(props.m);
   return <Show when={state()}>{s => <Show when={s().kind !== "stopping"} fallback={
-    <div class="answered ws-hold-quiet" role="status"><I n="loader" s={14} /><span>This continues by itself: the service is confirming that this task's processes stopped.</span></div>}>
+    <div class="answered ws-hold-quiet" role="status"><I n="loader" s={14} /><span>{replanStopping(view().task) ? sentence(replanStopping(view().task)!) : "This continues by itself: the service is confirming that this task's processes stopped."}</span></div>}>
     <section class="chat-review-hold" aria-label="Your decision is needed">
       <div class="chat-review-decision" role="status">
         <h3>{title()}</h3>
@@ -606,9 +632,12 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
           })()}</Match>
           <Match when={entry(id).kind === "fold"}>{(() => {
             const f = () => entry(id) as Extract<TimelineEntry, { kind: "fold" }>;
-            return <Fold text={f().text} open={opened.is(id)} onToggle={() => opened.toggle(id)}>
-              {() => <TextSteps steps={f().steps} taskId={m().view.id} view={viewOfText} state={opened} scope={id} />}
-            </Fold>;
+            const shown = () => ws.panels.showAllTools() && f().all ? f().all! : f();
+            return <Show when={shown().text}>
+              <Fold text={shown().text} open={opened.is(id)} onToggle={() => opened.toggle(id)}>
+                {() => <TextSteps steps={shown().steps} taskId={m().view.id} view={viewOfText} state={opened} scope={id} />}
+              </Fold>
+            </Show>;
           })()}</Match>
           <Match when={entry(id).kind === "plan" && m().session.plan}>
             <Fold text={`Plan r${m().session.plan!.revision}: ${m().planDone} of ${m().planTotal} done`} open={opened.is(id)} onToggle={() => opened.toggle(id)}>{() => <Plan m={m()} />}</Fold>
@@ -628,6 +657,9 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
             const l = () => entry(id) as Extract<TimelineEntry, { kind: "line" }>;
             return <div class={`answered${l().rule ? " ws-rule" : ""}`}><I n={l().icon} s={14} /><span>{l().text}</span><Show when={l().at !== null}><span class="faint">{clock(l().at)}</span></Show></div>;
           })()}</Match>
+          <Match when={entry(id).kind === "divider"}>
+            <div class="divide" role="separator">{(entry(id) as Extract<TimelineEntry, { kind: "divider" }>).text}</div>
+          </Match>
         </Switch>}</For>
         <SentMessages place={sentHere()} />
         {/* Keyed by decision id: a refreshed record of an open decision keeps its card, and the answer being written in it. */}
@@ -648,7 +680,7 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
     {/* Everything pinned below the feed is in the dock. Latest hangs over the feed, not over a decision card. */}
     <div class="dock">
       <Pill follow={follow} />
-      <Show when={props.route && !planning()}><OwnerHoldCard m={m()} route={props.route!} /><UnconfirmedCard m={m()} route={props.route!} /></Show>
+      <Show when={props.route && !planning()}><OwnerHoldCard m={m()} route={props.route!} /><UnconfirmedCard m={m()} route={props.route!} /><DeadEndCard m={m()} /></Show>
       <Show when={ws.can(capabilityOf("send_message"))} fallback={team()}><Composer model={props.model} team={team()} folded={m().open.some(d => d.kind === "question")} /></Show>
     </div>
   </section>;
@@ -682,6 +714,8 @@ export function WorkersList(props: { m: SessionModel; now: number; pick: string 
     <div class="wg">{g.title}<Count n={g.list.length} /></div>
     <For each={g.list.map(w => w.id)}>{id => <WorkerCard w={props.m.workers.find(w => w.id === id)!} now={props.now} to={at(id)} selected={props.pick === id} />}</For>
   </Show>;
+  // One card by id: it keeps its element while the machine refreshes the worker it shows.
+  const Card = (c: { id: string }) => <Show when={props.m.workers.find(w => w.id === c.id)}>{w => <WorkerCard w={w()} now={props.now} to={at(c.id)} selected={props.pick === c.id} />}</Show>;
   return <div class="wlist" role="tablist" aria-orientation="vertical" aria-label="Workers">
     <div class="wg">Coordinator</div>
     <A class="wcard" role="tab" to={at(CORTEX)} aria-selected={props.pick === CORTEX ? "true" : "false"}>
@@ -696,7 +730,23 @@ export function WorkersList(props: { m: SessionModel; now: number; pick: string 
       <span class="l1"><span class="ic"><I n={check().icon} s={14} class={check().spin ? `spin ${check().tone}` : check().tone === "st-idle" ? "faint" : check().tone} /></span>Runtime verification<span class={`st ${check().tone}`}>{check().label}</span></span>
       <span class="l2 trunc" style={{ display: "block" }}>Automatic, not a worker</span>
     </A>
-    <Group title="Finished" list={props.m.finished} />
+    {/* Finished workers by plan step: the newest attempt of each step, its earlier attempts folded under it. */}
+    <Show when={props.m.finished.length > 0}>
+      <div class="wg">Finished<Count n={props.m.finished.length} /></div>
+      <For each={attemptsByNode(props.m.finished).map(g => g.latest.id)}>{id => {
+        const earlier = () => attemptsByNode(props.m.finished).find(g => g.latest.id === id)?.earlier ?? [];
+        const [open, setOpen] = createSignal(false);
+        const shown = () => open() || earlier().some(w => w.id === props.pick);
+        return <>
+          <Card id={id} />
+          <Show when={earlier().length > 0}>
+            <button class="lnk ws-attempts" aria-expanded={shown() ? "true" : "false"} onClick={() => setOpen(!shown())}>
+              {shown() ? "Hide" : "Show"} {earlier().length} earlier attempt{earlier().length === 1 ? "" : "s"} of this step</button>
+            <Show when={shown()}><For each={earlier().map(w => w.id)}>{key => <Card id={key} />}</For></Show>
+          </Show>
+        </>;
+      }}</For>
+    </Show>
     <WriteDenials m={props.m} />
   </div>;
 }
@@ -717,10 +767,10 @@ function WriteDenials(props: { m: SessionModel }) {
 }
 
 /** The same Changes tab carries the diff review, Ready to merge and the conflict, so a task's state decides what it opens on. */
-function ChangesTab(props: { m: SessionModel; route: TaskRoute }) {
+function ChangesTab(props: { m: SessionModel; route: TaskRoute; viewState: ChangesViewState }) {
   const t = () => props.m.view.task;
   const merging = () => !props.m.view.automaticFact && (inConflict(t()) || t().status === "ready_to_merge" || t().integration?.method === "squash" || t().integration?.method === "commit");
-  return <Switch fallback={<ChangesPanel m={props.m} route={props.route} />}>
+  return <Switch fallback={<ChangesPanel m={props.m} route={props.route} viewState={props.viewState} />}>
     <Match when={!props.m.view.automaticFact && props.route.sub === "conflict"}><ConflictPanel m={props.m} route={props.route} /></Match>
     <Match when={props.route.sub === undefined && merging()}><ReadyPanel m={props.m} route={props.route} /></Match>
   </Switch>;
@@ -741,6 +791,7 @@ const firstPick = (m: SessionModel) => (m.running[0] ?? m.active[0] ?? m.workers
 /** The approved task session. Everything on it comes from the port. */
 export function TaskPage(props: { id: string }) {
   const ws = useWs();
+  const changesView: ChangesViewState = {};
   const model = createMemo<SessionModel>(prev => sessionModel(ws.store.index(), props.id) ?? prev!);
   const route = () => ws.router.route() as TaskRoute;
   const now = useTicker();
@@ -789,7 +840,7 @@ export function TaskPage(props: { id: string }) {
   const interrupted: StripItem = { id: "interrupted", tone: "info", icon: <I n="pause" s={14} />, get text() {
     const reason = m().view.task.issue;
     return !reason || reason === "turn_interrupted" ? "This turn was interrupted. Send a message to continue from the recorded state. Nothing has been restarted."
-      : `${sentence(stopReason(reason))} Send a message to continue from the recorded state, or use Stop or Close task. Nothing has been restarted.`;
+      : `${sentence(inTask(stopReason(reason)))} Send a message to continue from the recorded state, or use Stop or Close task. Nothing has been restarted.`;
   } };
   const unverified: StripItem = { id: "unverified", tone: "warn", icon: <I n="alert" s={14} class="st-warn" />, text: "Not verified. This task was closed as is, and the warning stays with its result." };
   const titleWhy: StripItem = { id: "title-why", tone: "info", icon: <I n="alert" s={14} class="st-warn" />, domId: taskWhyId(props.id), get text() { return titleBlock(m()) ?? ""; } };
@@ -811,7 +862,7 @@ export function TaskPage(props: { id: string }) {
         <div class="task-body">
           <Switch>
             <Match when={tab() === undefined}><Conversation model={model} now={now()} pick={pick()} onPick={onPick} route={route()} /></Match>
-            <Match when={tab() === "changes"}><ChangesTab m={m()} route={route()} /></Match>
+            <Match when={tab() === "changes"}><ChangesTab m={m()} route={route()} viewState={changesView} /></Match>
             <Match when={tab() === "code"}><CodeTab m={m()} route={route()} /></Match>
             <Match when={tab() === "terminal"}><div class="note-panel task-panel"><span class="w500">Terminal</span><span>{ws.t("terminalNote")}</span>
               <button class="btn btn-line btn-sm" onClick={() => { if (!ws.panels.terminalOpen()) ws.toggleTerminal(); }}>Open the bottom panel</button></div></Match>

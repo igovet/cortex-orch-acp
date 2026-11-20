@@ -117,7 +117,11 @@ export type MergeState = MergeSeed & {
 };
 export type AutomaticContinuation = {
   policy: "automatic_continuation"; continuationCount: number; lastContinuationReason: string | null;
-  pause: { eventId: string; kind: "external_blocker" | "continuation_cap" | "outcome_unknown"; reason: string } | null;
+  pause: { eventId: string; kind: "external_blocker" | "continuation_cap" | "outcome_unknown" | "owner_blocker"; reason: string } | null;
+  /** What the attempts counted against the current budget went to: each stop reason with how often, most frequent first. */
+  spentOn?: { reason: string; count: number }[];
+  /** An item the reviewer reported it cannot reach with its tools in at least two dead-end reviews, the newest still naming it. */
+  reviewDeadEnd?: { item: string; count: number };
 };
 export type Task = {
   id: string; projectId: string; sprintId: string | null; description: string;
@@ -215,7 +219,7 @@ export type WorkerResult = {
 };
 export type WorkerReview = {
   verdict?: "APPROVE" | "REQUEST_CHANGES" | "BLOCK" | "INCOMPLETE";
-  notCovered?: { item: string; reason: string }[];
+  notCovered?: { item: string; reason: string; blocker?: string }[];
   rerun?: { reason: string; previousWorkerId: string; followUpWorkerId: string };
 };
 /** A recorded route. `engine` is the engine key (`claude-agent-acp`, `codex-acp`, `opencode`) when the machine recorded it. */
@@ -239,8 +243,17 @@ export type Worker = {
   superseded?: true;
   /** Set by the app, never read from the machine: the last facts showed this worker running, but the task has since ended, so its state is no longer confirmed. */
   stale?: true;
-  /** How often the runtime refused this worker's result submission, and the latest refusal's code. */
-  resultRefusals?: { count: number; code: string };
+  /** How often the runtime refused this worker's result submission, the latest refusal's code, every distinct code (oldest
+   *  first) and up to three items the latest refusal named (paths, report ids or parts). */
+  resultRefusals?: { count: number; code: string; codes?: string[]; missing?: string[] };
+  /** A worker the coordinator cancelled whose session is not confirmed as stopped yet. */
+  stopping?: true;
+  /** The plan node this worker ran; a retry of the same step shares it. */
+  node?: string;
+  /** For a worker of an earlier plan: the plan revision that replaced it. */
+  replacedIn?: number;
+  /** The dead-end kind a worker named when it reported its assignment failed (for example `tool_unavailable`). */
+  blockerKind?: string;
   /** Why a worker without a result ended: the owner stopped it, the coordinator cancelled it (replan), or its engine session was lost. Absent when not recorded. */
   endedReason?: "stopped_by_owner" | "cancelled_by_coordinator" | "worker_lost";
 };
@@ -286,12 +299,15 @@ export type TimelineEntry =
   | { id: string; kind: "cortex"; text: string }
   /** What the owner said, as the runtime recorded it. */
   | { id: string; kind: "said"; text: string }
-  | { id: string; kind: "fold"; text: string; steps: string[] }
+  /** `all` is the same turn with the runtime's own steps counted and listed too; present only when they differ from `text` and `steps`. */
+  | { id: string; kind: "fold"; text: string; steps: string[]; all?: { text: string; steps: string[] } }
   | { id: string; kind: "plan" }
   | { id: string; kind: "workers"; title: string; workerIds: string[] }
   | { id: string; kind: "message"; messageId: string }
   | { id: string; kind: "decision"; decisionId: string }
-  | { id: string; kind: "line"; icon: string; text: string; at: number | null; rule: boolean };
+  | { id: string; kind: "line"; icon: string; text: string; at: number | null; rule: boolean }
+  /** A rule across the conversation: the runtime observed the engine compact its context there. */
+  | { id: string; kind: "divider"; text: string };
 export type NewEntry = TimelineEntry extends infer E ? E extends TimelineEntry ? Omit<E, "id"> : never : never;
 /** The conversation and facts of one task. Tasks with no recorded session start from an empty one. */
 export type TaskSession = {

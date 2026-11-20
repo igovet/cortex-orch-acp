@@ -1,6 +1,7 @@
 import { readableCheckReason, ACCESS_MODES, effortLabel, emptySession, engineLabel, isOpen, LANGUAGES, machineDefaults } from "@cortex/workspace-domain";
 import type { Check, Decision, EngineKey, Machine, Message, SessionOptions, TaskSession, TaskSettings, Worker, WorkerRoute, WorkerStatus } from "@cortex/workspace-domain";
-import { automaticAcceptanceHold, automaticStaleResultHold, staleResult, clock, interruptedTurn, plainChoice, readyLabel, readyStep, sameBranch, type TaskView, type WorkspaceIndex } from "./selectors";
+import { automaticAcceptanceHold, automaticStaleResultHold, staleResult, clock, interruptedTurn, plainChoice, readyLabel, readyStep, replanStopping, sameBranch, type TaskView, type WorkspaceIndex } from "./selectors";
+import { inTask } from "./status-text";
 
 /** Read models for the task session. Every count on the screen comes from these lists; nothing here changes state. */
 export type Face = { label: string; tone: string; icon: string; spin?: boolean };
@@ -16,10 +17,32 @@ const FACES: Record<WorkerStatus, Face> = {
   cancelled: { label: "Cancelled", tone: "st-idle", icon: "x-circle" },
 };
 export const workerFace = (status: WorkerStatus) => FACES[status];
-/** A finished worker whose check failed never reads as a clean finish. */
+/** A failed worker that named its dead end reads as that dead end: it found problems another role has to fix, or it could
+ *  not run its work on this machine. Neither is a crash. */
+const FAILED_AS: Record<string, Face> = {
+  other_role_work: { label: "Found problems", tone: "st-warn", icon: "alert" },
+  tool_unavailable: { label: "Could not run here", tone: "st-warn", icon: "alert" },
+};
+/** A finished worker whose check failed never reads as a clean finish. A cancelled worker whose session is still being
+ *  stopped reads as stopping; an attempt a newer plan replaced says so rather than reading as a current failure. */
 export function workerState(w: Worker): Face {
+  if (w.status === "cancelled" && w.stopping) return { label: "Stopping…", tone: "st-warn", icon: "loader", spin: true };
+  if (w.status === "failed" && w.replacedIn !== undefined) return { label: `Replaced in plan v${w.replacedIn}`, tone: "st-idle", icon: "refresh" };
+  if (w.status === "failed" && w.blockerKind && Object.hasOwn(FAILED_AS, w.blockerKind)) return FAILED_AS[w.blockerKind];
   const failed = w.status === "completed" ? w.result?.checks.filter(c => c.outcome === "failed").length ?? 0 : 0;
   return failed ? { label: `${failed} check${failed === 1 ? "" : "s"} failed`, tone: "st-bad", icon: "x-circle" } : workerFace(w.status);
+}
+/**
+ * The finished workers as the plan ran them: each step's newest attempt, with its earlier attempts (retries of the same
+ * step) under it. A worker without a recorded step is its own group. The order of the list is kept.
+ */
+export function attemptsByNode(workers: Worker[]): { latest: Worker; earlier: Worker[] }[] {
+  const groups: { key: string; latest: Worker; earlier: Worker[] }[] = [];
+  for (const w of workers) {
+    const key = w.node ? `node:${w.node}` : `worker:${w.id}`, group = groups.find(g => g.key === key);
+    if (group) group.earlier.push(w); else groups.push({ key, latest: w, earlier: [] });
+  }
+  return groups.map(({ latest, earlier }) => ({ latest, earlier }));
 }
 const ACTIVE: WorkerStatus[] = ["working", "waiting_you", "paused", "unknown"];
 const FINISHED: WorkerStatus[] = ["completed", "failed", "cancelled"];
@@ -115,10 +138,16 @@ export function reviewLine(w: Worker): string | null {
 }
 
 export type Chip = { icon: string; tone: string; spin?: boolean; text: string; wide?: string; next?: string };
-/** The current state and the next step, for the title band. */
+/** The current state and the next step, for the title band. Inside the task, a reason never says to open the task. */
 export function stateChip(m: SessionModel): Chip {
+  const chip = chipOf(m);
+  return { ...chip, text: inTask(chip.text) };
+}
+function chipOf(m: SessionModel): Chip {
   const { task } = m.view;
   if (task.status === "closed_unverified") return { icon: "alert", tone: "st-idle", text: m.view.fact.text };
+  // A replan waiting for a worker it cancelled: the plan is changing, nothing is working and nothing waits for the owner.
+  if (m.view.unknown && replanStopping(task)) return { icon: "loader", tone: "st-warn", spin: true, text: "Changing the plan" };
   if (m.view.unknown && task.status !== "stopping") return { icon: "alert", tone: "st-idle", text: m.mode === "unconfirmed" ? "Not confirmed" : m.view.fact.text };
   if (m.view.ownerDecision) return { icon: m.view.fact.icon ?? "question", tone: "st-warn", text: "Needs you" };
   if (m.view.ownerIntegration) return { icon: "merge", tone: "st-warn", text: "Needs you", next: "Confirm integration" };

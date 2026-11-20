@@ -204,7 +204,7 @@ it("worker activity hides internal steps, names tools plainly and expands to inp
   expect(stream.textContent).not.toContain("Native, no receipt");
   (stream.querySelector("button.fold") as HTMLButtonElement).click(); await settle();
   expect(stream.textContent).toContain("Read");
-  expect(stream.textContent).toContain("Read skill");
+  expect(stream.textContent).not.toContain("Read skill");
   const edit = [...stream.querySelectorAll<HTMLButtonElement>("button.ev-toggle")].find(b => b.textContent?.includes("Edit"))!;
   expect(edit.getAttribute("aria-expanded")).toBe("false");
   edit.click(); await settle();

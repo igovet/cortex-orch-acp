@@ -393,9 +393,16 @@ lifecycle/outward tools (`EnterWorktree`, `ExitWorktree`, `PushNotification`,
 `EnterPlanMode`, `ExitPlanMode`, `TaskStop`, `Artifact`, `SendFeedback`). Native
 `Read`, `Grep`, `Glob`, `WebFetch` and `WebSearch` stay, and MCP tools are not
 disallowed. The list is in `crates/workspace-service/src/native_engine_policy.rs`;
-fake-wire tests (`native_sessions`, `worker_roles`) check the emitted payload. `settingSources` is
-not sent, so the adapter default (`user`, `project`, `local`) applies and Claude
-Code loads `CLAUDE.md`/`AGENTS.md`; allow rules in those settings still apply.
+fake-wire tests (`native_sessions`, `worker_roles`) check the emitted payload.
+`settingSources: ["project"]` replaces the adapter default (`user`, `project`,
+`local`, which the adapter sets before merging these options): the owner's own
+Claude Code configuration (`~/.claude/settings.json`, `~/.claude/CLAUDE.md`) and
+their private per-project overrides (`.claude/settings.local.json`,
+`CLAUDE.local.md`) never reach a Cortex session, while the project's shared
+`.claude/settings.json` and its `CLAUDE.md`/`AGENTS.md` conventions still load;
+allow rules in the project settings still apply. The account e-mail that Claude
+Code adds to the session context comes from the native login, not from a
+settings file, so this option does not remove it.
 Role instructions reach the session in its prompt; no `systemPrompt` is sent.
 
 Every session runs in `default` mode, in every access mode and role. Claude
@@ -408,7 +415,7 @@ access mode's decision table (see
 private state is refused in every mode; Auto allows everything else and records
 the rule; Development allows reads outside the project and asks the owner for
 credential reads; Guarded asks the owner before reads outside the project,
-credential reads and web fetches. Read-only channels get only reads. Claude has no
+credential reads and web fetches. Read-only channels get only reads and web fetches (which follow the fetch rule above). Claude has no
 native write tool in a Cortex session, so the write rows apply to it only if it
 ever sends such a request. The Claude process is not sandboxed. Whether a real
 turn lists no native `Bash`, `Edit` or `Write`, keeps the attached MCP servers

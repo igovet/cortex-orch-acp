@@ -1086,6 +1086,124 @@ async fn queued_message_journey() {
     service.stop().await.unwrap();
     runner.await.unwrap().unwrap();
 }
+/// The degenerate-turn watchdog end to end. `degenerate-once`: the first coordinator
+/// session streams its own prompt text back and keeps generating; the runtime cancels
+/// that turn, records which rule fired, and runs the turn again in a fresh session,
+/// which plans and the task completes. `degenerate-twice`: the retry loops too, and
+/// the task stops with the `native_turn_degenerate` blocker.
+async fn degenerate_turn_journey(scenario: &str) {
+    let f = Fixture::new();
+    let twice = scenario == "degenerate-twice";
+    let worker = scenario == "degenerate-worker";
+    std::fs::write(f.0.join("project/scenario.txt"), scenario).unwrap();
+    let service = Service::bind_native(f.config(), Arc::new(Routes))
+        .await
+        .unwrap();
+    let registered = service
+        .register(&f.0.join("project"), "Degenerate")
+        .await
+        .unwrap();
+    let id = registered["projectId"].as_str().unwrap().to_owned();
+    service.activate(&id).await.unwrap();
+    let runner = tokio::spawn(service.clone().serve());
+    let store = f.store();
+    let created = service
+        .workspace(command(
+            &id,
+            "tasks.create",
+            json!(id),
+            "create",
+            json!({"description":"Degenerate fixture","checkout":{"kind":"main"}}),
+        ))
+        .await
+        .unwrap();
+    service
+        .workspace(command(
+            &id,
+            "tasks.start",
+            created["target"].clone(),
+            "start",
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    let count = |sql: &str| {
+        store
+            .read(|db| Ok(db.query_row(sql, [], |r| r.get::<_, i64>(0))?))
+            .unwrap()
+    };
+    tokio::time::timeout(Duration::from_secs(45), async {
+        loop {
+            let state: String = store
+                .read(|db| Ok(db.query_row("SELECT state FROM runtime_tasks", [], |r| r.get(0))?))
+                .unwrap();
+            let stopped =
+                count("SELECT count(*) FROM runtime_events WHERE type='NATIVE_DRIVER_STOPPED'");
+            if if twice {
+                stopped > 0
+            } else {
+                state == "COMPLETED"
+            } {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{scenario}: the degenerate journey did not settle"));
+    let (rule, role) = match scenario {
+        "degenerate-twice" => ("repetition", "coordinator"),
+        "degenerate-worker" => ("length", "worker"),
+        _ => ("echo", "coordinator"),
+    };
+    // Each trip is one record: the rule, the message id and its size, never its text.
+    let trips = count(&format!(
+        "SELECT count(*) FROM runtime_events WHERE type='NATIVE_TURN_DEGENERATE'
+         AND json_extract(payload_json,'$.rule')='{rule}' AND json_extract(payload_json,'$.role')='{role}'
+         AND json_extract(payload_json,'$.message_id') LIKE 'degenerate-%' AND json_extract(payload_json,'$.chars')>0"
+    ));
+    assert_eq!(trips, if twice { 2 } else { 1 }, "{scenario}");
+    assert_eq!(
+        count("SELECT count(*) FROM runtime_events WHERE type='NATIVE_TURN_DEGENERATE' AND instr(payload_json,'guner@guner@')>0"),
+        0
+    );
+    // The text after the trip never reaches the conversation.
+    assert_eq!(
+        count("SELECT count(*) FROM host_transcript WHERE instr(text,'Runtime status:')>0 OR instr(text,'Further echoed')>0"),
+        0
+    );
+    if twice {
+        assert_eq!(
+            count("SELECT count(*) FROM runtime_events WHERE type='NATIVE_DRIVER_STOPPED' AND json_extract(payload_json,'$.reason')='native_turn_degenerate'"),
+            1
+        );
+        assert_eq!(
+            count("SELECT count(*) FROM runtime_events WHERE type='PLAN_ACCEPTED'"),
+            0
+        );
+    } else if worker {
+        // The node keeps no result from the degenerate turn: the lost-worker path
+        // replaced it, and the fresh worker session finished it.
+        assert_eq!(
+            count("SELECT count(*) FROM runtime_events WHERE type='NATIVE_TURN_DEGENERATE' AND json_extract(payload_json,'$.node')='work' AND json_extract(payload_json,'$.revision')=1"),
+            1
+        );
+        assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type='ASSIGNMENT_RETRIED' AND json_extract(payload_json,'$.failure_class')='worker_lost'"), 1);
+        assert_eq!(
+            count("SELECT count(*) FROM runtime_events WHERE type='NATIVE_DRIVER_STOPPED'"),
+            0
+        );
+    } else {
+        // The retry ran in a fresh engine session, configured after the degenerate one.
+        assert!(count("SELECT count(*) FROM runtime_events WHERE type='NATIVE_SESSION_CONFIGURED' AND id<(SELECT min(id) FROM runtime_events WHERE type='PLAN_ACCEPTED')") >= 2);
+        assert_eq!(
+            count("SELECT count(*) FROM runtime_events WHERE type='NATIVE_DRIVER_STOPPED'"),
+            0
+        );
+    }
+    service.stop().await.unwrap();
+    runner.await.unwrap().unwrap();
+}
 async fn controls(scenario: &str, action: &str) {
     let f = Fixture::new();
     std::fs::write(f.0.join("project/scenario.txt"), scenario).unwrap();
@@ -1310,6 +1428,66 @@ async fn controls(scenario: &str, action: &str) {
         }
         assert_eq!(count("SELECT count(*) FROM runtime_requests WHERE request_key='pending-command' AND json_extract(result_json,'$.exit_code')=0"),1);
         assert_eq!(count("SELECT count(*) FROM runtime_events WHERE type IN ('ASSIGNMENT_RETRIED','NATIVE_DRIVER_STOPPED','USER_QUESTION_REQUESTED')"),0);
+        service.stop().await.unwrap();
+        runner.await.unwrap().unwrap();
+        return;
+    }
+    if action == "revoked" {
+        // The runtime itself revokes a live worker (as an accepted escalation or replan
+        // request does) with no owner signal to its turn. The held fixture turn never
+        // ends on its own: the runtime ends it, settles the attempt and leaves recovery
+        // within seconds instead of waiting for the engine to finish by itself.
+        let (task, assignment, channel, attempt): (String, String, String, String) = store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT task_id,idempotency_key,channel_id,attempt_id FROM delegation_provisioning
+                     WHERE role_id!='orchestrator' AND status='ready'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?)
+            })
+            .unwrap();
+        let revoked = std::time::Instant::now();
+        store
+            .write(|db| cortex_core::lifecycle::domain::interrupt_tx(db, &task))
+            .unwrap();
+        let settled = "SELECT EXISTS(SELECT 1 FROM capacity_reservations WHERE attempt_id=?1 AND state='released')
+            AND EXISTS(SELECT 1 FROM delegation_provisioning WHERE attempt_id=?1 AND status='terminated')
+            AND EXISTS(SELECT 1 FROM runtime_events e, json_each(e.payload_json,'$.assignment_refs') a
+                WHERE e.type='LIVE_CANCELLATIONS_SETTLED' AND a.value=?2)";
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !store
+                .read(|db| Ok(db.query_row(settled, (&attempt, &assignment), |r| r.get::<_, bool>(0))?))
+                .unwrap()
+            {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            let state = store.read(|db| Ok(db.query_row(
+                "SELECT (SELECT group_concat(state,',') FROM capacity_reservations WHERE attempt_id=?1)||' '||
+                    (SELECT status FROM delegation_provisioning WHERE attempt_id=?1)||' '||
+                    (SELECT state||':'||coalesce(blocker,'') FROM runtime_tasks WHERE task_id=?2)",
+                (&attempt, &task), |r| r.get::<_, String>(0))?)).unwrap();
+            panic!("the revoked worker turn kept running: {state}")
+        });
+        // The turn ends through the engine's authority monitor (transport closed) or,
+        // when that does not observe the revocation, through `session/cancel`.
+        let ending: String = store
+            .read(|db| Ok(db.query_row(
+                "SELECT coalesce((SELECT json_extract(payload_json,'$.stop_reason') FROM runtime_events
+                    WHERE type='NATIVE_TURN_SETTLED' AND json_extract(payload_json,'$.channel_id')=?),'terminated')",
+                [&channel], |r| r.get(0))?))
+            .unwrap();
+        assert!(
+            matches!(ending.as_str(), "cancelled" | "terminated"),
+            "{ending}"
+        );
+        println!(
+            "revoked worker turn ended ({ending}) and settled in {:?}",
+            revoked.elapsed()
+        );
         service.stop().await.unwrap();
         runner.await.unwrap().unwrap();
         return;
@@ -3452,6 +3630,39 @@ fn main() {
         println!("owner attachments: draft Start, follow-up message and answer retained and delivered to the engine");
         return;
     }
+    // The degenerate-turn watchdog: a coordinator-only stop runs on every host; the
+    // retried journey runs a worker, which needs the namespace sandbox.
+    if mode.is_empty() || mode == "degenerate-probe" {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(60),
+                degenerate_turn_journey("degenerate-twice"),
+            )
+            .await
+            .expect("degenerate-twice journey timeout");
+        });
+        if !namespace_host::assert_unavailable_view() {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                tokio::time::timeout(
+                    Duration::from_secs(60),
+                    degenerate_turn_journey("degenerate-once"),
+                )
+                .await
+                .expect("degenerate-once journey timeout");
+                tokio::time::timeout(
+                    Duration::from_secs(60),
+                    degenerate_turn_journey("degenerate-worker"),
+                )
+                .await
+                .expect("degenerate-worker journey timeout");
+            });
+            println!("degenerate coordinator and worker turns retried once in a fresh session; the tasks completed");
+        }
+        println!("degenerate coordinator turns: cancelled, recorded, retried once in a fresh session, then stopped");
+        if mode == "degenerate-probe" {
+            return;
+        }
+    }
     if mode.is_empty() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             service_regressions::batch().await;
@@ -3481,6 +3692,15 @@ fn main() {
     tokio::runtime::Runtime::new().unwrap().block_on(async {
         if mode.is_empty() {
             service_regressions::verification().await;
+        }
+        if mode == "waiting-worker-probe" {
+            for variant in ["guidance", "preempt"] {
+                tokio::time::timeout(Duration::from_secs(30), waiting_worker(variant))
+                    .await
+                    .expect("waiting worker journey timeout");
+            }
+            println!("waiting worker guidance and pre-empted guidance passed");
+            return;
         }
         if mode == "batch-probe" {
             tokio::time::timeout(Duration::from_secs(35), controls("batch", "answer_batch"))

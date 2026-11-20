@@ -103,7 +103,7 @@ export function isAutomaticContinuation(value: unknown): value is AutomaticConti
     || !(value.lastContinuationReason === null || recordedText(value.lastContinuationReason))) return false;
   const pause = value.pause;
   return pause === null || (record(pause) && recordedText(pause.eventId) && recordedText(pause.reason)
-    && (pause.kind === "external_blocker" || pause.kind === "continuation_cap" || pause.kind === "outcome_unknown"));
+    && (pause.kind === "external_blocker" || pause.kind === "continuation_cap" || pause.kind === "outcome_unknown" || pause.kind === "owner_blocker"));
 }
 const HOLD_ACTORS: readonly HoldActor[] = ["runtime", "agent", "owner"];
 export const OWNER_HOLD_ACTIONS: readonly OwnerHoldAction[] = ["allow_finish", "accept_result", "allow_repair", "allow_retries", "confirm_and_continue", "resume_task", "retry",
@@ -123,7 +123,7 @@ export function isAutomaticQueue(value: unknown): value is AutomaticQueue {
     && (value.taskId === null || recordedText(value.taskId))
     && (value.kind === "owner_integration" ? value.needsOwner === true && !!value.taskId
       : value.kind === "continuation" ? value.needsOwner === false
-        || (value.needsOwner === true && !!value.taskId && ["continuation_cap", "outcome_unknown"].includes(value.code))
+        || (value.needsOwner === true && !!value.taskId && ["continuation_cap", "outcome_unknown", "owner_blocker"].includes(value.code))
       : (value.kind === "start_refused" || value.kind === "settlement_blocked") && typeof value.needsOwner === "boolean")
     && holdDecision(value);
 }

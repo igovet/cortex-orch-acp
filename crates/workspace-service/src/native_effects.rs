@@ -219,7 +219,11 @@ async fn verify_in(
 async fn git(root: &Path, args: &[&str]) -> CoreResult<Vec<u8>> {
     git_with_limit(root, args, LISTING_OUTPUT).await
 }
-async fn git_with_limit(root: &Path, args: &[&str], output_limit: usize) -> CoreResult<Vec<u8>> {
+pub(crate) async fn git_with_limit(
+    root: &Path,
+    args: &[&str],
+    output_limit: usize,
+) -> CoreResult<Vec<u8>> {
     let mut argv = vec![
         "/usr/bin/git".to_owned(),
         "-c".into(),
@@ -626,6 +630,11 @@ pub(crate) fn plain_listing_excludes(name: &[u8], top: bool, is_dir: bool) -> bo
         || (is_dir && matches!(name, b".cortex" | b".cortex-dev"))
 }
 
+/// The NUL-separated deliverable paths of a plain project folder (`plain_listing`),
+/// for the per-command change record (`native_change_set`).
+pub(crate) fn plain_paths(root: &Path) -> CoreResult<Vec<u8>> {
+    Ok(plain_listing(root, false)?.paths)
+}
 /// The listing of a plain project folder, in no Git repository: every entry that is
 /// not a directory (regular files, symlinks by their target, special files) is a
 /// deliverable path, as Git lists an untracked one; a directory holding a `.git` entry

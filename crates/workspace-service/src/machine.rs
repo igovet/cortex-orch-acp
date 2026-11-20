@@ -5,6 +5,7 @@
 pub(crate) mod config_action;
 // Owner attachment bodies; the service boundary resolves references for Core and engines.
 pub(crate) mod attachment_files;
+mod close_commit;
 mod config_read;
 mod config_save;
 mod context;
@@ -12,7 +13,6 @@ mod coordinator;
 mod engine_connection;
 pub(crate) mod files;
 mod git;
-mod close_commit;
 mod integration;
 mod integration_squash;
 mod ledger;

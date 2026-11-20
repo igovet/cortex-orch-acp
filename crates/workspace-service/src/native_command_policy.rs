@@ -467,22 +467,23 @@ pub(super) fn hooks(root: &Path) -> io::Result<Option<PathBuf>> {
     })
 }
 
+/// `dirs` is this preparation's own [`git_dirs`] answer (each directory was pinned).
 pub(super) fn git(
     s: &mut Sandbox,
     root: &Path,
+    dirs: &[PathBuf],
     profile: Profile,
     whole: bool,
-) -> io::Result<Vec<PathBuf>> {
-    let dirs = git_dirs(root)?;
+) -> io::Result<()> {
     if !whole || profile == Profile::ReadOnly {
-        for p in &dirs {
+        for p in dirs {
             s.mount("--ro-bind", p, p)?;
         }
         // LFS can write even during Git inspection.
         s.git_config(&[format!("lfs.storage={}/git-lfs", s.scratch.display())]);
-        return Ok(dirs);
+        return Ok(());
     }
-    let mut writable = dirs.clone();
+    let mut writable = dirs.to_vec();
     let mut readonly = BTreeSet::new();
     let mut watched = Vec::new();
     let development = profile == Profile::Development;
@@ -563,7 +564,7 @@ pub(super) fn git(
             "core.fsmonitor=false".into(),
         ]);
     }
-    Ok(dirs)
+    Ok(())
 }
 
 /// Same retained policy as Python: absent Git controls are swept during and after
@@ -719,8 +720,166 @@ fn version(m: &fs::Metadata) -> (u64, u64, u64, i64, i64, i64, i64, u32, u32, u3
         m.gid(),
     )
 }
-/// Development detaches external aliases; Guarded/ReadOnly keep them read-only.
-/// Internal aliases are safe only if every directory entry is writable.
+/// One complete traversal of the project tree at preparation time, shared by the
+/// private-entry view and the hard-link policy (formerly two separate walks).
+/// Nothing is cached between commands: a link count can change without touching any
+/// project directory (a new link made from outside the project), so only a fresh
+/// scan of every writable regular file is exact. Directory types come from the
+/// directory listing itself; only regular files inside the write set are `fstatat`ed
+/// (relative to their open directory), and directories are listed in parallel.
+pub(super) struct Scan {
+    /// Every entry named like a private control (`.git`, `.cortex`, `.cortex-dev`,
+    /// the two dev JSON files) at any depth. Such entries are never descended.
+    pub(super) private: Vec<PathBuf>,
+    /// Canonical targets of private-named symbolic links.
+    private_targets: Vec<PathBuf>,
+    /// Writable, undenied regular files with more than one link.
+    links: Vec<Link>,
+    pub(super) entries: usize,
+}
+const TREE_LIMIT: usize = 2_000_000;
+pub(super) fn scan(root: &Path, writes: &[PathBuf], denied: &[PathBuf]) -> io::Result<Scan> {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Condvar,
+    };
+    // Each denial is resolved once, not once per candidate file.
+    let mut denied_all = denied.to_vec();
+    denied_all.extend(denied.iter().filter_map(|d| d.canonicalize().ok()));
+    struct Queue {
+        pending: Vec<PathBuf>,
+        active: usize,
+        error: Option<io::Error>,
+    }
+    let queue = Mutex::new(Queue {
+        pending: vec![root.to_owned()],
+        active: 0,
+        error: None,
+    });
+    let wake = Condvar::new();
+    let count = AtomicUsize::new(0);
+    let visit = |dir: &Path, found: &mut Scan, children: &mut Vec<PathBuf>| -> io::Result<()> {
+        for e in fs::read_dir(dir)? {
+            let e = e?;
+            if count.fetch_add(1, Ordering::Relaxed) >= TREE_LIMIT {
+                return Err(unavailable("project_tree_limit"));
+            }
+            let kind = e.file_type()?;
+            let p = e.path();
+            if private(&e.file_name()) {
+                if kind.is_symlink() {
+                    let target = p.canonicalize()?;
+                    if target == root {
+                        return Err(unavailable("control_path_overlaps_project"));
+                    }
+                    found.private_targets.push(target);
+                }
+                found.private.push(p);
+                continue;
+            }
+            if kind.is_dir() {
+                children.push(p);
+            } else if kind.is_file() && writes.iter().any(|w| p.starts_with(w)) {
+                let meta = e.metadata()?;
+                if meta.is_dir() {
+                    children.push(p);
+                } else if meta.is_file()
+                    && meta.nlink() > 1
+                    && !denied_all.iter().any(|d| p.starts_with(d))
+                {
+                    let owner = p
+                        .strip_prefix(root)
+                        .unwrap()
+                        .components()
+                        .next()
+                        .map(|c| root.join(c.as_os_str()))
+                        .unwrap();
+                    found.links.push(Link {
+                        path: p,
+                        meta,
+                        owner,
+                    });
+                }
+            }
+        }
+        Ok(())
+    };
+    let worker = || -> Scan {
+        let mut found = Scan {
+            private: Vec::new(),
+            private_targets: Vec::new(),
+            links: Vec::new(),
+            entries: 0,
+        };
+        let mut children = Vec::new();
+        loop {
+            let dir = {
+                let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+                loop {
+                    if q.error.is_some() {
+                        return found;
+                    }
+                    if let Some(dir) = q.pending.pop() {
+                        q.active += 1;
+                        break dir;
+                    }
+                    if q.active == 0 {
+                        return found;
+                    }
+                    q = wake.wait(q).unwrap_or_else(|e| e.into_inner());
+                }
+            };
+            let result = visit(&dir, &mut found, &mut children);
+            let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+            q.active -= 1;
+            match result {
+                Ok(()) => q.pending.append(&mut children),
+                Err(e) => {
+                    q.error.get_or_insert(e);
+                }
+            }
+            wake.notify_all();
+        }
+    };
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 8);
+    let parts: Vec<Scan> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads).map(|_| scope.spawn(worker)).collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)))
+            .collect()
+    });
+    if let Some(e) = queue.into_inner().unwrap_or_else(|e| e.into_inner()).error {
+        return Err(e);
+    }
+    let mut all = Scan {
+        private: Vec::new(),
+        private_targets: Vec::new(),
+        links: Vec::new(),
+        entries: count.into_inner(),
+    };
+    for mut part in parts {
+        all.private.append(&mut part.private);
+        all.private_targets.append(&mut part.private_targets);
+        all.links.append(&mut part.links);
+    }
+    // A deterministic order independent of thread scheduling. Read-only binds come
+    // first and private store directories (hidden by a read-only tmpfs) last, so a
+    // later mount never targets a path inside an already-hidden store.
+    all.private.sort_by_cached_key(|p| {
+        (
+            p.file_name()
+                .is_some_and(|n| n == ".cortex" || n == ".cortex-dev"),
+            p.clone(),
+        )
+    });
+    all.links.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(all)
+}
+/// Standalone traversal plus policy, for callers without a prepared [`Scan`].
+#[cfg(test)]
 pub(super) fn links(
     root: &Path,
     profile: Profile,
@@ -728,55 +887,25 @@ pub(super) fn links(
     denied: &[PathBuf],
     before_write: &mut dyn FnMut() -> io::Result<()>,
 ) -> io::Result<Vec<PathBuf>> {
+    let scan = scan(root, writes, denied)?;
+    links_from(&scan, root, profile, before_write)
+}
+/// Development detaches external aliases; Guarded/ReadOnly keep them read-only.
+/// Internal aliases are safe only if every directory entry is writable.
+pub(super) fn links_from(
+    scan: &Scan,
+    root: &Path,
+    profile: Profile,
+    before_write: &mut dyn FnMut() -> io::Result<()>,
+) -> io::Result<Vec<PathBuf>> {
     let mut groups: HashMap<(u64, u64), Vec<Link>> = HashMap::new();
-    let mut pending = vec![root.to_owned()];
-    let mut private_targets = Vec::new();
-    let mut count = 0;
-    while let Some(dir) = pending.pop() {
-        for e in fs::read_dir(dir)? {
-            let e = e?;
-            count += 1;
-            if count > 2_000_000 {
-                return Err(unavailable("project_tree_limit"));
-            }
-            if private(&e.file_name()) {
-                if e.file_type()?.is_symlink() {
-                    let target = e.path().canonicalize()?;
-                    if target == root {
-                        return Err(unavailable("control_path_overlaps_project"));
-                    }
-                    private_targets.push(target);
-                }
-                continue;
-            }
-            let p = e.path();
-            let meta = e.path().symlink_metadata()?;
-            if meta.is_dir() {
-                pending.push(p);
-            } else if meta.is_file() && meta.nlink() > 1 {
-                let writable = writes.iter().any(|w| p.starts_with(w))
-                    && !denied.iter().any(|d| {
-                        p.starts_with(d) || d.canonicalize().is_ok_and(|d| p.starts_with(d))
-                    });
-                if writable {
-                    let relative = p.strip_prefix(root).unwrap();
-                    let owner = relative
-                        .components()
-                        .next()
-                        .map(|c| root.join(c.as_os_str()))
-                        .unwrap();
-                    groups
-                        .entry((meta.dev(), meta.ino()))
-                        .or_default()
-                        .push(Link {
-                            path: p,
-                            meta,
-                            owner,
-                        });
-                }
-            }
-        }
+    for link in &scan.links {
+        groups
+            .entry((link.meta.dev(), link.meta.ino()))
+            .or_default()
+            .push(link.clone());
     }
+    let private_targets = &scan.private_targets;
     for links in groups.values_mut() {
         links.retain(|l| !private_targets.iter().any(|p| l.path.starts_with(p)));
     }

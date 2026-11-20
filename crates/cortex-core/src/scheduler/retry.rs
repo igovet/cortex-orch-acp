@@ -58,6 +58,41 @@ pub fn windowed_retry(times: &[f64], now: f64, window: RetryWindow) -> CoreResul
         },
     })
 }
+/// Whether a lost worker's dispatched action has a known end, so that a fresh
+/// attempt of its node may run. A complete receipt has one. A settled receipt has
+/// one when the runtime observed how its process ended (the supervisor's final
+/// status: an exit code, a signal, an owner stop or a timeout), when it provably
+/// never launched (`launched: false`, outcome `not_started`), when the supervisor
+/// finished but its output could not be verified (`supervisor_finished`), or when a
+/// read-only command's PID namespace ended with its supervisor
+/// (`supervisor_gone_pid_namespace`: it could not write). A receipt settled only on
+/// proof that its process is gone, without an observed end (outcome `unknown`:
+/// an earlier boot, an empty process group, an owner acknowledgement), and a
+/// receipt that is not settled, still block: the action may have taken effect,
+/// and repeating the node could repeat it. The coordinator decides those.
+pub fn action_outcome_known(receipt: &Value) -> bool {
+    if receipt["complete"] == true || receipt["status"] == "complete" {
+        return true;
+    }
+    if receipt["settled"] != true
+        || receipt["outcome_unknown"] == true
+        || receipt["failure"] == "command_outcome_unknown"
+    {
+        return false;
+    }
+    match receipt["outcome"].as_str() {
+        None => true,
+        Some("not_started") => receipt["launched"] == false,
+        Some("unknown") => {
+            receipt["exit_code"].is_i64()
+                || matches!(
+                    receipt["settlement_evidence"].as_str(),
+                    Some("supervisor_finished" | "supervisor_gone_pid_namespace")
+                )
+        }
+        Some(_) => false,
+    }
+}
 /// Observation is for this exact provisioned attempt, collected by EngineDriver
 /// before entering the transaction. Unknown is never absence.
 pub struct RetryObservation<'a> {
@@ -218,10 +253,19 @@ pub fn retry_lost_tx(
         retry["auth_retry"] = json!(true);
     }
     if let Some(attempt) = observed.attempt {
-        let unknown:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_requests r JOIN trusted_channels c ON c.channel_id=r.actor
+        let receipts = db
+            .prepare(
+                "SELECT r.result_json FROM runtime_requests r JOIN trusted_channels c ON c.channel_id=r.actor
             WHERE r.task_id=? AND c.attempt_id=? AND r.operation IN
             ('command_run','project_write','project_edit','project_mkdir','project_delete','project_skill_link','draft_write','external_call')
-            AND coalesce(json_extract(r.result_json,'$.complete'),0)!=1 AND coalesce(json_extract(r.result_json,'$.status'),'')!='complete')",(task,attempt),|r|r.get(0))?;
+            AND coalesce(json_extract(r.result_json,'$.complete'),0)!=1 AND coalesce(json_extract(r.result_json,'$.status'),'')!='complete'",
+            )?
+            .query_map((task, attempt), |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        // An unparsable receipt is never a known outcome.
+        let unknown = receipts.iter().any(|raw| {
+            !serde_json::from_str::<Value>(raw).is_ok_and(|receipt| action_outcome_known(&receipt))
+        });
         if unknown {
             return refuse("lost_worker_action_outcome_unknown");
         }

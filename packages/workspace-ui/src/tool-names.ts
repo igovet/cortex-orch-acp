@@ -5,7 +5,7 @@
  */
 import { presentToolSemantics } from "@cortex/workspace-domain/tool-presentation";
 import { chatToolIcon, nativeRow, summarizeToolRun } from "@cortex/workspace-domain/worker-panel-groups";
-import { isHiddenOperation } from "@cortex/workspace-domain/timeline-visibility";
+import { isHiddenOperation, isPlumbingOperation } from "@cortex/workspace-domain/timeline-visibility";
 // Framework-free domain presentation keeps both clients' rows consistent without importing a host plugin.
 const MCP = /^(?:mcp__(.+?)__|mcp\.([^.\s]+)\.)([A-Za-z0-9_-]+)\s*(.*)$/s;
 
@@ -33,7 +33,12 @@ export function isHiddenStep(text: string): boolean {
   const t = text.trim();
   if (/^context \d+\s*\/\s*\d+$/i.test(t)) return true;
   const name = (operation(t)?.name ?? t).toLowerCase();
-  return isHiddenOperation(name);
+  return isHiddenOperation(name, { showPlumbing: true });
+}
+/** The runtime's own steps (command status, skills, report drafts…): shown only when the reader asks for every tool call. */
+export function isPlumbingStep(text: string): boolean {
+  const t = text.trim();
+  return isPlumbingOperation((operation(t)?.name ?? t).toLowerCase());
 }
 
 /** Native activity names the role before the engine's own title ("orchestrator: mcp__cortex__plan_submit", "worker-frontend-dev:
@@ -153,15 +158,18 @@ export function viewOfActivity(a: Step): StepView {
   return { ...step, target: a.code && !IDENTIFIER.test(a.code.trim()) ? a.code : step.target };
 }
 // Recorded activity is never changed in place, so what was decided about a record holds for as long as the record lives.
-const hidden = new WeakMap<object, boolean>();
-export const isHiddenActivity = (a: Pick<Step, "text" | "code" | "args">) => {
-  const known = hidden.get(a);
-  if (known !== undefined) return known;
-  const detail = displayStep(a.args) ?? displayStep(a.text);
-  // Paseo also judges the call's kind: thinking and context figures arrive as untitled steps of those kinds.
-  const out = [a.text, a.code, detail?.title, detail?.kind].some(t => !!t && isHiddenStep(t));
-  hidden.set(a, out);
-  return out;
+const hidden = new WeakMap<object, "status" | "plumbing" | "shown">();
+/** `showPlumbing` is the reader's choice to see every tool call; the engine's status updates are never shown. */
+export const isHiddenActivity = (a: Pick<Step, "text" | "code" | "args">, showPlumbing = false) => {
+  let known = hidden.get(a);
+  if (known === undefined) {
+    const detail = displayStep(a.args) ?? displayStep(a.text);
+    // Paseo also judges the call's kind: thinking and context figures arrive as untitled steps of those kinds.
+    const parts = [a.text, a.code, detail?.title, detail?.kind].filter((t): t is string => !!t);
+    known = parts.some(isHiddenStep) ? "status" : parts.some(isPlumbingStep) ? "plumbing" : "shown";
+    hidden.set(a, known);
+  }
+  return known === "status" || (known === "plumbing" && !showPlumbing);
 };
 export const isFoldedStep = (a: Pick<Step, "kind" | "text" | "code">) => ["tool", "tools", "edit", "command"].includes(a.kind) || (a.kind === "note" && (isToolName(a.text) || IDENTIFIER.test(a.text.trim()) || (!!a.code && isToolName(a.code))));
 /** A recorded step that failed or was refused: a refusal's reason marks it as one even when the engine called it completed. */
@@ -200,7 +208,7 @@ export function oneRowPerCall<A extends Step>(list: readonly A[]): A[] {
  * update costs and redraws only the rows it changed. (Rebuilding every row's views on every update dropped frames in a long
  * feed; test/scroll-perf.driver.mjs measures it with `-live`.)
  */
-export function feedOf<A extends Step>(list: readonly A[], runIds?: Map<number, string>, previous?: ReadonlyMap<string, FeedItem<A>>): FeedItem<A>[] {
+export function feedOf<A extends Step>(list: readonly A[], runIds?: Map<number, string>, previous?: ReadonlyMap<string, FeedItem<A>>, showPlumbing = false): FeedItem<A>[] {
   const out: FeedItem<A>[] = [], used = new Set<string>();
   let run: A[] = [];
   const runKey = () => {
@@ -222,7 +230,7 @@ export function feedOf<A extends Step>(list: readonly A[], runIds?: Map<number, 
     run = [];
   };
   for (const a of list) {
-    if (isHiddenActivity(a)) continue;
+    if (isHiddenActivity(a, showPlumbing)) continue;
     if (isFoldedStep(a)) { run.push(a); continue; }
     flush();
     const key = `row:${a.sequence}`, old = previous?.get(key);

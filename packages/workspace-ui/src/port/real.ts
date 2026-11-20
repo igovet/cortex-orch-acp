@@ -1028,8 +1028,10 @@ export function createRealPort(options: RealPortOptions): WorkspacePort {
    *  then only when a task's state moved or the owner's own Git action made it stale, never for streamed text alone. */
   const streamFactsMs = options.streamFactsMs ?? STREAM_FACTS_MS;
   const factsThrottle = new Map<string, { ended: number; timer?: ReturnType<typeof setTimeout>; running: boolean; mark?: string }>();
-  /** Parts of a facts read the machine was still checking when it answered (it never waits for them, `factsOf`). */
-  const unsettled = (product: Product) => Object.values(product.tasks).some(t => t?.reviewActions?.pending === true || t?.integrationFacts?.pending === true || t?.integrationFacts?.refreshing === true);
+  /** Deferred observations can settle in a follow-up read. Check-only previews instead wait for runtime completion. */
+  const unsettled = (product: Product) => Object.values(product.tasks).some(t =>
+    (t?.reviewActions?.pending === true && t.reviewActions.unblockAction !== "wait") ||
+    t?.integrationFacts?.pending === true || t?.integrationFacts?.refreshing === true);
   /** The settled result facts of a task whose deferring read came back pending about the same result (same version and
    *  summary): its checks, warnings, digest, review actions and merge facts stay as last confirmed. `unsettled` still sees
    *  the pending read, so one settling read follows. A different version, or no earlier settled facts, shows as it came. */

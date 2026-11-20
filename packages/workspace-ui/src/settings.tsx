@@ -43,6 +43,7 @@ function Appearance() {
       </Srow>
       <Srow t="Notifications" d="Notify when something needs you outside the task or sprint on view: a question, a stopped task, a result to review, a failed task, a planning question or a paused sprint. Clicking one opens it. The desktop notification service must be available."><Sw label="Desktop notifications" checked={ws.panels.notifications()} disabled={ws.notify ? undefined : "Desktop notifications require the native app"} onChange={on => ws.panels.setNotifications(on)} /></Srow>
       <Show when={ws.notify && ws.panels.notifications()}><NotificationKinds /></Show>
+      <Srow t="Tool calls" d="Off: the conversation and worker pages show reading, searching and changing files, commands, Git and browser actions. On: they also show the runtime's own steps, such as command status checks, skills, task context, report drafts and submissions. Everything stays recorded either way."><Sw label="Show every tool call" checked={ws.panels.showAllTools()} onChange={on => ws.panels.setShowAllTools(on)} /></Srow>
       <Srow t="Autosave" d="Saves a file about a second after you stop typing. It waits while a task works in the checkout and after any conflict. Off by default."><Sw label="Autosave files" checked={ws.panels.autosave()} onChange={on => ws.panels.setAutosave(on)} /></Srow>
     </div>
   </Page>;

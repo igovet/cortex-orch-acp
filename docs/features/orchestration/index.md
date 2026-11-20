@@ -30,7 +30,115 @@ itself is unchanged.
 
 ## Review after a replan or reopen
 
-The review packet lists paths changed against the current execution baseline and paths recorded by this task across its plans. For each listed task write, the packet identifies its latest event, node and plan revision. A matching SHA-256 confirms the currently observed bytes. A mismatch calls for a fresh read. A missing comparison or incomplete baseline remains explicit. The reviewer examines the objective and material changes, and the runtime still binds approval and verification to the checkout digest.
+The review packet lists paths changed against the current execution baseline and paths recorded by this task across its plans. For each listed task write, the packet identifies its latest event, node and plan revision. A matching SHA-256 confirms the currently observed bytes. A mismatch calls for a fresh read. A missing comparison or incomplete baseline remains explicit. The reviewer examines the objective and material changes. Each listed file is marked `required` when this task changed it (see [review of the task's own changes](#review-of-the-tasks-own-changes)); approval and verification bind those files' bytes, or the whole checkout when the task's changes could not be attributed completely.
+
+## Review of the task's own changes
+
+A shared checkout holds other actors' uncommitted work: the owner's edits, other
+tasks, other tools. The execution-baseline difference lists all of it, so a
+review that had to read every listed file, and a binding to the whole checkout,
+were refused or re-bound by changes no worker of the task made (owner store
+2026-11-20: a packet of 121 changed files, 83 of them unrelated, three reviews
+refused `review_file_coverage_required` for up to 32 unrelated files, and one
+`review_project_revision_changed` from an unrelated edit). Review now covers the
+task's own changes.
+
+**Attribution.** A file has a writer from this task when:
+
+- a gateway file tool of one of the task's channels wrote, edited, moved or
+  deleted it (`NATIVE_PROJECT_WRITTEN`, `NATIVE_PROJECT_CHANGED`, across plans);
+- it changed while one of the task's commands ran. Around every writable
+  `command_run` and every owner-confirmed `outside_command`, the host lists the
+  checkout's dirty deliverable paths before launch and after the process ended
+  (`git status --porcelain=v2 -z --untracked-files=all --no-renames`: tracked
+  changes and untracked files, never Git-ignored ones, each with its status
+  record plus size, mtime, ctime, mode and inode; a folder outside any repository
+  is walked instead). Clean files are neither visited nor hashed. The paths whose
+  entry differs are recorded on the command's `NATIVE_COMMAND_FINISHED`
+  observation (`changed_paths`, `changed_paths_complete`,
+  `crates/workspace-service/src/native_change_set.rs`). A read-only `command_run`,
+  `project_git` (status or diff only), a runtime verification run (deliverable
+  files mounted read-only) and a payload that provably never started record an
+  empty, complete list without listing;
+- it changed during a turn of a writing worker whose engine could change files
+  without a receipt. The same listings bracket each such turn
+  (`NATIVE_WRITER_TURN_STARTED`, `NATIVE_WRITER_TURN_CHANGES`; `NATIVE_TURN_SETTLED`
+  carries `writer`). codex-acp (`workspace-write`) and OpenCode can write inside
+  their own sandbox without asking, so every writing turn of theirs counts
+  (`native_mutation: true`); Claude Code runs with its native shell and file tools
+  disallowed and asks for every other tool, so its turn counts only when the
+  runtime allowed a request in it other than a Cortex gateway tool or a read.
+
+A path that changed during a command or a counted turn is attributed to that
+node even when another actor changed it at the same time: attribution is
+conservative, never narrowed by guessing who made a concurrent edit. The packet
+names the writer in `by`, marks the file `required: true`, and counts
+`changed_files.required`; `change_boundary.command_changed_paths` counts the paths
+attributed this way.
+
+**Coverage.** `review_coverage_missing_tx` asks only for required files. Every
+other changed file stays listed with `required: false` as context, with the
+packet's guidance that it has no writer from this task, and is never a missing
+item, an outside-read-scope item (`outside_read_scope` lists required files only)
+or a `Changed files without reviewable text` limit. A listing longer than the
+packet's 200 entries keeps the task's own changes first; `more.required` counts
+the required files beyond the list, and only those become the `Changed files
+beyond the review list` limit. Deletions, ignored files, binary, image and opaque
+content, long-line segment coverage and `review_lines` ranges are handled as
+before, for required files.
+
+**Binding.** The host records the packet's binding with the recorded packet
+(`REVIEW_PACKET.binding`, not in the reviewer's brief) before the review starts:
+
+- `{"kind": "task_files", "paths": [...]}`: every required path. `REVIEW_STARTED`
+  (`binding: "task_files"`), each re-binding, the verdict's `review_digest` and
+  final verification and completion bind a digest of those paths' current states
+  only: content hash and mode, link target or `absent`, identified by the host at
+  each observation (`EvidenceSnapshot.task_files`; past a 256 MiB hashing budget a
+  file is identified by its metadata including ctime). An edit of a required file,
+  by anyone, still refuses the verdict with `review_project_revision_changed` and
+  re-binds, and after approval still refuses verification with
+  `verification_review_revision_changed` and schedules a fresh review. An edit of
+  any other file neither refuses nor re-binds a review and does not invalidate an
+  approval or a verification. A bound file whose state the host did not supply
+  makes the binding unavailable (`review_revision_unavailable`), never satisfied.
+- `{"kind": "checkout", "reason": ...}`: the whole checkout, exactly as before.
+  This is the conservative fallback whenever attribution is incomplete: a command
+  or counted turn since the baseline without a complete change record (a receipt
+  or turn from an earlier build, `command_without_change_record`,
+  `turn_without_change_record`; a listing that failed, `listing_failed`, or
+  exceeded its bounds, `too_many_paths` at 200,000 dirty paths or 64 MiB of
+  listing, `too_many_changed_paths` past 5,000 changed paths in one run; a nested
+  checkout, `nested_checkout`; a run settled without listings after a restart,
+  `settled_without_listing`; an unknown outcome, `outcome_unknown`,
+  `turn_outcome_unknown`; a command or turn started and never settled,
+  `command_unsettled`, `turn_unsettled`). The packet then sets
+  `changed_files.attribution_complete: false` with `attribution.reason`, every
+  listed file is required, and the review binds the whole checkout. A task-file
+  set past 20,000 paths also binds the whole checkout (`too_many_task_files`) while
+  requiring only the task's files. A packet recorded by an earlier build has no
+  binding and binds the whole checkout.
+
+Verification compares the same binding: `VERIFICATION_PASSED.revision_digest` and
+each runtime check's `revision_digest` are the approving review's binding, and
+`checkout_digest` records the whole checkout the commands ran in (it is what a
+worker's check receipt, the presented result identity and an owner's check rerun
+compare). The runtime still runs the plan's verification commands against the
+real checkout, so a breakage another actor's change causes still fails there.
+
+The guarantee and its limit are exact. Approval and verification certify that the
+bytes of every file this task wrote or changed are the reviewed bytes, and that
+the plan's commands passed on the checkout as it was when they ran. They do not
+certify other actors' concurrent changes: those were not reviewed, and a checkout
+that also contains them was verified, not reviewed. Attribution sees what the
+listings see: a path changed and restored to the same status record and metadata
+within one run, a Git-ignored file and the inside of a nested checkout are
+invisible (a nested checkout makes the record incomplete); between two turns of a
+writing worker no listing runs, so an engine-native background process that
+outlives its turn and changes a file before the next turn is not attributed.
+Very large dirty checkouts make attribution incomplete rather than slow: past the
+listing bounds above the review falls back to the whole checkout, and an
+observation of the whole checkout keeps its own bounds.
 
 ## Reviewer verification reuse
 
@@ -289,7 +397,7 @@ A project-folder sprint task's "unchanged" is judged on the files it recorded wr
 because the later tasks of its sprint write the same folder. Independently of routes, a reviewer attempt
 that is also an execution attempt of the task is refused as `review_not_independent`.
 Review remains independent and digest-bound; MCP revocation
-does not intercept native filesystem edits, which still invalidate the review
+does not intercept native filesystem edits; a writing turn's edits are attributed to the task and invalidate the review
 binding. A late engine failure, timeout or cancellation does not replace an
 accepted result or authorize a retry of that completed node. Verification and
 final completion gates are unchanged, including confirmed absence of live worker
@@ -298,15 +406,28 @@ sessions at completion.
 Retried nodes and fix nodes are covered because the decision
 compares the whole project, not individual worker claims. No model argument or
 hint can waive review; `EXECUTING → VERIFYING` is refused without the runtime's own
-record. A review result binds to the project digest recorded in `REVIEW_STARTED`.
-If the project changed while the review ran, for example because another writer
-edited the same checkout, `result_submit` refuses the verdict with
+record. A review result binds to the digest recorded in `REVIEW_STARTED`: the
+task's own files' states, or the whole checkout when attribution is incomplete
+([review of the task's own changes](#review-of-the-tasks-own-changes)).
+If what the review binds changed while it ran, for example because another writer
+edited one of the task's files, `result_submit` refuses the verdict with
 `review_project_revision_changed` before publishing anything. It then records a new
 `REVIEW_STARTED` for the current digest (`rebound_from`, `rebind`,
 `refused_request_key`). The reviewer re-checks the changes and submits with a new
 request_key. The refused request_key never records a verdict
 (`review_resubmit_required`). After `MAX_REVIEW_REBINDS` (3) re-bindings, a further
-change is refused as `review_project_revision_unstable`. Each of these reaches the
+change is refused as `review_project_revision_unstable` and recorded as
+`REVIEW_REVISION_UNSTABLE` with the observed digest; nothing is re-bound while the
+project keeps changing between submissions. A submission that finds the same digest
+as the previous unstable refusal (nothing changed in between) re-binds the review to
+that state (`REVIEW_STARTED` with `after_unstable: true`) and is refused
+`review_project_revision_changed`, so the reviewer re-reads what changed and the
+next submission on that state is accepted. A key refused as unstable never records
+a verdict either. Earlier, nothing was recorded past the budget, so every later
+submission was compared with the stale binding and the review could never clear.
+Final verification and completion certify exactly the reviewed binding. With a
+task-file binding they certify the task's own files, not the rest of the checkout,
+which no review saw; the plan's commands still run against the real checkout. Each of these reaches the
 reviewer as a correctable `isError` result naming the code, `field` `request_key`
 and a hint to re-check the change and resubmit with a fresh key. Before this, the binding
 was never refreshed, so one change refused every later submission of that review.
@@ -338,8 +459,11 @@ each part of the change the review cannot cover itself, with its dead-end
 `tool_unavailable`) and why, is neither an approval nor a block. The reviewer
 finishes its own review first: `result_submit` refuses, before publication and
 with the exact items in `missing`, an INCOMPLETE part without a valid blocker
-(`review_coverage_unfinished`), a changed regular file it has not read completely
-in its current bytes (`review_file_coverage_required`), a required predecessor report
+(`review_coverage_unfinished`), a required changed regular file (the task's own change) it has not read completely
+in its current bytes (`review_file_coverage_required`; a line longer than one
+`project_read` segment counts once its segments were followed with `next_column`
+to its end, and a file's `review_lines` ranges end at its last line as
+`project_read` counts lines, so a final line break adds no unreadable line), a required predecessor report
 (its packet's `predecessor_reports`) not read to its last page
 (`review_predecessor_reports_required`) and a BLOCK without
 findings (`review_block_findings_required`); the review stays the one running
@@ -365,11 +489,25 @@ reports with their size and page count, split into the required reports of this
 review's round (`predecessor_reports`) and optional context (`optional_reports`:
 earlier rounds, work without recorded writes, earlier plans; see
 [roles and delegation](../roles-and-delegation/index.md)); and the review's read scope, checked to
-cover every changed file. A change set the host could not enumerate never makes
-approval impossible: the listed files must still be read completely, and an
+cover every required changed file. A change set the host could not enumerate never makes
+approval impossible: the required listed files must still be read completely, and an
 approval then carries an `unverified` runtime check (`REVIEW_CHANGE_SET_LIMITED`)
 that the final result discloses under Not verified, telling the owner to inspect
-the folder.
+the folder. A listed file whose current bytes (exactly those of its
+`current_sha256`) have no reviewable text is not a missing read either: the packet
+marks it `review_content` `binary` (not UTF-8, or containing NUL), `image`, or
+`opaque` (encoded or minified text of at least 8 KiB whose lines average over 1,000
+bytes, or whose lines are all base64-like), and a read of such bytes that found no
+text proves the same. Unless the review read it completely (an image through a
+direct `project_read`, which shows it), an approval carries the `unverified` runtime
+check `Changed files without reviewable text` naming those paths, disclosed the same
+way. Every binary read records hash-bound coverage of its bytes, single or in
+`read_batch`, and so does a direct image read; a batched image read records nothing,
+because the batch refuses image replies (`batch_multimodal_unsupported`) and the
+image never reaches the model. A batched text page larger than the batch's inline
+item bound (which the batch defers) records nothing and claims only the coverage
+recorded before it (`coverage_recorded: false`); before this, the page reported the
+coverage it would have added.
 Three unsuccessful review cycles block further automatic
 work. The loop never treats an ordinary final model message as a worker result.
 
@@ -571,74 +709,50 @@ gateway receipt that is:
    that inline cut never affects verification, and `read_large_output` pages the
    complete retained bytes;
 4. recorded with its `argv`, and that command is not a trivial stand-in (below);
-5. cited by no earlier check of the same result (one command, one check).
+5. cited by no earlier check of the same result (one command, one check);
+6. bound to the submitted work (`revision_binding`, see
+   [check history](#check-history-and-current-outcome)): the whole checkout was
+   unchanged from launch to exit and is the submitted one, or the run's work set was
+   unchanged from launch to exit and is unchanged at submission. Otherwise
+   `evidence_gap: "revision_mismatch"`.
 
-**Trivial-command rule**. After leading
+**Trivial-command rule** (`trivial_command` in
+`crates/cortex-core/src/lifecycle/completion.rs`). After leading
 `NAME=value` assignments and the launchers `env`, `timeout`, `nice`, `nohup`,
 `command`, `exec` and `time` are removed, a command is trivial when nothing is
 left; when its program basename is a no-op, printer, listing, file read or search
 (`pwd`, `ls`, `echo`, `printf`, `cat`, `head`, `tail`, `tee`, `grep`, `rg`, `find`,
-`true`, `test`, `cd`, `env`, `which`, `stat`, `wc`, `sort` and the rest of
-`TRIVIAL_PROGRAMS`); when it is a read-only `git` subcommand (`status`, `log`,
+`true`, `test`, `cd`, `env`, `which`, `stat`, `wc`, `sort` and the rest of that
+list); when it is a read-only `git` subcommand (`status`, `log`,
 `show`, `branch`, `rev-parse`, `ls-files`, `remote`, `config`, `describe`) or
 `git diff` without `--check`, `--exit-code` or `--quiet`; or when it is a
-`sh`/`bash`/`dash`/`zsh`/`ksh` `-c` script whose exit status cannot come from a
-nontrivial command. For a script, its last command decides: a trivial last command
-masks everything before it unless joined by `&&` (also `;`/newline under `set -e`
-or `-e`, and `|` under `set -o pipefail`); `exit`, `exit $?` and `|| exit N`
-(N nonzero) pass the previous status through, `exit 0` masks it; an unparsable
-script is trivial. So `pytest || true`, `pytest; echo done` and
-`pytest | tail -5` are trivial, while `cd web && npm test` and
-`set -o pipefail; pytest | tee log` are not.
-
-One status-capture form is proved and is not trivial:
-`CHECK > log 2>&1; code=$?; tail -n 40 log; exit $code`. Every condition must
-hold: an `sh`, `bash` or `dash` `-c` script (not `zsh` or `ksh`, and no `+`
-shell option) of simple commands only, with no grouping, background job,
-compound command, `!`, here-document, command, arithmetic or process
-substitution, backslash, backtick or `#`; every word, checked with its quotes,
-in a deliberately small literal grammar: command heads and redirection targets
-are unquoted letters, digits and `_./:,+@%=-`, single-quoted text or
-double-quoted text without `$`, and other arguments may add only a plain `$NAME`
-or `${NAME}` (unquoted or double-quoted). Any other expansion is outside the
-proof, wherever it appears (before or after the capture, in a printer argument
-or a redirection target): every other `${...}` form (an array subscript such as
-`${x[code=0]}` or a substring offset such as `${x:code=0}` evaluates arithmetic
-that assigns the captured variable in Bash), `$1`, `$@`,
-`$$`, `$'...'`, `$"..."`, `$(...)`, unquoted glob, brace and tilde
-characters, and unbalanced quotes. Some harmless forms (such as `echo "$(date)"`
-or `tail ~/log`) are rejected with them; single-quoted text stays literal and is
-accepted. No assignment-prefixed commands (including `x=1 trap ...`, Bash
-`x+=1 trap ...` or `X=value CHECK`; use direct argv instead), only standalone
-assignments; no leading numeric command words (including a file descriptor
-before a redirection, such as `2>log CHECK`); no `eval`, `source`, `.`, `exec`, `trap`, `alias`, `shopt`,
-`readonly`, `declare`, `typeset`, `local`, `unset`, `read`, `let`, `mapfile`,
-`getopts`, `builtin`, `command`, `enable` or `return`, and `exit` only as the
-final command; `set` only as leading `-e`/`-u`/`-x`/`-o pipefail` options; a
-lowercase variable other than `_`, assigned exactly once by the standalone word
-`NAME=$?` or `NAME="$?"` after `;` or a newline, with the identifier and equals
-sign unquoted (quoted whole words and quoted identifiers are not assignments);
-the commands before it, taken as a script of
-their own, are not trivial; only printing and reading commands from the trivial
-list (except `cd`, `env`, `export`, `printf`, `set` and `type`) run
-between the assignment and the final `exit $NAME`, which follows them after
-`;`, a newline or `&&`. All intervening `printf` forms are excluded, including
-harmless literal formats: Bash `%n` writes a character count to a shell variable,
-and `-v` assigns a variable even when the option comes from a plain `$NAME`
-argument. Literal-word checks alone cannot prove these commands read-only;
-use `echo`/`tail` wrappers or direct check argv instead. Any other script that ends with `exit $VARIABLE` stays
-unverified with `evidence_gap: "status_variable_unproven"`, for example a
-reassigned or conditionally assigned variable, `|| true` or a pipeline without
-`pipefail` before the capture, a non-printing command (such as `cp`) between
-capture and exit, an expansion outside the literal grammar, or a trivial
-captured command. No exact rerun of such an argv can verify; run the check
-command directly as argv (for example `["python3", "-m", "pytest", "-q"]`)
-instead. This is a bounded recognizer, not a shell parser or a shell security
-boundary; direct argv is always the simpler route, because the gateway retains
-the complete output anyway. Anything else (a test runner, linter,
-type checker, build or project script) may verify a check. The rule does not prove
-that a nontrivial command tests *the named* check (for example an inline
-`python3 -c` program); that correspondence is the independent reviewer's
+`zsh`/`ksh` `-c` script, or an `sh`/`bash`/`dash` `-c` script outside one recognized
+form. That form is setup commands followed by exactly one simple command, joined by
+`;` or `&&`: setup is any number of `umask NNN` (three or four octal digits),
+`export NAME=value...`, `cd DIR` and `set` with only `-e`, `-u`, `-x` or
+`-o pipefail`; the last command is then classified like direct argv. The script may
+contain only words of unquoted letters, digits and `_./:,+@%=-~*?^`, single-quoted
+text, double-quoted text and plain `$NAME`/`${NAME}` expansions. A pipe, `||`, a
+single `&`, a redirection, grouping, a subshell, a newline, a comment, a backslash,
+a backtick, command or process substitution, `$'...'` and every other `$` form make
+the script trivial, as do an empty command (`;;`, a trailing `;`), unbalanced
+quotes, and a last command whose program word holds an expansion, glob or tilde
+(other than a leading `$HOME/` when the script does not assign `HOME`) or is a
+shell keyword or code-running builtin (`if`, `for`, `while`, `coproc`, `eval`,
+`source`, `.`, `trap`, `alias`, `umask`, `wait` and the like). The exit status of
+such a script is therefore the last command's, or a failing `&&` setup command's,
+never a masking one's. So `bash -c "umask 022; cargo test --locked"`,
+`sh -c "umask 022 && cd web && npm test"` and
+`bash -c 'umask 022; exec timeout 900 "$HOME/.cargo/bin/cargo" test'` verify,
+while `pytest || true`, `pytest; echo done`, `pytest | tail -5`,
+`cargo test > log 2>&1` and `umask 022` alone are trivial. Before this, every
+inline script was trivial, and the `umask 022` this repository requires pushed
+workers' checks into exactly that form. This is a bounded recognizer, not a shell
+parser or a shell security boundary; direct argv is always the simpler route,
+because the gateway retains the complete output anyway. Anything else (a test
+runner, linter, type checker, build or project script) may verify a check. The
+rule does not prove that a nontrivial command tests *the named* check (for example
+an inline `python3 -c` program); that correspondence is the independent reviewer's
 judgement, and the reviewer sees the exact `argv` in the receipt.
 
 Engine-native tool calls (the engine's own shell, read, edit or search tools) are
@@ -657,26 +771,28 @@ check is always kept as `failed`. A new submission containing an open failure
 is refused with `open_failed_check` before anything is recorded or published,
 unless the worker explicitly sends `assignment_outcome: "failed"` to submit an
 intentional failed assignment. The refusal leaves the channel active and its
-request key reusable. Its correction
- names the failed receipt, a
-bounded command identity (program, argv word count, argv SHA-256 prefix, cwd and
-profile, never the argv, script or output), the relevant later run and its
-actual gap, and distinguishes: no later run of the same identity; a later run
-that failed too or has no established result; a passing latest run no check
-cites, or cites without verification; a same-name pass of a different argv
-(which never closes the failure); a failed claim without a verified failing
-receipt; an unrecorded later run; and an argv whose exit-0 run can never verify
-(`trivial_command` or `status_variable_unproven`). It recommends an exact rerun
-only when one can close the failure; otherwise only the explicit failed
-assignment remains. The result receipt returned to the worker includes `node_status` and lists
-every check's recorded `outcome` with its `claimed_outcome`/`evidence_gap`, and
-`closed_by` for a closed failure (below).
-`evidence_gap` codes: `tool_call_ref_missing`, `tool_call_ref_unknown`,
-`foreign_attempt`, `ref_already_cited`, `not_a_command`,
-`engine_command_unverifiable`, `receipt_missing`, `ambiguous_ref`,
-`call_incomplete`, `nonzero_exit`, `zero_exit` (a failed claim citing exit 0),
-`result_missing`, `result_truncated`, `command_unrecorded`, `trivial_command`,
-`status_variable_unproven`, `later_run_failed`, `later_run_unresolved` (below).
+request key reusable. Its `missing` items name each open check by its name and
+`tool_call_ref`, the gap that keeps it open and what closes it
+(`worker_checks::open_items`), naming a program and receipt references, never argv
+text or output: `no_passing_rerun` (no later run of the same argv, cwd and
+profile), `later_run_unresolved` or `later_run_failed` (the latest rerun has no
+complete result, or failed too), `rerun_not_cited` (the latest rerun passed but no
+check cites it), `rerun_named_differently`, `rerun_<gap>` (the cited passing rerun
+does not verify, for example `rerun_revision_mismatch` when it observed neither the
+submitted checkout nor an unchanged work set, with that remedy rather than advice to
+rerun what already passed), `later_run_unrecorded`, `nonzero_exit` and
+`later_run_failed` for a passed claim kept as failed, and the gap of a failed claim
+without a verified failing receipt. `omitted_failed_check` likewise names each
+omitted receipt with its program and exit code. Only the explicit failed
+assignment remains when nothing can close the failure. The result receipt returned
+to the worker includes `node_status` and lists every check's recorded `outcome`
+with its `claimed_outcome`/`evidence_gap`, and `closed_by` for a closed failure
+(below).
+`evidence_gap` codes (`assess` in `crates/cortex-core/src/lifecycle/worker_checks.rs`):
+`tool_call_ref_missing`, `tool_call_ref_unknown`, `ref_already_cited`,
+`ambiguous_ref`, `call_incomplete`, `nonzero_exit`, `zero_exit` (a failed claim
+citing exit 0), `command_unrecorded`, `trivial_command`, `revision_mismatch`,
+`later_run_failed`, `later_run_unresolved` (below).
 
 ### Speculative verification during review
 
@@ -741,7 +857,14 @@ private large-output store, preserving the complete bytes. The tool event
 carries a bounded tail excerpt and the output record ID, rather than the full
 log. The excerpt is display-only; the retained output remains the complete
 verification evidence. Existing exit-code, interruption and project-integrity
-checks still determine whether verification passes.
+checks still determine whether verification passes. Each retained verification
+receipt (`retain_check_tx`) keeps, besides `complete` and `exit_code`, the run's
+`failure` (for example `timeout`, `command_signalled` or an unavailable sandbox) and
+`signal` from the runtime's own output receipt of the same run, null when that
+receipt names none; `VERIFICATION_FAILED` carries them to the coordinator and the
+task's pipeline document, and the owner's stop notice names the failure with the
+exit code. Earlier receipts kept only `complete` and `exit_code`, so a timed-out
+command read as a bare "no exit code".
 
 A command's **identity** is its operation, exact `argv` and effective `cwd`;
 `command_run` also includes its profile: `restricted` (a Guarded writing worker), `development`
@@ -751,7 +874,60 @@ An `outside_command` identity also retains its profile, `outside_confirmed`. Clo
 restricted profile. An `outside_command` receipt records its `cwd` too. A receipt without
 `argv` (or an `outside_command` receipt without `cwd`) has no identity and
 matches nothing. A run the gateway rejected before executing it
-(`TOOL_REJECTED`) is not history.
+(`TOOL_REJECTED`) is not history. Neither is a call the runtime settled as
+provably never launched (`settled`, `launched:false`, `outcome:"not_started"`,
+failure `command_not_started`: its payload never left sandbox preparation): it
+does not keep an earlier failure open and is not a later run of the same command
+(`never_launched` in `crates/cortex-core/src/lifecycle/worker_checks.rs`). A settled
+call with an unknown outcome still counts as an unrecorded later run.
+
+**Revision binding.** A passed run must have checked the work it is cited for. The
+check's `revision_binding` says which guarantee holds:
+
+- `{"kind": "checkout"}`: the whole checkout's digest (every deliverable file,
+  tracked or untracked, not Git-ignored) was the same before launch and after
+  exit (`revision_digest` on the receipt) and equals the digest observed at
+  submission. The check ran against exactly the submitted project.
+- `{"kind": "work_set", "work_set": [...], "digest": ...}` (`command_run` only):
+  the checkout changed during or after the run, but the run's **work set** did
+  not. The work set is taken in the transaction that records the command's start:
+  the assignment's declared scope entries plus every path that assignment's own
+  tools (`project_write`, `project_edit`, `project_delete`, `project_mkdir`)
+  recorded so far, across its attempts (`worker_checks::work_set_tx`). The host
+  hashes the set's deliverable files (Git-listed tracked and untracked files under
+  each entry, plus each literal entry, with mode and link targets;
+  `crates/workspace-service/src/native_work_set.rs`) before launch and again once
+  the process ended and its receipt settled, and retains both
+  (`NATIVE_CHECK_WORK_SET`). A pass binds this way only when both observations are
+  equal, the set hashes the same at submission, the record belongs to the
+  submitting assignment, and that assignment's tools wrote nothing outside the set
+  since the run started. Completion re-establishes the binding from the retained
+  record and the recorded result.
+
+Without either, the pass is kept unverified with `revision_mismatch`. The work-set
+binding exists because a shared checkout has concurrent writers: an Automatic
+sprint runs other tasks' writers in the same folder, and a check that passed
+against the worker's own unchanged files was refused every time another task
+saved a file anywhere (in one owner store, an exact rerun passed three times while
+another task wrote Rust files elsewhere, and the attempt was replanned).
+
+Its limits are exact. It proves that the files of this assignment's declared scope
+and its own tool writes are byte-for-byte what the check ran against. It does not
+prove that files outside the work set were the same: a test that reads another
+task's files, a shared dependency or generated code may pass against a state that
+no longer exists, and the binding does not show that. Changes this assignment's
+own commands (a formatter, a code generator) made outside its scope are not in the
+work set either; a change inside it that was reverted to identical bytes within
+the run is invisible, as it is for the checkout digest, and Git-ignored files are
+outside both digests. No work set is recorded for a scope of the whole project
+(`.`, `**`, an entry with no literal directory such as `*.md`), more than 256
+entries, a folder outside a Git repository, a nested checkout in the set, or more
+than 20,000 files or 256 MiB; such a run binds only to the whole checkout, as
+before. `outside_command` receipts bind only to the whole checkout. None of this
+weakens what is accepted later: the independent review binds the task's own files
+(or the whole checkout when their attribution is incomplete), and final runtime
+verification runs the plan's commands against the real checkout while that binding
+holds, so a cross-task breakage still fails there.
 
 - **A failure stays in the result.** A `failed` check is always recorded as
   `failed`. It stops failing the assignment only when it is **closed**: its
@@ -1059,7 +1235,8 @@ answer, ids, timestamps and answering session, is visible to later workers and
 the reviewer through `list_sources`/`read_source` and the recovery capsule's
 constraints (see [input history](../input-history-and-replay/index.md#answered-questions)).
 Lost workers are retried only after their absence is confirmed, and an
-uncertain action receipt prevents replay. A worker failure about the work is
+uncertain action receipt prevents replay (a receipt settled with an observed
+end, such as an owner stop, or that provably never launched, is not uncertain). A worker failure about the work is
 retried at most twice. A lost worker, or one whose engine crashed or would not
 start, falls under the [transient-failure retry window](../failures-and-cancellation/index.md#transient-engine-failures).
 The delay before each retry grows to at most a minute, and retries stop only

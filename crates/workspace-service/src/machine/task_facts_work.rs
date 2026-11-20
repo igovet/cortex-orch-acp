@@ -628,7 +628,12 @@ fn evaluate_exact(
                     (task, *id),
                     |r| r.get(0),
                 )?;
-            let actual = if native_task && native.is_some_and(|d| value["revision_digest"] == d) {
+            // The checkout the verification ran in: `checkout_digest` when it was bound
+            // to the task's own files (its `revision_digest` is then that binding).
+            let checkout = value
+                .get("checkout_digest")
+                .unwrap_or(&value["revision_digest"]);
+            let actual = if native_task && native.is_some_and(|d| *checkout == d) {
                 native.map(str::to_owned)
             } else if native_task && !legacy_domain {
                 None
@@ -637,7 +642,7 @@ fn evaluate_exact(
             } else {
                 super::legacy_source::capture(std::path::Path::new(&root))?
             };
-            if actual.as_deref() == value["revision_digest"].as_str() {
+            if actual.as_deref() == checkout.as_str() {
                 observed = actual;
             } else if native_task
                 && own_writes
@@ -648,7 +653,7 @@ fn evaluate_exact(
                 // A project-folder sprint task shares the folder with the tasks after
                 // it: their writes leave this result as verified while every file it
                 // wrote still holds what it wrote. Its identity stays the verified one.
-                observed = value["revision_digest"].as_str().map(str::to_owned);
+                observed = checkout.as_str().map(str::to_owned);
                 scoped = true;
             } else {
                 warnings = true;

@@ -329,7 +329,13 @@ leaves running keeps a running card (see
 [worker cards across steering](#worker-cards-across-steering)). Worker questions are assignment-local persisted waits.
 The worker ends its tool turn without an incomplete result; after a real answer,
 the runtime resumes that same assignment and attempt with the next prompt in the
-same healthy engine session. Sibling work can continue. The worker is not
+same healthy engine session. Sibling work can continue. The answer counts as delivered when that
+turn ends normally on a still-current channel, when the attempt records its result,
+or when the engine made any tool call through the channel during the answer's turn.
+A call in that turn can itself end the assignment (a replan request cancels it and
+closes the resuming wait as `cancelled`); the answer is then settled, not reported
+as `native_answer_delivery_unconfirmed` (`SessionDriver::continue_answer` in
+`crates/workspace-service/src/native_sessions.rs`). The worker is not
 reprovisioned and the coordinator does not need to submit a replacement plan for
 this ordinary question flow. Multiple open worker questions require explicit
 selection; decline, timeout or a text-only host response leaves the wait open.

@@ -147,9 +147,10 @@ fn hint(code: &str) -> &'static str {
         "command_output_create_failed" => "The private output file could not be created before launch. No command was started by this attempt.",
         "unknown_command_ref" => "Use the exact tool_call_ref returned by command_run on this channel.",
         "invalid_cwd" => "cwd must be an existing absolute directory without '..' components.",
-        "verification_executable_unavailable" => "The program was not found on the verification command path. Install it project-privately without system changes or choose another executable check; ask the owner if neither is possible.",
+        "verification_executable_unavailable" => "The program was not found on the verification command path (the project's .venv/bin, venv/bin and node_modules/.bin, then the owner's tool search path, which already includes the existing usual per-user tool folders such as ~/.local/bin, ~/.cargo/bin and the default nvm, fnm or Volta Node). Install it project-privately without system changes or choose another executable check; ask the owner if neither is possible.",
         "invalid_verification_command" | "verification_shell_syntax" => "Supply one literal argv: no shell operators, redirections or command substitution.",
-        "native_verification_sandbox_unavailable" => "The verification sandbox could not run the probe; this does not show that the program is missing.",
+        "native_command_sandbox_unavailable" => "The command did not start: its sandbox could not be prepared (host namespaces unavailable, or the host too busy to prepare it in time). Nothing ran. Retry the identical command once; if it is refused again, report the check as not run with this blocker.",
+        "native_verification_sandbox_unavailable" =>"The verification sandbox could not run the probe; this does not show that the program is missing.",
         "skill_link_name_invalid" => "Use the exact skill directory name under .agents/skills: 1-64 lowercase letters, digits and single hyphens.",
         "skill_source_missing" => "Write .agents/skills/<name>/SKILL.md as a regular file in a real directory first.",
         "skill_link_parent_unsafe" => ".claude or .claude/skills is not a real directory; nothing was changed. Report it.",
@@ -253,5 +254,15 @@ mod tests {
         assert_eq!(enrich(bare)["structuredContent"]["field"], "edits");
         let ok = json!({"content":[],"isError":false});
         assert_eq!(enrich(ok.clone()), ok);
+    }
+    /// A command whose sandbox could not be prepared did not run: the model is told so
+    /// and may retry it once, instead of being told to "correct the call".
+    #[test]
+    fn an_unprepared_command_sandbox_says_nothing_ran_and_allows_one_retry() {
+        let reply = reply("native_command_sandbox_unavailable");
+        let hint = reply["structuredContent"]["hint"].as_str().unwrap();
+        assert!(hint.contains("did not start") && hint.contains("Nothing ran"));
+        assert!(hint.contains("Retry the identical command once"));
+        assert!(!hint.contains("Correct the call"));
     }
 }

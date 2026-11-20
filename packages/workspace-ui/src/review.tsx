@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, createUniqueId, For, Match, on, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, createUniqueId, For, Match, on, onCleanup, onMount, Show, Switch } from "solid-js";
 import type { Check, FileDiff, GitFile } from "@cortex/workspace-domain";
 import { useWs } from "./ctx";
 import { Counts, Diff, GitLetter, type HunkActions } from "./diff";
@@ -35,7 +35,7 @@ export function Outcomes(props: { checks: Check[]; automaticAccepted?: boolean }
 function RerunCheck(props: { taskId: string; check: Check }) {
   const ws = useWs();
   const task = () => ws.store.index().byId.get(props.taskId)!.task;
-  const available = () => !stale(task()) && !task().integration && task().conflict === "none" && ["review", "ready_to_merge"].includes(task().status);
+  const available = () => !stale(task()) && task().reviewActions?.pending !== true && !task().integration && task().conflict === "none" && ["review", "ready_to_merge"].includes(task().status);
   return <Show when={props.check.running} fallback={<Show when={props.check.outcome !== "passed" && props.check.kind !== "manual" && props.check.kind !== "policy" && props.check.rerunnable === true && !!props.check.command?.length && available()}>
     <button class="btn btn-line btn-sm" aria-label={`Rerun ${props.check.name}`} {...ws.needs("rerun_check")} onClick={() => ws.run({ type: "rerun_check", taskId: props.taskId, digest: task().result!.digest, checkIndex: task().result!.checks.indexOf(props.check) })}>Rerun check</button>
   </Show>}><span role="status">{ws.t("rerunning")}</span></Show>;
@@ -124,7 +124,7 @@ function AcceptBlockerBody(props: { m: SessionModel; id?: string }) {
   const reason = () => holdReason() ?? (acceptStripShown(props.m) ? acceptBlocked(t()) : null);
   const checks = () => t().result?.checks ?? [];
   const rerunnable = () => checks().filter(c => c.kind !== "manual" && c.kind !== "policy" && c.rerunnable === true && !!c.command?.length && c.outcome !== "passed" && !c.running);
-  const canRerun = () => !stale(t()) && !t().integration && t().conflict === "none" && rerunnable().length > 0;
+  const canRerun = () => !stale(t()) && t().reviewActions?.pending !== true && !t().integration && t().conflict === "none" && rerunnable().length > 0;
   const rerun = async () => {
     const r = t().result!;
     for (const c of rerunnable()) { const sent = await ws.run({ type: "rerun_check", taskId: t().id, digest: r.digest, checkIndex: r.checks.indexOf(c) }); if (!sent.ok) return; }
@@ -161,7 +161,7 @@ function AcceptBlockerBody(props: { m: SessionModel; id?: string }) {
   return <>
     <Show when={ws.store.acceptanceIssue()?.taskId === t().id && !t().acceptance && ws.store.acceptanceIssue()}>{issue => <Strip class="rv-accept-error" tone="fail" role="alert" icon={<I n="alert" s={14} class="st-bad" />}
       action={<button class="btn btn-line btn-sm" onClick={() => void ws.store.reload()}>Refresh result</button>}>{issue().message} Acceptance was not confirmed. Refresh the result before trying again.</Strip>}</Show>
-    <Show when={reason()}>{why => <Strip id={props.id} class="rv-why" tone="warn" role="status" icon={<I n="alert" s={14} class="st-warn" />} action={<>
+    <Show when={reason()}>{why => <Strip id={props.id} class="rv-why" tone={t().reviewActions?.pending ? "info" : "warn"} role="status" icon={t().reviewActions?.pending ? <I n="circle" s={14} class="faint" /> : <I n="alert" s={14} class="st-warn" />} action={<>
       <Show when={canRepair()}><button class="btn btn-primary btn-sm" {...ws.needs("request_changes")} aria-busy={repairPending()} disabled={repairPending()} data-why={repairPending() ? "Sending repair request to the agent…" : undefined} onClick={e => askAgentToFix(e.currentTarget)}>Ask agent to fix</button></Show>
       <Show when={t().reviewActions?.pending !== true}><Switch>
         <Match when={t().conflict !== "none"}><A class="btn btn-line btn-sm" to={conflict()}>Open the conflict</A></Match>
@@ -198,7 +198,7 @@ export function ReviewBar(props: { m: SessionModel }) {
   return <section class="rv-bar" aria-label="Review this result">
     <ActionBar start={<><I n={t().status === "done" ? "check-circle" : "eye"} s={14} class="faint" /><span class="w500">Result v{r().version}</span>
       <span class={`st ${failed() ? "st-bad" : allPassed() ? "st-ok" : "st-idle"}`}><I n={failed() ? "x-circle" : allPassed() ? "check-circle" : "circle"} s={12} />{checksLine(r().checks)}</span></>} hint={hint()}>
-      <Show when={reviewActionsShown(props.m) && reviewing() && !stale(t())}><button class="btn btn-line" {...ws.needs("request_changes")} onClick={() => ws.open({ kind: "changes", taskId: t().id })}>Request changes…</button></Show>
+      <Show when={reviewActionsShown(props.m) && reviewing() && !stale(t()) && t().reviewActions?.pending !== true}><button class="btn btn-line" {...ws.needs("request_changes")} onClick={() => ws.open({ kind: "changes", taskId: t().id })}>Request changes…</button></Show>
       <Show when={reviewActionsShown(props.m) && !stale(t())}><Show when={t().status === "ready_to_merge"} fallback={<Show when={acceptOffered(t())}><AcceptButton m={props.m} describedBy={describedBy()} /></Show>}><Show when={!t().acceptance}><AcceptButton m={props.m} line describedBy={describedBy()} /></Show><A class="btn btn-primary" to={ready()}>{sameBranch(t(), props.m.view.target) ? "Finish task" : "Open Ready to merge"}</A></Show></Show>
     </ActionBar>
     <AcceptBlocker m={props.m} id={why} />
@@ -247,7 +247,7 @@ export function ResultCard(props: { m: SessionModel }) {
     <Show when={props.m.view.project.hasGit === false}><div class="rcard-note cap muted">{ws.t("changesWithoutGit")}</div></Show>
     <Show when={!automaticAcceptanceHold(props.m.view)}><AcceptBlocker m={props.m} id={why} /></Show>
     <ActionBar place="card" class="rv-card-f" label="Result actions" start={<><A class="lnk" to={changes()}>Review changes</A><Show when={c()}>{x => <span class="cap muted tnum">{x().files} files, <Counts add={x().add} del={x().del} /></span>}</Show></>}>
-      <Show when={reviewActionsShown(props.m) && changesOffered(t()) && !stale(t())}><button class="btn btn-sm" {...ws.needs("request_changes")} onClick={() => ws.open({ kind: "changes", taskId: t().id })}>Request changes…</button></Show>
+      <Show when={reviewActionsShown(props.m) && changesOffered(t()) && !stale(t()) && t().reviewActions?.pending !== true}><button class="btn btn-sm" {...ws.needs("request_changes")} onClick={() => ws.open({ kind: "changes", taskId: t().id })}>Request changes…</button></Show>
       <Show when={reviewActionsShown(props.m) && !stale(t()) && !automaticAcceptanceHold(props.m.view)}><Show when={t().status === "ready_to_merge"} fallback={<Show when={acceptOffered(t())}><AcceptButton m={props.m} small describedBy={describedBy()} /></Show>}><Show when={!t().acceptance}><AcceptButton m={props.m} small line describedBy={describedBy()} /></Show><A class="btn btn-primary btn-sm" to={ready()}>{sameBranch(t(), props.m.view.target) ? "Finish task" : "Open Ready to merge"}</A></Show></Show>
     </ActionBar>
   </div>;
@@ -270,7 +270,7 @@ function Evidence(props: { m: SessionModel; onAsk: (c: Check) => void }) {
   const t = () => props.m.view.task;
   const checks = () => t().result?.checks ?? [];
   const counts = () => checkCounts(visibleChecks(checks(), t().acceptance?.automatic === true || (t().status === "ready_to_merge" && t().result?.automaticReady === true) || /accepted/i.test(props.m.view.automaticFact?.text ?? "")));
-  const canAsk = () => reviewActionsShown(props.m) && (t().status === "review" || (t().status === "ready_to_merge" && !t().integration));
+  const canAsk = () => reviewActionsShown(props.m) && t().reviewActions?.pending !== true && (t().status === "review" || (t().status === "ready_to_merge" && !t().integration));
   const settled = () => checks().every(c => c.kind !== "manual" && c.outcome === "passed");
   return <details class="evid" open={!settled()}>
     <summary class="evid-h"><I n="chevron-right" s={12} class="faint" /><span class="w500">Evidence</span><span class="grow"></span>
@@ -287,16 +287,27 @@ function Evidence(props: { m: SessionModel; onAsk: (c: Check) => void }) {
  * With a diff, the result and its evidence share one bounded region and the diff keeps the rest; without one, the page scrolls
  * as a whole. Comments need a line of a diff, so a project without Git has no comment bar.
  */
-export function ChangesPanel(props: { m: SessionModel; route: TaskRoute }) {
+export type ChangesViewState = {
+  list?: number; diff?: number; page?: number;
+  scope?: string; layout?: "unified" | "split"; hideSpace?: boolean; current?: string | null;
+};
+
+export function ChangesPanel(props: { m: SessionModel; route: TaskRoute; viewState: ChangesViewState }) {
   const ws = useWs();
   const t = () => props.m.view.task;
   const state = () => ws.store.state();
   const review = createMemo(() => reviewFor(state(), t().id));
   const checkout = createMemo(() => taskCheckout(state(), t()));
-  const [scope, setScope] = createSignal("result");
-  const [layout, setLayout] = createSignal<"unified" | "split">("unified");
-  const [hideSpace, setHideSpace] = createSignal(false);
-  const [current, setCurrent] = createSignal<string | null>(null);
+  const view = props.viewState;
+  const [scope, setScope] = createSignal(view.scope ?? "result");
+  const [layout, setLayout] = createSignal<"unified" | "split">(view.layout ?? "unified");
+  const [hideSpace, setHideSpace] = createSignal(view.hideSpace ?? false);
+  const [current, setCurrent] = createSignal<string | null>(view.current ?? null);
+  onCleanup(() => Object.assign(view, { scope: scope(), layout: layout(), hideSpace: hideSpace(), current: current() }));
+  const rememberScroll = (key: "list" | "diff") => (el: HTMLElement) => {
+    onMount(() => { el.scrollTop = view[key] ?? 0; });
+    onCleanup(() => { view[key] = el.scrollTop; });
+  };
   const resultLabel = () => t().result ? `Result v${t().result!.version}` : "All changes";
   const scopes = createMemo(() => [{ id: "result", label: resultLabel(), sub: "The exact version you accept", paths: review()?.files.map(f => f.path) ?? [] }, ...(review()?.scopes ?? [])]);
   const active = () => scopes().find(s => s.id === scope()) ?? scopes()[0];
@@ -317,7 +328,16 @@ export function ChangesPanel(props: { m: SessionModel; route: TaskRoute }) {
   const pick = (path: string) => { setCurrent(path); document.getElementById(`diff-${path}`)?.scrollIntoView?.({ block: "start" }); };
   const blockedMerge = () => mergeBlocked(t());
   const noGit = () => props.m.view.project.hasGit === false;
-  const bounded = () => !noGit() && files().length > 0;
+  const bounded = createMemo(() => !noGit() && files().length > 0);
+  const rememberPageScroll = (el: HTMLDivElement) => {
+    createEffect(() => {
+      if (bounded()) return;
+      el.scrollTop = view.page ?? 0;
+      const save = () => { if (!bounded()) view.page = el.scrollTop; };
+      el.addEventListener("scroll", save, { passive: true });
+      onCleanup(() => el.removeEventListener("scroll", save));
+    });
+  };
   const commitTo = (): Route => ({ name: "project", machine: props.route.machine, project: t().projectId, view: "git", scope: { kind: "all" }, checkout: checkout()?.id });
   const top = () => <>
     <Show when={t().result}><ResultSummary m={props.m} /></Show>
@@ -339,7 +359,7 @@ export function ChangesPanel(props: { m: SessionModel; route: TaskRoute }) {
     <Show when={review()?.sha}><span class="faint l-compact-hide">Pinned result version</span></Show>
   </>} />;
   return <section class="task-panel rv-panel" aria-label="Changes" onKeyDown={e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } }}>
-    <Page class={bounded() ? "l-work" : undefined} scroll={bounded() ? "none" : "vertical"}
+    <Page class={bounded() ? "l-work" : undefined} scroll={bounded() ? "none" : "vertical"} bodyRef={rememberPageScroll}
       head={<Show when={t().result} fallback={<Show when={automaticAcceptanceHold(props.m.view)}><AcceptBlocker m={props.m} /></Show>}><ReviewBar m={props.m} /></Show>}
       foot={<Show when={!noGit()}><ActionBar class="rv-foot" label="Review comments" start={<>
         <span class="cap muted">{drafts() ? `${drafts()} comment${drafts() === 1 ? "" : "s"}` : "No comments"}</span>
@@ -357,9 +377,9 @@ export function ChangesPanel(props: { m: SessionModel; route: TaskRoute }) {
         <Region class="rv-top">{top()}</Region>
         {tools()}
         <div class="chg-body">
-          <div class="flist"><Keyed each={files()} by={f => f.path}>{f => <button class="fitem" aria-current={current() === f().path ? "true" : undefined} onClick={() => pick(f().path)}><GitLetter status={f().status} /><span class="trunc">{f().path}</span><span class="r"><Counts add={f().add} del={f().del} /></span></button>}</Keyed></div>
+          <div class="flist" ref={rememberScroll("list")}><Keyed each={files()} by={f => f.path}>{f => <button class="fitem" aria-current={current() === f().path ? "true" : undefined} onClick={() => pick(f().path)}><GitLetter status={f().status} /><span class="trunc">{f().path}</span><span class="r"><Counts add={f().add} del={f().del} /></span></button>}</Keyed></div>
           {/* Keyed by path: a background read that changes one file's diff redraws only that diff, and a comment being written stays. */}
-          <div class="dview"><Keyed each={files()} by={f => f.path}>{f => <div id={`diff-${f().path}`}>
+          <div class="dview" ref={rememberScroll("diff")}><Keyed each={files()} by={f => f.path}>{f => <div id={`diff-${f().path}`}>
             <FileHead file={f()} working={working(f().path)} onOpen={() => go(f())} onStage={() => { const c = checkout(), w = working(f().path); if (c && w) ws.run({ type: "git_stage", checkoutId: c.id, path: f().path, staged: w.stage !== "staged" }); }} onRevert={() => { const c = checkout(); if (c) ws.open({ kind: "revert", checkoutId: c.id, path: f().path }); }} />
             <Diff file={f()} layout={layout()} hideSpace={hideSpace()} actions={hunkActions(f().path)} taskId={t().id} comments={review()?.comments.filter(c => c.path === f().path)} />
           </div>}</Keyed></div>

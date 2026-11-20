@@ -176,7 +176,7 @@ fn answered_without_changes(
             ('project_write','project_edit','project_mkdir','project_delete','project_skill_link',
              'outside_write','outside_command','command_run'))
         AND NOT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?1 AND (type='NATIVE_PROJECT_WRITTEN'
-            OR (type='NATIVE_PERMISSION_REQUESTED' AND json_valid(payload_json)
+            OR (type IN ('NATIVE_PERMISSION_REQUESTED','NATIVE_PERMISSION_AUTO_ALLOWED') AND json_valid(payload_json)
                 AND json_extract(payload_json,'$.kind') IN ('edit','delete','move','execute'))))",
         [&runtime],
         |r| r.get(0),

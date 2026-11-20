@@ -192,6 +192,15 @@ pub fn route_blocked(reason: &str) -> bool {
     )
 }
 
+/// A stop another automatic attempt cannot change and the route recovering does not
+/// clear (the model produced unusable turns again; the reviewer cannot read an item
+/// with its tools): it pauses as `owner_blocker`, which only the owner resumes
+/// (Allow more attempts, or Close as is). An `external_blocker` would be resumed by
+/// the runtime as soon as the route qualifies, repeating the same stop.
+fn owner_blocked(reason: &str, dead_end: bool) -> bool {
+    reason == "native_turn_degenerate" || dead_end
+}
+
 fn evidence(db: &Connection, task: &str, revision: i64, reason: &str) -> CoreResult<Value> {
     let events = db.prepare(
         "SELECT id,type FROM runtime_events WHERE task_id=?1 AND type IN (
@@ -235,6 +244,67 @@ fn evidence(db: &Connection, task: &str, revision: i64, reason: &str) -> CoreRes
     Ok(details)
 }
 
+/// An item the reviewer reported it cannot reach with its tools (`tool_unavailable`)
+/// in at least two dead-end reviews since the owner last renewed the budget, resumed
+/// the task or reopened it, while the newest dead end still names it. Another
+/// automatic attempt cannot change that, so the stop pauses for the owner instead of
+/// spending the budget. Items compare by their name before any ` (` or `: ` detail.
+pub fn repeated_review_dead_end(db: &Connection, task: &str) -> CoreResult<Option<(String, i64)>> {
+    let since: i64 = db.query_row(
+        "SELECT coalesce(max(id),0) FROM runtime_events WHERE task_id=?
+         AND type IN ('AUTOMATIC_CAP_RENEWED','AUTOMATIC_RESUMED','TASK_REOPENED')",
+        [task],
+        |r| r.get(0),
+    )?;
+    let ends = db
+        .prepare(
+            "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REVIEW_DEAD_END_ROUTED'
+             AND id>? AND json_valid(payload_json) ORDER BY id DESC LIMIT 64",
+        )?
+        .query_map((task, since), |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .map(|raw| serde_json::from_str::<Value>(raw).unwrap_or(Value::Null))
+        .collect::<Vec<_>>();
+    let unreachable = |event: &Value| -> Vec<String> {
+        event["blocked"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|b| b["blocker"] == "tool_unavailable")
+            .filter_map(|b| b["item"].as_str().map(dead_end_item))
+            .filter(|item| !item.is_empty())
+            .collect()
+    };
+    let Some(newest) = ends.first() else {
+        return Ok(None);
+    };
+    for item in unreachable(newest) {
+        let count = ends
+            .iter()
+            .filter(|e| {
+                unreachable(e)
+                    .iter()
+                    .any(|i| i.to_lowercase() == item.to_lowercase())
+            })
+            .count() as i64;
+        if count >= 2 {
+            return Ok(Some((item, count)));
+        }
+    }
+    Ok(None)
+}
+/// A dead-end item's name without the reviewer's detail: `change_set (host could not …)`
+/// and `change_set: changed paths …` both name `change_set`.
+fn dead_end_item(item: &str) -> String {
+    let end = [item.find(" ("), item.find(": ")]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(item.len());
+    item[..end].trim().chars().take(160).collect()
+}
+
 /// Records a stop and fences the old revision. It does not prove that a child
 /// exited, or give the next coordinator any authority over unresolved effects.
 pub(super) fn stop_tx(db: &Transaction<'_>, task: &str, reason: &str) -> CoreResult<TaskState> {
@@ -254,10 +324,20 @@ pub(super) fn stop_tx(db: &Transaction<'_>, task: &str, reason: &str) -> CoreRes
     let count = count(db, task)?;
     let exhausted = budget_used(db, task)? >= HARD_CAP;
     let unknown = reason.ends_with("outcome_unknown") || reason.ends_with("unconfirmed");
+    let dead_end = if reason == "review_incomplete" {
+        repeated_review_dead_end(db, task)?
+    } else {
+        None
+    };
+    if let Some((item, count)) = &dead_end {
+        details["review_dead_end"] = json!({"item":item,"count":count});
+    }
     let pause = if unknown {
         Some("outcome_unknown")
     } else if exhausted {
         Some("continuation_cap")
+    } else if owner_blocked(reason, dead_end.is_some()) {
+        Some("owner_blocker")
     } else if route_blocked(reason) {
         Some("external_blocker")
     } else {
@@ -388,11 +468,17 @@ pub fn route_pause_tx(
     Ok(())
 }
 
-/// The owner can renew the bounded retry budget for this exact hold, never
-/// for an unconfirmed effect or a route the scheduler must qualify.
+/// The owner can renew the bounded retry budget for this exact hold (an exhausted
+/// budget, or an owner blocker that another automatic attempt could not change),
+/// never for an unconfirmed effect or a route the scheduler must qualify.
 pub(super) fn owner_cap(db: &Connection, task: &str) -> CoreResult<Option<i64>> {
     let cap = projection(db, task)?
-        .filter(|value| value["pause"]["kind"] == "continuation_cap")
+        .filter(|value| {
+            matches!(
+                value["pause"]["kind"].as_str(),
+                Some("continuation_cap" | "owner_blocker")
+            )
+        })
         .and_then(|value| value["pause"]["eventId"].as_str()?.parse().ok());
     Ok(cap)
 }

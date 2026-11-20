@@ -210,6 +210,134 @@ fn native_recovery_states_its_reason_only_with_settled_or_recorded_evidence() {
         Some("native_session_outcome_unknown")
     );
 }
+/// A replan that cancelled a live worker waits for that worker's session to stop. The
+/// hold stays `process_exit_pending`; it is named for the owner with the worker's role,
+/// and ends once the cancellation is settled.
+#[test]
+fn a_replan_waiting_for_a_cancelled_worker_names_that_worker() {
+    let (p, s) = setup();
+    s.write(|db| {
+        db.execute("UPDATE runtime_tasks SET state='RECOVERING'", [])?;
+        cortex_core::lifecycle::event_tx(db, "runtime", "NATIVE_TASK_ADOPTED", json!({"execution_host":"rust"}))?;
+        db.execute("INSERT INTO delegation_provisioning(idempotency_key,task_id,role_id,step,status,owner_epoch,created_at,updated_at)
+            VALUES ('a1','runtime','worker-qa-engineer','engine','ready',1,'now','now')", [])?;
+        cortex_core::lifecycle::event_tx(db, "runtime", "LIVE_ASSIGNMENTS_CANCELLED", json!({"assignment_refs":["a1"],"reason":"replanning"}))?;
+        Ok(())
+    })
+    .unwrap();
+    let t = get(&reader(&p));
+    assert_eq!(t.phase, "recovery");
+    assert!(
+        t.warnings.iter().any(|w| w == "process_exit_pending"),
+        "{:?}",
+        t.warnings
+    );
+    assert!(
+        t.warnings.iter().any(|w| w == "cancelled_worker_stopping"),
+        "{:?}",
+        t.warnings
+    );
+    assert_eq!(
+        t.wait_reason.as_deref(),
+        Some("cancelled_worker_stopping:qa-engineer")
+    );
+    // Once the cancellation is settled the same live row is not named as a cancelled worker.
+    s.write(|db| {
+        let through: i64 = db.query_row(
+            "SELECT max(id) FROM runtime_events WHERE type='LIVE_ASSIGNMENTS_CANCELLED'",
+            [],
+            |r| r.get(0),
+        )?;
+        cortex_core::lifecycle::event_tx(
+            db,
+            "runtime",
+            "LIVE_CANCELLATIONS_SETTLED",
+            json!({"assignment_refs":["a1"],"through":through}),
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let t = get(&reader(&p));
+    assert!(
+        !t.warnings.iter().any(|w| w == "cancelled_worker_stopping"),
+        "{:?}",
+        t.warnings
+    );
+    assert_eq!(t.wait_reason, None);
+}
+/// The automatic continuation projection says what its attempts went to, and names an
+/// item the reviewer reported unreachable in two dead-end reviews.
+#[test]
+fn automatic_attempts_name_what_they_were_spent_on_and_a_repeated_review_dead_end() {
+    let (p, s) = setup();
+    let dead_end = |item: &str| json!({"blocked":[{"blocker":"tool_unavailable","item":item,"reason":"lines over the read limit"}],"verdict":"INCOMPLETE"});
+    s.write(|db| {
+        cortex_core::lifecycle::event_tx(
+            db,
+            "runtime",
+            "AUTOMATIC_POLICY_BOUND",
+            json!({"policy":"automatic_continuation"}),
+        )?;
+        cortex_core::lifecycle::event_tx(
+            db,
+            "runtime",
+            "REVIEW_DEAD_END_ROUTED",
+            dead_end("README.md (paged completely)"),
+        )?;
+        for reason in [
+            "review_incomplete",
+            "review_incomplete",
+            "native_session_lost",
+        ] {
+            cortex_core::lifecycle::event_tx(
+                db,
+                "runtime",
+                "AUTOMATIC_CONTINUATION",
+                json!({"reason":reason}),
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    let t = get(&reader(&p));
+    let a = t.automatic_continuation.expect("automatic task");
+    assert_eq!(
+        a["spentOn"],
+        json!([{"reason":"review_incomplete","count":2},{"reason":"native_session_lost","count":1}])
+    );
+    assert!(
+        a.get("reviewDeadEnd").is_none(),
+        "one dead end is not a repeat: {a}"
+    );
+    s.write(|db| {
+        cortex_core::lifecycle::event_tx(
+            db,
+            "runtime",
+            "REVIEW_DEAD_END_ROUTED",
+            dead_end("README.md: every line over 2000 characters"),
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    let a = get(&reader(&p)).automatic_continuation.unwrap();
+    assert_eq!(a["reviewDeadEnd"], json!({"item":"README.md","count":2}));
+    // A newer dead end on another item: the repeated one may have been fixed.
+    s.write(|db| {
+        cortex_core::lifecycle::event_tx(
+            db,
+            "runtime",
+            "REVIEW_DEAD_END_ROUTED",
+            dead_end("CHANGELOG.md"),
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(get(&reader(&p))
+        .automatic_continuation
+        .unwrap()
+        .get("reviewDeadEnd")
+        .is_none());
+}
 #[test]
 fn scoped_keyset_pages_expire_on_change_and_wrong_project_never_leaks() {
     let (p, s) = setup();

@@ -156,6 +156,14 @@ pub(crate) const CLAUDE_CREDENTIAL_READ_ASKS: &[&str] = &[
 /// into the SDK query options by the adapter): bypass unavailable, only the MCP
 /// servers Cortex attaches, no plugins, skills, hooks or auto-memory, and the
 /// tools above removed from the model's context.
+///
+/// `settingSources` is `["project"]`: the adapter's default
+/// (`user`, `project`, `local`) would load the owner's personal Claude Code
+/// configuration (`~/.claude/settings.json`, `~/.claude/CLAUDE.md`) and their
+/// private per-project overrides (`.claude/settings.local.json`,
+/// `CLAUDE.local.md`) into every Cortex session, including allow rules, model,
+/// output-style and environment settings Cortex does not govern. The project's
+/// shared settings and its `CLAUDE.md` conventions still load.
 pub(crate) fn claude_session_meta() -> Value {
     let settings = json!({
         "disableAllHooks": true,
@@ -164,6 +172,7 @@ pub(crate) fn claude_session_meta() -> Value {
     });
     json!({"claudeCode":{"options":{
         "allowDangerouslySkipPermissions": false,
+        "settingSources": ["project"],
         "strictMcpConfig": true,
         "plugins": [],
         "skills": [],
@@ -377,6 +386,9 @@ mod tests {
         let o = &meta["claudeCode"]["options"];
         assert_eq!(o["allowDangerouslySkipPermissions"], false);
         assert_eq!(o["strictMcpConfig"], true);
+        // The owner's user-level and private local settings never load; the
+        // project's shared settings and CLAUDE.md conventions do.
+        assert_eq!(o["settingSources"], json!(["project"]));
         assert_eq!(o["managedSettings"]["disableAllHooks"], true);
         assert_eq!(o["settings"]["autoMemoryEnabled"], false);
         let denied: Vec<&str> = o["disallowedTools"]

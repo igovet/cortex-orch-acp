@@ -131,10 +131,11 @@ pub(crate) fn current() -> Option<OsString> {
     std::env::join_paths(resolved_in(&state).into_iter().map(|(p, _)| p)).ok()
 }
 
-/// This process's environment with `PATH` replaced by the resolved search path.
+/// This process's environment with `PATH` replaced by the command search path
+/// ([`for_commands`]).
 pub(crate) fn environment() -> BTreeMap<OsString, OsString> {
     let mut environment: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
-    if let Some(path) = current() {
+    if let Some(path) = for_commands() {
         environment.insert("PATH".into(), path);
     }
     environment
@@ -163,6 +164,9 @@ fn resolved_in(state: &State) -> Vec<(PathBuf, &'static str)> {
         .iter()
         .map(|p| (p.clone(), detected_origin))
         .chain(state.extra.iter().map(|p| (p.clone(), "extra")))
+        // The usual per-user tool folders the shell path lacks (startup files that set
+        // a toolchain up only for some terminals, say) fill gaps after the owner's own.
+        .chain(usual(&state.home).into_iter().map(|p| (p, "fallback")))
         .chain(SYSTEM.iter().map(|p| (PathBuf::from(p), "system")));
     let mut seen = BTreeSet::new();
     let mut bytes = 0;
@@ -623,12 +627,33 @@ pub(crate) fn fallback(
         .map(|p| p.to_string_lossy().into_owned())
         .filter(|e| !e.is_empty())
         .collect();
+    entries.extend(
+        usual(home)
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned()),
+    );
+    let (directories, rejected) = normalise(entries, private);
+    Detected {
+        directories,
+        source: Source::Fallback,
+        shell: None,
+        reason: Some(reason),
+        read_at: now_ms(),
+        rejected,
+    }
+}
+
+/// The usual per-user tool directories that exist, in search order: `~/.local/bin`,
+/// `~/.cargo/bin`, `~/bin`, the active nvm and fnm Node versions, Volta, Bun, Deno,
+/// Go, pnpm's home and the pyenv/asdf shims. Not yet validated.
+pub(crate) fn usual(home: &Path) -> Vec<PathBuf> {
     let mut known = vec![
         home.join(".local/bin"),
         home.join(".cargo/bin"),
         home.join("bin"),
     ];
     known.extend(nvm_default(home));
+    known.extend(fnm_default(home));
     known.extend([
         home.join(".volta/bin"),
         home.join(".bun/bin"),
@@ -641,21 +666,56 @@ pub(crate) fn fallback(
         home.join(".pyenv/shims"),
         home.join(".asdf/shims"),
     ]);
-    entries.extend(
-        known
-            .into_iter()
-            .filter(|p| p.is_dir())
-            .map(|p| p.to_string_lossy().into_owned()),
-    );
-    let (directories, rejected) = normalise(entries, private);
-    Detected {
-        directories,
-        source: Source::Fallback,
-        shell: None,
-        reason: Some(reason),
-        read_at: now_ms(),
-        rejected,
+    known.retain(|p| p.is_dir());
+    known
+}
+
+/// fnm's default version's `bin` (`aliases/default` in fnm's directory: `FNM_DIR`,
+/// else `$XDG_DATA_HOME/fnm`, `~/.local/share/fnm` or the older `~/.fnm`).
+pub(crate) fn fnm_default(home: &Path) -> Option<PathBuf> {
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home.join(".local/share"));
+    std::env::var_os("FNM_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .into_iter()
+        .chain([data.join("fnm"), home.join(".fnm")])
+        .map(|dir| dir.join("aliases/default/bin"))
+        .find(|p| p.is_dir())
+}
+
+/// The search path for commands launched from this process. Where the service started
+/// the tool search path, that resolved value; elsewhere (an incoming ACP agent, whose
+/// `PATH` is its client's) the inherited `PATH`, then the usual per-user tool
+/// directories it lacks, then the system folders, validated like every other entry.
+pub(crate) fn for_commands() -> Option<OsString> {
+    if started() {
+        return current();
     }
+    let home = owner_home();
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    inherited_with_usual(
+        &home,
+        &inherited,
+        &private_roots(Path::new("/nonexistent"), &home),
+    )
+}
+
+/// `inherited`, then the usual per-user tool directories and system folders it lacks.
+pub(crate) fn inherited_with_usual(
+    home: &Path,
+    inherited: &OsStr,
+    private: &[PathBuf],
+) -> Option<OsString> {
+    let entries = std::env::split_paths(inherited)
+        .chain(usual(home))
+        .chain(SYSTEM.iter().map(PathBuf::from))
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|e| !e.is_empty());
+    let (directories, _) = normalise(entries, private);
+    std::env::join_paths(directories).ok()
 }
 
 /// nvm's default version's `bin`, from `~/.nvm/alias/default`. (`NVM_DIR` is set by

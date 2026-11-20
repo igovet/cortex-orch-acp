@@ -13,6 +13,8 @@ export const sprintModeDescription: Record<SprintRunMode, string> = {
 };
 
 export const staleResult = (task: Task) => !!task.result &&
+  // A check receipt is not the final result's workspace identity.
+  !(task.reviewActions?.pending === true && task.reviewActions.unblockAction === "wait") &&
   (task.workspaceDigest !== task.result.digest || task.result.warnings?.includes("workspace_drift") === true);
 
 type ReviewHoldView = Pick<TaskView, "id" | "sprint" | "task" | "unknown">;
@@ -139,8 +141,71 @@ const REFUSALS: Record<string, string> = {
   invalid_arguments: "its submission did not match the expected form",
   channel_identity_changed: "its session was no longer the current one",
   worker_required: "it was not allowed to submit a result",
+  review_file_coverage_required: "it had not read every changed file in full",
+  review_project_revision_changed: "the files changed while it reviewed",
+  review_project_revision_unstable: "the files kept changing while it reviewed",
+  command_not_settled: "a command it cited had not finished",
+  review_predecessor_reports_required: "it had not read the earlier workers' reports",
+  failed_check_repair_required: "it reported a failed check without repairing it",
+  review_coverage_unfinished: "it left parts unchecked that it could still check",
+  assignment_blocker_required: "it reported a failure without saying what stopped it",
+  report_sections_missing: "its report lacked required sections",
+  draft_guidance_remaining: "its report still held the template's guidance",
+  review_resubmit_required: "it resubmitted a refused review unchanged",
+  review_block_findings_required: "it blocked the result without naming the problems",
+  review_not_covered_required: "its verdict did not match what it left unchecked",
 };
-export const refusalReason = (code: string) => Object.hasOwn(REFUSALS, code) ? REFUSALS[code] : "the runtime refused it";
+/** An item a refusal named, without the runtime's note on it: `README.md (current complete read is missing or stale)` is `README.md`. */
+const missingItem = (item: string) => item.replace(/\s*\([^()]*\)\s*$/, "").trim();
+const listed = (items: string[]) => items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+/** Why the runtime sent a worker's result back, in words. The items the refusal named make it concrete where they apply. */
+export const refusalReason = (code: string, missing: readonly string[] = []) => {
+  const items = missing.map(missingItem).filter(Boolean);
+  if (items.length) switch (code) {
+    case "review_file_coverage_required": return `it had not read ${listed(items)} in full`;
+    case "review_coverage_unfinished": return `it left ${listed(items)} unchecked although it could still check ${items.length === 1 ? "it" : "them"}`;
+    case "report_sections_missing": return `its report lacked ${items.length === 1 ? "the section" : "the sections"} ${listed(items)}`;
+  }
+  return Object.hasOwn(REFUSALS, code) ? REFUSALS[code] : "the runtime refused it";
+};
+/**
+ * The worker card's line about its refused result submissions. A worker that was later accepted reads neutrally (it is
+ * history and asks nothing); one still without an accepted result reads as the problem it is, with the earlier reasons.
+ */
+export function refusalLine(r: NonNullable<Worker["resultRefusals"]>, accepted: boolean): { text: string; tone: string } {
+  const times = r.count === 1 ? "once" : `${r.count} times`, latest = refusalReason(r.code, r.missing ?? []);
+  if (accepted) return { text: `Sent back ${times} before it was accepted (most recently: ${latest}). Nothing is needed from you.`, tone: "muted" };
+  const earlier = (r.codes ?? []).filter(c => c !== r.code).map(c => refusalReason(c));
+  return { text: `Its result was refused ${times}: ${latest}.${earlier.length ? ` Earlier: ${earlier.join("; ")}.` : ""}`, tone: "st-bad" };
+}
+const lowerFirst = (text: string) => text ? text[0].toLowerCase() + text.slice(1) : text;
+/** What the automatic attempts counted against the current budget went to, in words, or null without that record. */
+export function attemptsSpentOn(task: Pick<Task, "automaticContinuation">): string | null {
+  const spent = task.automaticContinuation?.spentOn;
+  if (!Array.isArray(spent)) return null;
+  const parts = spent.filter(s => !!s && typeof s.reason === "string" && Number.isSafeInteger(s.count) && s.count > 0)
+    .map(s => `${lowerFirst(plainStop(s.reason)).replace(/\.$/, "")} (${s.count === 1 ? "once" : `${s.count} times`})`);
+  return parts.length ? `The attempts went to: ${parts.join("; ")}.` : null;
+}
+/** Items a reviewer names by their machine name. */
+const DEAD_END_ITEM: Record<string, string> = { change_set: "the full list of changed files", "change set": "the full list of changed files" };
+/**
+ * A review that cannot be completed: the reviewer reported the same item unreachable with its tools in two or more reviews,
+ * and the newest still names it. Said to the owner while the task is still before verification, with what they can do.
+ * Null otherwise.
+ */
+export function reviewDeadEnd(task: Pick<Task, "automaticContinuation" | "status" | "observedPhase" | "archive">): string | null {
+  const d = task.automaticContinuation?.reviewDeadEnd;
+  if (!d || typeof d.item !== "string" || !d.item.trim() || !(typeof d.count === "number" && d.count >= 2)) return null;
+  if (task.status === "done" || task.status === "closed_unverified" || task.archive || ["verification", "finalizing", "result"].includes(task.observedPhase ?? "")) return null;
+  const raw = d.item.trim(), named = DEAD_END_ITEM[raw.toLowerCase()];
+  const file = !named && /^[^\s]+\.[A-Za-z0-9]+$|\//.test(raw) && !/\s/.test(raw);
+  const item = named ?? (file ? raw : `“${raw}”`);
+  return `The reviewer cannot read ${item} with its tools, so this review cannot be completed. ${file ? "Close as is, or change the file so it can be read." : "Close as is, or change the task so the reviewer can reach it."}`;
+}
+/** While a replan waits for a worker it cancelled to stop: that wait in words, naming the worker. Null otherwise. */
+export const replanStopping = (task: Pick<Task, "warnings" | "issue">) =>
+  task.warnings?.includes("cancelled_worker_stopping") ? plainStop(task.issue?.startsWith("cancelled_worker_stopping") ? task.issue : "cancelled_worker_stopping") : null;
 /** Whether a recovery hold is a lost turn or an outcome nobody could observe, rather than a stop the runtime decided. */
 export const interruptedTurn = (reason: string | null | undefined) => { const code = (reason ?? "").trim();
   return !code || code === "turn_interrupted" || code === "native_recovery_failed" || /(?:_outcome_unknown|_unconfirmed)$/.test(code); };
@@ -325,6 +390,7 @@ export function buildIndex(state: WorkspaceState, now: number): WorkspaceIndex {
       : automaticFact ?? statusFact(task, { target, running, title, sprint, ready: id => ready(id, sprint?.runMode), next: nextInSprint.has(task.id) })
       : machine.connection !== "connected" ? { text: `Last known: ${STATUS_WORD[task.status]}`, tone: "st-idle", icon: "help" }
       : task.status === "stopping" ? { text: "Stop not confirmed", tone: "st-warn", icon: "hourglass" }
+      : replanStopping(task) ? { text: replanStopping(task)!.replace(/\..*$/, ""), tone: "st-warn", icon: "hourglass" }
       : { text: "Process state unknown", tone: "st-idle", icon: "help" };
     const seen = last.get(task.id);
     return { id: task.id, task, project, machine, sprint, column, unknown, fact, automaticFact, ownerDecision, ownerIntegration, at: task.doneAt ?? (seen ? Date.parse(seen) : task.lastConfirmedAt ?? null), target, workers: own, running };
@@ -401,7 +467,9 @@ export function sideWord(view: TaskView): string {
   }
   if (view.task.status === "paused") return "Paused";
   if (view.column === "needs") return "Needs you";
-  if (view.column === "work") return view.task.status === "stopping" ? "Stopping" : "Working";
+  // A task in recovery is not working: a replan waiting for a cancelled worker says so, any other recovery is unconfirmed.
+  if (view.column === "work") return view.task.status === "stopping" ? "Stopping" : replanStopping(view.task) ? "Changing plan"
+    : view.unknown && view.task.warnings?.some(w => w.startsWith("process_exit_")) ? "Not confirmed" : "Working";
   if (view.column === "review") return "Review";
   return view.project.hasGit === false || sameBranch(view.task, view.target) ? "Finish" : "Merge";
 }

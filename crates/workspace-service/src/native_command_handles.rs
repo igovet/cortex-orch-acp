@@ -25,8 +25,121 @@ async fn recv<T>(r: tokio::sync::oneshot::Receiver<CoreResult<T>>) -> CoreResult
     r.await
         .map_err(|_| CoreError::Refused("native_host_closed"))?
 }
+/// The cause of a store-side refusal before the payload was released.
+fn store_cause(e: &CoreError) -> String {
+    match e.code() {
+        "busy" | "scheduler_owner_busy" => "store_busy".into(),
+        "storage_unavailable" => "store_unavailable".into(),
+        code => format!("refused:{code}"),
+    }
+}
+/// A supervisor's preparation failure code, accepted only in its fixed vocabulary.
+fn launch_cause(failed: &str) -> String {
+    let code = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 64
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b':')
+    };
+    if code(failed) {
+        failed.into()
+    } else {
+        "sandbox_preparation_failed".into()
+    }
+}
 fn directory(store: &Store, task: &str) -> PathBuf {
     store.key().directory().join(task).join(".native-output")
+}
+
+/// Output signatures of a program that tried to create its own user-namespace
+/// sandbox inside the command sandbox and was refused. Ubuntu's
+/// `bwrap-userns-restrict` AppArmor profile confines everything bubblewrap
+/// starts so that it cannot create another user namespace, however loose the
+/// command's mounts are. Matching is advisory only: it never changes the
+/// command's outcome, reruns it or widens its authority.
+const NESTED_SANDBOX_DENIALS: &[&str] = &[
+    "bwrap: No permissions to cre",
+    "bwrap: setting up uid map: Permission denied",
+    "bwrap: Creating new namespace failed",
+    "unshare: unshare failed: Operation not permitted",
+    "cannot clone: Operation not permitted",
+    "No usable sandbox!",
+];
+
+/// Structured hint for a receipt whose output shows a refused nested sandbox.
+/// A writing profile may rerun the same argv through the existing consent-backed
+/// `outside_command` route; read-only profiles have no such route.
+pub(super) fn nested_sandbox_hint(profile: &str, output: &[&[u8]]) -> Option<Value> {
+    let signature = NESTED_SANDBOX_DENIALS.iter().find(|s| {
+        output
+            .iter()
+            .any(|chunk| chunk.windows(s.len()).any(|w| w == s.as_bytes()))
+    })?;
+    let writer = matches!(profile, "development" | "guarded");
+    Some(json!({
+        "code": "nested_sandbox_denied",
+        "signature": signature,
+        "explanation": "A program in this command tried to create its own namespace sandbox (bubblewrap, flatpak, unshare, rootless containers, Chromium/Electron, a nested Cortex) and the host refused it inside the command sandbox. This is a host nesting limit, not a defect of that program, and repeating command_run will not change it.",
+        "outside_command": if writer { "offered" } else { "not_offered" },
+        "next": if writer {
+            "If the work needs this program's own sandbox, run the same argv with outside_command; the user confirms it on a permission card (Auto answers it itself) and a refusal means it did not run."
+        } else {
+            "This role cannot run commands outside the sandbox: report the check as not run with this blocker, or leave it to a writing specialist."
+        },
+    }))
+}
+/// A program the command (or a script it ran) could not find: bubblewrap's own
+/// `execvp NAME: No such file or directory`, or exit 127 with a shell's or `env`'s
+/// "not found". The program is named only when it is a plain short name.
+pub(super) fn missing_program_hint(exit_code: Option<i64>, output: &[&[u8]]) -> Option<Value> {
+    let text: String = output
+        .iter()
+        .map(|chunk| String::from_utf8_lossy(chunk))
+        .collect();
+    let plain = |name: &str| {
+        let name = name
+            .trim()
+            .trim_matches(|c| c == '\'' || c == '"' || c == '`');
+        (!name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._+-/".contains(&b)))
+        .then(|| name.to_owned())
+    };
+    let execvp = text.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("bwrap: execvp ")?
+            .strip_suffix(": No such file or directory")
+            .map(|name| plain(name))
+    });
+    let program = match execvp {
+        Some(name) => name,
+        None if exit_code == Some(127) => {
+            let found = text.lines().rev().find_map(|line| {
+                let line = line.trim();
+                let head = line
+                    .strip_suffix(": command not found")
+                    .or_else(|| line.strip_suffix(": not found"))
+                    .or_else(|| {
+                        // Only `env` reports a missing program this way; a missing file
+                        // named by any other program is not a missing program.
+                        let head = line.strip_suffix(": No such file or directory")?;
+                        let (tool, _) = head.split_once(": ")?;
+                        (tool == "env" || tool.ends_with("/env")).then_some(head)
+                    })?;
+                Some(head.rsplit(": ").next().and_then(plain))
+            })?;
+            found
+        }
+        None => return None,
+    };
+    Some(json!({
+        "code": "program_not_found",
+        "program": program,
+        "explanation": "The program was not found on the command search path: the project's .venv/bin, venv/bin and node_modules/.bin, then the owner's tool search path (their shell's PATH, folders they added, the existing usual per-user tool folders such as ~/.local/bin, ~/.cargo/bin and the default nvm, fnm or Volta Node, then the system folders). It is not installed where commands look, so repeating the command will not change it.",
+        "next": "Use the project's own copy if it has one (for example a node_modules/.bin tool), or report the check as not run with this blocker; the owner can add the program's folder under Diagnostics > Tool search path.",
+    }))
 }
 fn leaf<'a>(h: &'a Value, field: &str) -> CoreResult<&'a str> {
     let name = h[field]
@@ -99,6 +212,8 @@ impl Drop for Unreleased {
                     "command_not_started",
                     None,
                     "payload_never_released",
+                    Some("call_ended_before_release"),
+                    &Value::Null,
                 )
             });
         }
@@ -163,6 +278,7 @@ fn settle(
     h: &Value,
     status: &Value,
     revision: Option<String>,
+    changes: Option<Value>,
 ) -> CoreResult<Value> {
     let dir = directory(store, task);
     let filename = leaf(h, "output")?;
@@ -174,15 +290,28 @@ fn settle(
     use std::io::{Seek, SeekFrom};
     file.seek(SeekFrom::Start(0))?;
     let mut prefix = Vec::new();
-    file.take(65536).read_to_end(&mut prefix)?;
+    (&mut file).take(65536).read_to_end(&mut prefix)?;
+    // Errors usually come last: also look at the retained tail for the hint.
+    let mut tail = Vec::new();
+    if size > 65536 {
+        file.seek(SeekFrom::Start(size.saturating_sub(65536).max(65536)))?;
+        file.take(65536).read_to_end(&mut tail)?;
+    }
     let code = status["exit_code"].as_i64();
     let signal = status["signal"].as_i64();
     let failure = status["failure"].as_str().map(str::to_owned);
-    let value = json!({"tool_call_ref":h["reference"],"argv":h["argv"],"cwd":h["cwd"],
+    let mut value = json!({"tool_call_ref":h["reference"],"argv":h["argv"],"cwd":h["cwd"],
         "profile":h["profile"],"access_mode":h["mode"],"revision_digest":revision,
         "exit_code":code,"signal":signal,"failure":failure,"settled":true,
         "complete":failure.is_none()&&code.is_some(),"output":String::from_utf8_lossy(&prefix),
         "output_truncated":size>65536,"byte_count":size,"large_output_id":h["id"]});
+    if let Some(hint) = nested_sandbox_hint(h["profile"].as_str().unwrap_or(""), &[&prefix, &tail])
+    {
+        value["nested_sandbox"] = hint;
+    }
+    if let Some(hint) = missing_program_hint(code, &[&prefix, &tail]) {
+        value["missing_program"] = hint;
+    }
     store.write(|db|{
         let raw:String=db.query_row("SELECT result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?",
             (task,actor,key),|r|r.get(0))?;
@@ -194,6 +323,14 @@ fn settle(
         db.execute("UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=?",
             (value.to_string(),task,actor,key))?;
         let mut observation=value.clone();observation.as_object_mut().unwrap().remove("output");
+        // Diagnosis only (kept out of the reply): how long the payload ran, in ms.
+        if let Some(ms)=status["process_ms"].as_u64() {observation["timings"]=json!({"process_ms":ms});}
+        // Which deliverable paths changed while it ran (`native_change_set`). A run
+        // settled without its listings (recovered after a restart) has no record
+        // unless it was read-only.
+        let changes=changes.clone().unwrap_or_else(|| if h["profile"]=="read_only" {crate::native_change_set::unchanged("read_only")}
+            else {crate::native_change_set::incomplete("settled_without_listing")});
+        crate::native_change_set::add(&mut observation,&changes);
         lifecycle::event_tx(db,task,"NATIVE_COMMAND_FINISHED",json!({"receipt":{
             "tool_call_ref":h["reference"],"argv":h["argv"],"observation":observation}}))?;
         Ok(value)
@@ -266,13 +403,33 @@ pub(super) async fn execute(
         key: args["request_key"].as_str().unwrap_or_default().to_owned(),
         reference: reference.clone(),
     };
+    // Why a launch never released its payload and how long each stage took: fixed
+    // reason codes and numbers only, kept on the not-started receipt and the
+    // process event for diagnosis.
+    let mut cause: Option<String> = None;
+    let mut timings = serde_json::Map::new();
+    let millis = |since: std::time::Instant| json!(since.elapsed().as_millis() as u64);
     let launched = async {
-    let before = native_commands::check_digest(root.clone(), &argv).await;
+    let digest = std::time::Instant::now();
+    // The dirty-path listing for the change record runs beside the digest; a
+    // read-only command cannot change deliverable files and lists nothing.
+    let (before, listed) = tokio::join!(
+        native_commands::check_digest(root.clone(), &argv),
+        async {
+            if readonly {
+                None
+            } else {
+                Some(crate::native_change_set::snapshot(root.clone()).await)
+            }
+        }
+    );
+    timings.insert("digest_ms".into(), millis(digest));
     let mut launcher = Command::new(std::env::current_exe()?);
     // Read now, so a changed tool search path applies from the next command on.
-    if let Some(path) = crate::tool_path::current() {
+    if let Some(path) = crate::tool_path::for_commands() {
         launcher.env("PATH", path);
     }
+    let spawned = std::time::Instant::now();
     let mut child = launcher
         .arg(supervisor::MODE)
         .env_remove("CORTEX_CHANNEL_SECRET")
@@ -280,18 +437,48 @@ pub(super) async fn execute(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0)
-        .spawn()?;
+        .spawn()
+        .inspect_err(|_| cause = Some("supervisor_spawn_failed".into()))?;
     let mut input = child.stdin.take().unwrap();
     input.write_all(&serde_json::to_vec(&spec)?).await?;
     input.write_all(b"\n").await?;
     let mut messages = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut authorizing = 0u64;
     let h;
     loop {
-        let line = tokio::time::timeout(Duration::from_secs(15), messages.next_line())
-            .await
-            .map_err(|_| CoreError::Refused("native_command_sandbox_unavailable"))??
-            .ok_or(CoreError::Refused("native_command_sandbox_unavailable"))?;
+        // Each preparation step is normally well under a second. Under heavy host disk
+        // load (observed on 2026-11-20) one step took longer than the former 15 seconds,
+        // and the command was refused as if the sandbox were unavailable. The bound stays
+        // finite: a supervisor that never answers still fails closed, before any launch.
+        let line = match tokio::time::timeout(Duration::from_secs(60), messages.next_line()).await {
+            Err(_) => {
+                cause = Some("sandbox_preparation_timeout".into());
+                timings.insert("supervisor_wait_ms".into(), millis(spawned));
+                return Err(CoreError::Refused("native_command_sandbox_unavailable"));
+            }
+            Ok(Err(e)) => {
+                cause = Some("supervisor_pipe_failed".into());
+                return Err(e.into());
+            }
+            Ok(Ok(None)) => {
+                cause = Some("supervisor_exited".into());
+                return Err(CoreError::Refused("native_command_sandbox_unavailable"));
+            }
+            Ok(Ok(Some(line))) => line,
+        };
         let v: Value = serde_json::from_str(&line)?;
+        if let Some(object) = v["timings"].as_object() {
+            for (stage, value) in object {
+                if value.is_u64() {
+                    timings.insert(stage.clone(), value.clone());
+                }
+            }
+        }
+        if let Some(failed) = v["failed"].as_str() {
+            cause = Some(launch_cause(failed));
+            return Err(CoreError::Refused("native_command_sandbox_unavailable"));
+        }
+        let committing = std::time::Instant::now();
         authorize(
             &ex,
             &c,
@@ -301,9 +488,12 @@ pub(super) async fn execute(
             &reference,
             v["authorize"] == true,
         )
-        .await?;
+        .await
+        .inspect_err(|e| cause = Some(store_cause(e)))?;
+        authorizing += committing.elapsed().as_millis() as u64;
         if v["ready"].is_object() {
             if supervisor::identity(child.id().unwrap()).as_ref() != Some(&v["ready"]) {
+                cause = Some("supervisor_identity_mismatch".into());
                 return Err(CoreError::Refused("command_handle_identity_mismatch"));
             }
             h = json!({"reference":reference,"identity":v["ready"],"status":status_file,"stop":stopping,
@@ -312,6 +502,9 @@ pub(super) async fn execute(
             let t = i.task.clone();
             let actor = c.channel_id.clone();
             let key = args["request_key"].as_str().unwrap().to_owned();
+            let committing = std::time::Instant::now();
+            let mut stages = timings.clone();
+            stages.insert("authorize_commit_ms".into(), json!(authorizing));
             recv(ex.write(move|db|{
                 // A receipt the runtime already settled (its call was lost) never launches.
                 let bound = db.execute("UPDATE runtime_requests SET result_json=json_set(result_json,'$.handle',json(?))
@@ -321,23 +514,26 @@ pub(super) async fn execute(
                 if bound != 1 {
                     return Err(CoreError::Refused("command_outcome_unknown"));
                 }
+                stages.insert("bind_queued_ms".into(), json!(committing.elapsed().as_millis() as u64));
                 lifecycle::event_tx(db,&t,"NATIVE_COMMAND_PROCESS",json!({
-                    "ref":handle["reference"],"process_identity":handle["identity"],"supervised":true}))?;
+                    "ref":handle["reference"],"process_identity":handle["identity"],"supervised":true,
+                    "timings":stages}))?;
                 Ok(())
-            })?).await?;
+            })?).await.inspect_err(|e| cause = Some(store_cause(e)))?;
             input.write_all(b"go\n").await?;
             break;
         }
         if v["authorize"] != true {
+            cause = Some("invalid_supervisor_message".into());
             return Err(CoreError::Refused("invalid_command_supervisor"));
         }
         input.write_all(b"go\n").await?;
     }
     drop(input);
-    Ok::<_, CoreError>((before, child, messages, h))
+    Ok::<_, CoreError>((before, listed, child, messages, h))
     }
     .await;
-    let (before, mut child, _messages, h) = match launched {
+    let (before, listed, mut child, _messages, h) = match launched {
         Ok(launched) => {
             unreleased.ex = None;
             launched
@@ -352,6 +548,8 @@ pub(super) async fn execute(
                 unreleased.key.clone(),
                 unreleased.reference.clone(),
             );
+            let cause = cause.unwrap_or_else(|| store_cause(&error));
+            let timings = Value::Object(timings);
             if let Ok(reply) = ex.write(move |db| {
                 native_commands::settle_unrecorded_tx(
                     db,
@@ -362,6 +560,8 @@ pub(super) async fn execute(
                     "command_not_started",
                     None,
                     "payload_never_released",
+                    Some(&cause),
+                    &timings,
                 )
             }) {
                 let _ = reply.await;
@@ -408,14 +608,25 @@ pub(super) async fn execute(
                 _=cancelled.changed()=>{} }
             };
             phase = "settlement";
-            let after = native_commands::check_digest(root, &argv).await;
+            let (after, changes) =
+                tokio::join!(native_commands::check_digest(root.clone(), &argv), async {
+                    match &listed {
+                        None => crate::native_change_set::unchanged("read_only"),
+                        Some(before) => crate::native_change_set::record(
+                            before,
+                            &crate::native_change_set::snapshot(root.clone()).await,
+                        ),
+                    }
+                });
             let revision = if before == after { after } else { None };
             let actor = c.channel_id;
             let task = i.task;
             let key = args["request_key"].as_str().unwrap().to_owned();
             let h = h.clone();
-            recv(ex.publication(move |s| settle(s, &task, &actor, &key, &h, &status, revision))?)
-                .await
+            recv(ex.publication(move |s| {
+                settle(s, &task, &actor, &key, &h, &status, revision, Some(changes))
+            })?)
+            .await
         }
         .await;
         // A child handle is only reaped here; its independent supervisor is not
@@ -564,7 +775,7 @@ pub(super) async fn recover(runtime: &crate::native_runtime::Runtime) -> CoreRes
                     let dir=directory(s,&t);
                     match observe(&dir,&handle) {
                         Ok(status) if status["state"]=="finished" => {
-                            let confirmed=settle(s,&t,&a,&k,&handle,&status,None).is_ok();
+                            let confirmed=settle(s,&t,&a,&k,&handle,&status,None,None).is_ok();
                             if !confirmed {unknown(s,&t,&handle)?;}
                             Ok(Some(confirmed))
                         },
@@ -718,7 +929,7 @@ pub(super) fn resettle_row(
                 .and_then(|f| supervisor::status(&directory(store, task).join(f)).ok())
                 .filter(|s| s["ref"] == h["reference"] && s["supervisor"] == h["identity"]);
             if let Some(status) = status.as_ref().filter(|s| s["state"] == "finished") {
-                if settle(store, task, actor, key, h, status, None).is_ok() {
+                if settle(store, task, actor, key, h, status, None, None).is_ok() {
                     return Ok(Resettled::Settled);
                 }
                 Some((
@@ -800,6 +1011,8 @@ pub(super) fn resettle_row(
             failure,
             code,
             evidence,
+            None,
+            &Value::Null,
         )
     })?;
     Ok(if changed {
@@ -872,6 +1085,119 @@ mod resettle_tests {
                 Ok(serde_json::from_str(&raw)?)
             })
             .unwrap()
+    }
+    /// The two observed shapes of a missing program (bubblewrap's own execvp failure,
+    /// and a shell's exit 127) name it; other failures and odd names do not.
+    #[test]
+    fn a_missing_program_is_named_with_the_search_path_it_was_looked_up_on() {
+        let execvp = missing_program_hint(
+            Some(1),
+            &[b"bwrap: execvp npm: No such file or directory\n"],
+        )
+        .unwrap();
+        assert_eq!(execvp["code"], "program_not_found");
+        assert_eq!(execvp["program"], "npm");
+        assert!(execvp["explanation"]
+            .as_str()
+            .unwrap()
+            .contains("~/.cargo/bin"));
+        for (output, program) in [
+            (&b"sh: 1: cargo: not found\n"[..], "cargo"),
+            (b"bash: line 1: pnpm: command not found\n", "pnpm"),
+            (b"/usr/bin/env: 'node': No such file or directory\n", "node"),
+        ] {
+            let hint = missing_program_hint(Some(127), &[output]).unwrap();
+            assert_eq!(hint["program"], program, "{hint}");
+        }
+        assert!(missing_program_hint(Some(1), &[b"sh: 1: cargo: not found\n"]).is_none());
+        assert!(missing_program_hint(Some(0), &[b"ok\n"]).is_none());
+        assert!(
+            missing_program_hint(Some(127), &[b"cat: notes.txt: No such file or directory\n"])
+                .is_none()
+        );
+        let odd = missing_program_hint(Some(127), &[b"sh: 1: a b c $(x): not found\n"]).unwrap();
+        assert!(odd["program"].is_null());
+    }
+    /// A launch refused before its payload was released records why (a fixed code) on
+    /// the receipt, and its stage timings (numbers) on the finish event only.
+    #[test]
+    fn a_not_started_receipt_names_its_cause_and_keeps_timings_out_of_the_reply() {
+        let root = std::env::temp_dir().join(format!(
+            "command-cause-{}",
+            crate::native_effects::identity().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let key = ProjectKey::new(&root, StoreChannel::Dev).unwrap();
+        let store = Store::open(key, OpenMode::Initialize).unwrap();
+        TaskMachine::new(&store)
+            .create("t", "cause", "owner")
+            .unwrap();
+        let timings = json!({"digest_ms":3,"tree_walk_ms":160,"probe_ms":12});
+        store
+            .write(|db| {
+                row(
+                    db,
+                    "command_run",
+                    "refused",
+                    json!({"complete":false,
+                    "tool_call_ref":"native-command:refused","argv":["cargo","test"]}),
+                )?;
+                native_commands::settle_unrecorded_tx(
+                    db,
+                    "t",
+                    "gone-channel",
+                    "refused",
+                    Some("native-command:refused"),
+                    "command_not_started",
+                    None,
+                    "payload_never_released",
+                    Some(&launch_cause("sandbox_unavailable:setup_timeout")),
+                    &timings,
+                )
+            })
+            .unwrap();
+        let settled = receipt(&store, "refused");
+        assert_eq!(settled["failure"], "command_not_started");
+        assert_eq!(settled["cause"], "sandbox_unavailable:setup_timeout");
+        assert!(settled["timings"].is_null(), "{settled}");
+        let observation: Value = store
+            .read(|db| {
+                let raw: String = db.query_row(
+                    "SELECT json_extract(payload_json,'$.receipt.observation') FROM runtime_events
+                    WHERE type='NATIVE_COMMAND_FINISHED'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                Ok(serde_json::from_str(&raw)?)
+            })
+            .unwrap();
+        assert_eq!(observation["timings"], timings);
+        assert_eq!(observation["cause"], "sandbox_unavailable:setup_timeout");
+        // Only fixed codes are kept; anything else is reduced to one generic cause.
+        assert_eq!(
+            launch_cause("bad cause /home/x"),
+            "sandbox_preparation_failed"
+        );
+        assert_eq!(store_cause(&CoreError::Refused("busy")), "store_busy");
+        assert_eq!(
+            store_cause(&CoreError::Refused("access_changed")),
+            "refused:access_changed"
+        );
+        assert_eq!(
+            supervisor::preparation_cause(&std::io::Error::other(
+                "native_command_sandbox_unavailable: project_tree_limit"
+            )),
+            "sandbox_unavailable:project_tree_limit"
+        );
+        assert_eq!(
+            supervisor::preparation_cause(&std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied
+            )),
+            "preparation_io_PermissionDenied"
+        );
+        drop(store);
+        std::fs::remove_dir_all(&root).unwrap();
     }
     async fn sleeper() -> tokio::process::Child {
         Command::new("/bin/sleep")
@@ -1055,6 +1381,101 @@ mod resettle_tests {
         assert_eq!(done["failure"], "outcome_not_recorded");
         assert_eq!(done["settlement_evidence"], "supervisor_finished");
         assert_ne!(receipt(&store, "observed")["settled"], true);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_sandbox_hint_names_the_route_the_profile_actually_has() {
+        let bwrap: &[u8] = b"bwrap: No permissions to create a new namespace, likely because the kernel does not allow non-privileged user namespaces.\n";
+        let writer = nested_sandbox_hint("development", &[bwrap, b""]).unwrap();
+        assert_eq!(writer["code"], "nested_sandbox_denied");
+        assert_eq!(writer["outside_command"], "offered");
+        assert_eq!(
+            nested_sandbox_hint(
+                "guarded",
+                &[
+                    b"",
+                    b"[0101/1:FATAL:zygote_host_impl_linux.cc] No usable sandbox!"
+                ]
+            )
+            .unwrap()["outside_command"],
+            "offered"
+        );
+        assert_eq!(
+            nested_sandbox_hint(
+                "read_only",
+                &[b"unshare: unshare failed: Operation not permitted"]
+            )
+            .unwrap()["outside_command"],
+            "not_offered"
+        );
+        assert!(
+            nested_sandbox_hint("git_context", &[bwrap]).unwrap()["outside_command"]
+                == "not_offered"
+        );
+        assert!(nested_sandbox_hint(
+            "development",
+            &[b"bwrap is mentioned", b"no namespaces here"]
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn settled_receipt_carries_nested_sandbox_hint_from_the_output_tail() {
+        let root = std::env::temp_dir().join(format!(
+            "command-nested-hint-{}",
+            crate::native_effects::identity().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let key = ProjectKey::new(&root, StoreChannel::Dev).unwrap();
+        let store = Store::open(key, OpenMode::Initialize).unwrap();
+        TaskMachine::new(&store)
+            .create("t", "nested", "owner")
+            .unwrap();
+        let dir = directory(&store, "t");
+        cortex_core::store::locks::private_directory(&store.key().directory().join("t"), true)
+            .unwrap();
+        cortex_core::store::locks::private_directory(&dir, true).unwrap();
+        // The denial lands after more than 64 KiB of ordinary output.
+        let mut body = vec![b'.'; 200_000];
+        body.extend_from_slice(b"\nbwrap: No permissions to create a new namespace\n");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dir.join("n.bin"))
+            .unwrap();
+        std::io::Write::write_all(&mut file, &body).unwrap();
+        let (hash, size) = native_commands::fingerprint(&mut file).unwrap();
+        let handle = json!({"reference":"native-command:nested","identity":{},"status":"n.status",
+            "stop":"n.stop","output":"n.bin","id":"lo_n","argv":["bwrap","--unshare-user","--ro-bind","/","/","--","/usr/bin/true"],
+            "cwd":"/","profile":"development","mode":"development","denied":[]});
+        let status = json!({"state":"finished","exit_code":1,"signal":null,"failure":null,"hash":hash,"byte_count":size});
+        store
+            .write(|db| row(db, "command_run", "nested", json!({"complete":false,"tool_call_ref":"native-command:nested","handle":handle})))
+            .unwrap();
+        let value = settle(
+            &store,
+            "t",
+            "gone-channel",
+            "nested",
+            &handle,
+            &status,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(value["exit_code"], 1);
+        assert_eq!(value["complete"], true);
+        assert_eq!(value["output_truncated"], true);
+        assert_eq!(value["nested_sandbox"]["outside_command"], "offered");
+        assert_eq!(
+            receipt(&store, "nested")["nested_sandbox"]["code"],
+            "nested_sandbox_denied"
+        );
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }

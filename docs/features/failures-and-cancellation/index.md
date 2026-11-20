@@ -318,7 +318,56 @@ updates are retained and replayed if the client disconnected before seeing them.
 
 Every path that stops or replans live work records the live set in the same transaction that cancels the pending and running nodes: `session/cancel` interruption, `propose_replan`, `return_to_coordinator` and both stop-question branches. Each writes a `LIVE_ASSIGNMENTS_CANCELLED` event naming the assignment references it cancelled. The RECOVERING step reads the captures not yet settled, cancels and terminates exactly those assignments, and sweeps only the owned provisioning attempts whose idempotency keys match them. Completed and failed assignments, and any assignment an earlier recovery already settled, are not touched. A completed worker still settling its result is left to its own settlement.
 
+Recovery needs each captured attempt's capacity released, which happens only when its session process has been shut down. A worker turn that is still running when its channel is revoked or its owner epoch replaced is therefore ended by the runtime rather than left to finish by itself: besides the engine's own authority monitor, which closes the transport on observed authority loss, the active prompt checks once a second whether its worker channel was revoked, gives a revoked turn 10 seconds to end by itself (its closing reply after its own accepted replan or escalation), then sends ACP `session/cancel`, and lets the turn settle with stop reason `cancelled`. If the engine does not reply within 25 seconds, the turn ends with its outcome unknown and the session's ordinary shutdown terminates and settles the process (`SessionDriver::prompt` in `crates/workspace-service/src/native_sessions.rs`). Coordinator sessions and workers whose authority is intact are not affected.
+
 The captures survive a restart in RECOVERING. The RECOVERING-to-PLANNING transaction writes `LIVE_CANCELLATIONS_SETTLED` for the captures it covered. If a live worker's termination is not confirmed, the task moves to BLOCKED with `replanning_worker_termination_unconfirmed`, and a later recovery rechecks the same captured attempts. A node cancelled by a stop recorded before captures existed is captured on its first recovery with reason `unrecorded` and handled the same way.
+
+### Degenerate model turns
+
+A model turn can stream unusable text instead of acting: replay its own prompt,
+loop on the same words, or write tens of kilobytes without a tool call. The
+runtime does not settle such a turn as an ordinary reply. Every agent message of
+a coordinator or worker turn streams through a watchdog
+(`degenerate` in `crates/workspace-service/src/native_sessions.rs`) with four rules:
+
+| Rule | Trips when |
+| --- | --- |
+| `echo` | an agent message contains text only the runtime's own prompt carries: `Cortex retained-state recovery capsule`, `<system-reminder>` or `Runtime status:` |
+| `repetition` | a message of at least 1,000 characters repeats 30 % or more of its 16-character windows (sampled every 4 characters) |
+| `length` | one agent message reaches 16,000 characters with no tool call between its parts |
+| `refusal` | a runtime-driven turn ends with the ACP `refusal` stop reason |
+
+The bounds come from retained production sessions: the largest ordinary message
+was 4,748 characters (one legitimate consultant message 13,121), the largest
+ordinary repeated-window share 0.045, and none of the markers appeared in seven
+days of ordinary agent text. Agent thoughts and tool calls are not watched.
+
+On a trip the runtime records `NATIVE_TURN_DEGENERATE` (channel, session, role,
+the worker's node and plan revision, the rule, the engine message id, the message
+size and, for `repetition`, the share; never the text), sends `session/cancel`
+and gives the engine the same 25 seconds as a revoked worker before the turn
+ends with its outcome unknown and the session is terminated. Agent text that
+arrives after the trip is not added to the conversation. The turn is then
+retried once in a fresh engine session:
+
+- A coordinator turn that left the task's state and plan revision unchanged runs
+  again with the same prompt in a new session. A degenerate turn that still
+  changed the task (an accepted plan, a question) stands, and the driver
+  continues from that state.
+- A worker turn ends with its node still open and its session terminated, so the
+  lost-worker path (`ASSIGNMENT_RETRIED`, failure class `worker_lost`) replaces the
+  assignment in a fresh session at the next step.
+
+A second degenerate turn (the coordinator's retry, or the same worker node again
+in the same plan revision) stops the task with the blocker
+`native_turn_degenerate`, whose owner question says the model's output was
+unusable twice and suggests choosing another model before continuing. In
+Automatic mode that stop pauses the task as `owner_blocker` instead of
+continuing on the same route: unlike an `external_blocker`, the runtime never
+resumes it when the route qualifies again; only the owner's Allow more attempts
+(which renews the budget) or Close as is… does. Direct `SessionDriver::prompt` callers outside the
+runtime's turn loop still see a `refusal` stop reason as an ordinary reply.
+
 
 ### Stopping one worker command
 
@@ -467,7 +516,14 @@ host-owned and cannot be suppressed from inside the plugin. Inside Cortex:
   coordinator recovery: interrupted workers are recorded
   `recovery_worker_lost`, and `retry_lost` retries a lost node at most
   twice only after observed process absence and only when it owns no open
-  gateway receipt. A node that does is returned to the coordinator with
+  gateway receipt. A receipt is closed when it is complete, or settled with an
+  observed end: the supervisor's final status (an exit code, a signal, an owner
+  stop, a timeout, or an unverifiable output with a finished supervisor), a
+  launch that provably never started (`launched: false`), or a read-only
+  command whose PID namespace ended. A receipt settled only because its process
+  is provably gone, with no observed end (outcome `unknown`), stays open for
+  this rule: the action may have taken effect, and a fresh attempt of the same
+  node could repeat it. A node that owns an open receipt is returned to the coordinator with
   `lost_worker_action_outcome_unknown`; the coordinator's planning request
   lists each such action and states that it was not re-run. The
   gateway's own `request_key` fence still refuses a repeat of the same call.

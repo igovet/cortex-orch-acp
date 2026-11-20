@@ -68,11 +68,11 @@ export function Whole(props: { text: string; class?: string }) {
 }
 
 /** Head, status lane, body and foot. Only the body scrolls, unless it is laid out as Regions (`scroll="none"`). */
-export function Page(props: { head?: JSX.Element; status?: JSX.Element; foot?: JSX.Element; children: JSX.Element; scroll?: "vertical" | "sideways" | "none"; class?: string }) {
+export function Page(props: { head?: JSX.Element; status?: JSX.Element; foot?: JSX.Element; children: JSX.Element; scroll?: "vertical" | "sideways" | "none"; class?: string; bodyRef?: (el: HTMLDivElement) => void }) {
   return <div class={cx("l-page", props.class)}>
     <div class="l-page-head">{props.head}</div>
     <div class="l-page-status">{props.status}</div>
-    <div class="l-page-body" data-scroll={props.scroll ?? "vertical"}>{props.children}</div>
+    <div class="l-page-body" ref={el => props.bodyRef?.(el)} data-scroll={props.scroll ?? "vertical"}>{props.children}</div>
     <div class="l-page-foot">{props.foot}</div>
   </div>;
 }

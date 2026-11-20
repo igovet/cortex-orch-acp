@@ -14,4 +14,15 @@ A control is shown to work only when a real pointer clicks it. `scripts/cortex-x
 
 Before any desktop archive is handed to an owner, require the [installed real-input gate](../project/verification.md#installed-desktop-real-input-gate) on that exact archive. It installs through apt in disposable systemd containers, launches the installed desktop entry on private X11 and Wayland screens, uses real OS input and closes its own window. Extracted-binary, browser, preload and accessible-action checks cannot replace it. Keep complete output and the archive-bound result; an incomplete or failed gate blocks handoff.
 
+Paid live testing of the standalone Cortex Workspace desktop is a separate,
+opt-in check, not an installed-gate substitute. Default checks remain no-paid.
+Use the [standalone desktop procedure](../project/verification.md#standalone-cortex-workspace-desktop)
+only with an explicit owner request for this app in `desktop` mode and a
+recorded approval reference. The procedure covers candidate identity, private
+virtual screen and service, a disposable project and app roots, native
+account checks and before/after metadata comparison. Use real input and
+observe the actual window with screenshots or recordings; logs alone do not
+qualify a rendered case. Virtual-screen evidence does not qualify the
+owner's Ubuntu session, GPU or a physical Android device.
+
 Desktop release qualification for the Ubuntu first release covers: test schemas and negative authorization; event replay and gaps; idempotency and races between desktop clients; crash and ambiguous external outcomes; files and leases; Git conflicts and push; the fake-ACP desktop scenario (CW-Q01a); the desktop fault and race matrix (CW-Q02a); rendered Ubuntu accessibility, long histories and performance (CW-Q03a); installer, service and authorization checks (CW-Q04a); and a desktop migration and rollback rehearsal on copies (CW-Q05). The owner pilot is the Ubuntu checklist (CW-Q06a). Mobile qualification is separate and waits for Gate M: enrollment, relay, revoke and network transitions; push unavailable and delivery; the fake-ACP phone leg (CW-Q01b); the phone and device fault rows (CW-Q02b); physical Android accessibility, long histories, APK upgrade and rollback (CW-Q03b and CW-Q04b); and the Android pilot (CW-Q06b). Record exact version, device, commands, outcome and missing evidence. Do not treat mocked or CLI-only results as rendered/mobile qualification. Paid or live external operations need separate authorization.

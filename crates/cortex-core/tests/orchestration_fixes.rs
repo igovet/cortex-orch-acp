@@ -886,3 +886,385 @@ fn a_complete_packet_approval_records_no_limitation() {
     approve(&s, &e).unwrap();
     assert_eq!(approved_checks(&s), json!([]));
 }
+
+/// A task whose worker (node `n`, channel `c`) wrote `src/lib.rs` through the
+/// gateway and ran one command whose `NATIVE_COMMAND_FINISHED` observation carries
+/// `record`, in a shared checkout where another actor has 101 uncommitted changes
+/// (`README.md` and `other/*`). The review packet is built from the runtime
+/// records, recorded with its binding and the review started on it, as the host
+/// does; the snapshot identifies the bound task files.
+fn attributed_review(record: Value) -> (Project, Store, EvidenceSnapshot, OwnerEpoch, Value) {
+    attributed_review_with(record, &[])
+}
+/// `attributed_review` with further runtime events of the worker (channel `c`)
+/// recorded after its command.
+fn attributed_review_with(
+    record: Value,
+    events: &[(&str, Value)],
+) -> (Project, Store, EvidenceSnapshot, OwnerEpoch, Value) {
+    use std::collections::BTreeMap;
+    let (p, s, mut e, owner) = executed();
+    let before: BTreeMap<String, String> = [("src/lib.rs", "h0"), ("README.md", "r0")]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let mut current = before.clone();
+    current.insert("src/lib.rs".into(), "1".repeat(64));
+    current.insert("src/generated.rs".into(), "2".repeat(64));
+    current.insert("README.md".into(), "3".repeat(64));
+    for n in 0..100 {
+        current.insert(format!("other/{n}.txt"), "4".repeat(64));
+    }
+    let packet = s
+        .write(|db| {
+            reconciliation::record_baseline_manifest_tx(db, "t", &"a".repeat(64), &before)?;
+            db.execute("UPDATE trusted_channels SET assignment_id='a' WHERE channel_id='c'", [])?;
+            event_tx(db, "t", "NATIVE_PROJECT_WRITTEN", json!({"channel_id":"c","path":"src/lib.rs","sha256":"1".repeat(64)}))?;
+            event_tx(db, "t", "NATIVE_COMMAND_STARTED", json!({"ref":"native-command:gen","channel_id":"c","argv":["make","generate"]}))?;
+            let mut observation = json!({"tool_call_ref":"native-command:gen","exit_code":0,"complete":true,"settled":true});
+            for (k, v) in record.as_object().unwrap() {
+                observation[k] = v.clone();
+            }
+            event_tx(db, "t", "NATIVE_COMMAND_FINISHED", json!({"receipt":{"tool_call_ref":"native-command:gen","argv":["make","generate"],"observation":observation}}))?;
+            for (kind, payload) in events {
+                event_tx(db, "t", kind, payload.clone())?;
+            }
+            bind(db, "_review_1", "ar", "xr", "cr")?;
+            db.execute("UPDATE trusted_channels SET assignment_id='ar' WHERE channel_id='cr'", [])?;
+            let mut packet = reconciliation::review_packet_tx(db, "t", "_review_1", Some(&current), Some(&"i".repeat(64)), &current)?;
+            let binding = packet.as_object_mut().unwrap().remove("review_binding").unwrap();
+            event_tx(db, "t", "REVIEW_PACKET", json!({"assignment_ref":"ar","node":"_review_1","packet":packet,"binding":binding.clone()}))?;
+            packet["review_binding"] = binding;
+            Ok(packet)
+        })
+        .unwrap();
+    e.artifacts.insert("review".into(), "e".repeat(64));
+    // The host identifies every bound file (and, for tests that change them, the
+    // task's two files even under a whole-checkout binding).
+    let bound: Vec<String> = packet["review_binding"]["paths"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.as_str().map(str::to_owned))
+        .chain(["src/lib.rs".to_owned(), "src/generated.rs".to_owned()])
+        .collect();
+    for path in bound {
+        let state = format!("file:644:{}", current[&path]);
+        e.task_files.insert(path, state);
+    }
+    s.write(|db| {
+        start_review_tx(db, "t", "ar", &e)?;
+        publish(db, "ar", "review")
+    })
+    .unwrap();
+    (p, s, e, owner, packet)
+}
+fn generated() -> Value {
+    json!({"changed_paths":["src/generated.rs"],"changed_paths_complete":true,"changed_paths_source":"listing"})
+}
+fn read_task_files(s: &Store) {
+    read_completely(s, "src/lib.rs", &"1".repeat(64));
+    read_completely(s, "src/generated.rs", &"2".repeat(64));
+}
+fn missing_paths(s: &Store) -> Vec<String> {
+    s.read(|db| review_coverage_missing_tx(db, "t", "ar", &json!({"verdict":"APPROVE"})))
+        .unwrap()
+        .iter()
+        .map(|m| m["path"].as_str().unwrap().to_owned())
+        .collect()
+}
+fn bindings(s: &Store) -> Vec<Value> {
+    s.read(|db| {
+        Ok(db
+            .prepare(
+                "SELECT payload_json FROM runtime_events WHERE type='REVIEW_STARTED' ORDER BY id",
+            )?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?)
+    })
+    .unwrap()
+    .iter()
+    .map(|b| serde_json::from_str(b).unwrap())
+    .collect()
+}
+fn preflight(s: &Store, key: &str, e: &EvidenceSnapshot) -> Option<String> {
+    s.write(|db| review::preflight_result_tx(db, "t", "ar", key, e))
+        .unwrap()
+        .map(|r| r["error"].as_str().unwrap().to_owned())
+}
+
+/// Owner store 2026-11-20: a review packet listed 121 changed files, 83 of them
+/// other actors' uncommitted work, and three reviews in a row were refused
+/// `review_file_coverage_required` for up to 32 unrelated files. Only the task's
+/// own changes are required now: its gateway writes and the file its command
+/// generated, attributed to the command's node.
+#[test]
+fn a_review_in_a_dirty_checkout_requires_only_the_tasks_own_changes() {
+    let (_p, s, e, _o, packet) = attributed_review(generated());
+    let changed = &packet["changed_files"];
+    assert_eq!(changed["total"], 103);
+    assert_eq!(changed["required"], 2);
+    assert_eq!(changed["attribution_complete"], true);
+    let file = |path: &str| {
+        changed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["path"] == path)
+            .unwrap()
+            .clone()
+    };
+    // A file changed by a command (not a gateway write) is attributed and required.
+    assert_eq!(file("src/generated.rs")["by"], json!(["n"]));
+    assert_eq!(file("src/generated.rs")["required"], true);
+    assert_eq!(file("src/lib.rs")["required"], true);
+    for unrelated in ["README.md", "other/7.txt"] {
+        assert_eq!(file(unrelated)["required"], false, "{unrelated}");
+        assert_eq!(file(unrelated)["by"], json!([]));
+    }
+    assert_eq!(
+        packet["review_binding"],
+        json!({"kind":"task_files","paths":["src/generated.rs","src/lib.rs"]})
+    );
+    assert_eq!(bindings(&s)[0]["binding"], "task_files");
+    assert_eq!(missing_paths(&s), ["src/generated.rs", "src/lib.rs"]);
+    assert_eq!(
+        approve(&s, &e).unwrap_err().code(),
+        "review_file_coverage_required"
+    );
+    // Reading the task's two files is enough, with no limitation recorded.
+    read_task_files(&s);
+    assert!(missing_paths(&s).is_empty());
+    approve(&s, &e).unwrap();
+    assert_eq!(approved_checks(&s), json!([]));
+}
+
+/// Another actor editing the checkout during the review, and after it, never
+/// refuses, re-binds or invalidates a review bound to the task's own files;
+/// verification compares the same binding.
+#[test]
+fn an_unrelated_change_never_rebinds_or_invalidates_a_task_file_review() {
+    let (_p, s, mut e, o, _) = attributed_review(generated());
+    read_task_files(&s);
+    for (i, c) in ['c', 'd', 'e', 'f', '7'].into_iter().enumerate() {
+        e.project_digest = Some(c.to_string().repeat(64));
+        assert_eq!(preflight(&s, &format!("k{i}"), &e), None, "{c}");
+    }
+    approve(&s, &e).unwrap();
+    assert_eq!(bindings(&s).len(), 1);
+    s.write(|db| review::advance_tx(db, "t")).unwrap();
+    assert_eq!(state(&s), "VERIFYING");
+    e.project_digest = Some("8".repeat(64));
+    s.write(|db| {
+        verification_preflight_tx(db, "t", &e)?;
+        assert_eq!(
+            review_changed_checkout_tx(db, "t", &e).unwrap_err().code(),
+            "verification_revision_unchanged"
+        );
+        retain_check_tx(
+            db,
+            "t",
+            &o,
+            "check",
+            &["cargo".into(), "test".into()],
+            &CommandObservation {
+                complete: true,
+                exit_code: Some(0),
+                receipt_ref: "fake-executor:1".into(),
+            },
+            &e,
+        )?;
+        e.project_digest = Some("9".repeat(64));
+        assert!(record_verification_tx(db, "t", &["check".into()], &e)?);
+        Ok(())
+    })
+    .unwrap();
+    let verified: Value = serde_json::from_str(
+        &s.read(|db| {
+            Ok(db.query_row(
+                "SELECT payload_json FROM runtime_events WHERE type='VERIFICATION_PASSED'",
+                [],
+                |r| r.get::<_, String>(0),
+            )?)
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(verified["checkout_digest"], "9".repeat(64));
+    assert_ne!(verified["revision_digest"], verified["checkout_digest"]);
+}
+
+/// A change to a file the task wrote still re-binds a running review and
+/// invalidates an approved one.
+#[test]
+fn a_task_file_change_still_rebinds_the_review_and_invalidates_verification() {
+    let (_p, s, mut e, _o, _) = attributed_review(generated());
+    read_task_files(&s);
+    // A command-attributed file changed during the review.
+    e.task_files
+        .insert("src/generated.rs".into(), "file:644:changed".into());
+    assert_eq!(
+        preflight(&s, "k0", &e).as_deref(),
+        Some("review_project_revision_changed")
+    );
+    let bound = bindings(&s);
+    assert_eq!(bound.len(), 2);
+    assert_eq!(bound[1]["rebind"], 1);
+    // Bound to the new state, the next submission on it passes the preflight.
+    assert_eq!(preflight(&s, "k1", &e), None);
+    approve(&s, &e).unwrap();
+    s.write(|db| review::advance_tx(db, "t")).unwrap();
+    // A gateway-written file changed after approval: verification refuses and a
+    // fresh review is scheduled.
+    e.task_files.insert("src/lib.rs".into(), "absent".into());
+    s.write(|db| {
+        assert_eq!(
+            verification_preflight_tx(db, "t", &e).unwrap_err().code(),
+            "verification_review_revision_changed"
+        );
+        review_changed_checkout_tx(db, "t", &e)
+    })
+    .unwrap();
+    assert_eq!(state(&s), "REVIEWING");
+}
+
+/// Without the bound files' states a task-file binding is unavailable, never
+/// satisfied by the whole checkout's digest.
+#[test]
+fn a_task_file_binding_without_the_files_states_is_unavailable() {
+    let (_p, s, e, _o, _) = attributed_review(generated());
+    let bare = EvidenceSnapshot {
+        project_digest: e.project_digest.clone(),
+        ..Default::default()
+    };
+    assert_eq!(
+        s.write(|db| review::preflight_result_tx(db, "t", "ar", "k0", &bare))
+            .unwrap_err()
+            .code(),
+        "review_revision_unavailable"
+    );
+    assert_eq!(bindings(&s).len(), 1);
+}
+
+/// When any of the task's commands has no complete change record, attribution is
+/// incomplete: every listed file is required and the review binds the whole
+/// checkout, as before.
+#[test]
+fn incomplete_command_attribution_falls_back_to_requiring_every_changed_file() {
+    for (record, reason) in [
+        (
+            json!({"changed_paths_complete":false,"changed_paths_reason":"too_many_paths"}),
+            "too_many_paths",
+        ),
+        // A receipt from before change records were kept.
+        (json!({}), "command_without_change_record"),
+    ] {
+        let (_p, s, mut e, _o, packet) = attributed_review(record);
+        let changed = &packet["changed_files"];
+        assert_eq!(changed["attribution_complete"], false, "{reason}");
+        assert_eq!(changed["attribution"]["reason"], reason);
+        assert_eq!(changed["required"], 103);
+        assert!(changed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["required"] == true));
+        assert_eq!(
+            packet["review_binding"],
+            json!({"kind":"checkout","reason":reason})
+        );
+        assert_eq!(bindings(&s)[0]["binding"], "checkout");
+        read_task_files(&s);
+        let missing = missing_paths(&s);
+        assert_eq!(missing.len(), 101, "{reason}");
+        assert!(missing.contains(&"README.md".to_owned()));
+        // An unrelated change re-binds a whole-checkout review, as before.
+        e.project_digest = Some("c".repeat(64));
+        assert_eq!(
+            preflight(&s, "k0", &e).as_deref(),
+            Some("review_project_revision_changed")
+        );
+    }
+}
+
+/// A writing worker's turn whose engine could change files without a receipt
+/// attributes the paths that changed during it; a turn without that possibility
+/// attributes nothing, and a turn without a complete record falls back.
+#[test]
+fn a_writing_turns_changes_are_the_tasks_and_an_unrecorded_turn_falls_back() {
+    let turn = |changes: Value| {
+        let mut finished = json!({"channel_id":"c","turn":"turn-1"});
+        for (k, v) in changes.as_object().unwrap() {
+            finished[k] = v.clone();
+        }
+        vec![
+            (
+                "NATIVE_WRITER_TURN_STARTED",
+                json!({"channel_id":"c","turn":"turn-1"}),
+            ),
+            ("NATIVE_WRITER_TURN_CHANGES", finished),
+            (
+                "NATIVE_TURN_SETTLED",
+                json!({"channel_id":"c","stop_reason":"end_turn","writer":true}),
+            ),
+        ]
+    };
+    let readme = |packet: &Value| {
+        packet["changed_files"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["path"] == "README.md")
+            .unwrap()
+            .clone()
+    };
+    // An engine-native edit inside the turn (codex-acp): attributed to the node.
+    let (_p, _s, _e, _o, packet) = attributed_review_with(
+        generated(),
+        &turn(
+            json!({"native_mutation":true,"changed_paths":["README.md"],"changed_paths_complete":true}),
+        ),
+    );
+    assert_eq!(packet["changed_files"]["attribution_complete"], true);
+    assert_eq!(packet["changed_files"]["required"], 3);
+    assert_eq!(readme(&packet)["required"], true);
+    assert_eq!(readme(&packet)["by"], json!(["n"]));
+    // A turn whose engine could not write without a receipt attributes nothing.
+    let (_p, _s, _e, _o, packet) = attributed_review_with(
+        generated(),
+        &turn(
+            json!({"native_mutation":false,"changed_paths":["README.md"],"changed_paths_complete":true}),
+        ),
+    );
+    assert_eq!(packet["changed_files"]["required"], 2);
+    assert_eq!(readme(&packet)["required"], false);
+    // Incomplete, unsettled and unrecorded turns fall back to every changed file.
+    for (events, reason) in [
+        (
+            turn(
+                json!({"native_mutation":true,"changed_paths_complete":false,"changed_paths_reason":"turn_outcome_unknown"}),
+            ),
+            "turn_outcome_unknown",
+        ),
+        (
+            vec![(
+                "NATIVE_WRITER_TURN_STARTED",
+                json!({"channel_id":"c","turn":"turn-2"}),
+            )],
+            "turn_unsettled",
+        ),
+        // A worker turn settled by an earlier build, which kept no change record.
+        (
+            vec![(
+                "NATIVE_TURN_SETTLED",
+                json!({"channel_id":"c","stop_reason":"end_turn"}),
+            )],
+            "turn_without_change_record",
+        ),
+    ] {
+        let (_p, _s, _e, _o, packet) = attributed_review_with(generated(), &events);
+        assert_eq!(packet["changed_files"]["attribution"]["reason"], reason);
+        assert_eq!(packet["changed_files"]["required"], 103, "{reason}");
+        assert_eq!(packet["review_binding"]["kind"], "checkout");
+    }
+}

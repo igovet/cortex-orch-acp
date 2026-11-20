@@ -1,6 +1,6 @@
 import { createEffect, createMemo, createSignal, For, on, Show, type JSX } from "solid-js";
 import { capabilityOf, taskRenamable, type Task } from "@cortex/workspace-domain";
-import { asOf, automaticAcceptanceHold, checkCounts, clock, dayClock, engineLimits, humanStatus, nothingToCommit, ownerHold, sameBranch, windowTitle, sprintModeLabel, sprintTitle, type TaskView } from "./selectors";
+import { asOf, automaticAcceptanceHold, checkCounts, clock, dayClock, engineLimits, humanStatus, nothingToCommit, ownerHold, reviewDeadEnd, sameBranch, windowTitle, sprintModeLabel, sprintTitle, type TaskView } from "./selectors";
 import { useWs } from "./ctx";
 import { FieldEdit } from "./field-edit";
 import { onScreen } from "./freshness";
@@ -84,6 +84,14 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
   const mode = () => m()?.mode;
   const blocked = () => m() ? closeBlocked(m()!) : null;
   const archiveWhy = () => archiveBlocked(props.view.task);
+  const answering = () => mode() === "live" && props.view.task.conflict === "none" && ((m()?.open.length ?? 0) > 0 || (props.view.column === "needs" && props.view.task.observedPhase !== "recovery"));
+  const seeNeeded = () => {
+    const kind = m() ? unconfirmedState(m()!)?.kind ?? "" : "";
+    if (kind === "exit_unconfirmed" || kind === "records") return true;
+    const open = m()?.open.length ?? 0;
+    if (ownerHold(props.view)?.nextActor === "owner") return open === 0 || !answering();
+    return !!m() && open === 0 && !!reviewDeadEnd(props.view.task) && m()!.mode !== "unconfirmed";
+  };
   return <>
     <Show when={mode() === "live" && props.view.task.conflict === "none" && ((m()?.open.length ?? 0) > 0 || (props.view.column === "needs" && props.view.task.observedPhase !== "recovery"))}><button class="btn btn-primary" onClick={go}>Answer</button></Show>
     <Show when={props.view.task.status === "review" && mode() === "review"}><A class="btn btn-primary" to={{ name: "task", machine: props.view.machine.id, task: props.view.id, tab: "changes", sub: "diff" }}>Review changes</A></Show>
@@ -107,10 +115,12 @@ export function TaskActions(props: { view: TaskView; onMenu: (el: HTMLElement) =
       <button class="btn btn-line" aria-describedby={archiveWhy() ? why() : undefined} aria-disabled={archiveWhy() ? "true" : undefined} data-why={archiveWhy()} {...ws.needs("archive_task")} onClick={() => { if (!archiveWhy()) ws.archiveTask(props.view.id); }}><I n="archive" s={12} />Archive</button>
     </Show>
     {/* A queue hold decided for the owner: its actions are on the pinned card above the message box; this brings it into view. */}
-    <Show when={ownerHold(props.view)?.nextActor === "owner" || ["exit_unconfirmed", "records"].includes(m() ? unconfirmedState(m()!)?.kind ?? "" : "")}><button class="btn btn-primary" onClick={() => {
+    {/* It is offered only where its target is on the page: the pinned card, or (the card stays away while a question or a
+        permission is open) that open decision, unless Answer already brings the owner there. */}
+    <Show when={seeNeeded()}><button class="btn btn-primary" onClick={() => {
       const tab = ws.router.route();
       if (tab.name === "task" && (tab.tab || tab.live)) ws.go({ name: "task", machine: tab.machine, task: props.view.id });
-      queueMicrotask(() => onScreen().querySelector(".chat-review-hold")?.scrollIntoView({ block: "center" }));
+      queueMicrotask(() => (onScreen().querySelector(".chat-review-hold") ?? onScreen().querySelector(".dc:not(.dc-done), .dc-panel"))?.scrollIntoView({ block: "center" }));
     }}>See what is needed</button></Show>
     {/* A held task waits for the owner: say what is expected with one concrete action, not only a message box. */}
     <Show when={mode() === "live" && props.view.task.observedPhase === "recovery" && props.view.task.conflict === "none"}><button class="btn btn-primary" {...ws.needs("retry_task")} onClick={() => ws.run({ type: "retry_task", taskId: props.view.id, now: ws.store.clock() })}><I n="play" s={12} />Continue</button></Show>

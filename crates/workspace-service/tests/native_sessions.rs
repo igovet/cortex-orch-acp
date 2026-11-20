@@ -171,6 +171,8 @@ async fn review_reads(
                 .into_iter()
                 .flatten()
                 .filter(|f| f["current_sha256"].is_string())
+                // Only the task's own changes are required reading.
+                .filter(|f| f["required"] != false)
                 .filter_map(|f| f["path"].as_str().map(str::to_owned))
                 .collect();
             let reports = db
@@ -1133,6 +1135,20 @@ async fn channel_source_project_and_commands() {
         check(&w,"command_run",json!({"argv":["/usr/bin/touch","new-unreserved"],"request_key":"unreserved"}),
             json!({"/result/structuredContent/exit_code":0,"/result/structuredContent/profile":"development"})).await;
         assert!(p.0.join("new-unreserved").exists());
+        // The command's finish record attributes the file it created to the task,
+        // so its review requires it like a gateway write.
+        let record: Value = serde_json::from_str(&s.read(|db| Ok(db.query_row(
+            "SELECT json_extract(e.payload_json,'$.receipt.observation') FROM runtime_events e JOIN runtime_requests r
+             ON json_extract(r.result_json,'$.tool_call_ref')=json_extract(e.payload_json,'$.receipt.tool_call_ref')
+             WHERE e.type='NATIVE_COMMAND_FINISHED' AND r.request_key='unreserved'",[],|r|r.get::<_,String>(0))?)).unwrap()).unwrap();
+        assert_eq!(record["changed_paths_complete"], true, "{record}");
+        assert!(
+            record["changed_paths"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("new-unreserved")),
+            "{record}"
+        );
         // /tmp is intentionally shared/writable even in Guarded. Use the
         // literal host /var/tmp to distinguish the host-writable profile.
         let outside = Project(PathBuf::from("/var/tmp").join(p.0.file_name().unwrap()));
@@ -1777,7 +1793,7 @@ async fn claude_permission_requests_follow_runtime_policy() {
             .read(|db| {
                 Ok(db.query_row(
                     "SELECT payload_json FROM runtime_events WHERE type IN
-            ('NATIVE_PERMISSION_DECIDED','NATIVE_PERMISSION_CANCELLED') ORDER BY id DESC LIMIT 1",
+            ('NATIVE_PERMISSION_DECIDED','NATIVE_PERMISSION_CANCELLED','NATIVE_PERMISSION_AUTO_ALLOWED') ORDER BY id DESC LIMIT 1",
                     [],
                     |r| r.get::<_, String>(0),
                 )?)
@@ -1934,11 +1950,23 @@ async fn claude_permission_requests_follow_runtime_policy() {
         };
         assert_eq!(answer(&d, &s, &bare).await, bare_expected);
         let (requested, ruled): (i64, i64) = s.read(|db| Ok((
-            db.query_row("SELECT count(*) FROM runtime_events WHERE type='NATIVE_PERMISSION_REQUESTED'",[],|r|r.get(0))?,
-            db.query_row("SELECT count(*) FROM runtime_events WHERE type IN ('NATIVE_PERMISSION_DECIDED','NATIVE_PERMISSION_CANCELLED')
+            db.query_row("SELECT count(*) FROM runtime_events WHERE type IN ('NATIVE_PERMISSION_REQUESTED','NATIVE_PERMISSION_AUTO_ALLOWED')",[],|r|r.get(0))?,
+            db.query_row("SELECT count(*) FROM runtime_events WHERE type IN ('NATIVE_PERMISSION_DECIDED','NATIVE_PERMISSION_CANCELLED','NATIVE_PERMISSION_AUTO_ALLOWED')
                 AND json_extract(payload_json,'$.rule') IS NOT NULL",[],|r|r.get(0))?,
         ))).unwrap();
         assert_eq!((requested, ruled), (14, 14));
+        // A channel tool the access mode allows leaves one combined record; every other
+        // request keeps its request record and its separate decision record.
+        let (combined, pairs, decisions): (i64, i64, i64) = s.read(|db| Ok((
+            db.query_row("SELECT count(*) FROM runtime_events WHERE type='NATIVE_PERMISSION_AUTO_ALLOWED'
+                AND json_extract(payload_json,'$.rule')='channel_mcp' AND json_extract(payload_json,'$.decider') LIKE 'mode:%'
+                AND json_extract(payload_json,'$.tool') LIKE 'mcp__cortex__%'",[],|r|r.get(0))?,
+            db.query_row("SELECT count(*) FROM runtime_events WHERE type='NATIVE_PERMISSION_REQUESTED'",[],|r|r.get(0))?,
+            db.query_row("SELECT count(*) FROM runtime_events WHERE type IN ('NATIVE_PERMISSION_DECIDED','NATIVE_PERMISSION_CANCELLED')",[],|r|r.get(0))?,
+        ))).unwrap();
+        assert!(combined > 0, "{mode}");
+        assert_eq!(pairs, decisions, "{mode}");
+        assert_eq!(combined + pairs, 14, "{mode}");
         d.shutdown().await.unwrap();
         drop(s);
         close(h).await;
@@ -2399,7 +2427,7 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
     }
     let claude_meta = json!({"/claudeCode/options/allowDangerouslySkipPermissions":false,
         "/claudeCode/options/strictMcpConfig":true,"/claudeCode/options/managedSettings/disableAllHooks":true,
-        "/claudeCode/options/settings/autoMemoryEnabled":false,
+        "/claudeCode/options/settings/autoMemoryEnabled":false,"/claudeCode/options/settingSources":["project"],
         "disallowed:Bash":true,"disallowed:Edit":true,"disallowed:Write":true,"disallowed:NotebookEdit":true,
         "disallowed:Agent":true,"disallowed:Read":false,"disallowed:Grep":false,"disallowed:Glob":false,
         "disallowed:WebFetch":false});
@@ -2954,6 +2982,78 @@ async fn worker_question_answer_exact_delivery_and_native_denial() {
     s.write(|db| {
         let waits = cortex_core::lifecycle::waits::projection_tx(db, "t")?;
         assert_eq!(waits.last().unwrap()["status"], "orphaned");
+        Ok(())
+    })
+    .unwrap();
+    d.shutdown().await.unwrap();
+    drop(s);
+    close(h).await;
+}
+/// The worker asks, the owner answers, and in the answer's own turn the worker requests
+/// a plan change: the replan cancels its assignment, revokes its channel and closes the
+/// resuming wait as `cancelled` before ACP replies. The engine acted on the answer, so
+/// the delivery is settled, never reported as unconfirmed.
+async fn answer_turn_replan_settles_the_answer_delivery() {
+    let p = Project::new();
+    let h = p.host().await;
+    let o = h
+        .create("t".into(), "Work".into(), "owner".into())
+        .await
+        .unwrap();
+    let s = p.store();
+    s.write(|db|{
+        db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='t'",[])?;
+        db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-backend-dev','Work','[]','[\"src\"]','execution','running','a',NULL)",[])?;
+        Ok(())
+    }).unwrap();
+    let d = h
+        .dispatch(
+            "t".into(),
+            o.clone(),
+            SessionRole::Worker {
+                assignment: "a".into(),
+            },
+            p.route(),
+        )
+        .await
+        .unwrap();
+    let q = call(
+        "ask_question",
+        json!({"question":"Which route?","options":["Light","Stop"],"request_key":"route-question"}),
+    );
+    assert_eq!(d.prompt(&q).await.unwrap().stop_reason, "end_turn");
+    let question = s
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT id FROM pending_questions WHERE status='open'",
+                [],
+                |r| r.get::<_, String>(0),
+            )?)
+        })
+        .unwrap();
+    // The fixture engine performs the call the answer text names, in the answer's turn.
+    let answer = call(
+        "replan_request",
+        json!({"reason":"The owner's answer changes the plan","request_key":"answer-replan"}),
+    );
+    assert_eq!(
+        h.answer("t".into(), o, "answer".into(), question, answer)
+            .await
+            .unwrap()["recorded"],
+        true
+    );
+    assert!(d.continue_answer().await.unwrap());
+    s.write(|db| {
+        let waits = cortex_core::lifecycle::waits::projection_tx(db, "t")?;
+        assert_eq!(waits.last().unwrap()["status"], "cancelled");
+        assert_eq!(waits.last().unwrap()["reason"], "replanning");
+        assert!(waits.iter().all(|w| w["status"] != "orphaned"));
+        let replanned: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id='t' AND type='REPLAN_REQUEST_ACCEPTED')",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(replanned);
         Ok(())
     })
     .unwrap();
@@ -3752,7 +3852,17 @@ async fn native_plan_review_verification_journey(
     // The truncated case is about the verification output (dd, below). The changed
     // file stays readable: a single line past project_read's line bound can never be
     // read completely, which is a reviewer dead end, not an approval.
-    std::fs::write(p.0.join("work.txt"), "after").unwrap();
+    // The worker's engine edits the file natively, inside its turn and without a
+    // Cortex tool: the turn's change record attributes it to the task.
+    let edit = worker
+        .prompt(r#"native-write:{"path":"work.txt","content":"after"}"#)
+        .await
+        .unwrap();
+    assert_eq!(edit.stop_reason, "end_turn");
+    assert_eq!(
+        std::fs::read_to_string(p.0.join("work.txt")).unwrap(),
+        "after"
+    );
     let _ = truncated;
     let result = json!({"report":"# Work\n\nFixture file changed.","summary":"Changed the fixture file.","checks":[],"request_key":"result"});
     submit_result(&h, &worker, "journey", &o, &a, result).await;
@@ -3762,9 +3872,30 @@ async fn native_plan_review_verification_journey(
         "EXECUTING"
     );
     worker.shutdown().await.unwrap();
+    // Another actor's uncommitted file in the shared checkout, changed outside any
+    // turn or command of this task: listed as context, never required or bound.
+    std::fs::write(p.0.join("unrelated.txt"), "someone else's work").unwrap();
     let mut step = h.advance("journey".into(), o.clone()).await.unwrap();
     assert_eq!(step["state"], "REVIEWING");
     assert_eq!(step["assignments"][0]["role"], "worker-code-reviewer");
+    let listed = &step["assignments"][0]["review_packet"]["changed_files"];
+    let required = |path: &str| {
+        listed["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["path"] == path)
+            .map(|f| f["required"].clone())
+    };
+    assert_eq!(listed["attribution_complete"], true, "{listed}");
+    assert_eq!(required("work.txt"), Some(json!(true)), "{listed}");
+    assert_eq!(required("unrelated.txt"), Some(json!(false)), "{listed}");
+    // The binding stays with the recorded packet, not in the reviewer's brief.
+    assert!(step["assignments"][0]["review_packet"]["review_binding"].is_null());
+    if !restart {
+        // It keeps changing during the review: no re-binding, no refusal below.
+        std::fs::write(p.0.join("unrelated.txt"), "changed again").unwrap();
+    }
     if restart {
         let before = step["assignments"][0]["assignment_ref"].clone();
         close(h).await;
@@ -3826,6 +3957,23 @@ async fn native_plan_review_verification_journey(
         "checks":[],"verdict":if fix{"REQUEST_CHANGES"}else{"APPROVE"},"request_key":"review",
         "findings":if fix{json!([{"node":"work","files":["work.txt"],"fix":"Make the fixture correct.","cross_cutting":false}])}else{json!([])}});
     if restart {
+        let assignment = step["assignments"][0]["assignment_ref"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let refusal = || {
+            p.store()
+                .read(|db| {
+                    let raw: String = db.query_row(
+                        "SELECT payload_json FROM runtime_events WHERE task_id='journey' AND type='WORKER_RESULT_REFUSED'
+                         AND json_extract(payload_json,'$.assignment_ref')=? ORDER BY id DESC LIMIT 1",
+                        [&assignment],
+                        |r| r.get(0),
+                    )?;
+                    Ok(serde_json::from_str::<Value>(&raw)?)
+                })
+                .unwrap()
+        };
         std::fs::write(p.0.join("work.txt"), "changed during review").unwrap();
         review
             .prompt(&call("result_submit", result.clone()))
@@ -3836,6 +3984,33 @@ async fn native_plan_review_verification_journey(
             assert_eq!(db.query_row("SELECT count(*) FROM reports",[],|r|r.get::<_,i64>(0))?,1);
             Ok(())
         }).unwrap();
+        assert_eq!(refusal()["code"], "review_project_revision_changed");
+        // The review is rebound to the current state and its packet now names the
+        // current bytes: the earlier read of the replaced bytes no longer covers the
+        // file, so a verdict submitted without re-reading it is refused, unrecorded.
+        result["request_key"] = json!("review-unread");
+        review
+            .prompt(&call("result_submit", with_sections(result.clone())))
+            .await
+            .unwrap();
+        let stale = refusal();
+        assert_eq!(stale["code"], "review_file_coverage_required", "{stale}");
+        assert_eq!(
+            stale["missing"],
+            json!(["work.txt (current complete read is missing or stale)"])
+        );
+        assert!(h
+            .result_receipt(
+                "journey".into(),
+                o.clone(),
+                assignment.clone(),
+                "review-unread".into()
+            )
+            .await
+            .unwrap()
+            .is_none());
+        // The reviewer re-reads what changed, then submits with a fresh request_key.
+        review_reads(&p, &review, "journey", &assignment).await;
         result["request_key"] = json!("review-current");
     }
     submit_result(
@@ -4016,7 +4191,17 @@ async fn plain_folder_task_runs_its_whole_lifecycle() {
         )
         .await
         .unwrap();
-    std::fs::write(p.0.join("work.txt"), "after").unwrap();
+    // The worker's engine edits the file natively, inside its turn and without a
+    // Cortex tool: the turn's change record attributes it to the task.
+    let edit = worker
+        .prompt(r#"native-write:{"path":"work.txt","content":"after"}"#)
+        .await
+        .unwrap();
+    assert_eq!(edit.stop_reason, "end_turn");
+    assert_eq!(
+        std::fs::read_to_string(p.0.join("work.txt")).unwrap(),
+        "after"
+    );
     let result = json!({"report":"# Work\n\nFixture file changed.","summary":"Changed the fixture file.","checks":[],"request_key":"result"});
     submit_result(&h, &worker, "plain", &o, &a, result).await;
     worker.shutdown().await.unwrap();
@@ -5267,7 +5452,7 @@ async fn reopened_synthesis_feedback() -> bool {
                     .unwrap();
                 s.read(|db| {
                     let raw: String = db.query_row(
-                        "SELECT payload_json FROM runtime_events WHERE task_id='retry' AND type='NATIVE_PERMISSION_DECIDED' ORDER BY id DESC LIMIT 1",
+                        "SELECT payload_json FROM runtime_events WHERE task_id='retry' AND type IN ('NATIVE_PERMISSION_DECIDED','NATIVE_PERMISSION_AUTO_ALLOWED') ORDER BY id DESC LIMIT 1",
                         [], |r| r.get(0))?;
                     assert_eq!(serde_json::from_str::<Value>(&raw)?["outcome"]["optionId"], "allow-once");
                     Ok(())
@@ -5563,7 +5748,17 @@ async fn verification_drift_blocks_the_pass() {
         )
         .await
         .unwrap();
-    std::fs::write(p.0.join("work.txt"), "after").unwrap();
+    // The worker's engine edits the file natively, inside its turn and without a
+    // Cortex tool: the turn's change record attributes it to the task.
+    let edit = worker
+        .prompt(r#"native-write:{"path":"work.txt","content":"after"}"#)
+        .await
+        .unwrap();
+    assert_eq!(edit.stop_reason, "end_turn");
+    assert_eq!(
+        std::fs::read_to_string(p.0.join("work.txt")).unwrap(),
+        "after"
+    );
     submit_result(&h, &worker, "drift", &o, &a, json!({"report":"# Work\n\nChanged.","summary":"Changed the fixture file.","checks":[],"request_key":"result"})).await;
     worker.shutdown().await.unwrap();
     let step = h.advance("drift".into(), o.clone()).await.unwrap();
@@ -6361,6 +6556,16 @@ fn main() {
             println!("recovery project operations, including batch read coverage, passed");
             return;
         }
+        if mode == "answer-replan" {
+            tokio::time::timeout(
+                Duration::from_secs(45),
+                answer_turn_replan_settles_the_answer_delivery(),
+            )
+            .await
+            .expect("answer replan scenario exceeded deadline");
+            println!("answer-turn replan settles the answer delivery");
+            return;
+        }
         if mode == "verification-drift" {
             verification_drift_blocks_the_pass().await;
             return;
@@ -6439,6 +6644,7 @@ fn main() {
             coordinator_tools_not_chat_and_lease().await;
             engine_model_name_is_recorded_with_the_configured_session().await;
             worker_question_answer_exact_delivery_and_native_denial().await;
+            answer_turn_replan_settles_the_answer_delivery().await;
             pause_resume_does_not_revive_old_coordinator_and_cancel_is_not_completion().await;
             startup_failure_settles_only_owned_reaped_process().await;
             launch_refusal_before_spawn_is_a_confirmed_absence().await;
@@ -6462,6 +6668,7 @@ fn main() {
     });
     if ![
         "recovery-project-operations",
+        "answer-replan",
         "verification-drift",
         "shared-checkout",
         "synthesis-feedback",

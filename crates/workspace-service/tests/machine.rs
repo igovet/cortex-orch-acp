@@ -880,7 +880,10 @@ async fn plain_folder_opens_with_git_absent() {
         f.ok("repo.file", json!({"file":"a.txt"})).await["text"],
         "read without git"
     );
-    assert_eq!(f.call("git_init", json!({})).await["code"], "git_unavailable");
+    assert_eq!(
+        f.call("git_init", json!({})).await["code"],
+        "git_unavailable"
+    );
 
     fs::create_dir(f.repo.join(".git")).unwrap();
     assert_eq!(

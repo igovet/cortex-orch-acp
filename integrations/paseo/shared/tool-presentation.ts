@@ -225,7 +225,10 @@ export function presentToolSemantics(input: ToolPresentationInput): ToolPresenta
     input.rawInput ?? input.input, input.rawOutput, input.toolKind);
   if (codeMode) input = { ...input, name: codeMode.name, title: codeMode.name, rawInput: codeMode.input };
   const name = operationName(input);
-  if (isHiddenOperation(name) || isHiddenOperation(input.toolKind)) {
+  // Only the engine's status updates have nothing to say. The runtime's own plumbing is named like any tool and marked
+  // `visible: false`: whether to show it is the reader's choice, made by the caller.
+  const shown = { showPlumbing: true };
+  if (isHiddenOperation(name, shown) || isHiddenOperation(input.toolKind, shown)) {
     return { kind: "generic", icon: "Wrench", action: "", target: null, label: "", expandable: false, systemOperation: true, visible: false };
   }
   const title = String(input.title ?? input.name ?? "").trim();
@@ -272,7 +275,7 @@ export function presentToolSemantics(input: ToolPresentationInput): ToolPresenta
     label: target ? `${mapped.action}: ${target}` : mapped.action,
     expandable: !(name === "project_read" || name === "read_skill" || (!ACTIONS[name] && native === NATIVE_READ)),
     systemOperation: false,
-    visible: true,
+    visible: !isHiddenOperation(name) && !isHiddenOperation(input.toolKind),
   };
 }
 

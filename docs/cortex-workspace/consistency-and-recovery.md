@@ -104,6 +104,21 @@ board preview) is read in the background; another is read when it is opened. A
 window with no screen declaring what it shows (a headless store) reads every
 conversation.
 
+Streamed message chunks are display rows that the runtime does not commit one by
+one. Each chunk's row waits in memory as a deferred write
+(`StoreExecutor::write_deferred` in `crates/cortex-core/src/store/executor.rs`) and
+commits in one transaction with the other waiting display rows within 250 ms, at
+once when 64 are waiting, before any later ordinary write (a tool row, an owner
+message, the turn's settle event, any runtime state change) and when the service
+shuts down. Rows keep one row per chunk, the same seq order and the same message
+identity a chunk committed at once would get, because each deferred row runs the
+same statement in submission order; only the commit is shared. A streaming turn
+therefore needs one commit per 250 ms window instead of one per chunk. The loss
+bound applies to display text only: a service killed (not stopped) inside that
+window loses the waiting chunks of the last 250 ms, never a tool row, a result, a
+lifecycle change or anything another write depends on. A waiting row that fails
+(for example a replaced owner's channel) is rolled back alone and never reported.
+
 After its first complete read a conversation is only continued, never reread.
 Each history page names a forward cursor (`tailCursor`, see the
 [protocol](protocol.md#native-desktop-read-api)), and the task's stream events

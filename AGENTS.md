@@ -112,27 +112,45 @@ without printing credentials before relying on either engine.
 
 Default verification is no-paid: targeted `cargo test` runs, the Paseo plugin type-check
 and `npm --prefix integrations/paseo run test:*` scripts, and the no-paid smoke
-harness. No standing approval for paid live checks exists. Run a paid live check
-only when the owner explicitly requests it for the current work and names the
-mode: `cli` (headless, through the guarded Paseo CLI) or `desktop` (the Paseo
-Electron app). Without such a request, do not launch a paid model call or a
-live Paseo run; report each applicable live check as not run with the blocker
-"paid live check not requested by the owner". A request covers only the named
-mode and the work it names. Run requested paid checks only through
-the isolated dev Paseo setup: the permanent `~/.paseo-dev` daemon, its separate
-Electron profile at `~/.config/Paseo-dev`, a disposable project, and the Cortex
-runtime launched by that daemon from the explicit absolute checkout plugin path.
-Never use production `~/.paseo` or the production Cortex agent. Preserve the
-production-account rules above. Use only an explicit owner-selected route
-for a requested check, supported by current settings and observed host data;
-do not substitute or automatically escalate to another route. Heavy models
-remain prohibited in routine live qualification. Check native login
-status without printing credentials before relying on either engine.
+harness. No standing approval for paid live checks exists. Run one only on an
+explicit owner request for the current work naming the mode and the surface,
+and record an approval reference naming that request. Without such a request,
+do not launch a paid model call or a live Paseo run; report each applicable
+live check as not run with the blocker "paid live check not requested by the
+owner". A request covers only the named work, mode and surface.
+
+- **Paseo:** `cli` (guarded headless CLI) or `desktop` (Electron), only through
+  the permanent isolated `~/.paseo-dev` daemon, separate
+  `~/.config/Paseo-dev` Electron profile, a disposable project, and the Cortex
+  runtime launched by that daemon from the explicit absolute checkout plugin
+  path. Never use production `~/.paseo` or the production Cortex agent.
+- **Standalone Cortex Workspace:** `desktop` only, explicitly requested for
+  the standalone 1.0.6 app (isolated install of the candidate archive or built
+  binary from this checkout). Use a private disposable virtual screen, private
+  session bus and separate disposable project, never this checkout or the
+  owner's DISPLAY/WAYLAND session. Run both app and service with the owner's
+  real HOME for existing native engine accounts, and disposable
+  `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME` and
+  `XDG_RUNTIME_DIR` for app/service state and a distinct socket. Never connect
+  to, modify or reuse the owner's production Workspace install, user service,
+  config or stores, or production Paseo. Take before/after metadata-only
+  snapshots of known real-HOME Cortex/Workspace locations and report stray
+  writes. Prove isolation before any paid call; see the
+  [standalone desktop procedure](docs/project/verification.md#standalone-cortex-workspace-desktop).
+  Apply the qualification evidence rules above, and observe the real window
+  with real input and screenshots or recordings; logs alone do not qualify it.
+
+On either route, preserve the production-account rules above: no copied
+credentials, test accounts or engine login; check native login status without
+printing credentials. Use only an explicit owner-selected engine/model route
+supported by current settings and observed host data; do not substitute or
+automatically escalate. Heavy models remain prohibited in routine live
+qualification.
 
 The no-paid default automated suite
 (`scripts/cortex-xtask.sh test-fast`, see
 `docs/project/test-matrix.md`) cannot reach a paid engine and is not a
-substitute for live qualification. The only paid probes are
+substitute for live qualification. The only paid Paseo probes are
 `scripts/cortex-paseo-tools.sh probe-codex` and `probe-claude`; both
 continue to require `--i-authorize-paid-call` and `--approval-ref`; run them
 only on an explicit owner request and pass a reference naming that request
@@ -153,6 +171,60 @@ package, profile and test checks sequential.
 This release-verification obligation belongs to the owner of the Cortex
 change. Run live workloads against a separate isolated project, never against
 this checkout itself.
+
+### Standalone desktop testing procedure
+
+This is the practical procedure for the standalone Cortex Workspace `desktop`
+mode, distilled from live runs. The binding requirements (baseline inventory,
+environment roots, evidence rules, cleanup) are in
+[verification.md](docs/project/verification.md#standalone-cortex-workspace-desktop);
+this section only records what works in practice. The paid-approval rules above
+stay in force: nothing here authorizes a paid call.
+
+1. **Host commands go through `outside_command`.** Scratch-mounted worker shells
+   (`command_run` in read-only or Guarded form) cannot reach the real host
+   display, session bus or sockets. Launch, drive and reap the lab only through
+   the outside-command route, with the owner's consent card (Auto answers it).
+2. **Use one detached, self-reaping lab.** Start it in the background so it
+   survives the launching command, with a driver that later attaches to it and a
+   reaper that stops only its own processes. The lab has: a private,
+   authenticated Xvfb on a free display (never the owner's DISPLAY/WAYLAND); an
+   explicit private D-Bus session socket with no systemd user-manager activation
+   or fallback; a private mode-0700 run root holding all five XDG directories
+   (`XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`,
+   `XDG_RUNTIME_DIR`); the owner's real `HOME` for existing native accounts; the
+   candidate service started explicitly on the private socket **before** the
+   desktop; only the disposable Git project registered (no remote); remote access
+   off; no production overrides such as `CORTEX_ROUTING`.
+3. **Do not wrap the lab in a nested bwrap fence, and do not add a separate
+   sandbox pre-check.** A nested namespace fails to bring up the private bus. The
+   app's own verification sandbox is exercised by the paid task itself; a failure
+   to create it there is a product defect to record, not a setup problem to work
+   around.
+4. **Verify before any paid call:** the service and desktop use the private
+   socket and expected roots, the environment matches in both processes, the
+   selected route is the only enabled one, and native login status is checked
+   without printing credentials. If any of these is unverified, stop before paying.
+5. **Drive the real window.** Use XTEST mouse and keyboard input on the native
+   Tauri/WebKitGTK window, with screenshots or a continuous recording of each
+   state. Judge flicker or transient states by extracting and comparing frames
+   from the recording (a settled screenshot cannot show a two-frame flash); keep
+   the capture immutable and re-analyze the same capture if an analysis script
+   fails. Logs or protocol data alone never establish rendered behavior.
+6. **Keep a command ledger:** every command's argv, cwd, exit code and retained
+   output reference, plus hashes of all artifacts (screenshots, recordings,
+   snapshots). Retain failed invocations; never use them to judge the product.
+7. **Clean up only what you own.** Reap the owned lab processes, remove only the
+   exact private sockets the lab created, and compare before/after metadata-only
+   snapshots of the production Cortex/Workspace locations listed in the linked
+   section; report stray writes and missing coverage.
+8. **Known surface limits of the desktop window:** it does not narrow to phone
+   width, so the phone shell needs a real phone device; Update needs
+   `taskWorktrees`; View PR needs an accepted task with a pull request;
+   loading older conversation pages needs a task long enough to have them. Report
+   these as not exercised rather than passed. The task under test also has to be
+   long enough or arranged to produce a worker question, result and verification
+   if those states are in scope.
 
 ## Paseo development and plugin safety
 
@@ -176,7 +248,7 @@ overrides. If the installed build cannot be shown to isolate every required stat
 the daemon endpoint, do not launch Paseo or install the plugin; report the missing
 evidence.
 
-### Requested live modes: `cli` and `desktop`
+### Requested Paseo live modes: `cli` and `desktop`
 
 Both modes run only on an explicit owner request naming the mode (see above).
 In `cli` mode, drive a Cortex agent headlessly through the guarded wrapper

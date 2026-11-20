@@ -2,7 +2,7 @@
 //! Parity reference: delegation/evidence.py current_outcomes/accept_checks.
 use super::{completion::trivial_command, probe_correction};
 use crate::{CoreError, CoreResult};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 #[derive(Clone, Debug)]
@@ -11,10 +11,21 @@ pub struct Run {
     pub receipt: Value,
     pub order: i64,
     pub output_verified: bool,
+    /// A runtime-verified work-set binding of this run (`work_set_binding`): the
+    /// run's work set was unchanged across the run and is unchanged at submission.
+    /// Only the host's own observation (or, at completion, the recorded result of
+    /// that observation) sets it; never a model argument.
+    pub work_set: Option<Value>,
 }
 impl Run {
     fn reference(&self) -> &str {
         self.receipt["tool_call_ref"].as_str().unwrap_or("")
+    }
+    /// The run was bound to the whole checkout and that checkout is the submitted one.
+    fn exact(&self, digest: Option<&str>) -> bool {
+        self.receipt["revision_digest"]
+            .as_str()
+            .is_some_and(|d| d.len() == 64 && Some(d) == digest)
     }
     fn identity(&self) -> bool {
         self.receipt["argv"]
@@ -23,8 +34,22 @@ impl Run {
             && self.receipt["cwd"].is_string()
             && self.receipt["profile"].is_string()
     }
+    /// A receipt the runtime itself settled as provably never launched: its payload
+    /// was never released to the sandbox (`settle_unrecorded_tx`, `command_not_started`).
+    /// No process ran, so it cannot be an unknown later run of a check: it neither
+    /// blocks closing an earlier failure nor counts as a later run of the same command.
+    /// A settled receipt with an unknown outcome is not this and still blocks.
+    fn never_launched(&self) -> bool {
+        self.receipt["settled"] == true
+            && self.receipt["launched"] == false
+            && self.receipt["outcome"] == "not_started"
+            && self.receipt["failure"] == "command_not_started"
+            && self.receipt["exit_code"].is_null()
+    }
     pub(super) fn same(&self, other: &Self) -> bool {
-        self.identity()
+        !self.never_launched()
+            && !other.never_launched()
+            && self.identity()
             && other.identity()
             && self.receipt["argv"] == other.receipt["argv"]
             && self.receipt["cwd"] == other.receipt["cwd"]
@@ -83,9 +108,196 @@ pub fn load_runs(db: &Connection, task: &str, channel: &str) -> CoreResult<Vec<R
                 receipt,
                 order,
                 output_verified: false,
+                work_set: None,
             })
         })
         .collect()
+}
+
+/// At most this many entries (scope entries plus written paths) form a work set;
+/// a larger one is not recorded and its runs bind only to the whole checkout.
+pub const WORK_SET_LIMIT: usize = 256;
+/// A scope entry that names the whole project (or something outside it) leaves no
+/// narrower set: `overlaps` treats an empty literal prefix as everything.
+fn whole_project(entry: &str) -> bool {
+    let entry = crate::scheduler::policy::canonical(entry);
+    let prefix = entry[..entry.find(['*', '?', '[']).unwrap_or(entry.len())]
+        .trim_end_matches('/')
+        .to_owned();
+    prefix.is_empty()
+        || prefix == "."
+        || entry.starts_with('/')
+        || entry.split('/').any(|part| part == "..")
+}
+fn written_paths(
+    db: &Connection,
+    task: &str,
+    assignment: &str,
+    after: Option<i64>,
+) -> CoreResult<Vec<String>> {
+    // Every channel of this assignment (all its attempts): project_write/edit and
+    // the file operations (`NATIVE_PROJECT_CHANGED`) record their path.
+    let rows = db
+        .prepare(
+            "SELECT DISTINCT json_extract(e.payload_json,'$.path') FROM runtime_events e
+             JOIN trusted_channels c ON c.task_id=e.task_id
+               AND c.channel_id=json_extract(e.payload_json,'$.channel_id')
+             WHERE e.task_id=? AND c.assignment_id=? AND e.id>?
+               AND e.type IN ('NATIVE_PROJECT_WRITTEN','NATIVE_PROJECT_CHANGED')
+               AND length(json_extract(e.payload_json,'$.path'))>0",
+        )?
+        .query_map((task, assignment, after.unwrap_or(0)), |r| r.get(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(rows)
+}
+/// The work set of an assignment's command, taken in the transaction that records
+/// the command's start: its declared scope entries plus every path its own tools
+/// (project_write/edit, delete, mkdir) wrote so far. `None` when that set is the
+/// whole project (a `.`/`**` scope), too large, or there is no assignment: such a run
+/// binds only to the whole checkout, as before.
+pub fn work_set_tx(
+    db: &Connection,
+    task: &str,
+    assignment: Option<&str>,
+    scope: &[String],
+) -> CoreResult<Option<Vec<String>>> {
+    let Some(assignment) = assignment else {
+        return Ok(None);
+    };
+    if scope.iter().any(|s| whole_project(s)) {
+        return Ok(None);
+    }
+    let mut set: std::collections::BTreeSet<String> = scope
+        .iter()
+        .map(|s| crate::scheduler::policy::canonical(s))
+        .collect();
+    for path in written_paths(db, task, assignment, None)? {
+        if whole_project(&path) {
+            return Ok(None);
+        }
+        set.insert(crate::scheduler::policy::canonical(&path));
+    }
+    if set.is_empty() || set.len() > WORK_SET_LIMIT {
+        return Ok(None);
+    }
+    Ok(Some(set.into_iter().collect()))
+}
+/// Whether a path belongs to a work set (the scheduler's conservative overlap).
+pub fn in_work_set(path: &str, work_set: &[String]) -> bool {
+    work_set
+        .iter()
+        .any(|entry| crate::scheduler::policy::overlaps(path, entry))
+}
+/// Retain the work-set observation of one settled command run: the work-set digest
+/// before launch and after the process ended. Written by the host only.
+pub fn record_work_set_tx(
+    db: &Connection,
+    task: &str,
+    reference: &str,
+    assignment: &str,
+    work_set: &[String],
+    start: &str,
+    end: &str,
+) -> CoreResult<()> {
+    let started: Option<i64> = db
+        .query_row(
+            "SELECT id FROM runtime_events WHERE task_id=? AND type='NATIVE_COMMAND_STARTED'
+             AND json_extract(payload_json,'$.ref')=? ORDER BY id LIMIT 1",
+            (task, reference),
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(started) = started else {
+        return Ok(());
+    };
+    let seen: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='NATIVE_CHECK_WORK_SET'
+         AND json_extract(payload_json,'$.ref')=?)",
+        (task, reference),
+        |r| r.get(0),
+    )?;
+    if seen {
+        return Ok(());
+    }
+    super::event_tx(
+        db,
+        task,
+        "NATIVE_CHECK_WORK_SET",
+        json!({"ref":reference,"assignment_ref":assignment,"work_set":work_set,
+            "started_event":started,"start_digest":start,"end_digest":end,"stable":start==end}),
+    )?;
+    Ok(())
+}
+/// The retained work-set observation of `reference`, when it is stable (the work
+/// set had the same digest before launch and after the process ended).
+pub fn work_set_record(db: &Connection, task: &str, reference: &str) -> CoreResult<Option<Value>> {
+    let rows = db
+        .prepare(
+            "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='NATIVE_CHECK_WORK_SET'
+             AND json_extract(payload_json,'$.ref')=? LIMIT 2",
+        )?
+        .query_map((task, reference), |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let [raw] = rows.as_slice() else {
+        return Ok(None);
+    };
+    let v: Value = serde_json::from_str(raw)?;
+    let valid = v["stable"] == true
+        && v["end_digest"]
+            .as_str()
+            .is_some_and(|d| d.len() == 64 && d.bytes().all(|b| b.is_ascii_hexdigit()))
+        && v["start_digest"] == v["end_digest"]
+        && v["work_set"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty() && a.iter().all(Value::is_string))
+        && v["started_event"].is_i64();
+    Ok(valid.then_some(v))
+}
+/// Whether this assignment's own tools wrote a path outside `work_set` after the
+/// run started: that later work is not what the check ran against.
+pub fn wrote_outside_after(
+    db: &Connection,
+    task: &str,
+    assignment: &str,
+    started: i64,
+    work_set: &[String],
+) -> CoreResult<bool> {
+    Ok(written_paths(db, task, assignment, Some(started))?
+        .iter()
+        .any(|p| !in_work_set(p, work_set)))
+}
+/// The binding a verified work-set run gives its passed check.
+pub fn work_set_binding(record: &Value) -> Value {
+    json!({"kind":"work_set","work_set":record["work_set"],"digest":record["end_digest"]})
+}
+/// At completion, re-establish each recorded work-set binding from the runtime's own
+/// records: the submission-time comparison was made by the host and recorded with
+/// the result; the observation it compared must still be the retained stable one.
+pub fn accept_recorded_bindings(
+    db: &Connection,
+    task: &str,
+    checks: &[Value],
+    runs: &mut [Run],
+) -> CoreResult<()> {
+    for check in checks {
+        let binding = &check["revision_binding"];
+        if binding["kind"] != "work_set" || check["evidence_strength"] != "verified" {
+            continue;
+        }
+        let Some(reference) = check["tool_call_ref"].as_str() else {
+            continue;
+        };
+        let Some(record) = work_set_record(db, task, reference)? else {
+            continue;
+        };
+        if work_set_binding(&record) != *binding {
+            continue;
+        }
+        for run in runs.iter_mut().filter(|r| r.reference() == reference) {
+            run.work_set = Some(binding.clone());
+        }
+    }
+    Ok(())
 }
 
 /// Only cited commands and their matching history need full output hashing.
@@ -113,7 +325,6 @@ pub fn observe_outputs(
     runs: &mut [Run],
     artifacts: &std::collections::BTreeMap<String, String>,
 ) -> CoreResult<()> {
-    use rusqlite::OptionalExtension;
     for run in runs {
         let Some(id) = run.receipt["large_output_id"].as_str() else {
             continue;
@@ -187,11 +398,9 @@ fn assess(check: &Value, runs: &[Run], digest: Option<&str>, duplicate: bool) ->
             .unwrap_or(true)
     {
         Some("trivial_command")
-    } else if check["outcome"] == "passed"
-        && run.receipt["revision_digest"]
-            .as_str()
-            .is_none_or(|d| d.len() != 64 || Some(d) != digest)
-    {
+    } else if check["outcome"] == "passed" && !run.exact(digest) && run.work_set.is_none() {
+        // Neither the whole submitted checkout nor a runtime-verified work set
+        // (`work_set_binding`) is what this run observed.
         Some("revision_mismatch")
     } else {
         None
@@ -227,6 +436,7 @@ pub fn evaluate(checks: &[Value], runs: &[Run], digest: Option<&str>) -> CoreRes
             "evidence_gap",
             "claimed_outcome",
             "revision_digest",
+            "revision_binding",
         ] {
             c.as_object_mut()
                 .ok_or(CoreError::Refused("invalid_native_result"))?
@@ -241,6 +451,13 @@ pub fn evaluate(checks: &[Value], runs: &[Run], digest: Option<&str>) -> CoreRes
             if a.strength == "verified" {
                 let run = &runs[a.run.unwrap()];
                 c["revision_digest"] = run.receipt["revision_digest"].clone();
+                // What the pass is bound to: the exact submitted checkout, or only
+                // the run's work set (its scope and own writes; other files may differ).
+                c["revision_binding"] = match (&run.work_set, run.exact(digest)) {
+                    (_, true) => json!({"kind":"checkout"}),
+                    (Some(binding), false) => binding.clone(),
+                    (None, false) => Value::Null,
+                };
                 if let Some(latest) = runs.iter().filter(|r| r.same(run)).max_by_key(|r| r.order) {
                     if latest.order > run.order {
                         if !latest.complete() {
@@ -285,7 +502,11 @@ pub fn evaluate(checks: &[Value], runs: &[Run], digest: Option<&str>) -> CoreRes
                             && a.strength == "verified"
                     })
                     .collect();
-                if cited.len() == 1 && !runs.iter().any(|r| r.order > run.order && !r.identity()) {
+                if cited.len() == 1
+                    && !runs
+                        .iter()
+                        .any(|r| r.order > run.order && !r.identity() && !r.never_launched())
+                {
                     c["closed_by"] = json!(latest.reference());
                 }
             }
@@ -358,7 +579,7 @@ pub fn evaluate(checks: &[Value], runs: &[Run], digest: Option<&str>) -> CoreRes
                     || !good.receipt["runtime_verification"].is_null()
                     || runs.iter().any(|r| {
                         r.order > bad.order
-                            && (!r.identity()
+                            && ((!r.identity() && !r.never_launched())
                                 || (r.same(bad) && (!r.complete() || r.receipt["exit_code"] != 0)))
                     })
                 {
@@ -398,6 +619,92 @@ pub fn evaluate(checks: &[Value], runs: &[Run], digest: Option<&str>) -> CoreRes
     Ok(out)
 }
 
+fn program(run: &Run) -> String {
+    run.receipt["argv"][0]
+        .as_str()
+        .map(|p| p.rsplit('/').next().unwrap_or(p).chars().take(40).collect())
+        .unwrap_or_else(|| "command".into())
+}
+fn gap_hint(gap: &str) -> &'static str {
+    match gap {
+        "revision_mismatch" => "it observed neither the submitted checkout nor an unchanged work set (this assignment's scope and written files changed during or after the run, or the run has no work-set record): rerun it unchanged after your last edit and cite the new run",
+        "call_incomplete" => "it has no complete result or its retained output is not intact: inspect it with command_status, or rerun it",
+        "trivial_command" => "its command cannot verify a check (a read, search, no-op or unproved inline shell): run the real check command directly",
+        "later_run_failed" => "a later run of the same command failed",
+        "later_run_unresolved" => "a later run of the same command has no result yet: inspect it with command_status",
+        _ => "it is not a verified pass",
+    }
+}
+/// What keeps each open failed check of an evaluated result open, as bounded items
+/// for a refusal: the check's name, its `tool_call_ref`, the gap and what closes it.
+/// Names a program and receipt references only, never argv text or output.
+pub fn open_items(evaluated: &[Value], runs: &[Run]) -> Vec<String> {
+    let name = |c: &Value| -> String {
+        c["name"]
+            .as_str()
+            .unwrap_or("check")
+            .chars()
+            .take(80)
+            .collect()
+    };
+    let mut items = Vec::new();
+    for check in evaluated {
+        if check["outcome"] != "failed" || resolved(check) {
+            continue;
+        }
+        let reference = check["tool_call_ref"].as_str().unwrap_or("");
+        let label = format!("{} [{}]", name(check), reference);
+        if check["claimed_outcome"] == "passed" {
+            let gap = check["evidence_gap"].as_str().unwrap_or("nonzero_exit");
+            items.push(match gap {
+                "later_run_failed" => format!("{label}: later_run_failed: a later run of the same command failed; fix the cause, rerun it and cite that latest passing run"),
+                _ => format!("{label}: nonzero_exit: the cited run exited nonzero; fix the cause, rerun the same command and cite the passing run"),
+            });
+            continue;
+        }
+        if check["evidence_strength"] != "verified" {
+            let gap = check["evidence_gap"]
+                .as_str()
+                .unwrap_or("unverified_failure");
+            items.push(format!("{label}: {gap}: the failed check cites no verified failing run of this attempt; cite the failing command_run receipt, or rerun the check"));
+            continue;
+        }
+        let Some(failed) = runs.iter().find(|r| r.reference() == reference) else {
+            continue;
+        };
+        let later = runs
+            .iter()
+            .filter(|r| r.same(failed) && r.order > failed.order)
+            .max_by_key(|r| r.order);
+        let Some(latest) = later else {
+            items.push(format!("{label}: no_passing_rerun: no later run of the same {} argv, cwd and profile; fix the cause, rerun exactly that command and cite the passing run as passed under the same name", program(failed)));
+            continue;
+        };
+        let rerun = latest.reference();
+        if !latest.complete() {
+            items.push(format!("{label}: later_run_unresolved: the latest rerun [{rerun}] has no complete result; inspect it with command_status, or rerun"));
+            continue;
+        }
+        if latest.receipt["exit_code"] != 0 {
+            items.push(format!("{label}: later_run_failed: the latest rerun [{rerun}] failed too; fix the cause and rerun"));
+            continue;
+        }
+        let cited: Vec<&Value> = evaluated
+            .iter()
+            .filter(|c| c["tool_call_ref"] == rerun && c["claimed_outcome"] != "failed")
+            .collect();
+        match cited.as_slice() {
+            [] => items.push(format!("{label}: rerun_not_cited: the latest rerun [{rerun}] passed; cite it as a passed check named \"{}\"", name(check))),
+            [c] if c["name"] != check["name"] => items.push(format!("{label}: rerun_named_differently: cite the passing rerun [{rerun}] under the same name \"{}\"", name(check))),
+            [c] if c["outcome"] != "passed" => {
+                let gap = c["evidence_gap"].as_str().unwrap_or("unverified");
+                items.push(format!("{label}: rerun_{gap}: the passing rerun [{rerun}] does not verify: {}", gap_hint(gap)));
+            }
+            _ => items.push(format!("{label}: later_run_unrecorded: a later command run of this attempt has no recorded identity; rerun the check once more and cite that run")),
+        }
+    }
+    items
+}
 pub fn resolved(check: &Value) -> bool {
     check["outcome"] == "failed"
         && ["closed_by", "retracted_by", "superseded_by"]
@@ -414,6 +721,7 @@ mod tests {
             operation: "command_run".into(),
             order,
             output_verified: true,
+            work_set: None,
             receipt: json!({"tool_call_ref":reference,"argv":argv,"cwd":"/fixture","profile":"development",
                 "complete":true,"exit_code":code,"failure":null,"revision_digest":DIGEST,
                 "output":output,"byte_count":output.len()}),
@@ -458,8 +766,23 @@ mod tests {
             "uncited_success",
             "duplicate",
             "missing_ref",
+            "never_launched_between",
+            "never_launched_same_after",
+            "settled_unknown_between",
         ] {
             let bad = run("bad", 1, 1, json!(["cargo", "test"]), "failed");
+            // What `settle_unrecorded_tx` leaves for a call whose payload never left
+            // sandbox preparation: argv only, no cwd or profile, no exit.
+            let unreleased = |reference: &str, order: i64, outcome: &str, failure: &str| Run {
+                operation: "command_run".into(),
+                order,
+                output_verified: false,
+                work_set: None,
+                receipt: json!({"tool_call_ref":reference,"argv":["cargo","test"],"complete":false,
+                    "settled":true,"exit_code":null,"failure":failure,"outcome":outcome,
+                    "launched":if outcome == "not_started" {json!(false)} else {Value::Null},
+                    "settlement_evidence":"payload_never_released"}),
+            };
             let mut good = run("good", 2, 0, json!(["cargo", "test"]), "passed");
             let mut runs = vec![bad, good.clone()];
             let mut checks = vec![check("failed", "bad"), check("passed", "good")];
@@ -496,15 +819,55 @@ mod tests {
                 }
                 "duplicate" => checks.push(check("passed", "good")),
                 "missing_ref" => checks[1]["tool_call_ref"] = json!("unknown"),
+                // Observed: sandbox preparation timed out for a rerun, then the exact
+                // rerun passed. The never-released call must not keep the failure open.
+                "never_launched_between" => {
+                    runs[1].order = 3;
+                    runs.push(unreleased(
+                        "unreleased",
+                        2,
+                        "not_started",
+                        "command_not_started",
+                    ));
+                }
+                // Even with a full identity, a never-launched later call is not a later run.
+                "never_launched_same_after" => {
+                    let mut late = unreleased("late", 3, "not_started", "command_not_started");
+                    late.receipt["cwd"] = json!("/fixture");
+                    late.receipt["profile"] = json!("development");
+                    runs.push(late);
+                }
+                // A call that may have started with an unknown outcome still blocks.
+                "settled_unknown_between" => {
+                    runs[1].order = 3;
+                    runs.push(unreleased(
+                        "unknown",
+                        2,
+                        "unknown",
+                        "spawn_or_capture_failed",
+                    ));
+                }
                 _ => (),
             }
             let result = evaluate_pair(&checks, &runs).unwrap();
             assert_eq!(result[0]["outcome"], "failed", "{case}");
             assert_eq!(
                 result[0]["closed_by"] == "good",
-                matches!(case, "exact" | "outside" | "outside_reverse" | "duplicate"),
+                matches!(
+                    case,
+                    "exact"
+                        | "outside"
+                        | "outside_reverse"
+                        | "duplicate"
+                        | "never_launched_between"
+                        | "never_launched_same_after"
+                ),
                 "{case}"
             );
+            if case == "never_launched_same_after" {
+                assert_eq!(result[1]["outcome"], "passed", "{case}");
+                assert!(result[1]["evidence_gap"].is_null(), "{case}");
+            }
             assert_eq!(result[0]["evidence_strength"], "verified", "{case}");
             if case == "uncited_failure" {
                 assert_eq!(result[1]["outcome"], "failed");
@@ -746,5 +1109,158 @@ mod tests {
             let out=evaluate_pair(&checks,&runs);
             assert_eq!(out.is_ok(),allowed,"{output}");
         }
+    }
+
+    /// Owner store 2026-11-19 (cortex store, one attempt): the exact rerun of a failed
+    /// rendered-layout check passed three times while another task wrote Rust files
+    /// elsewhere in the shared checkout; no run kept a checkout digest, the failure
+    /// could never close and the attempt was replanned. A run whose own work set was
+    /// unchanged across the run and at submission now verifies, bound to that set.
+    #[test]
+    fn a_work_set_binding_verifies_a_pass_and_closes_its_failure() {
+        let binding =
+            json!({"kind":"work_set","work_set":["packages/ui/**"],"digest":"b".repeat(64)});
+        let bad = run("bad", 1, 1, json!(["npm", "test"]), "failed");
+        let mut good = run("good", 2, 0, json!(["npm", "test"]), "passed");
+        // The checkout changed during the run: no checkout digest.
+        good.receipt["revision_digest"] = Value::Null;
+        let checks = vec![check("failed", "bad"), check("passed", "good")];
+        let unbound = evaluate_pair(&checks, &[bad.clone(), good.clone()]).unwrap();
+        assert_eq!(unbound[1]["evidence_gap"], "revision_mismatch");
+        assert!(unbound[0]["closed_by"].is_null());
+        good.work_set = Some(binding.clone());
+        let out = evaluate_pair(&checks, &[bad, good]).unwrap();
+        assert_eq!(out[1]["outcome"], "passed");
+        assert_eq!(out[1]["evidence_strength"], "verified");
+        assert_eq!(out[1]["revision_binding"], binding);
+        assert_eq!(out[0]["closed_by"], "good");
+        // An exact checkout match is reported as such; a model cannot supply either.
+        let mut claimed = check("passed", "one");
+        claimed["revision_binding"] = binding.clone();
+        let exact = evaluate_pair(
+            &[claimed.clone()],
+            &[run("one", 1, 0, json!(["cargo", "test"]), "")],
+        )
+        .unwrap();
+        assert_eq!(exact[0]["revision_binding"], json!({"kind":"checkout"}));
+        let mut stale = run("one", 1, 0, json!(["cargo", "test"]), "");
+        stale.receipt["revision_digest"] = json!("c".repeat(64));
+        let out = evaluate_pair(&[claimed], &[stale]).unwrap();
+        assert_eq!(out[0]["evidence_gap"], "revision_mismatch");
+        assert!(out[0]["revision_binding"].is_null());
+    }
+    /// `open_failed_check` named nothing (an empty `missing`), and its hint always
+    /// said to rerun the same command, also when the passing rerun had already run
+    /// and only its revision binding was missing.
+    #[test]
+    fn open_items_name_the_check_its_receipt_and_the_actual_gap() {
+        let bad = run("bad", 1, 1, json!(["npm", "test"]), "failed");
+        let mut good = run("good", 2, 0, json!(["npm", "test"]), "passed");
+        let items = |checks: &[Value], runs: &[Run]| {
+            open_items(&evaluate_pair(checks, runs).unwrap(), runs)
+        };
+        let failed = check("failed", "bad");
+        assert!(items(&[failed.clone()], &[bad.clone()])[0]
+            .starts_with("check [bad]: no_passing_rerun: no later run of the same npm argv"));
+        assert!(items(&[failed.clone()], &[bad.clone(), good.clone()])[0]
+            .starts_with("check [bad]: rerun_not_cited: the latest rerun [good] passed"));
+        let mut other = check("passed", "good");
+        other["name"] = json!("other");
+        assert!(
+            items(&[failed.clone(), other], &[bad.clone(), good.clone()])[0]
+                .contains("rerun_named_differently")
+        );
+        good.receipt["revision_digest"] = Value::Null;
+        let mismatch = items(
+            &[failed.clone(), check("passed", "good")],
+            &[bad.clone(), good.clone()],
+        );
+        assert!(mismatch[0].starts_with("check [bad]: rerun_revision_mismatch: the passing rerun [good] does not verify: it observed neither"), "{mismatch:?}");
+        assert!(!mismatch[0].contains("no later run"));
+        let mut late = run("late", 3, 1, json!(["npm", "test"]), "again");
+        late.receipt["tool_call_ref"] = json!("late");
+        assert!(
+            items(&[failed.clone()], &[bad.clone(), good.clone(), late])[0]
+                .contains("later_run_failed: the latest rerun [late] failed too")
+        );
+        // A passed claim of a nonzero run is an open failure with its own item.
+        assert!(items(&[check("passed", "bad")], &[bad.clone()])[0]
+            .starts_with("check [bad]: nonzero_exit:"));
+        // A closed failure names nothing.
+        let ok = run("ok", 2, 0, json!(["npm", "test"]), "passed");
+        assert!(items(&[failed, check("passed", "ok")], &[bad, ok]).is_empty());
+    }
+    fn store() -> (std::path::PathBuf, crate::Store) {
+        let root = std::env::temp_dir().join(format!("work-set-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let store = crate::Store::open(
+            crate::ProjectKey::new(&root, crate::StoreChannel::Dev).unwrap(),
+            crate::OpenMode::Initialize,
+        )
+        .unwrap();
+        crate::lifecycle::TaskMachine::new(&store)
+            .create("t", "work set", "owner")
+            .unwrap();
+        (root, store)
+    }
+    #[test]
+    fn work_sets_are_scope_and_own_writes_and_bind_only_a_stable_record() {
+        let (root, store) = store();
+        store
+            .write(|db| {
+                for (channel, assignment) in [("own", "a"), ("sibling", "b")] {
+                    db.execute("INSERT INTO trusted_channels(channel_id,secret_hash,task_id,principal_thread_id,role,assignment_id,attempt_id,owner_epoch,issued_at)
+                        VALUES (?,'fixture','t','thread','worker',?,'x',1,'now')", (channel, assignment))?;
+                }
+                let write = |channel: &str, path: &str| {
+                    super::super::event_tx(db, "t", "NATIVE_PROJECT_WRITTEN", json!({"channel_id":channel,"path":path,"sha256":"0"}))
+                };
+                write("own", "docs/notes.md")?;
+                write("sibling", "crates/other.rs")?;
+                let scope = vec!["packages/ui/**".to_owned(), "./packages/domain".to_owned()];
+                assert_eq!(
+                    work_set_tx(db, "t", Some("a"), &scope)?,
+                    Some(vec!["docs/notes.md".into(), "packages/domain".into(), "packages/ui/**".into()])
+                );
+                // The whole project, or no assignment, leaves no narrower set.
+                for whole in [".", "**", "*.md", "/abs", "../up"] {
+                    assert_eq!(work_set_tx(db, "t", Some("a"), &[whole.to_owned()])?, None, "{whole}");
+                }
+                assert_eq!(work_set_tx(db, "t", None, &scope)?, None);
+                let set = work_set_tx(db, "t", Some("a"), &scope)?.unwrap();
+                let started = super::super::event_tx(db, "t", "NATIVE_COMMAND_STARTED", json!({"ref":"r1"}))?;
+                super::super::event_tx(db, "t", "NATIVE_COMMAND_STARTED", json!({"ref":"r2"}))?;
+                record_work_set_tx(db, "t", "r1", "a", &set, &"d".repeat(64), &"d".repeat(64))?;
+                record_work_set_tx(db, "t", "r2", "a", &set, &"d".repeat(64), &"e".repeat(64))?;
+                // A record is written once; an unknown command has none.
+                record_work_set_tx(db, "t", "r1", "a", &set, &"f".repeat(64), &"f".repeat(64))?;
+                record_work_set_tx(db, "t", "unknown", "a", &set, &"d".repeat(64), &"d".repeat(64))?;
+                let stable = work_set_record(db, "t", "r1")?.expect("stable record");
+                assert_eq!(stable["end_digest"], "d".repeat(64));
+                assert_eq!(stable["started_event"], started);
+                assert!(work_set_record(db, "t", "r2")?.is_none(), "changed during the run");
+                assert!(work_set_record(db, "t", "unknown")?.is_none());
+                // A sibling's write elsewhere does not count; this assignment's does.
+                assert!(!wrote_outside_after(db, "t", "a", started, &set)?);
+                write("own", "packages/ui/src/a.ts")?;
+                assert!(!wrote_outside_after(db, "t", "a", started, &set)?);
+                write("own", "crates/late.rs")?;
+                assert!(wrote_outside_after(db, "t", "a", started, &set)?);
+                // Completion re-establishes only the recorded binding of that record.
+                let binding = work_set_binding(&stable);
+                let mut runs = vec![run("r1", 1, 0, json!(["npm", "test"]), "")];
+                let mut recorded = check("passed", "r1");
+                recorded["evidence_strength"] = json!("verified");
+                recorded["revision_binding"] = json!({"kind":"work_set","work_set":["**"],"digest":"d".repeat(64)});
+                accept_recorded_bindings(db, "t", &[recorded.clone()], &mut runs)?;
+                assert!(runs[0].work_set.is_none(), "a forged binding");
+                recorded["revision_binding"] = binding.clone();
+                accept_recorded_bindings(db, "t", &[recorded], &mut runs)?;
+                assert_eq!(runs[0].work_set, Some(binding));
+                Ok(())
+            })
+            .unwrap();
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

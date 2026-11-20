@@ -250,6 +250,8 @@ fn detail(update: &Value) -> Value {
 /// Retained updates of one tool call that a display row merges: at most `PRIOR` of
 /// them, newest first; past that bound, the call's first update is merged first.
 const PRIOR: usize = 100;
+/// The text of a compaction divider row (`kind` "system"); the Workspace draws it as a rule.
+pub const COMPACTION_DIVIDER: &str = "Context compacted";
 fn display(
     db: &Connection,
     session: &str,
@@ -296,6 +298,11 @@ fn display_with(
         Err(_) => return Ok(Some(("unknown".into(), String::new(), None))),
     };
     let kind = field(&u, "sessionUpdate").unwrap_or("");
+    // The runtime's marker of a completed context compaction: a divider row.
+    if kind == "compaction_update" {
+        return Ok((field(&u, "status") == Some("completed"))
+            .then(|| ("system".into(), COMPACTION_DIVIDER.into(), None)));
+    }
     if !matches!(kind, "plan" | "tool_call" | "tool_call_update")
         || hidden(field(&u, "title").unwrap_or(""))
     {
@@ -938,6 +945,45 @@ mod tests {
                 return out;
             }
         }
+    }
+
+    #[test]
+    fn a_completed_compaction_reads_as_one_divider_row() {
+        let db = fixture();
+        db.execute(
+            "INSERT INTO host_transcript VALUES ('s',0,'agent_message','Before.',NULL,'now')",
+            [],
+        )
+        .unwrap();
+        for (seq, update) in [
+            (
+                1,
+                json!({"sessionUpdate":"compaction_update","toolCallId":"xa_c:compaction:k","status":"completed"}),
+            ),
+            (
+                2,
+                json!({"sessionUpdate":"compaction_update","toolCallId":"xa_c:compaction:k","status":"in_progress"}),
+            ),
+        ] {
+            db.execute(
+                "INSERT INTO host_updates VALUES ('s',?,?,'now')",
+                rusqlite::params![seq, update.to_string()],
+            )
+            .unwrap();
+        }
+        db.execute(
+            "INSERT INTO host_transcript VALUES ('s',3,'agent_message','After.',NULL,'now')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            texts(&db, 100),
+            [
+                "assistant|Before.".to_owned(),
+                format!("system|{COMPACTION_DIVIDER}"),
+                "assistant|After.".to_owned(),
+            ]
+        );
     }
 
     /// A retained live store: the coordinator's last chunk ("ARCHITECTURE.md`.")

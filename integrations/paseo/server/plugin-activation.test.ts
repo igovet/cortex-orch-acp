@@ -70,6 +70,13 @@ test("Paseo CJS loader activates a directory plugin with explicit source root", 
     process.env.CORTEX_PASEO_SOURCE_ROOT = fakeCheckout(join(isolated, "checkout"));
     delete process.env.CORTEX_ACP_COMMAND;
     await evaluateLikePaseo();
+    // Activation starts the checkout's first-run setup in the background; the fake one
+    // writes a marker into HOME. Removing HOME before it finished raced with that write
+    // (ENOTEMPTY in about one run of three), so wait for it, bounded.
+    const marker = join(isolated, "automatic-ran");
+    for (let waited = 0; !existsSync(marker) && waited < 5000; waited += 50) {
+      await new Promise((settle) => setTimeout(settle, 50));
+    }
   } finally {
     for (const [key, value] of saved) {
       if (value === undefined) delete process.env[key];
@@ -344,6 +351,13 @@ test("an explicit source root wins over an XDG launch record", async () => {
     process.env.CORTEX_PASEO_SOURCE_ROOT = fakeCheckout(join(isolated, "checkout"));
     delete process.env.CORTEX_ACP_COMMAND;
     await evaluateLikePaseo();
+    // Activation starts the checkout's first-run setup in the background; the fake one
+    // writes a marker into HOME. Removing HOME before it finished raced with that write
+    // (ENOTEMPTY in about one run of three), so wait for it, bounded.
+    const marker = join(isolated, "automatic-ran");
+    for (let waited = 0; !existsSync(marker) && waited < 5000; waited += 50) {
+      await new Promise((settle) => setTimeout(settle, 50));
+    }
   } finally {
     for (const [key, value] of saved) {
       if (value === undefined) delete process.env[key];

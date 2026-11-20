@@ -105,9 +105,10 @@ table (`classify` in `crates/cortex-engine/src/permission.rs`, path classes in
 | Cortex private state (`.cortex`, `.cortex-dev`, dev owner files, service state), read or write | refused | refused | refused |
 | Web fetch | ask the owner | allow | allow |
 
-Read-only roles and review-stage sessions get only the read rows: their native
-write, delete and execute requests are refused in every mode under the
-`read_only` rule. The table narrows native engine tools only; a `command_run`
+Read-only roles and review-stage sessions get only the read rows and the web-fetch row:
+their native write, delete and execute requests are refused in every mode under the
+`read_only` rule, while a web fetch, which only reads, follows the web-fetch row like any
+other channel's. The table narrows native engine tools only; a `command_run`
 command can still read anywhere the owner can. "Ask the owner" opens a card on the
 connected owner client titled `Owner decision: <role> wants to <operation>
 <paths> because <reason>` with only Allow once and Deny; the engine's request
@@ -115,7 +116,13 @@ waits until the owner answers, and a denial goes back as the engine's reject
 option. Each answer is a `NATIVE_PERMISSION_DECIDED` or
 `NATIVE_PERMISSION_CANCELLED` event with its rule and decider (`owner`,
 `mode:<access mode>`, `runtime`, `withdrawn:<reason>` or `no_owner_client`) and an
-owner-decided one also leaves a `permission_receipts` row. An incoming ACP client
+owner-decided one also leaves a `permission_receipts` row. A request for a channel-bound MCP tool (the `cortex` gateway or an attached external
+server, rule `channel_mcp`), which the access mode allows and which re-checks the
+channel inside the call, is recorded as one `NATIVE_PERMISSION_AUTO_ALLOWED` event
+(request fields, outcome, rule and `mode:<access mode>` decider) written in one
+transaction with the channel, session and access-mode checks; every other request
+keeps its `NATIVE_PERMISSION_REQUESTED` record and its separate decision record.
+These channel-tool allowances were more than half of all runtime events. An incoming ACP client
 (Paseo, Zed) shows the card itself; in a native Workspace task it is an owner
 decision of kind `permission` in the task's Conversation ("Asked by <role>", the
 paths, why, Allow once and Deny), counted as needing the owner and raised as a
@@ -367,9 +374,16 @@ defaults to true, which prefixes each line with its number and a tab; `false`
 returns the raw text. Line numbers never belong in `project_edit` strings or in
 `project_write` content. Each text result stays under 24,000 serialized bytes,
 counting the duplicated structured copy. `start_line`, `end_line`, `total_lines`,
-`complete`, `partial`, `next_offset` and `truncated_lines` report what was
-returned. A line longer than 2000 characters is cut and listed in
-`truncated_lines`, and a truncated line never counts as read. UTF-8 regular files
+`complete`, `partial`, `next_offset`, `start_column`, `next_column` and
+`truncated_lines` report what was returned. A page returns at most 2000
+characters of one line (fewer when the line's serialized text exceeds the inline
+budget). A longer line ends its page: it is listed in `truncated_lines`,
+`next_offset` names that same line and `next_column` the first character not yet
+returned. Passing both as `offset` and `column` continues the line, so following
+the cursor returns every character exactly once. A line counts as read only after
+all of its segments were returned in order from its first character; a segment
+that starts past what was already returned adds nothing. Only the per-line count
+of characters returned is stored, never text. UTF-8 regular files
 return text and a SHA-256 that identifies the bytes read. A supported image (PNG,
 JPEG, GIF or WEBP, sniffed by content, not extension), up to a 10 MiB cap,
 returns a real MCP `image` content block plus its SHA-256, byte size, MIME type
@@ -377,7 +391,7 @@ and path as text (`gateway_image_too_large` above the cap). Any other non-UTF-8
 regular file returns only its SHA-256, byte size and `binary: true`. A text file
 above 16 MB is refused (`gateway_file_too_large`).
 
-Read coverage is kept per channel. Ranges of non-truncated lines accumulate
+Read coverage is kept per channel. Ranges of completely returned lines accumulate
 across pages only while the file's digest is unchanged. Only digests and line
 ranges are stored, in the runtime request ledger (`project_read_state`), never
 file bodies. Coverage is capped at 2048 merged ranges, so a fragmented read
@@ -560,11 +574,65 @@ the project's `.git` is visible
 (see below). A command runs until it exits unless it sets `timeout_seconds`, and
 is killed when authority is revoked. There is no unsandboxed fallback.
 
+Sandbox preparation is bounded but tolerant of a busy host: the service waits up to 60
+seconds for each step reported by the per-command supervisor, the namespace and overlay
+probes up to 20 seconds and the git ignored-path query up to 30 seconds (each step is normally
+well under a second). Exceeding a bound still refuses before launch with
+`native_command_sandbox_unavailable`; the receipt is settled as never launched, and the
+tool's hint tells the model that nothing ran and the identical command may be retried once.
+Such a never-launched call does not keep an earlier failed check open (see
+[check history](../orchestration/index.md#check-history-and-current-outcome)).
+
+A program inside a command cannot create its own namespace sandbox: Ubuntu's
+`bwrap-userns-restrict` AppArmor profile confines everything bubblewrap starts so that it
+cannot create another user namespace, whatever the mounts. Nested bubblewrap, flatpak,
+`unshare`, rootless containers, Chromium/Electron sandboxes and a nested Cortex therefore
+fail inside `command_run`. When the retained output (its first 64 KiB or its last 64 KiB)
+shows one of these refusals, the settled receipt carries `nested_sandbox`
+(`code: nested_sandbox_denied`, the matched signature, and whether `outside_command` is
+offered to the command's profile). It is advisory: the outcome, exit code and evidence
+are unchanged, nothing is rerun, and no authority widens. A writing worker may rerun the
+same argv through the consent-backed `outside_command`; a read-only role reports the check
+as not run with that blocker. The signatures are bubblewrap's, `unshare`'s, a rootless
+container runtime's `cannot clone` and Chromium's `No usable sandbox!` messages. A nested
+Cortex reports its own `native_command_sandbox_unavailable` or
+`native_verification_sandbox_unavailable` code instead and is not matched. Signatures in the
+middle of a larger output are not scanned (`nested_sandbox_hint` in
+`crates/workspace-service/src/native_command_handles.rs`).
+
+A settled receipt whose retained output shows a program that could not be found
+(bubblewrap's `execvp NAME: No such file or directory`, or exit 127 with a shell's
+`not found`/`command not found` or `env`'s `No such file or directory`) carries
+`missing_program` (`code: program_not_found`, the program when it is a plain short name,
+the search path it was looked up on and what to do). It is advisory like
+`nested_sandbox`: the outcome is unchanged and nothing is rerun
+(`missing_program_hint` in the same file).
+
+A launch that never released its payload (`failure: command_not_started`) names why
+in the receipt's `cause`: `sandbox_unavailable:<reason>` with the sandbox's own fixed
+reason (for example `setup_timeout`, `namespace_or_mount_setup_failed`,
+`project_tree_limit`), `sandbox_preparation_timeout` when the supervisor did not answer
+within 60 seconds, `supervisor_exited`, `supervisor_spawn_failed`, `store_busy` or
+`store_unavailable` when the store refused the authorization or handle commit,
+`refused:<code>` for another refusal (for example `refused:access_changed`), or
+`call_ended_before_release`. Preparation stage durations (milliseconds) and the
+scanned entry count are numbers only: they are recorded on the `NATIVE_COMMAND_PROCESS`
+event of a launched command (`digest_ms`, `controls_ms`, `tree_walk_ms`,
+`tree_entries`, `hardlink_policy_ms`, `git_policy_ms`, `overlay_probe_ms`, `probe_ms`,
+`preparation_ms`, `authorize_commit_ms`, `bind_queued_ms`) and on the
+`NATIVE_COMMAND_FINISHED` event's observation of a command that did not start; a
+finished command's observation records `process_ms`. They are never part of the tool
+reply.
+
 A bare program name is looked up on the project's `.venv/bin`, `venv/bin` and
 `node_modules/.bin`, then on the owner's
 [tool search path](../../cortex-workspace/maintenance-and-controls.md#tool-search-path):
-the `PATH` the Workspace service reads from the owner's login shell plus folders
-the owner added, validated as [SECURITY.md](../../../SECURITY.md) describes. Any
+the `PATH` the Workspace service reads from the owner's login shell, folders
+the owner added, then the existing usual per-user tool folders it still lacks
+(`~/.local/bin`, `~/.cargo/bin`, the default nvm or fnm Node, Volta and the others
+listed there), then the system folders, validated as [SECURITY.md](../../../SECURITY.md)
+describes. An incoming ACP agent, which never reads a shell, uses its client's `PATH`
+followed by the same usual and system folders. Any
 other search entry inside the project is dropped. No mount is added for these
 folders: every profile already shows the host filesystem (with private stores
 masked), so a tool folder and its symlink targets are readable with exactly the
@@ -681,6 +749,23 @@ links its two binaries to each other, and pinning them made every `npm ci` fail
 with `EBUSY`. Links are counted as distinct directory entries, so a tree seen
 twice through a bind mount never makes up a missing outside link. Guarded and
 engine launches retain directory-wide read-only demotion above 256 such files.
+
+Every sandboxed command's preparation makes one complete pass over the project tree
+(`policy::scan` in `crates/workspace-service/src/native_command_policy.rs`); it finds
+both the private names above at any depth (they are never descended) and the
+writable regular files with more than one link. Directory listings give each entry's
+type, so only regular files inside the write set are `fstatat`ed, relative to their
+open directory, and directories are listed by up to eight threads. The limit stays
+2,000,000 entries (`project_tree_limit`). The scan is not cached between commands:
+a new link to a project file made from outside the project changes no project
+directory, so no cheap revalidation could notice it. On this checkout (about 490,000
+scanned entries, a debug build, warm cache) the whole preparation fell from about
+1.7 s to about 0.24 s, of which the scan is about 0.16 s; on a cold or busy disk it
+is still proportional to the number of entries. What the scan guarantees is the tree
+as it was listed: an entry created after its directory was listed and before the
+command starts (a new private-named entry, a new outside hard link) is not covered
+by that command's mounts and is seen by the next command's scan. A link count that
+rises between the scan and the launch is the same window.
 
 Development/Auto writing-worker commands instead detach granted external hardlinks
 before granting writes. A uv `.venv` or pnpm `node_modules` can then be updated,

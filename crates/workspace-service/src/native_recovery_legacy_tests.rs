@@ -556,3 +556,87 @@ async fn an_unasked_legacy_work_stop_gets_its_question_on_start() {
         close(root, runtime).await;
     }
 }
+
+/// cortex store: a task stayed RECOVERING (`legacy_effect_outcome_unknown`) for days
+/// because an earlier host recorded a command's start and the service died before
+/// the exit event, although the command's own receipt was complete and the machine
+/// had rebooted since. Recovery now records the missing exit once from that evidence
+/// and holds the task for what its facts still show; a start with no such evidence
+/// keeps the hold, and later restarts record nothing new.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_legacy_command_start_settles_from_its_receipt_or_an_earlier_boot_once() {
+    // (case, evidence of the exit, the hold after recovery)
+    for (case, evidence, hold) in [
+        (
+            "receipt",
+            Some("receipt_complete"),
+            "native_session_outcome_unknown",
+        ),
+        (
+            "boot",
+            Some("previous_boot"),
+            "native_outside_outcome_unknown",
+        ),
+        ("none", None, "legacy_effect_outcome_unknown"),
+    ] {
+        let (root, runtime, _, task) = seeded().await;
+        let b = boot();
+        let start = |reference: &str| {
+            format!("INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES ('{task}','COMMAND_PROCESS_STARTED','ch1','{{\"argv\":[\"make\"],\"operation\":\"command_run\",\"tool_call_ref\":\"{reference}\"}}','0');")
+        };
+        let mut rows = format!(
+            "UPDATE runtime_tasks SET state='RECOVERING',blocker='legacy_effect_outcome_unknown' WHERE task_id='{task}';
+             {}",
+            start("gateway:cmd")
+        );
+        match case {
+            "receipt" => rows.push_str(&format!(
+                "INSERT INTO runtime_requests VALUES ('{task}','acc','ch1','command_run','d','{{\"complete\":true,\"receipt\":{{\"tool_call_ref\":\"gateway:cmd\",\"exit_code\":0,\"failure\":null,\"complete\":true}}}}');")),
+            // A later recovery ran in another boot; an outside write is still unknown.
+            "boot" => rows.push_str(&format!(
+                "INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES ('{task}','NATIVE_PROCESS_UNCONFIRMED','runtime','{{\"boot_id\":\"an-earlier-boot\",\"attempts\":[\"x\"]}}','0');
+                 INSERT INTO runtime_requests VALUES ('{task}','probe','ch2','outside_write','d','{{\"complete\":false}}');")),
+            // Another channel's receipt and an event of this boot are no evidence.
+            _ => rows.push_str(&format!(
+                "INSERT INTO runtime_requests VALUES ('{task}','acc','ch2','command_run','d','{{\"complete\":true,\"tool_call_ref\":\"gateway:cmd\",\"exit_code\":0}}');
+                 INSERT INTO runtime_events(task_id,type,actor,payload_json,created_at) VALUES ('{task}','NATIVE_PROCESS_UNCONFIRMED','runtime','{{\"boot_id\":\"{b}\",\"attempts\":[\"x\"]}}','0');")),
+        }
+        exec(&runtime, rows).await;
+        runtime.recover_fixture().await.unwrap();
+        assert_eq!(
+            sql(&runtime, "SELECT state||':'||blocker FROM runtime_tasks").await,
+            format!("RECOVERING:{hold}"),
+            "{case}"
+        );
+        let exits = "SELECT coalesce(group_concat(json_extract(payload_json,'$.evidence')||':'||coalesce(json_extract(payload_json,'$.exit_code'),'null')||':'||coalesce(json_extract(payload_json,'$.failure'),'none')||':'||json_extract(payload_json,'$.recovered'),','),'') FROM runtime_events WHERE type='COMMAND_PROCESS_EXITED'";
+        assert_eq!(
+            sql(&runtime, exits).await,
+            match evidence {
+                Some("receipt_complete") => "receipt_complete:0:none:1".to_owned(),
+                Some(e) => format!("{e}:null:outcome_not_recorded:1"),
+                None => String::new(),
+            },
+            "{case}"
+        );
+        let required = "SELECT coalesce(group_concat(json_extract(payload_json,'$.reason')||':'||coalesce(json_extract(payload_json,'$.settled_barrier'),'-'),','),'') FROM runtime_events WHERE type='NATIVE_RECOVERY_REQUIRED'";
+        assert_eq!(
+            sql(&runtime, required).await,
+            if evidence.is_some() {
+                format!("{hold}:legacy_effect_outcome_unknown")
+            } else {
+                String::new()
+            },
+            "{case}"
+        );
+        let counted = "SELECT count(*) FROM runtime_events";
+        let before = sql(&runtime, counted).await;
+        runtime.recover_fixture().await.unwrap();
+        runtime.recover_fixture().await.unwrap();
+        assert_eq!(
+            sql(&runtime, counted).await,
+            before,
+            "{case}: a restart re-recorded"
+        );
+        close(root, runtime).await;
+    }
+}

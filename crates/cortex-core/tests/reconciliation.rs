@@ -118,6 +118,37 @@ fn synthesis_disclosures_conflicts_and_certified_completion() {
     );
     s.write(|db| complete_tx(db, "t", &e)).unwrap();
 }
+/// A verification receipt kept only `complete` and `exit_code`, so a timed-out or
+/// signalled command reached the coordinator and the owner as a bare "no exit
+/// code". The retained cause of the same run now stays with the check.
+#[test]
+fn a_failed_verification_keeps_the_retained_cause_of_its_run() {
+    let (_p, s, o, e) = setup();
+    s.write(|db| {
+        lifecycle::request_tx(db, "t", "native-verifier-output", "out", "native_command_output",
+            &json!({"tool_call_ref":"slow"}),
+            || Ok(json!({"tool_call_ref":"slow","observation":{"complete":false,"exit_code":null,"failure":"timeout","signal":9}})))?;
+        retain_check_tx(db, "t", &o, "slow", &["true".to_owned()],
+            &CommandObservation { complete: false, exit_code: None, receipt_ref: "slow".into() }, &e)?;
+        record_verification_tx(db, "t", &["slow".into()], &e)?;
+        Ok(())
+    })
+    .unwrap();
+    let failed: Value = serde_json::from_str(
+        &s.read(|db| {
+            Ok(db.query_row(
+                "SELECT payload_json FROM runtime_events WHERE type='VERIFICATION_FAILED'",
+                [],
+                |r| r.get::<_, String>(0),
+            )?)
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(failed["checks"][0]["failure"], "timeout");
+    assert_eq!(failed["checks"][0]["signal"], 9);
+    assert_eq!(failed["checks"][0]["exit_code"], Value::Null);
+}
 #[test]
 fn runtime_exact_command_closes_gap_but_unrelated_or_failed_runs_do_not() {
     let (_p, s, o, e) = setup();

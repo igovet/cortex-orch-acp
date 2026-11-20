@@ -642,3 +642,73 @@ fn missing_or_invalid_home_uses_scratch_without_unprotecting_xdg_state() {
     assert!(f.0.join("relocated/new").exists());
     assert!(!config.join("cortex/no").exists());
 }
+/// One parallel scan replaces the two former walks: it finds private entries at any
+/// depth (without descending them), every writable external hard link, and counts
+/// exactly what a sequential walk sees; the prepared view then hides those entries.
+#[test]
+fn single_scan_finds_deep_private_entries_and_external_links() {
+    let f = Fixture::new();
+    let root = f.root();
+    for i in 0..40 {
+        let dir = root.join(format!("tree/{i}/deeper/{}", i % 7));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("file"), "x").unwrap();
+    }
+    fs::create_dir_all(root.join("tree/3/deeper/.cortex")).unwrap();
+    fs::write(root.join("tree/3/deeper/.cortex/secret"), "private").unwrap();
+    fs::create_dir_all(root.join("tree/9/.git/objects")).unwrap();
+    fs::write(root.join("tree/9/.git/config"), "[core]").unwrap();
+    fs::write(root.join("tree/12/.cortex-workspace-dev.json"), "{}").unwrap();
+    fs::write(f.0.join("shared"), "outside").unwrap();
+    fs::hard_link(f.0.join("shared"), root.join("tree/20/deeper/6/external")).unwrap();
+    fs::hard_link(root.join("source"), root.join("tree/5/internal")).unwrap();
+    let scan = policy::scan(&root, &[root.clone()], &[]).unwrap();
+    // Read-only binds first, store directories (hidden by a read-only tmpfs) last.
+    assert_eq!(
+        scan.private,
+        [
+            root.join("tree/12/.cortex-workspace-dev.json"),
+            root.join("tree/9/.git"),
+            root.join(".cortex-dev"),
+            root.join("tree/3/deeper/.cortex"),
+        ]
+    );
+    let mut sequential = 0;
+    let mut pending = vec![root.clone()];
+    while let Some(dir) = pending.pop() {
+        for e in fs::read_dir(dir).unwrap() {
+            let e = e.unwrap();
+            sequential += 1;
+            if e.file_type().unwrap().is_dir() && !policy::private(&e.file_name()) {
+                pending.push(e.path());
+            }
+        }
+    }
+    assert_eq!(scan.entries, sequential);
+    let overlays = policy::links(
+        &root,
+        Profile::Guarded,
+        &[root.clone()],
+        &[],
+        &mut || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(overlays, vec![root.join("tree/20/deeper/6/external")]);
+    if !available(&f) {
+        return;
+    }
+    let s = f.prepare(Profile::Guarded, &[root.clone()], &[]).unwrap();
+    run(
+        &s,
+        r#"
+        ! cat tree/3/deeper/.cortex/secret
+        ! touch tree/9/.git/config
+        test -z "$(cat tree/12/.cortex-workspace-dev.json)"
+        ! sh -c 'echo no > tree/20/deeper/6/external'
+        echo yes > tree/5/internal
+    "#,
+        &[],
+    );
+    assert_eq!(fs::read_to_string(f.0.join("shared")).unwrap(), "outside");
+    assert_eq!(fs::read_to_string(root.join("source")).unwrap(), "yes\n");
+}

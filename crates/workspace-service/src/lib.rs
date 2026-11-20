@@ -28,6 +28,7 @@ mod native_access;
 mod native_activity;
 mod native_attachments;
 mod native_batch;
+mod native_change_set;
 #[doc(hidden)]
 pub mod native_codex_runtime;
 mod native_command_handles;
@@ -58,6 +59,7 @@ mod native_skills;
 mod native_sources;
 mod native_sprint_plan;
 mod native_tool_errors;
+mod native_work_set;
 mod notifier;
 mod project_guard;
 mod remote;

@@ -10,7 +10,7 @@ const cortexTools = [
   "user_question_request", "result_submit", "list_sources", "read_source",
   "read_skill", "read_capsule", "read_large_output", "read_diagnostics", "ask_question",
   "list_route_options", "read_batch", "tools_discover", "check_preflight", "verification_submit",
-  "access_request", "project_skill_link", "outside_write", "outside_command",
+  "access_request", "project_skill_link", "outside_write", "outside_command", "sprint_plan_submit",
 ];
 
 test("maps every advertised Cortex MCP operation to a human semantic row", () => {
@@ -47,7 +47,9 @@ test("uses native Read/Edit/Shell/Skill/Governance action and target", () => {
 });
 
 test("retains coordinator capsule and report reads", () => {
-  assert.equal(presentToolSemantics({ name: "mcp__cortex__read_capsule", input: {} }).visible, true);
+  // Loading the capsule is the runtime's own step: it is named, but the simplified view does not show it.
+  assert.equal(presentToolSemantics({ name: "mcp__cortex__read_capsule", input: {} }).label, "Read capsule");
+  assert.equal(presentToolSemantics({ name: "mcp__cortex__read_capsule", input: {} }).visible, false);
   assert.equal(presentToolSemantics({ title: "Read — capsule", input: {} }).visible, true);
   assert.equal(presentToolSemantics({ title: "Read — src/capsule", input: {} }).visible, true);
   assert.equal(presentToolSemantics({ name: "mcp__cortex__read_report", input: { report_id: "capsule" } }).visible, true);

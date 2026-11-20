@@ -67,8 +67,9 @@ See [contained execution](../features/permissions-and-containment/index.md#git-a
   `src/cortex_runtime/orchestration/gateway.py`):
   - Text reads page by 1-based line (`offset`, `limit` up to 2000 lines,
     `line_numbers` on by default). A result stays under 24,000 bytes. A line
-    longer than 2000 characters is truncated and flagged, and a truncated line
-    never counts as read.
+    longer than 2000 characters ends its page in `truncated_lines` with
+    `next_column`; continuing it with `offset` and `column` returns the rest, and
+    the line counts as read once all of its segments were returned in order.
   - Coverage belongs to one channel and one digest. Ranges of non-truncated
     lines accumulate across pages only while the digest is unchanged, and only
     digests and ranges are stored, never file bodies. `full_content_sha256`
@@ -94,14 +95,15 @@ See [contained execution](../features/permissions-and-containment/index.md#git-a
     directory after it. `src/cortex_runtime/engine/fs_bridge.py` does the same
     for engine-side file writes.
 - **Rules for writers.** Use `project_edit` for any partial change. Before a
-  `project_write`, read every page without truncated lines. Never reuse a digest
-  from a partial page, from another channel, or from a locally computed hash.
+  `project_write`, read every page, continuing each truncated line with
+  `next_column`. Never reuse a digest from a partial page, from another
+  channel, or from a locally computed hash.
 - **Known limits.**
-  - A file with a line over 2000 characters cannot reach complete coverage, so
-    `project_write` cannot replace it and `project_edit` is the only route. The
-    current examples are `README.md` (one line of 2,081 characters) and
-    `docs/features/roles-and-delegation/index.md` (two lines over 2,000 characters). Split
-    such a line before a whole-file rewrite is needed.
+  - A line over 2000 characters needs one page per 2000-character segment
+    before it counts toward complete coverage; until 2026-11-20 such a line
+    could never be read completely, so a reviewer could not cover a changed file
+    containing one (for example a JSON ledger) and `project_write` could not
+    replace it.
   - The session that wrote this note ran an earlier build: its `project_read`
     still paged by character offset, and its advertised tools did not include
     `project_edit`. The guards above are verified against source and the
@@ -118,6 +120,15 @@ sandbox. Real bubblewrap tests probe once and skip known namespace denial
 explicitly, not as a pass. Unexpected probe errors still fail. Run the
 `requires_bwrap` cases outside nesting for containment evidence; see
 [verification](verification.md#running-the-suite-inside-a-runtime-sandbox).
+
+The same denial stops a live desktop candidate launched from a worker's
+`command_run`: the candidate cannot create its own mandatory sandbox there, even
+with `apparmor_restrict_unprivileged_userns=0`, because Ubuntu's
+`bwrap-userns-restrict` profile confines everything bubblewrap starts. Launch such
+a candidate through the consent-backed `outside_command` (or a container), not by
+weakening host AppArmor. A `command_run` receipt whose output shows the refusal
+carries a `nested_sandbox` hint; see
+[permissions and containment](../features/permissions-and-containment/index.md).
 
 ## Claude adapter auto-update can outrun delivery registration
 
@@ -455,12 +466,14 @@ A background engine auto-update can install a new `claude-agent-acp` adapter ver
   wrapped checks in `bash -lc '... > /tmp/log 2>&1; code=$?; ...; exit $code'`.
   Every passing exact rerun of such a script was classified trivial, the
   refusal only asked for another exact rerun, and the worker was refused nine
-  times before it dropped the failed checks and was accepted. Now the plain
-  status-capture form verifies, every other `exit $VARIABLE` stays
-  `status_variable_unproven`, the refusal says when only
-  `assignment_outcome: "failed"` remains, a presented failure must be cited
-  again (`omitted_failed_check`), and `command_run` inlines at most 64 KiB, as
-  advertised (it previously returned the whole output inline).
+  times before it dropped the failed checks and was accepted. Now a presented
+  failure must be cited again (`omitted_failed_check`), `command_run` inlines at
+  most 64 KiB, as advertised (it previously returned the whole output inline),
+  and an `open_failed_check` refusal names each open check, its receipt and the
+  gap that keeps it open (for example `rerun_revision_mismatch`), so it no longer
+  asks for an exact rerun that cannot close it. Status-capture scripts remain
+  trivial; only `umask`/`export`/`cd`/`set` setup followed by one simple command
+  verifies through a shell.
 - **Situational skills are still gated at submission.** Successful gateway writes
   and mkdir calls give early `required_before_result_submit` skill/reason hints
   from this attempt's own gateway writes as non-error reminders; only attributable paths

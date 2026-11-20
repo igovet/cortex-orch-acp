@@ -584,3 +584,60 @@ fn identical_findings_or_unchanged_files_stop_the_fix_review_ping_pong() {
         }
     }
 }
+
+/// A reviewer that names the same item it cannot reach with its tools in two dead
+/// ends pauses the Automatic task for the owner instead of spending the budget on
+/// reviews that cannot change; after the owner resumes, it takes two new dead ends.
+#[test]
+fn a_repeated_unreachable_review_item_pauses_instead_of_continuing() {
+    let (_p, s, task, _) = start(true);
+    let dead_end = |item: &str| {
+        s.write(|db| {
+            db.execute(
+                "UPDATE runtime_tasks SET state='PLANNING',blocker=NULL WHERE task_id=?",
+                [&task],
+            )?;
+            lifecycle::event_tx(
+                db,
+                &task,
+                "REVIEW_DEAD_END_ROUTED",
+                json!({"verdict":"INCOMPLETE","blocked":[
+                    {"item":item,"blocker":"tool_unavailable","reason":"cannot read it"},
+                    {"item":"docs/a.md","blocker":"owner_decision","reason":"owner"}]}),
+            )?;
+            domain::stop_tx(db, &task, "review_incomplete")?;
+            Ok(())
+        })
+        .unwrap()
+    };
+    dead_end("assets/font.css (embedded base64)");
+    assert_eq!(event_count(&s, &task, "AUTOMATIC_CONTINUATION"), 1);
+    assert_eq!(event_count(&s, &task, "AUTOMATIC_PAUSED"), 0);
+    // The same item, described differently, ends the automatic attempts.
+    dead_end("assets/font.css: lines too long");
+    assert_eq!(event_count(&s, &task, "AUTOMATIC_CONTINUATION"), 1);
+    let paused: Value = s
+        .read(|db| {
+            Ok(serde_json::from_str(&db.query_row(
+                "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='AUTOMATIC_PAUSED'",
+                [&task],
+                |r| r.get::<_, String>(0),
+            )?)?)
+        })
+        .unwrap();
+    assert_eq!(paused["pause_kind"], "owner_blocker");
+    assert_eq!(paused["review_dead_end"]["item"], "assets/font.css");
+    assert_eq!(paused["review_dead_end"]["count"], 2);
+    // Only the owner resumes it: the scheduler owes nothing for this pause.
+    assert!(s.read(|db| automatic::owed(db, &task)).unwrap().is_none());
+    // Allow more attempts renews the budget and grants a fresh look: one more dead
+    // end continues again.
+    s.write(|db| {
+        lifecycle::event_tx(db, &task, "AUTOMATIC_CAP_RENEWED", json!({}))?;
+        Ok(())
+    })
+    .unwrap();
+    dead_end("assets/font.css");
+    assert_eq!(event_count(&s, &task, "AUTOMATIC_CONTINUATION"), 2);
+    assert_eq!(event_count(&s, &task, "AUTOMATIC_PAUSED"), 1);
+}

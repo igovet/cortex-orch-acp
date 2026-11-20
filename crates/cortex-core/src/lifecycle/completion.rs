@@ -33,6 +33,11 @@ pub struct EvidenceSnapshot {
     pub incomplete: bool,
     pub artifacts: BTreeMap<String, String>,
     pub workers: BTreeMap<String, ProcessObservation>,
+    /// The current state of each file a review binds instead of the whole checkout
+    /// (`bound_files_tx`): its content hash and mode, link target, `absent`, or its
+    /// metadata past the host's byte bound. A bound file missing here makes that
+    /// binding unavailable, never satisfied.
+    pub task_files: BTreeMap<String, String>,
 }
 fn digest(snapshot: &EvidenceSnapshot) -> CoreResult<&str> {
     snapshot
@@ -41,24 +46,137 @@ fn digest(snapshot: &EvidenceSnapshot) -> CoreResult<&str> {
         .filter(|s| s.len() == 64 && s.bytes().all(|c| c.is_ascii_hexdigit()))
         .ok_or(CoreError::Refused("project_revision_unavailable"))
 }
-/// Non-shell baseline of the retained evidence classifier. Inline shell
-/// programs remain conservatively unverifiable until their status flow is
-/// proved; a script file is an ordinary project check, not an inline program.
-pub fn trivial_command(argv: &[String]) -> bool {
-    fn base(s: &str) -> &str {
-        s.rsplit('/').next().unwrap_or(s)
+/// The task files one review binds, from the binding the host recorded with its
+/// packet (`reconciliation::review_packet_tx`), or `None` when it binds the whole
+/// checkout: attribution was incomplete, the set was too large, or the packet
+/// predates task-file bindings.
+pub fn review_bound_files(
+    db: &rusqlite::Connection,
+    task: &str,
+    assignment: &str,
+) -> CoreResult<Option<Vec<String>>> {
+    let raw: Option<String> = db
+        .query_row(
+            "SELECT json_extract(payload_json,'$.binding') FROM runtime_events WHERE task_id=? AND type='REVIEW_PACKET'
+             AND json_extract(payload_json,'$.assignment_ref')=? ORDER BY id DESC LIMIT 1",
+            (task, assignment),
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(raw) = raw else { return Ok(None) };
+    let binding: Value = serde_json::from_str(&raw)?;
+    if binding["kind"] != "task_files" {
+        return Ok(None);
     }
-    fn assignment(s: &str) -> bool {
-        s.split_once('=').is_some_and(|(k, _)| {
-            !k.is_empty()
-                && k.bytes().enumerate().all(|(i, b)| {
-                    b == b'_' || b.is_ascii_alphabetic() || i > 0 && b.is_ascii_digit()
-                })
-        })
+    Ok(Some(
+        serde_json::from_value(binding["paths"].clone())
+            .map_err(|_| CoreError::Refused("review_revision_unavailable"))?,
+    ))
+}
+/// The digest of the bound task files' current states. Domain-separated from the
+/// checkout digest, so the two never compare equal.
+pub fn task_files_digest(paths: &[String], snapshot: &EvidenceSnapshot) -> CoreResult<String> {
+    let mut input = b"cortex-review-task-files-v1\n".to_vec();
+    for path in paths {
+        let state = snapshot
+            .task_files
+            .get(path)
+            .ok_or(CoreError::Refused("review_revision_unavailable"))?;
+        input.extend_from_slice(path.as_bytes());
+        input.push(0);
+        input.extend_from_slice(state.as_bytes());
+        input.push(b'\n');
     }
+    Ok(crate::digest(&input))
+}
+/// What one review binds now: its task files' digest, or the whole checkout's.
+pub(super) fn review_digest_tx(
+    db: &rusqlite::Connection,
+    task: &str,
+    assignment: &str,
+    snapshot: &EvidenceSnapshot,
+) -> CoreResult<(String, &'static str)> {
+    match review_bound_files(db, task, assignment)? {
+        Some(paths) => Ok((task_files_digest(&paths, snapshot)?, "task_files")),
+        None => Ok((
+            snapshot
+                .project_digest
+                .clone()
+                .filter(|s| s.len() == 64)
+                .ok_or(CoreError::Refused("project_revision_unavailable"))?,
+            "checkout",
+        )),
+    }
+}
+/// Every path a review of the task's current revision binds by its bytes: the host
+/// identifies exactly these in an `EvidenceSnapshot` (`task_files`).
+pub fn bound_files_tx(db: &rusqlite::Connection, task: &str) -> CoreResult<BTreeSet<String>> {
+    let assignments = db
+        .prepare(
+            "SELECT n.assignment_ref FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
+             WHERE n.task_id=? AND n.revision=t.revision AND n.stage='review' AND n.assignment_ref IS NOT NULL",
+        )?
+        .query_map([task], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut paths = BTreeSet::new();
+    for assignment in assignments {
+        paths.extend(
+            review_bound_files(db, task, &assignment)?
+                .into_iter()
+                .flatten(),
+        );
+    }
+    Ok(paths)
+}
+/// The current digest the task's review binding is compared with: that of the
+/// latest review of the revision (its task files or the whole checkout), or the
+/// whole checkout for a review waiver.
+fn bound_digest_tx(
+    db: &rusqlite::Connection,
+    task: &str,
+    snapshot: &EvidenceSnapshot,
+) -> CoreResult<String> {
+    let review: Option<Option<String>> = db
+        .query_row(
+            "SELECT n.assignment_ref FROM runtime_nodes n JOIN runtime_tasks t USING(task_id)
+             WHERE n.task_id=? AND n.revision=t.revision AND n.stage='review' ORDER BY n.rowid DESC LIMIT 1",
+            [task],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match review.flatten() {
+        Some(assignment) => Ok(review_digest_tx(db, task, &assignment, snapshot)?.0),
+        None => Ok(digest(snapshot)?.to_owned()),
+    }
+}
+/// The task's current review-binding digest for the host (verification drift
+/// checks); see `bound_digest_tx`.
+pub fn current_binding_digest(
+    db: &rusqlite::Connection,
+    task: &str,
+    snapshot: &EvidenceSnapshot,
+) -> CoreResult<String> {
+    bound_digest_tx(db, task, snapshot)
+}
+fn base(s: &str) -> &str {
+    s.rsplit('/').next().unwrap_or(s)
+}
+fn assignment(s: &str) -> bool {
+    s.split_once('=').is_some_and(|(k, _)| name(k))
+}
+fn name(k: &str) -> bool {
+    !k.is_empty()
+        && k.bytes()
+            .enumerate()
+            .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || i > 0 && b.is_ascii_digit())
+}
+/// The command left after leading `NAME=value` assignments and the launchers
+/// `env`, `timeout`, `nice`, `nohup`, `command`, `exec` and `time`.
+fn command_words(argv: &[String]) -> &[String] {
     let mut w = argv;
     loop {
-        let Some(head) = w.first() else { return true };
+        let Some(head) = w.first() else { return w };
         if assignment(head) {
             w = &w[1..];
             continue;
@@ -105,6 +223,191 @@ pub fn trivial_command(argv: &[String]) -> bool {
             _ => break,
         }
     }
+    w
+}
+/// One word of an inline shell script, within the small literal grammar
+/// `shell_script` accepts: `raw` as written, `text` with its quotes removed
+/// (expansions stay literal text).
+struct Word {
+    raw: String,
+    text: String,
+}
+/// Split an inline script into simple commands joined by `;` or `&&`, or `None`
+/// for anything outside a deliberately small grammar: words of unquoted letters,
+/// digits and `_./:,+@%=-~*?^`, single-quoted text, double-quoted text, and
+/// plain `$NAME`/`${NAME}` expansions. Every other operator (pipes, `||`, a single
+/// `&`, redirections, grouping, subshells, here-documents, comments, newlines),
+/// command or process substitution, backslash, backtick, `$'...'` and any other
+/// `$` form is refused, so the exit status of the script is the status of its
+/// last command or of a failing `&&` prefix.
+fn shell_script(script: &str) -> Option<Vec<Vec<Word>>> {
+    let chars: Vec<char> = script.chars().collect();
+    let mut commands = vec![Vec::new()];
+    let mut i = 0;
+    let expansion = |i: usize| -> Option<usize> {
+        // `chars[i]` is `$`: accept `$NAME` or `${NAME}`, returning the next index.
+        let rest = &chars[i + 1..];
+        if rest.first() == Some(&'{') {
+            let end = rest.iter().position(|c| *c == '}')?;
+            let n: String = rest[1..end].iter().collect();
+            return name(&n).then_some(i + 1 + end + 1);
+        }
+        let len = rest
+            .iter()
+            .take_while(|c| c.is_ascii_alphanumeric() || **c == '_')
+            .count();
+        let n: String = rest[..len].iter().collect();
+        name(&n).then_some(i + 1 + len)
+    };
+    while i < chars.len() {
+        let c = chars[i];
+        if c == ' ' || c == '\t' {
+            i += 1;
+            continue;
+        }
+        if c == ';' || (c == '&' && chars.get(i + 1) == Some(&'&')) {
+            if commands.last().is_none_or(Vec::is_empty) {
+                return None;
+            }
+            commands.push(Vec::new());
+            i += if c == ';' { 1 } else { 2 };
+            continue;
+        }
+        let (mut raw, mut text) = (String::new(), String::new());
+        while i < chars.len() {
+            let c = chars[i];
+            match c {
+                ' ' | '\t' | ';' => break,
+                '&' if chars.get(i + 1) == Some(&'&') => break,
+                '\'' => {
+                    let end = chars[i + 1..].iter().position(|c| *c == '\'')?;
+                    let body: String = chars[i + 1..i + 1 + end].iter().collect();
+                    raw.push('\'');
+                    raw.push_str(&body);
+                    raw.push('\'');
+                    text.push_str(&body);
+                    i += end + 2;
+                }
+                '"' => {
+                    let mut j = i + 1;
+                    let mut body = String::new();
+                    loop {
+                        match chars.get(j)? {
+                            '"' => break,
+                            '`' | '\\' => return None,
+                            '$' => {
+                                let next = expansion(j)?;
+                                body.extend(&chars[j..next]);
+                                j = next;
+                            }
+                            c => {
+                                body.push(*c);
+                                j += 1;
+                            }
+                        }
+                    }
+                    raw.push('"');
+                    raw.push_str(&body);
+                    raw.push('"');
+                    text.push_str(&body);
+                    i = j + 1;
+                }
+                '$' => {
+                    let next = expansion(i)?;
+                    let part: String = chars[i..next].iter().collect();
+                    raw.push_str(&part);
+                    text.push_str(&part);
+                    i = next;
+                }
+                c if c.is_ascii_alphanumeric() || "_./:,+@%=-~*?^".contains(c) => {
+                    raw.push(c);
+                    text.push(c);
+                    i += 1;
+                }
+                _ => return None,
+            }
+        }
+        commands.last_mut()?.push(Word { raw, text });
+    }
+    if commands.last().is_none_or(Vec::is_empty) {
+        return None;
+    }
+    Some(commands)
+}
+/// An inline `sh`/`bash`/`dash` `-c` script that sets up the environment and then
+/// runs one check is judged by that check: any number of `umask NNN`,
+/// `export NAME=value...`, `cd DIR` and `set -e/-u/-x/-o pipefail` commands joined
+/// by `;` or `&&`, followed by exactly one simple command, which is classified like
+/// direct argv. Its program word may start with `$HOME/` (when the script does not
+/// assign HOME) but carry no other expansion. Anything else is trivial: its exit
+/// status is not proven to come from a nontrivial command.
+fn trivial_script(script: &str) -> bool {
+    let Some(commands) = shell_script(script) else {
+        return true;
+    };
+    let (last, setup) = commands.split_last().expect("at least one command");
+    let mut assigns_home = false;
+    for command in setup {
+        let words: Vec<&str> = command.iter().map(|w| w.raw.as_str()).collect();
+        let valid = match words.as_slice() {
+            ["umask", mode] => {
+                (3..=4).contains(&mode.len()) && mode.bytes().all(|b| (b'0'..=b'7').contains(&b))
+            }
+            ["cd", _] => true,
+            ["export", assignments @ ..] if !assignments.is_empty() => {
+                assignments.iter().all(|a| {
+                    assigns_home |= a.starts_with("HOME=");
+                    a.split_once('=').is_some_and(|(k, _)| name(k))
+                })
+            }
+            ["set", options @ ..] if !options.is_empty() => {
+                let mut options = options.iter();
+                let mut ok = true;
+                while let Some(o) = options.next() {
+                    ok &= if *o == "-o" {
+                        options.next() == Some(&"pipefail")
+                    } else {
+                        o.len() > 1
+                            && o.starts_with('-')
+                            && o[1..].bytes().all(|b| b"eux".contains(&b))
+                    };
+                }
+                ok
+            }
+            _ => false,
+        };
+        if !valid {
+            return true;
+        }
+    }
+    let argv: Vec<String> = last.iter().map(|w| w.text.clone()).collect();
+    assigns_home |= last.iter().any(|w| w.raw.starts_with("HOME="));
+    let Some(head) = command_words(&argv).first() else {
+        return true;
+    };
+    // The program must be literal: an expansion could name any program.
+    let literal = head
+        .strip_prefix("$HOME/")
+        .or_else(|| head.strip_prefix("${HOME}/"))
+        .filter(|_| !assigns_home)
+        .unwrap_or(head);
+    // Shell keywords and builtins that run other code, background it, invert its
+    // status or only change shell state never prove a check's status.
+    const SHELL_WORDS: [&str; 26] = [
+        "if", "then", "else", "elif", "fi", "case", "esac", "for", "select", "while", "until",
+        "do", "done", "function", "coproc", "eval", "source", ".", "builtin", "trap", "alias",
+        "umask", "wait", "let", "read", "unset",
+    ];
+    if literal.contains(['$', '*', '?', '~']) || SHELL_WORDS.contains(&literal) {
+        return true;
+    }
+    trivial_command(&argv)
+}
+/// Whether a command cannot verify a check: its exit status is not proven to come
+/// from a nontrivial command (see `command_words`, `trivial_script`). A script file
+/// is an ordinary project check, not an inline program.
+pub fn trivial_command(argv: &[String]) -> bool {
+    let w = command_words(argv);
     let Some(head) = w.first() else { return true };
     let program = base(head);
     if [
@@ -148,15 +451,23 @@ pub fn trivial_command(argv: &[String]) -> bool {
         };
     }
     if ["sh", "bash", "dash", "zsh", "ksh"].contains(&program) {
-        for word in &w[1..] {
-            if word.starts_with('-') && !word.starts_with("--") {
-                if word[1..].contains('c') {
-                    return true;
-                }
+        let mut words = w[1..].iter();
+        let mut inline = false;
+        while let Some(word) = words.next() {
+            if word == "-o" || word == "+o" {
+                words.next();
+            } else if word.starts_with('-') && !word.starts_with("--") {
+                inline |= word[1..].contains('c');
             } else if !word.starts_with("--") && !word.starts_with('+') {
-                break;
+                if !inline {
+                    // A script file is an ordinary project check.
+                    return false;
+                }
+                // zsh and ksh scripts stay outside the recognized grammar.
+                return !["sh", "bash", "dash"].contains(&program) || trivial_script(word);
             }
         }
+        return inline;
     }
     false
 }
@@ -193,6 +504,66 @@ mod evidence_policy_tests {
                 "{argv:?}"
             );
         }
+    }
+    /// Owner stores 2026-11: AGENTS.md requires `umask 022`, which pushed workers
+    /// into `bash -c "umask 022; ..."`, and every such check was kept unverified as
+    /// `trivial_command`. Setup prefixes followed by one simple command are judged
+    /// by that command; any other operator or expansion still proves nothing.
+    #[test]
+    fn shell_setup_prefixes_are_judged_by_their_one_check_command() {
+        let argv = |shell: &str, script: &str| vec![shell.to_owned(), "-c".into(), script.into()];
+        for (shell, script) in [
+            ("bash", "umask 022; cargo test --locked"),
+            ("/bin/sh", "umask 022 && cd packages/workspace-ui && timeout --kill-after=5 600 npx vitest run test/a.test.tsx"),
+            ("bash", "export PATH=\"$HOME/.cargo/bin:$PATH\" CARGO_TERM_COLOR=never; cargo test -p core"),
+            ("bash", "umask 022; exec timeout --kill-after=5 1500 \"$HOME/.cargo/bin/cargo\" test --locked -p x"),
+            ("dash", "set -eu; set -o pipefail; cd 'crates/a b' && RUST_LOG=off cargo test -- 'name with spaces'"),
+            ("bash", "umask 0022;cargo fmt --check"),
+        ] {
+            assert!(!trivial_command(&argv(shell, script)), "{shell} {script}");
+            let mut flags = vec![shell.to_owned(), "-e".into(), "-o".into(), "pipefail".into()];
+            flags.extend(argv("x", script).into_iter().skip(1));
+            assert!(!trivial_command(&flags), "{flags:?}");
+        }
+        for (shell, script) in [
+            ("bash", "umask 022"),
+            ("bash", "umask 022; ls"),
+            ("bash", "umask 022; cargo test | tail -5"),
+            ("bash", "umask 022; cargo test || true"),
+            ("bash", "cargo test > log 2>&1"),
+            ("bash", "cargo test & wait"),
+            ("bash", "umask 022\ncargo test"),
+            ("bash", "umask 022; cargo test $(echo -q)"),
+            ("bash", "umask 022; cargo test `echo`"),
+            ("bash", "$CHECK test"),
+            ("bash", "export HOME=/tmp; \"$HOME/cargo\" test"),
+            ("bash", "HOME=/tmp; cargo test"),
+            ("bash", "touch x; cargo test"),
+            ("bash", "coproc cargo test"),
+            ("bash", "eval 'cargo test'"),
+            ("bash", "! grep -n x file"),
+            ("bash", "{ cargo test; }"),
+            ("bash", "umask 022; cargo test 'unterminated"),
+            ("bash", "umask 022;; cargo test"),
+            ("bash", "umask 022; cargo test;"),
+            ("bash", "cd x && pytest; echo done"),
+            ("bash", "umask 022; bash -c 'cargo test; true'"),
+            ("zsh", "umask 022; cargo test"),
+            ("ksh", "umask 022; cargo test"),
+        ] {
+            assert!(trivial_command(&argv(shell, script)), "{shell} {script}");
+        }
+        // A nested inline script is judged the same way.
+        assert!(!trivial_command(&argv(
+            "bash",
+            "umask 022; bash -c 'umask 022; cargo test'"
+        )));
+        // No script after -c proves nothing; a script file is a project check.
+        assert!(trivial_command(&["bash".into(), "-c".into()]));
+        assert!(!trivial_command(&[
+            "bash".into(),
+            "scripts/check.sh".into()
+        ]));
     }
 }
 fn latest(db: &Transaction<'_>, task: &str, kind: &str) -> CoreResult<Option<(i64, Value)>> {
@@ -242,7 +613,7 @@ pub fn review_changed_checkout_tx(
         return refuse("verification_not_expected");
     }
     let (review_event, reviewed) = review_binding_tx(db, task)?;
-    let current = digest(snapshot)?;
+    let current = bound_digest_tx(db, task, snapshot)?;
     if reviewed == current {
         return refuse("verification_revision_unchanged");
     }
@@ -395,11 +766,13 @@ pub fn start_review_tx(
     if bound {
         return refuse("review_already_bound");
     }
+    // The host records the packet first, so its binding is known here.
+    let (revision_digest, binding) = review_digest_tx(db, task, assignment, snapshot)?;
     event_tx(
         db,
         task,
         "REVIEW_STARTED",
-        json!({"assignment_ref":assignment,"revision_digest":digest(snapshot)?}),
+        json!({"assignment_ref":assignment,"revision_digest":revision_digest,"binding":binding}),
     )?;
     Ok(())
 }
@@ -421,13 +794,19 @@ enum Independence {
 /// latest review packet. Each entry is `{"path"|"kind","reason"}`. An INCOMPLETE
 /// review is not asked for parts it declared blocked by a dead end, nor for paths
 /// outside its read scope that it cannot resolve itself; any other verdict must have
-/// read every listed changed file.
+/// read every listed changed file the packet marks `required`: the task's own
+/// changes (write receipts and paths its commands changed). A file another actor
+/// changed in the shared checkout is listed as context (`required: false`) and is
+/// never a missing item. A packet without the mark (an earlier build), or one
+/// whose attribution was incomplete, requires every listed file.
 ///
 /// A change set the host could not enumerate completely (no usable baseline
 /// manifest, or more changed files than the packet lists) is a host limit no
 /// reviewer can resolve, so it is not a missing item: the verdict covers the listed
 /// files, and `review_change_set_limits_tx` records what was not listed with the
-/// result, never as verified.
+/// result, never as verified. A listed file whose current bytes have no reviewable
+/// text (binary, an image the review was not shown, opaque encoded or minified
+/// content) is likewise not a missing item but such a recorded limit.
 pub fn review_coverage_missing_tx(
     db: &rusqlite::Connection,
     task: &str,
@@ -454,14 +833,7 @@ pub fn review_coverage_missing_tx(
             }
         }
     }
-    let channel: Option<String> = db
-        .query_row(
-            "SELECT channel_id FROM trusted_channels WHERE task_id=? AND assignment_id=?
-             AND revoked_at IS NULL ORDER BY rowid DESC LIMIT 1",
-            (task, assignment),
-            |r| r.get(0),
-        )
-        .optional()?;
+    let channel = review_channel(db, task, assignment)?;
     let outside: BTreeSet<&str> = packet["outside_read_scope"]
         .as_array()
         .into_iter()
@@ -479,6 +851,7 @@ pub fn review_coverage_missing_tx(
             // a directory or an unobservable entry has no `current_sha256`.
             if file["change"] == "deleted"
                 || !file["current_sha256"].is_string()
+                || file["required"] == false
                 || blocked.contains(path)
             {
                 continue;
@@ -486,35 +859,89 @@ pub fn review_coverage_missing_tx(
             if incomplete && outside.contains(path) {
                 continue;
             }
-            let Some(channel) = channel.as_deref() else {
-                missing.push(json!({"path":path,"reason":"review channel unavailable"}));
-                continue;
-            };
-            let key = format!("file-read:{}", crate::digest(path.as_bytes()));
-            let read: Option<String> = db
-                .query_row(
-                    "SELECT result_json FROM runtime_requests WHERE task_id=? AND request_key=?
-                     AND actor=? AND operation='native_file_read'",
-                    (task, key, channel),
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let valid = read
-                .as_deref()
-                .and_then(|s| serde_json::from_str::<Value>(s).ok())
-                .is_some_and(|v| {
-                    v["sha256"] == file["current_sha256"]
-                        && (v["complete"] == true
-                            || review_lines_read(&file["review_lines"], &v["lines"]))
-                });
-            if !valid {
-                missing.push(
-                    json!({"path":path,"reason":"current complete read is missing or stale"}),
-                );
+            match file_coverage(db, task, channel.as_deref(), file)? {
+                FileCoverage::Covered | FileCoverage::NoText => {}
+                FileCoverage::Missing(reason) => missing.push(json!({"path":path,"reason":reason})),
             }
         }
     }
     Ok(missing)
+}
+/// The review assignment's current channel, whose reads count as its coverage.
+fn review_channel(
+    db: &rusqlite::Connection,
+    task: &str,
+    assignment: &str,
+) -> CoreResult<Option<String>> {
+    Ok(db
+        .query_row(
+            "SELECT channel_id FROM trusted_channels WHERE task_id=? AND assignment_id=?
+             AND revoked_at IS NULL ORDER BY rowid DESC LIMIT 1",
+            (task, assignment),
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+/// Whether a review covered one listed changed file with current bytes.
+enum FileCoverage {
+    Covered,
+    /// Text the review can still read; the reason names what is missing.
+    Missing(&'static str),
+    /// Current bytes with no reviewable text (binary, an image the review did not
+    /// read directly, opaque encoded or minified content): never a missing item; an approval
+    /// discloses it as an `unverified` limit (`review_change_set_limits_tx`).
+    NoText,
+}
+/// Content kinds the host marks as having no reviewable text (`review_content`).
+const NO_TEXT: [&str; 3] = ["binary", "image", "opaque"];
+fn file_coverage(
+    db: &rusqlite::Connection,
+    task: &str,
+    channel: Option<&str>,
+    file: &Value,
+) -> CoreResult<FileCoverage> {
+    let no_text = file["review_content"]
+        .as_str()
+        .is_some_and(|k| NO_TEXT.contains(&k));
+    let Some(channel) = channel else {
+        return Ok(if no_text {
+            FileCoverage::NoText
+        } else {
+            FileCoverage::Missing("review channel unavailable")
+        });
+    };
+    let path = file["path"].as_str().unwrap_or("");
+    let key = format!("file-read:{}", crate::digest(path.as_bytes()));
+    let read: Option<Value> = db
+        .query_row(
+            "SELECT result_json FROM runtime_requests WHERE task_id=? AND request_key=?
+             AND actor=? AND operation='native_file_read'",
+            (task, key, channel),
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .filter(|v: &Value| v["sha256"] == file["current_sha256"]);
+    let Some(read) = read else {
+        return Ok(if no_text {
+            FileCoverage::NoText
+        } else {
+            FileCoverage::Missing("current complete read is missing or stale")
+        });
+    };
+    // A read of these exact bytes that found no text proves there is nothing to
+    // read as text.
+    if read["content"] == "binary" {
+        return Ok(FileCoverage::NoText);
+    }
+    if read["complete"] == true || review_lines_read(&file["review_lines"], &read["lines"]) {
+        return Ok(FileCoverage::Covered);
+    }
+    Ok(if no_text {
+        FileCoverage::NoText
+    } else {
+        FileCoverage::Missing("current complete read is missing or stale")
+    })
 }
 /// Whether a read of the current bytes covered every line of the packet's
 /// `review_lines` ranges (the lines that differ from HEAD, with context). A file
@@ -555,9 +982,11 @@ fn review_packet_of(
     Ok(Some(event["packet"].take()))
 }
 /// What an approving review could not cover because the host could not list it,
-/// from its review packet: each is an `unverified` check (never a pass) that the
-/// final result must disclose, so the owner is told to inspect the folder. Empty
-/// when the packet listed every changed file.
+/// from its review packet, and the listed changed files whose current bytes have no
+/// reviewable text (`FileCoverage::NoText`): each is an `unverified` check (never a
+/// pass) that the final result must disclose, so the owner is told to inspect them.
+/// Empty when the packet listed every changed file and each one is text or was
+/// read completely.
 pub fn review_change_set_limits_tx(
     db: &rusqlite::Connection,
     task: &str,
@@ -568,15 +997,50 @@ pub fn review_change_set_limits_tx(
     };
     let changed = &packet["changed_files"];
     let mut limits = Vec::new();
-    if changed["complete"] != true {
+    // With complete attribution the task's own command changes are listed even
+    // without a baseline comparison, and an unlisted file outside them is another
+    // actor's change: neither is a limit of this review.
+    let attributed = changed["attribution_complete"] == true;
+    if changed["complete"] != true && !attributed {
         limits.push(json!({"name":"Changes outside the recorded writes","outcome":"unverified",
             "blocker":"Changes made by commands outside the recorded writes could not be listed; inspect the folder.",
             "source":"runtime"}));
     }
-    if let Some(more) = changed["more"]["count"].as_i64().filter(|n| *n > 0) {
+    let beyond = if attributed {
+        &changed["more"]["required"]
+    } else {
+        &changed["more"]["count"]
+    };
+    if let Some(more) = beyond.as_i64().filter(|n| *n > 0) {
         limits.push(json!({"name":"Changed files beyond the review list","outcome":"unverified",
             "blocker":format!("{more} changed files beyond the review list were not read individually by the reviewer; inspect the folders named in the review packet."),
             "source":"runtime"}));
+    }
+    let channel = review_channel(db, task, assignment)?;
+    let mut unreviewable = Vec::new();
+    for file in changed["files"].as_array().into_iter().flatten() {
+        if file["change"] == "deleted"
+            || !file["current_sha256"].is_string()
+            || file["required"] == false
+        {
+            continue;
+        }
+        if let FileCoverage::NoText = file_coverage(db, task, channel.as_deref(), file)? {
+            unreviewable.extend(file["path"].as_str().map(str::to_owned));
+        }
+    }
+    if !unreviewable.is_empty() {
+        let shown = unreviewable
+            .iter()
+            .take(10)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = unreviewable.len().saturating_sub(10);
+        limits.push(json!({"name":"Changed files without reviewable text","outcome":"unverified",
+            "blocker":format!("{} changed files have no reviewable text (binary, an image the reviewer did not read directly, or encoded/minified content) and were not reviewed as text: {shown}{}; inspect them directly.",
+                unreviewable.len(), if more > 0 { format!(" and {more} more") } else { String::new() }),
+            "paths":unreviewable.iter().take(50).collect::<Vec<_>>(),"source":"runtime"}));
     }
     Ok(limits)
 }
@@ -780,7 +1244,7 @@ pub fn record_result_tx(
                 task,
                 "REVIEW_COVERAGE_REQUIRED",
                 json!({"assignment_ref":assignment,"missing":missing,
-                    "message":"Read every listed changed file with project_read before submitting this verdict, or submit INCOMPLETE naming each part you cannot reach with its blocker."}),
+                    "message":"Read every listed changed file marked required with project_read before submitting this verdict, or submit INCOMPLETE naming each part you cannot reach with its blocker."}),
             )?;
         }
         return refuse(code);
@@ -815,7 +1279,8 @@ pub fn record_result_tx(
             .optional()?
             .ok_or(CoreError::Refused("review_revision_unavailable"))?;
         let start: Value = serde_json::from_str(&start)?;
-        if start["assignment_ref"] != assignment || start["revision_digest"] != digest(snapshot)? {
+        let (bound, binding) = review_digest_tx(db, task, assignment, snapshot)?;
+        if start["assignment_ref"] != assignment || start["revision_digest"] != bound {
             return refuse("review_resubmit_required");
         }
         // Independence rests on the recorded routes: a reviewer on the model of the
@@ -867,7 +1332,14 @@ pub fn record_result_tx(
                 }
             }
         }
-        result["project_digest"] = json!(digest(snapshot)?);
+        // `project_digest` stays the whole checkout observed with the verdict (when
+        // observed); `review_digest` is what the verdict binds and what verification
+        // and completion compare.
+        if binding == "checkout" {
+            result["project_digest"] = json!(digest(snapshot)?);
+        }
+        result["review_digest"] = json!(bound);
+        result["review_binding"] = json!(binding);
     }
     db.execute(
         "UPDATE runtime_nodes SET status=?,result_json=? WHERE task_id=? AND assignment_ref=?",
@@ -919,10 +1391,12 @@ pub(super) fn review_binding_tx(db: &Transaction<'_>, task: &str) -> CoreResult<
             WHERE e.task_id=? AND e.type='WORKER_COMPLETED' AND json_extract(e.payload_json,'$.result.report_ref')=?
             ORDER BY e.id DESC LIMIT 1",(task,v["report_ref"].as_str()),|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
         let (id, _) = event.ok_or(CoreError::Refused("completion_review_missing"))?;
+        // An approval recorded before task-file bindings binds the whole checkout.
         return Ok((
             id,
-            v["project_digest"]
+            v["review_digest"]
                 .as_str()
+                .or(v["project_digest"].as_str())
                 .ok_or(CoreError::Refused("completion_review_missing"))?
                 .into(),
         ));
@@ -950,7 +1424,7 @@ pub fn verification_preflight_tx(
         return refuse("verification_not_expected");
     }
     let (_, reviewed) = review_binding_tx(db, task)?;
-    if reviewed != digest(snapshot)? {
+    if reviewed != bound_digest_tx(db, task, snapshot)? {
         return refuse("verification_review_revision_changed");
     }
     let active: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM capacity_reservations WHERE task_id=? AND kind='worker' AND state!='released')", [task], |r| r.get(0))?;
@@ -976,11 +1450,31 @@ pub fn retain_check_tx(
         return refuse("verification_not_expected");
     }
     let (review_event, reviewed) = review_binding_tx(db, task)?;
-    if reviewed != digest(snapshot)? {
+    if reviewed != bound_digest_tx(db, task, snapshot)? {
         return refuse("verification_review_revision_changed");
     }
     let value = json!({"argv":argv,"complete":observed.complete,"exit_code":observed.exit_code,
         "receipt_ref":observed.receipt_ref,"revision":revision,"revision_digest":reviewed,"owner_epoch":owner.epoch,"review_event":review_event});
+    // Why an incomplete or failing run failed (a timeout, a signal, an unavailable
+    // sandbox), from the runtime's own retained output receipt of the same run;
+    // without one the cause stays unknown (null), never invented.
+    let cause: Option<String> = db
+        .query_row(
+            "SELECT json_extract(result_json,'$.observation') FROM runtime_requests
+             WHERE task_id=? AND actor='native-verifier-output' AND operation='native_command_output'
+             AND json_extract(result_json,'$.tool_call_ref')=? LIMIT 1",
+            (task, &observed.receipt_ref),
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let cause: Value = cause
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(Value::Null);
+    let mut retained = value.clone();
+    retained["failure"] = cause["failure"].clone();
+    retained["signal"] = cause["signal"].clone();
+    // The request identity stays the command observation itself.
     request_tx(
         db,
         task,
@@ -988,7 +1482,7 @@ pub fn retain_check_tx(
         key,
         "verification_command",
         &value,
-        || Ok(value.clone()),
+        || Ok(retained),
     )
 }
 pub fn record_verification_tx(
@@ -1002,7 +1496,7 @@ pub fn record_verification_tx(
         return refuse("verification_not_expected");
     }
     let (review_event, reviewed) = review_binding_tx(db, task)?;
-    if reviewed != digest(snapshot)? {
+    if reviewed != bound_digest_tx(db, task, snapshot)? {
         return refuse("verification_review_revision_changed");
     }
     let plan: String = db.query_row(
@@ -1061,6 +1555,12 @@ pub fn record_verification_tx(
         checks.push(v);
     }
     let mut verification = json!({"revision":revision,"revision_digest":reviewed,"review_event":review_event,"checks":checks});
+    // The whole checkout the commands ran against, which a worker's check receipt
+    // names; `revision_digest` is the review binding (it equals this digest when
+    // the review bound the whole checkout).
+    if let Some(checkout) = snapshot.project_digest.as_deref() {
+        verification["checkout_digest"] = json!(checkout);
+    }
     if !passed {
         unresolved.extend(commands.iter().skip(receipt_keys.len()).cloned());
         verification["unresolved_commands"] = json!(unresolved);
@@ -1338,6 +1838,7 @@ pub fn complete_tx(
                     None => Vec::new(),
                 };
                 super::worker_checks::observe_outputs(db, task, &mut runs, &snapshot.artifacts)?;
+                super::worker_checks::accept_recorded_bindings(db, task, checks, &mut runs)?;
                 let current =
                     super::worker_checks::evaluate(checks, &runs, v["project_digest"].as_str())?;
                 for (check, now) in checks.iter().zip(&current) {
@@ -1380,14 +1881,20 @@ pub fn complete_tx(
                     // that receipt alone, so completion never refuses a verified pass because
                     // the description differs (for example an abbreviated `python3 -c "..."`);
                     // older stores retain such text in their node results.
+                    // A work-set binding was re-established above from the retained
+                    // observation (`accept_recorded_bindings`); the checkout digest of
+                    // such a run may be absent (the checkout changed elsewhere).
+                    let work_set = now["revision_binding"]["kind"] == "work_set"
+                        && now["revision_binding"] == check["revision_binding"];
                     if receipt["complete"] != true
                         || receipt["exit_code"] != 0
                         || !receipt["failure"].is_null()
                         || (check["evidence_strength"] == "verified"
                             && (receipt["revision_digest"] != check["revision_digest"]
-                                || receipt["revision_digest"]
-                                    .as_str()
-                                    .is_none_or(|s| s.len() != 64)))
+                                || (!work_set
+                                    && receipt["revision_digest"]
+                                        .as_str()
+                                        .is_none_or(|s| s.len() != 64))))
                         || serde_json::from_value::<Vec<String>>(receipt["argv"].clone())
                             .map(|a| trivial_command(&a))
                             .unwrap_or(true)
@@ -1441,7 +1948,7 @@ pub fn complete_tx(
         {
             return refuse("completion_verification_missing");
         }
-        if v["revision_digest"] != reviewed || digest(snapshot)? != reviewed {
+        if v["revision_digest"] != reviewed || bound_digest_tx(db, task, snapshot)? != reviewed {
             return refuse("completion_project_revision_changed");
         }
         super::repair_checks::require_prior_worker_repairs(db, task, revision, &v)?;

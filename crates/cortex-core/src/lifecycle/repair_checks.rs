@@ -22,6 +22,7 @@ fn receipt(db: &Connection, task: &str, assignment: &str, reference: &str) -> Co
         receipt: serde_json::from_str(&row.get::<_, String>(1)?)?,
         order: 0,
         output_verified: false,
+        work_set: None,
     };
     if rows.next()?.is_some() {
         return Err(err());
@@ -68,10 +69,14 @@ pub(super) fn require_prior_worker_repairs(
          AND json_extract(c.value,'$.outcome')='passed' AND json_extract(c.value,'$.evidence_strength')='verified'
          AND json_extract(c.value,'$.revision_digest')=?",
     )?;
-    let rows = current.query_map(
-        (task, revision, verification["revision_digest"].as_str()),
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-    )?;
+    // A worker's check receipt names the whole checkout it ran against; a
+    // verification bound to the task's files records that checkout separately.
+    let checkout = verification["checkout_digest"]
+        .as_str()
+        .or(verification["revision_digest"].as_str());
+    let rows = current.query_map((task, revision, checkout), |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
     for row in rows {
         let (assignment, reference) = row?;
         let run = receipt(db, task, &assignment, &reference)?;

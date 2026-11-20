@@ -38,6 +38,12 @@ One tier per (engine, version), from static adapter dist evidence only
   compaction starts/finishes, never before it. Cortex reacts to it (opens
   a fresh generation, redelivers on the next continuation) but can never
   intervene beforehand or claim it stopped a hidden internal engine action.
+  The first completed signal of a compaction also writes one display-only
+  `compaction_update` row (`native_activity`), which the history projection reads
+  as a `system` row "Context compacted" and the Workspace task conversation draws as
+  a divider. Only the Workspace session keeps that row: it is not an ACP v1 session
+  update, so incoming ACP sessions never replay it. A worker's compaction stays on
+  that worker's page, whose feed does not draw it yet.
 - **controlled_boundary** — no compaction/reset signal is evidenced for
   this adapter+version. Cortex only refreshes context at boundaries it
   itself controls (a new session open, or a session it itself replaces).
@@ -73,6 +79,16 @@ opens a second generation; only the first sighting of a terminal
 (`"completed"`) phase for a given id does.
 
 ## Delivery ledger
+
+The full capsule is sent once per context generation. When a session already has a
+`delivery_confirmed` or `continuation_observed` capsule for its current generation,
+`delivery_tx` (`crates/cortex-core/src/recovery_context.rs`) renders only a one-line
+reference in its place: the task state, the plan revision, whether the retained state
+changed since that capsule, and that `read_capsule` returns the current one. A capsule
+that was only built or transmitted (its turn's response never arrived) is sent again in
+full, and a new generation (session open, replacement, observed compaction) always
+starts with the full capsule. Repeating the whole JSON block in every prompt was
+observed on 2026-11-20 to let a coordinator stream its own prompt back as its reply.
 
 `capsule_deliveries`, keyed by
 `(recipient, context_generation_id, capsule_revision)`: a second

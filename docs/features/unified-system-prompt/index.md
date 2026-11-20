@@ -351,7 +351,9 @@ states English-only communication; its turns and brief name
 question tool.
 
 Every worker prompt is the instruction bundle, the recovery capsule and the
-assignment brief, in that order (`SessionDriver::prompt`). The brief lists the
+assignment brief, in that order (`SessionDriver::prompt`). The capsule is complete
+in the first prompt of each context generation and a one-line `read_capsule`
+reference after that (see [context generations](../context-generations/index.md#delivery-ledger)). The brief lists the
 objective, scope, acceptance (the plan's verification commands), the owner's
 constraints, every predecessor report id with its role, title, size and page count,
 the runtime-selected report skeleton and `user_question_language`; see

@@ -20,7 +20,7 @@ const CHECKING = "Checking the result against the project…";
 const passed: Check = { name: "npm test", detail: "", outcome: "passed", source: "runtime", command: ["npm", "test"], rerunnable: true };
 const result = { version: 1, digest: null as unknown as string, summary: "Wrote the HTTPS setup.", checks: [passed], acceptanceAvailable: false };
 
-it("a result in review shows its card at once while it is checked, and the same card fills in when the check lands", async () => {
+it.each([false, true])("a result in review stays pending until the same card settles (check-only preview: %s)", async preview => {
   const s = scriptedPort({ capabilities: { everything: true, operations: [] } });
   history.replaceState(null, "", `/m/${LOCAL_MACHINE_ID}/t/t`);
   const root = document.createElement("div"); document.body.append(root);
@@ -28,31 +28,63 @@ it("a result in review shows its card at once while it is checked, and the same 
   await settle();
   const state: WorkspaceState = withTask(emptyWorkspace(), "HTTPS");
   state.machines[0].connection = "connected";
-  Object.assign(state.tasks[0], { status: "review", executionId: "e", workspaceDigest: null, result, reviewActions: { accept: false, pending: true, reason: CHECKING, unblockAction: null } });
+  // Review may come from a newer board than the check-only facts.
+  const pending = preview ? "Waiting for Cortex to finish this result…" : CHECKING;
+  Object.assign(state.tasks[0], { status: "review", executionId: "e",
+    workspaceDigest: preview ? "observed-later" : null,
+    result: preview ? { ...result, checks: [{ ...passed, outcome: "failed" } as Check], digest: "check-receipt", summary: "Native host command observations; owner reruns do not certify completion." } : result,
+    reviewActions: { accept: false, pending: true, reason: pending, unblockAction: preview ? "wait" : null } });
   s.emit(projection("1", state)); await settle();
   const card = document.querySelector(".rcard");
   expect(card?.textContent).toContain("Result v1");
-  expect(card?.textContent).toContain("Wrote the HTTPS setup.");
+  expect(card?.textContent).toContain(preview ? "Native host command observations" : "Wrote the HTTPS setup.");
+  expect(card?.textContent).not.toMatch(/Result evidence is unavailable|Stale result|Close as is/);
   const accept = () => [...document.querySelectorAll<HTMLButtonElement>(".rcard button")].find(b => b.textContent === "Accept v1");
   expect(accept()?.getAttribute("aria-disabled")).toBe("true");
   const strip = document.querySelector(".rcard .rv-why");
-  expect(strip?.textContent).toContain(CHECKING);
+  expect(strip?.textContent).toContain(pending);
   // Nothing is offered while it is checked: no request for a new result, no check to run.
   expect(strip?.querySelector("button")).toBeNull();
+  // Neither the card nor the Changes header offers a settled-result action while the result is pending.
+  const labels = [...document.querySelectorAll<HTMLElement>("button")].map(b => `${b.textContent} ${b.getAttribute("aria-label") ?? ""}`).join("|");
+  expect(labels).not.toMatch(/Request changes|Rerun/);
   // The settled facts arrive: the same card element, now acceptable.
   const facts: ProjectFacts = { projectId: "p", openBranch: "main", defaultBranch: "main", repo: null, workers: [], reviews: [], sprints: [],
     overlays: { t: { workspaceDigest: "d1", result: { ...result, digest: "d1", acceptanceAvailable: true }, reviewActions: { accept: true, reason: null, unblockAction: null } } as ProjectFacts["overlays"][string] } };
   s.emit({ kind: "facts", facts }); await settle();
   expect(document.querySelector(".rcard")).toBe(card);
+  expect(card?.textContent).toContain("Wrote the HTTPS setup.");
   expect(accept()?.getAttribute("aria-disabled")).toBeNull();
   expect(document.querySelector(".rcard .rv-why")).toBeNull();
 });
 
-it("a facts read with pending parts is followed by one settling read, and nothing polls after it", async () => {
+it("Changes offers no repair or rerun while the result is pending, and offers them again once failed-check facts settle", async () => {
+  const s = scriptedPort({ capabilities: { everything: true, operations: [] } });
+  history.replaceState(null, "", `/m/${LOCAL_MACHINE_ID}/t/t/changes`);
+  const root = document.createElement("div"); document.body.append(root);
+  dispose = render(() => <Workspace port={s.port} />, root);
+  await settle();
+  const failed: Check = { ...passed, outcome: "failed" };
+  const state: WorkspaceState = withTask(emptyWorkspace(), "HTTPS");
+  state.machines[0].connection = "connected";
+  Object.assign(state.tasks[0], { status: "review", executionId: "e", workspaceDigest: "observed-later",
+    result: { ...result, checks: [failed], digest: "check-receipt", summary: "Native host command observations; owner reruns do not certify completion." },
+    reviewActions: { accept: false, pending: true, reason: "Waiting for Cortex to finish this result…", unblockAction: "wait" } });
+  s.emit(projection("1", state)); await settle();
+  const labels = () => [...document.querySelectorAll<HTMLElement>("button")].map(b => `${b.textContent} ${b.getAttribute("aria-label") ?? ""}`).join("|");
+  expect(labels()).not.toMatch(/Request changes|Ask to fix|Rerun/);
+  const facts: ProjectFacts = { projectId: "p", openBranch: "main", defaultBranch: "main", repo: null, workers: [], reviews: [], sprints: [],
+    overlays: { t: { workspaceDigest: "d1", result: { ...result, checks: [failed], digest: "d1", acceptanceAvailable: false }, reviewActions: { accept: false, reason: null, unblockAction: null } } as ProjectFacts["overlays"][string] } };
+  s.emit({ kind: "facts", facts }); await settle();
+  expect(labels()).toMatch(/Ask to fix/);
+  expect(labels()).toMatch(/Rerun/);
+});
+
+it.each([false, true])("only deferred observations start an immediate settling read (waiting for runtime: %s)", async wait => {
   let deferred = 0, settled = 0;
   const item = wireTask({ taskId: "t", title: "HTTPS", titleAvailability: "available", version: "2", phase: "result", executionId: "e", runtimeState: "COMPLETED", executionState: "completed" });
   const overlay = (pending: boolean) => ({ status: "review", result: { ...result, digest: pending ? null : "d1", acceptanceAvailable: !pending },
-    workspaceDigest: pending ? null : "d1", reviewActions: pending ? { accept: false, pending: true, reason: CHECKING, unblockAction: null } : { accept: true, reason: null, unblockAction: null } });
+    workspaceDigest: pending ? null : "d1", reviewActions: pending ? { accept: false, pending: true, reason: CHECKING, unblockAction: wait ? "wait" : null } : { accept: true, reason: null, unblockAction: null } });
   const t = scriptedTransport({
     "service.capabilities": () => ({ methods: ["native.query", "native.board", "machine.call"], machine: true }),
     "projects.list": () => [{ projectId: "p", displayName: "P", canonicalRoot: "/p", activation: {} }],
@@ -77,7 +109,15 @@ it("a facts read with pending parts is followed by one settling read, and nothin
   });
   const store = createRoot(d => { dispose = d; return createWorkspaceStore(createRealPort({ transport: t.transport, actorId: "owner", registry: true, streamFactsMs: 60_000 })); });
   store.interest("p", "facts", "t");
-  await vi.waitFor(() => expect(store.state().tasks.find(x => x.id === "t")?.reviewActions?.accept).toBe(true));
+  const review = () => store.state().tasks.find(x => x.id === "t")?.reviewActions;
+  if (wait) {
+    await vi.waitFor(() => expect(review()?.unblockAction).toBe("wait"));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(settled).toBe(0);
+    expect(review()?.accept).toBe(false);
+    return;
+  }
+  await vi.waitFor(() => expect(review()?.accept).toBe(true));
   // Each read that came pending is followed by at most one settling read, and once settled nothing reads again on its own.
   expect(deferred).toBeGreaterThan(0);
   expect(settled).toBeGreaterThan(0);

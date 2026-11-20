@@ -291,3 +291,88 @@ fn a_planning_study_names_no_verification_and_other_plans_still_must() {
         "verification_required"
     );
 }
+
+/// Production stores: the first review-cycle stop of a planning task goes to its
+/// coordinator (`ASK_USER_REQUIRED` with the blocker, no blocked state), which asks
+/// the owner. The owner's "continue" did not renew the budget, so every later round
+/// stopped again after one review. An answer after that stop now grants a fresh
+/// budget at the next submission; a resubmission with no answer does not.
+#[test]
+fn an_owner_answer_after_a_coordinator_review_cycle_stop_renews_the_plan_budget() {
+    use cortex_core::lifecycle::{event_tx, review};
+    for answered in [true, false] {
+        let (_p, s, task, _) = start(Some(NativeExecutionPolicy::SprintPlanning));
+        let first = json!([{"key":"t1","title":"First","description":"Do it","dependsOn":[]}]);
+        let args = json!({"tasks":first,"request_key":"p1"});
+        s.write(|db| sprint_planning::submit_tx(db, &task, "c", "p1", &args, &first))
+            .unwrap();
+        // The budget is used up: the third review asks for changes again.
+        s.write(|db| {
+            db.execute(
+                "UPDATE runtime_tasks SET review_cycle=3 WHERE task_id=?",
+                [&task],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        reviewed(
+            &s,
+            &task,
+            "_plan_review_1",
+            json!({"verdict":"REQUEST_CHANGES","report_ref":"r_aaaaaaaaaaaa",
+            "project_digest":"a".repeat(64),"findings":[{"node":"t1","files":[],"fix":"Name the acceptance criteria"}]}),
+        );
+        s.write(|db| review::advance_tx(db, &task)).unwrap();
+        assert_eq!(state(&s, &task), "RECOVERING");
+        let (asked, blocked): (i64, i64) = s
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT count(*) FILTER (WHERE type='ASK_USER_REQUIRED'),count(*) FILTER (WHERE type='TASK_STATE_CHANGED')
+                     FROM runtime_events WHERE task_id=? AND json_extract(payload_json,'$.blocker')='review_cycle_limit'",
+                    [&task],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!((asked, blocked), (1, 0));
+        // The coordinator's question and, maybe, the owner's answer.
+        s.write(|db| {
+            event_tx(
+                db,
+                &task,
+                "USER_QUESTION_REQUESTED",
+                json!({"coordinator":true}),
+            )?;
+            if answered {
+                event_tx(
+                    db,
+                    &task,
+                    "USER_ANSWER_RECEIVED",
+                    json!({"answer_source":"text"}),
+                )?;
+            }
+            db.execute(
+                "UPDATE runtime_tasks SET state='PLANNING' WHERE task_id=?",
+                [&task],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let revised = json!([{"key":"t1","title":"First","description":"Do it; acceptance: it works","dependsOn":[]}]);
+        let args = json!({"tasks":revised,"request_key":"p2"});
+        let receipt = s
+            .write(|db| sprint_planning::submit_tx(db, &task, "c", "p2", &args, &revised))
+            .unwrap();
+        assert_eq!(receipt["review"], "scheduled");
+        let cycle: i64 = s
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT review_cycle FROM runtime_tasks WHERE task_id=?",
+                    [&task],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(cycle, if answered { 1 } else { 4 }, "answered: {answered}");
+    }
+}

@@ -7,7 +7,7 @@ import { createBodyMark, createTicker, createUnsent } from "./freshness";
 import { A, Count, createFollow, I, Loading, MenuItem, Modal, Pop } from "./kit";
 import { ActionBar, Toolbar } from "./layout";
 import type { Route } from "./router";
-import { clock, refusalReason } from "./selectors";
+import { clock, refusalLine, refusalReason } from "./selectors";
 import { displayStep, feedOf, isHiddenActivity, oneRowPerCall, stepFailed, viewOfActivity, type FeedItem, type FeedRun } from "./tool-names";
 import { contextLine, duration, elapsedOf, isFinished, recordedCoordinatorRoute, reviewLine, tokens, verificationFace, workerModel, workerState, type SessionModel } from "./session-model";
 
@@ -15,14 +15,15 @@ import { ResultText } from "./result-text";
 import { CopySource, MessageTools } from "./message-copy";
 import { SentMessages } from "./sent";
 import { useTaskRoutes } from "./task-place";
+import type { FollowPosition } from "./follow";
 
 export const CORTEX = "cortex", VERIFICATION = "verification";
 
 /** The live line. A worker's page derives it from that worker's `activity`; the Conversation passes the coordinator's own `text`. */
-export function WorkingIndicator(props: { activity?: Activity[]; text?: string }) {
+export function WorkingIndicator(props: { activity?: Activity[]; text?: string; showAllTools?: boolean }) {
   const label = () => {
     if (props.text !== undefined) return props.text;
-    const last = props.activity?.filter(a => !isHiddenActivity(a)).at(-1);
+    const last = props.activity?.filter(a => !isHiddenActivity(a, props.showAllTools)).at(-1);
     if (last?.command?.state === "running") return "Running command…";
     const detail = displayStep(last?.args);
     if (detail?.status === "in_progress" && detail.kind === "edit") return "Editing…";
@@ -273,18 +274,22 @@ function StopWorker(props: { worker: Worker | null; onClose: () => void }) {
 
 /** The coordinator's transcript records its reply as it streamed, one piece per row. Pieces next to each other are one message,
  *  so they are read as one, word for word: shown apart, every piece became its own paragraph of one or two words. */
-function joinStreamedText(list: Activity[]): Activity[] {
+function joinStreamedText(list: Activity[], showPlumbing: boolean): Activity[] {
   const out: Activity[] = [];
+  // A hidden step of the runtime's own still ends a message: the text before and after it are two messages, though nothing shows between them.
+  let ended = false;
   for (const a of list) {
+    if (a.kind !== "message" && a.kind !== "divider" && isHiddenActivity(a, showPlumbing)) { if (a.kind !== "note") ended = true; continue; }
     const last = out.at(-1);
-    if (last?.kind === "note" && a.kind === "note") out[out.length - 1] = { ...last, text: last.text + a.text };
+    if (!ended && last?.kind === "note" && a.kind === "note") out[out.length - 1] = { ...last, text: last.text + a.text };
     else out.push(a);
+    ended = false;
   }
   return out;
 }
 
 /** Everything a worker did, newest at the bottom. New events never move the reader; Follow and the pill bring them back. */
-function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: boolean; onAsk?: () => void }) {
+function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: boolean; onAsk?: () => void; position?: FollowPosition }) {
   const ws = useWs();
   const [finding, setFinding] = createSignal(false);
   const [needle, setNeedle] = createSignal("");
@@ -307,9 +312,10 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
   });
   const all = createMemo(() => {
     const rows = oneRowPerCall([...new Map([...older(), ...props.w.activity].map(a => [a.sequence, a])).values()]
-      .sort((a,b) => (a.at ?? 0)-(b.at ?? 0) || a.sequence-b.sequence))
-      .filter(a => a.kind === "message" || a.kind === "divider" || !isHiddenActivity(a));
-    return props.w.id.startsWith("coordinator:") ? joinStreamedText(rows) : rows;
+      .sort((a,b) => (a.at ?? 0)-(b.at ?? 0) || a.sequence-b.sequence));
+    const showPlumbing = ws.panels.showAllTools();
+    return props.w.id.startsWith("coordinator:") ? joinStreamedText(rows, showPlumbing)
+      : rows.filter(a => a.kind === "message" || a.kind === "divider" || !isHiddenActivity(a, showPlumbing));
   });
   const observed = createMemo(() => {
     const current = identity();
@@ -317,14 +323,18 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
     // A snapshot can briefly remove rows while Solid reconciles its store.
     // Retain observed identities: neither that reconciliation nor the rolling
     // 200-event tail makes an already seen event a new arrival.
-    for (const item of props.w.activity.filter(a => !isHiddenActivity(a))) {
+    for (const item of props.w.activity.filter(a => !isHiddenActivity(a, ws.panels.showAllTools()))) {
       if (!seenItems.has(item.sequence)) { seenItems.add(item.sequence); arrivals++; }
     }
     return arrivals;
   });
   // A message sent here counts from the press; its record taking its place is not a second arrival.
   const sentHere = () => ({ kind: "worker" as const, taskId: props.model().view.id, workerId: props.w.id });
-  const follow = createFollow(() => scroller, () => observed() + ws.store.sends.shown(sentHere()).length);
+  const nextCursor = () => cursor() === undefined ? props.w.activityCursor : cursor();
+  const position = props.position;
+  // A failed page leaves its cursor available for Retry; the partial feed still cannot restore the saved offset.
+  const follow = createFollow(() => scroller, () => observed() + ws.store.sends.shown(sentHere()).length,
+    position && { position, ready: () => !loadingOlder() && !nextCursor() });
   // What the owner just sent comes into view above the composer, even from a reader who had scrolled up.
   let sentSeen = ws.store.sends.shown(sentHere()).length;
   createEffect(() => { const n = ws.store.sends.shown(sentHere()).length; if (n > sentSeen) follow.jump(); sentSeen = n; });
@@ -338,7 +348,6 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
       if (toggle.isConnected && toggle.getAttribute("aria-expanded") === "true") follow.reveal(toggle.closest(".step, .fold-block") ?? toggle, () => dock.querySelector(".pill-band")?.getBoundingClientRect().height ?? 0);
     });
   };
-  const nextCursor = () => cursor() === undefined ? props.w.activityCursor : cursor();
   const loadOlder = async () => {
     const next = nextCursor();
     if (!next || loadingOlder()) return;
@@ -364,7 +373,7 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
     if (runIdsOf !== identity()) { runIdsOf = identity(); runIds.clear(); lastShown = new Map(); }
     const q = needle().trim().toLowerCase();
     // A search shows parts of blocks; it must not teach them new identities.
-    const out = feedOf(all().filter(a => !q || `${a.text} ${a.code ?? ""}`.toLowerCase().includes(q)), q ? undefined : runIds, lastShown);
+    const out = feedOf(all().filter(a => !q || `${a.text} ${a.code ?? ""}`.toLowerCase().includes(q)), q ? undefined : runIds, lastShown, ws.panels.showAllTools());
     lastShown = new Map(out.map(x => [x.key, x]));
     return out;
   });
@@ -382,7 +391,7 @@ function Stream(props: { model: Accessor<SessionModel>; w: Worker; readOnly?: bo
   const message = (id: string) => props.model().messages.find(m => m.id === id) ?? olderMessages().find(m => m.id === id);
   createBodyMark("follow", () => follow.following() ? "on" : "off");
   const running = () => props.w.status === "working";
-  const typing = () => <Show when={running()}><WorkingIndicator activity={all()} /></Show>;
+  const typing = () => <Show when={running()}><WorkingIndicator activity={all()} showAllTools={ws.panels.showAllTools()} /></Show>;
   const rows = () => <>
     <Show when={loadingOlder()}><Loading class="cap faint" text="Loading recorded activity…" /></Show>
     <Show when={historyError()}><div class="cap st-warn" role="alert">{historyError()} <button class="lnk" onClick={() => void loadOlder()}>Retry</button></div></Show>
@@ -506,7 +515,7 @@ function Finished(props: { w: Worker; onAsk?: () => void }) {
     <div class="rcard ws-worker-result">
       <div class="rcard-h"><I n={face().icon} s={14} class={face().tone === "st-idle" ? "faint" : face().tone} />{r()?.outcome === "failed" ? "Reported failure" : "Worker result"}<Show when={r()?.reportId}><span class="r"><button class="btn btn-line btn-sm" onClick={() => void read()}>Open report</button></span></Show><Show when={r()?.summary}>{summary => <CopySource text={summary()} label="Copy the worker result as Markdown" />}</Show></div>
       <div class="rcard-b"><ResultText text={r()?.summary ?? noResult(props.w.endedReason)} />
-        <Show when={props.w.resultRefusals}>{x => <div class="cap st-bad ws-mt4">{`Its result was refused ${x().count === 1 ? "once" : `${x().count} times`}: ${refusalReason(x().code)}.`}</div>}</Show></div>
+        <Show when={props.w.resultRefusals}>{x => { const line = () => refusalLine(x(), props.w.status === "completed" && !!r() && r()!.outcome !== "failed"); return <div class={`cap ${line().tone} ws-mt4`} role="note">{line().text}</div>; }}</Show></div>
       <div class="res-sec"><div class="res-h">Checks</div>
         <Show when={(r()?.checks.length ?? 0) > 0} fallback={<div class="cap muted">No checks reported.</div>}>
           <For each={r()!.checks}>{c => <div class="chk"><I n={CHECK_ICON[c.outcome].icon} s={14} class={CHECK_ICON[c.outcome].tone} /><span>{c.name}<Show when={c.outcome === "not_run" || c.outcome === "unverified" || c.outcome === "failed"}> <span class="faint">{c.detail}</span></Show></span><span class="src">{checkSource(c, ws.t("unsourcedCheck"))}</span></div>}</For>
@@ -563,6 +572,7 @@ export function WorkerPane(props: { model: Accessor<SessionModel>; pick: string;
   const ws = useWs();
   const m = () => props.model();
   const [stopping, setStopping] = createSignal<Worker | null>(null);
+  const positions = new Map<string, FollowPosition>();
   const worker = () => m().workers.find(w => w.id === props.pick) ?? null;
   // The coordinator is messaged from its conversation: the task's page, or the sprint's for the task planning a sprint.
   const routes = useTaskRoutes(() => ({ machine: m().view.machine.id, id: m().view.id }));
@@ -599,10 +609,14 @@ export function WorkerPane(props: { model: Accessor<SessionModel>; pick: string;
       <Head w={w()} now={props.now} onStop={() => undefined} />
       <div class="d-scroll"><div class="res-sec"><div class="res-h">{w().waitsFor ? "Waits for" : "Starts when"}</div>{w().waitsFor ? `${w().waitsFor}. It starts on its own when that node is done.` : "All execution nodes are done. The review starts on its own."}</div></div>
     </>;
+    // The keyed pane owns only the selected worker's DOM; keep positions above it.
+    const id = w().id;
+    let position = positions.get(id);
+    if (!position) positions.set(id, position = {});
     return <>
       <Head w={w()} now={props.now} onStop={() => setStopping(w())} />
       <Show when={w().status === "waiting_you"}><div class="res-sec">Answer the open question in Conversation.</div></Show>
-      <Stream model={props.model} w={w()} onAsk={() => ask(w())} />
+      <Stream model={props.model} w={w()} onAsk={() => ask(w())} position={position} />
     </>;
   };
   // A pane rebuilds only when it shows a different worker or kind of worker: the composer and scroll position must survive new events.

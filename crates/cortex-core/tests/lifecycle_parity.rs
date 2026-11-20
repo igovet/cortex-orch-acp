@@ -819,6 +819,68 @@ fn changing_review_has_three_rebinds_not_an_infinite_loop() {
         4
     );
 }
+/// Owner store 2026-11-19: after three rebinds a review was refused
+/// `review_project_revision_unstable` six times and the task went to recovery,
+/// because no binding was recorded past the budget and every later submission was
+/// compared with the stale one. Once two submissions see the same project, the
+/// review is re-bound and the next submission on that state is accepted.
+#[test]
+fn an_unstable_review_rebinds_once_the_project_is_stable_again() {
+    let (_p, s, _) = setup();
+    let mut e = evidence('b');
+    finish_execution(&s, &mut e);
+    s.write(|db| {
+        add_review_tx(db, "t", &e)?;
+        bind(db, "_review_1", "ar", "xr", "cr")?;
+        start_review_tx(db, "t", "ar", &e)
+    })
+    .unwrap();
+    let submit = |key: &str, c: char| {
+        s.write(|db| {
+            cortex_core::lifecycle::review::preflight_result_tx(db, "t", "ar", key, &evidence(c))
+        })
+        .unwrap()
+        .map(|r| r["error"].as_str().unwrap().to_owned())
+    };
+    for (i, c) in ['c', 'd', 'e'].into_iter().enumerate() {
+        assert_eq!(
+            submit(&format!("k{i}"), c).as_deref(),
+            Some("review_project_revision_changed")
+        );
+    }
+    // Still changing: unstable, and the stale binding stays.
+    assert_eq!(
+        submit("k3", 'f').as_deref(),
+        Some("review_project_revision_unstable")
+    );
+    assert_eq!(
+        submit("k4", 'g').as_deref(),
+        Some("review_project_revision_unstable")
+    );
+    // A key refused as unstable never records a verdict.
+    assert_eq!(
+        submit("k4", 'g').as_deref(),
+        Some("review_resubmit_required")
+    );
+    // Unchanged since the previous refusal: re-bound to that state.
+    assert_eq!(
+        submit("k5", 'g').as_deref(),
+        Some("review_project_revision_changed")
+    );
+    let latest: Value = serde_json::from_str(
+        &s.read(|db| Ok(db.query_row(
+            "SELECT payload_json FROM runtime_events WHERE type='REVIEW_STARTED' ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get::<_, String>(0)
+        )?))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(latest["revision_digest"], "g".repeat(64));
+    assert_eq!(latest["after_unstable"], true);
+    // The next submission on the same state passes the preflight.
+    assert_eq!(submit("k6", 'g'), None);
+}
 // Mirrors tests/test_targeted_review_fixes.py::test_a_local_finding_creates_a_single_fix_with_only_its_findings.
 #[test]
 fn targeted_review_fix_retains_effective_scope_and_only_local_findings() {

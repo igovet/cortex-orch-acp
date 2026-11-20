@@ -87,7 +87,8 @@ response not an error, so a real report above the inline bound is read through
 still usable evidence, never proof of the failed item. Complete describes batch
 delivery, not complete document coverage or successful underlying command output.
 A deferred `project_read` adds no coverage and omits the coverage fields from
-the retained page. Fetching that page with `read_large_output` does not change
+the retained page, which also carries `coverage_recorded: false`. A batched read of a binary file
+(returned by identity only) records hash-bound coverage like a direct one. Fetching that page with `read_large_output` does not change
 coverage. For a write precondition or review coverage, use `project_read`
 directly or request smaller inline pages.
 

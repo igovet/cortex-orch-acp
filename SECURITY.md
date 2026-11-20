@@ -1,6 +1,6 @@
 # Security policy
 
-Workspace reserves a shared checkout for independent review and final verification. External edits invalidate the reviewed digest. A worker continuation after a pending command reply or premature result submission requires a settled receipt for each named command on its own channel. Review packets identify earlier writes by task, revision and recorded event. Where available, the last write hash is compared with a fresh full-file content hash. Git-ignored files are not deliverable: their changes never make a review packet's change set incomplete. When the host cannot enumerate the change set, an approval still requires complete current reads of every listed changed file and carries a disclosed `unverified` runtime check for the unlisted part; it is never recorded as reviewed. Missing receipts preserve the unknown-outcome barrier.
+Workspace reserves a shared checkout for independent review and final verification. Review requires and binds the task's own changes (gateway write receipts, and paths that changed while one of its commands or writing-engine turns ran); an edit of those files, by anyone, invalidates the reviewed digest, while other actors' uncommitted files are listed as context and neither required nor bound. Incomplete attribution falls back to requiring every changed file and binding the whole checkout. See "Review of the task's own changes" below. A worker continuation after a pending command reply or premature result submission requires a settled receipt for each named command on its own channel. Review packets identify earlier writes by task, revision and recorded event. Where available, the last write hash is compared with a fresh full-file content hash. Git-ignored files are not deliverable: their changes never make a review packet's change set incomplete. When the host cannot enumerate the change set, an approval still requires complete current reads of every listed changed file and carries a disclosed `unverified` runtime check for the unlisted part; it is never recorded as reviewed. A listed file whose current bytes have no reviewable text (binary, an image the reviewer did not read directly, or opaque encoded/minified text) is likewise never recorded as reviewed: an approval carries a disclosed `unverified` runtime check naming it. Past three rebinds, a review whose project keeps changing is refused until two submissions see the same state; it is then re-bound to that state and must be resubmitted, so it never certifies a state it did not bind. Missing receipts preserve the unknown-outcome barrier.
 
 Execution baselines record the project checkout’s resolved Git HEAD, or null for an unborn branch or a plain folder. Ignored-file evidence is a separate metadata comparison, not a content check. If its bounded listing or metadata pass cannot finish, the ignored digest is absent and cannot support a review waiver; a complete deliverable manifest is still usable. An incomplete deliverable observation does not become complete as a result.
 
@@ -41,7 +41,10 @@ coverage and stale read coverage before replacement. Their structured errors
 report rejected writes and correction guidance, not authorization refusals.
 Existing-file replacement requires complete non-truncated same-channel coverage;
 a supplied digest alone grants nothing. Deferred batch reads do not add coverage
-for writes or independent review, even if their retained output is fetched. Creation requires the absent-content
+for writes or independent review, even if their retained output is fetched, and
+their page no longer reports the coverage it would have added. A binary read
+(single or batched) is hash-bound coverage of its bytes; a batched image read,
+which never delivers the image, grants none. Creation requires the absent-content
 precondition. Exact edits may use a current partial text read but reject missing
 or ambiguous anchors, including overlapping Unicode matches, atomically.
 Actual private-path, role, channel and write-denial decisions remain final.
@@ -62,9 +65,21 @@ coordinator/assignment scope's older channel output, never a sibling assignment'
 Legacy output reads retain status/encoding but explicitly lack native integrity
 certification and cannot manufacture a native check receipt. Ordinary passed worker checks require an
 exact successful ordinary or confirmed outside-command receipt, intact native
-retained output and an unchanged before/after project digest matching submission.
+retained output and either an unchanged before/after project digest matching
+submission, or, for `command_run`, an unchanged before/after digest of the run's
+work set (its assignment's declared scope plus the paths its own tools wrote before
+the run) that still matches at submission, with no later write of that assignment
+outside the set. The work-set binding proves only that the worker's own declared
+work is what the check ran against: files outside the set, including other tasks'
+concurrent changes the check may depend on, and changes the worker's own commands
+made outside its scope, are not bound. Independent review and final runtime
+verification bind the task's own changes (see "Review of the task's own changes"
+below), or the exact whole checkout when attribution is incomplete.
 The runtime derives evidence strength; duplicate, unknown, read/search/no-op and
-unproved inline-shell passed claims are retained unverified, not certified.
+unproved inline-shell passed claims are retained unverified, not certified. An
+inline `sh`/`bash`/`dash -c` script is proved only as `umask`/`export`/`cd`/`set`
+setup joined by `;` or `&&` and then one simple nontrivial command, with no other
+operator or expansion; this is a bounded recognizer, not a shell security boundary.
 Observed nonzero exits remain failures. Exact latest reruns can close failures
 without rewriting history. Explicit exploratory withdrawals retain retracted
 failures; supported source-bound standalone probe corrections and Python argparse
@@ -73,6 +88,37 @@ Complete output, same-attempt identity, ordering and unique correction links are
 rechecked at completion; stored links alone grant nothing. Static probe analysis
 never executes submitted source and refuses unsupported forms. General shell
 status-flow equivalence remains unfinished.
+
+### Review of the task's own changes
+
+A shared checkout holds other actors' uncommitted work, so a review is required to
+read, and binds, only the files this task changed. A file counts as the task's
+change when one of its channels' gateway file tools recorded a write, move or
+deletion of it, or when it changed while one of the task's commands ran (writable
+`command_run`, owner-confirmed `outside_command`) or during a writing worker's turn
+whose engine can change files without a receipt (codex-acp and OpenCode always;
+Claude Code only when the runtime allowed a non-gateway, non-read request in that
+turn). The host lists the checkout's dirty deliverable paths (Git status with
+untracked files, plus size, mtime, ctime, mode and inode; never Git-ignored files;
+a plain folder is walked) before and after each such run and records the paths
+whose entry changed on its finish record. Attribution is conservative: a path that
+changed during the window is attributed even when another actor changed it at the
+same time. Every other changed file stays in the packet as context
+(`required: false`) and is never a coverage refusal. The review, its re-bindings,
+verification and completion compare a digest of the required files' current
+states (content hash and mode, link target or `absent`; metadata including ctime
+past a 256 MiB hashing budget), so an edit of a task file by anyone still refuses
+the verdict or invalidates the approval, and an edit elsewhere does not. When any
+command or counted turn since the baseline lacks a complete change record (an
+earlier build, a failed or oversized listing, a nested checkout, an unknown
+outcome, a run still unsettled), the packet says so (`attribution_complete: false`
+with its reason), every listed file is required and the review binds the whole
+checkout, exactly as before. Limits: approval and verification certify the task's
+files and that the plan's commands passed on the real checkout as it was when they
+ran, not other actors' concurrent changes, which no review saw. A change restored
+to the same status record and metadata within one run, changes inside a nested
+checkout (which make the record incomplete) and an engine-native background
+process that changes a file between two turns of its worker are not attributed.
 
 Question-card delivery retains the prompt's cancellation generation, so cancelling
 cannot be bypassed by a late card from that prompt. Fresh prompts retain their
@@ -159,7 +205,7 @@ Missing/mismatched supervisors, incomplete artifacts and legacy lost handles sta
 unknown and non-replayable; once their process is provably gone (an earlier boot,
 an empty recorded payload process group, an ended read-only PID namespace, or a
 payload never released) the receipt is settled with an unknown or not-started
-outcome, never a success, and is still never rerun. Engine sessions left open by a service that died are
+outcome, never a success, and is still never rerun. A lost worker's node is retried only when each of its receipts is complete or settled with an observed end (a final supervisor status, an owner stop, a launch that never started, or an ended read-only PID namespace); a receipt settled with an unknown outcome still sends the work to its coordinator or owner. A command start of an earlier host with no recorded exit is settled only from its own complete or settled receipt (same task, channel and call reference) or from a later runtime event of another boot, and its exit is recorded as recovered with that evidence, never as a success the receipt does not show. Engine sessions left open by a service that died are
 settled at the next start only when the process table shows no engine adapter,
 Codex App Server or session relay of this user working in the project (an
 unreadable entry counts as one); the task is then held for the owner, never
@@ -174,6 +220,10 @@ keeps the host /var/tmp writable, as in the retained profile. Writable scratch a
 explicit cache mounts still permit chmod. Read-only project writes use a probed,
 discarded disk overlay where supported, otherwise remaining read-only. Unavailable
 namespaces/mounts fail closed; there is no Landlock-only or unsandboxed fallback.
+A settled `command_run` receipt whose output shows a refused nested namespace sandbox
+carries an advisory `nested_sandbox` hint naming whether the consent-backed
+`outside_command` is offered to that profile; it changes no outcome, reruns nothing and
+grants nothing.
 Engine-jail and external-MCP containment remain separate from this command policy. Source reads
 verify same-task input fingerprints and return images as real MCP content blocks;
 answering-session provenance is committed with each native answer and legacy
@@ -662,7 +712,8 @@ anything the startup files leave running in that group is killed as well. Only t
 nothing else is retained or logged. If the shell cannot be read (timeout, error,
 no markers, an unsupported shell), the service uses its inherited `PATH` plus the
 existing well-known per-user tool directories (`~/.local/bin`, `~/.cargo/bin`,
-`~/bin`, nvm's default version from `~/.nvm/alias/default`, `~/.volta/bin`,
+`~/bin`, nvm's default version from `~/.nvm/alias/default`, fnm's default
+version (`aliases/default/bin` in `FNM_DIR`, `~/.local/share/fnm` or `~/.fnm`), `~/.volta/bin`,
 `~/.bun/bin`, `~/.deno/bin`, `~/go/bin`, pnpm's home, pyenv and asdf shims) and
 records the reason, shown in Settings and Diagnostics. Service start never waits
 for or fails on this read. Each entry is accepted only if it is an absolute,
@@ -671,7 +722,13 @@ in Cortex's private state (any `.cortex`/`.cortex-dev` component, the service's
 state directory, its configuration and state folders); entries are de-duplicated
 by real directory in order and capped at 64 entries and 16 KiB. Owner-added extra
 folders (at most 16, validated the same way and also refused inside a registered
-project) follow, then `/usr/local/bin`, `/usr/bin` and `/bin`. Every launch
+project) follow, then those same usual per-user tool directories that exist and are
+not already listed (filling gaps only: an earlier entry keeps precedence), then
+`/usr/local/bin`, `/usr/bin` and `/bin`. A process that never read the shell (an
+incoming ACP agent, whose `PATH` is its client's) launches commands with its
+inherited `PATH`, then the usual directories, then the system ones, validated the
+same way. A settled command receipt whose output shows a missing program carries an
+advisory `missing_program` hint; it changes no outcome and grants nothing. Every launch
 re-validates the list, and the sandbox's command path additionally drops any entry
 inside the command's own project, so a project can never add a program directory
 beyond its fixed `.venv/bin`, `venv/bin` and `node_modules/.bin`. No mount is
@@ -804,7 +861,9 @@ Owner `product.task / accept` now shares Rust's native result-evidence validator
 completed execution, root/session/owner binding, unknown Start, digest, fresh-result marker, evidence
 version and required literal acknowledgement. Its immediate Core writer transaction stays held through the
 private overlay replacement; it does not complete the scheduler, authorize a different owner or
-manufacture receipts. Acceptance captures the exact legacy checkout digest. Archiving (manual or
+manufacture receipts. Pending review facts are for display only: an early check observation does not
+establish final result identity or authorize acceptance. Acceptance captures the exact legacy checkout
+digest. Archiving (manual or
 automatic) never asks and never discards; a task with no saved disposition whose bound, consistent runtime
 record is the owner's force-finish (`CANCELLED` with `owner_resolved_without_certification`) is presented
 as closed as is with `notVerifiedByCortex`, never as accepted or verified, and a saved disposition always
@@ -1298,7 +1357,8 @@ every mode; Auto allows everything else and records it; Development allows reads
 outside the project and asks the owner for writes outside the project, credential
 and key material, Git control and engine/Cortex configuration writes and
 deletions; Guarded also asks before reads outside the project and native web
-fetches. Read-only channels keep the read/search-only native fence in every mode.
+fetches. Read-only channels keep the read/search/fetch-only native fence in every mode; a web fetch
+only reads and follows the mode's fetch rule (Guarded asks the owner).
 An owner card for a declared deletion (`delete`/`move` kinds or a declared `rm`)
 keeps its `Removal blocked pending confirmation: ...` title, other cards are titled
 `Owner decision: ...`; only an offered one-shot option is accepted, and without a
@@ -2047,34 +2107,21 @@ refusal is retained with its code and named items, and no second reviewer is
 scheduled for the same revision. Fix and review rounds without progress
 (unchanged reviewed bytes or repeated findings) stop with `review_no_progress`;
 there is no changed-command supersession or waiver of review/verification.
-The refusal names receipts, evidence gaps and a bounded command identity (program,
-argv word count and argv SHA-256 prefix, cwd, profile); it never echoes the argv,
-a shell script or command output. Every failed (or still pending) gateway
+An `open_failed_check` refusal names each open check with its `tool_call_ref`,
+the gap that keeps it open and what closes it, and `omitted_failed_check` names
+each omitted receipt; they name a program and receipt references only, never the
+argv, a shell script or command output. Every failed (or still pending) gateway
 receipt a submission cites is retained as a runtime event before the other
 gates, refused submissions included, so a later result that omits or relabels
 it is refused with `omitted_failed_check` and `open_failure` re-derives the
-omission on recording; only runs actually cited as checks are retained. The
-status-capture recognizer for `... ; code=$?; ...; exit $code` scripts proves
-only a narrow simple-command form, requiring an unquoted capture identifier and
-`=`; quoted whole assignment words or identifiers are commands, not captures.
-Double quotes around the value alone (`rc="$?"`) are supported. Assignment-prefixed
-commands are rejected rather than treating the assignment as the command head;
-otherwise a hidden `trap` could override the captured failure at shell exit.
-This also excludes Bash append-assignment prefixes and leading numeric words,
-including file descriptors before redirections, which can hide the same builtin.
-Every word must also fit a small literal grammar checked with its quotes:
-literal command heads and redirection targets, and only plain `$NAME`/`${NAME}`
-expansions in other arguments. Bash parameter expansions such as `${x[code=0]}`
-or `${x:code=0}` evaluate arithmetic that can reassign the captured variable
-inside an innocuous printer argument, so every other `${...}` form, `$(...)`,
-unquoted glob/brace/tilde characters and unbalanced quotes fail closed,
-including some harmless forms; a direct-argv check is the supported alternative.
-`printf` is excluded between capture and exit, even with a harmless literal format:
-Bash `%n` and `-v` can assign the captured variable, and plain variable arguments
-can supply those formats/options without using forbidden expansion syntax.
-Safe `echo`/`tail` wrappers remain supported.
-Other variable exits stay unverified (`status_variable_unproven`); it is a bounded classifier, not a shell
-parser or sandbox. Command receipts inline at most 64 KiB of output; evidence
+omission on recording; only runs actually cited as checks are retained. Inline
+shell scripts verify only as `umask`/`export`/`cd`/`set` setup commands joined by
+`;` or `&&` and then one simple nontrivial command, within a small literal word
+grammar (plain `$NAME`/`${NAME}` expansions in arguments, a leading `$HOME/` in the
+program); a pipe, `||`, `&`, redirection, substitution, any other expansion,
+keyword or code-running builtin fails closed to trivial, including some harmless
+forms, and a direct-argv check is the supported alternative. It is a bounded
+classifier, not a shell parser or sandbox. Command receipts inline at most 64 KiB of output; evidence
 always uses the complete retained output.
 Accepted receipts disclose `node_status`, not task acceptance.
 
@@ -2221,8 +2268,9 @@ that channel just produced: complete after a full write or an edit of a complete
 `.gitignore`, where the runtime adds protected lines), otherwise partial. A later change by anyone else
 therefore still fails as a stale read, and partial coverage never becomes overwrite authority. Coverage is
 a runtime ledger, not a permission grant: private, link and deny-write checks still apply before any read
-or write. A line longer than 2000 characters is never counted as read, so such a file can be changed only
-with `project_edit`.
+or write. `project_read` returns at most 2000 characters of one line per page; a longer line ends its page
+with `next_column`, and it counts as read only once every segment was returned in order from its first
+character, so a skipped segment never becomes complete coverage.
 
 Internal `.gitignore` reconciliation uses an exact, unnumbered, non-truncated snapshot through the same no-follow, single-link and 16 MB reader; public read pages are never repair input. Edit presentation uses the protected bytes committed by the writer. Diff matching is skipped before computation when combined input exceeds 32,000 characters or the before/after line-count product exceeds 250,000; the receipt marks `diff_omitted: "input_budget"` and `diff_truncated: true`. Hash and size evidence remain available.
 
@@ -2322,6 +2370,7 @@ The Cortex Workspace desktop slice has a user-level machine service that owns th
   the window's process alone, and the window withdraws them when it closes.
 - Workspace invalidation hooks are connection-local to supported Store writers, not a security boundary on arbitrary SQLite clients. Independent/older writers do not need Workspace tables or callbacks; their writes are not guaranteed to publish notifications. Normal writable initialization retires legacy persistent outbox hooks; inspection leaves the durable schema untouched.
 - Both channels ship a root-owned runtime under `/usr/lib/<package>/runtime`. Units ignore legacy `service.env` files and use fixed absolute launch paths. Login-start symlinks and minimal best-effort maintainer scripts start/restart/stop only the matching user unit; they never access Paseo or delete user data. The native service-start path runs absolute `/usr/bin/systemctl --user` with fixed reload/start arguments, not webview-supplied commands. The separate editor action accepts only a registered project identity and fixed VS Code arguments. Dev XDG isolation and unchanged native account references remain in force.
+- [Paid standalone desktop qualification](docs/project/verification.md#standalone-cortex-workspace-desktop) requires explicit owner authorization for this surface and mode, a private screen and session bus, a disposable project and XDG roots, and a candidate service isolated from the production installation and user manager. A private socket path alone does not prevent the desktop's systemd startup fallback from touching the production user manager. Real HOME is for the selected existing native account, not permission to reuse production Workspace or Paseo state. Before/after metadata-only checks of known Cortex/Workspace locations detect stray writes within their coverage; neither XDG separation nor an unchanged snapshot proves same-user filesystem containment.
 - The package depends on bubblewrap but does not weaken AppArmor or kernel policy. A namespace refusal blocks sandboxed engine execution and remains an explicit qualification limit; see [platforms](docs/cortex-workspace/platforms.md).
 - `history.page` exposes bounded display text, plans, tool titles/status and each call's selected target (path, command, query, skill or report reference) and non-private edit text, not raw tool arguments/results or private report bodies. An untitled update is judged private or not by the title retained for its call, and stays private when none was retained. A refused call keeps only a credential-redacted reason of at most 1,000 characters: the runtime refusal's `message`, or a Cortex tool's error text; engine tool output and report/draft refusals are not kept. A worker's edit lines come from the runtime's own record of that write (unclipped records only), credential-redacted and bounded per edit and per read. Its cursor binds the project, task, session, page size and frozen high-water mark. Owner queue and review drafts live in private service state, separate from immutable captured source history.
 - The service-only `_cortex/workspace_control` method resolves the registered execution and live session/current owner epoch before accepting prompts, worker guidance, worker cancellation or a command-stop request. Stop/Close alone may cancel the exact bound launch before its runtime row exists even when retries have advanced the coordinator epoch; prompts and other controls retain current-epoch checks. It is not a model MCP tool. Worker guidance targets one live channel and is marked delivered when appended to a successful Cortex tool response, not when read or acted on. It grants no authority. The exact gateway command reference and a reason remain required for stopping a command; native engine actions cannot be stopped through this control.
@@ -2461,7 +2510,10 @@ Claude settings, project `.mcp.json` and plugins do not start; `plugins` and
 `skills` are empty; hooks and auto-memory are off (`disableAllHooks`,
 `autoMemoryEnabled: false`, in both the session's flag settings and its
 SDK-parent policy settings, which an administrator's managed-settings tier can
-override). The session runs in `default` mode in every access mode. Native
+override). `settingSources: ["project"]` keeps the owner's user-level Claude Code
+settings and memory (`~/.claude/settings.json`, `~/.claude/CLAUDE.md`) and their
+private per-project overrides (`.claude/settings.local.json`, `CLAUDE.local.md`)
+out of every session; the project's shared settings and `CLAUDE.md` still load. The session runs in `default` mode in every access mode. Native
 `Read`, `Grep`, `Glob`, `WebFetch` and `WebSearch` remain. Claude Code runs reads
 and searches inside its working directory (the project) without asking; deny
 rules in the session settings keep `.cortex/**`, `.cortex-dev/**` and the dev
@@ -2562,7 +2614,11 @@ with its rule and its decider: `owner`, `mode:<access mode>` for an allowance,
 `runtime` for a policy refusal, `withdrawn:<reason>`, or `no_owner_client` when the
 task has neither an ACP client nor a Workspace binding, in which case the request
 is refused. An owner-decided request also leaves a `permission_receipts` row
-(`allow_once`, `reject_once` or `cancelled`). Cortex's own `outside_write` and
+(`allow_once`, `reject_once` or `cancelled`). An access-mode allowance of a channel-bound MCP tool (rule
+`channel_mcp`) is the single event `NATIVE_PERMISSION_AUTO_ALLOWED`, committed in
+the same transaction that re-authenticates the channel, matches the bound session
+and reads the access mode; owner decisions, refusals and requests for native tools
+keep the `NATIVE_PERMISSION_REQUESTED` record and their decision event. Cortex's own `outside_write` and
 `outside_command` follow the same table and card: Cortex private state is refused,
 Auto allows and records, Guarded and Development ask (a write outside the project
 asks in Development too), with their existing path and scope checks first.
@@ -2620,7 +2676,13 @@ report can arrive, and the post-result settlement normally tears the engine down
 when the turn ends, within 15. Native tools can still act in that window; such
 late project changes invalidate the digest-bound review, verification or
 completion gate as above. Explicit cancellation, stop and replanning terminate at
-once.
+once. Independently of the engine's transport monitor, an active worker prompt
+checks once a second, on the store's writer lane, whether its channel was revoked
+or its owner epoch replaced; a turn still running 10 seconds after that is sent ACP `session/cancel` and, when the
+engine has not replied within 25 seconds, ends the turn as outcome-unknown so
+the session's ordinary shutdown terminates the process and releases its
+capacity. This only stops work whose authority was already withdrawn; coordinator
+sessions are not affected.
 
 Unverified without a live run: that a real Claude turn lists no native `Bash`,
 `Edit` or `Write` tool, that an attempted native edit is impossible, that the
@@ -3065,9 +3127,15 @@ leave a hidden temporary file. The inherited host-writable profile still permits
 direct host aliases; this protects project aliases, not arbitrary same-user code.
 See [hardlink preparation](docs/features/permissions-and-containment/index.md#git-and-tool-state)
 for cost and error details. `.cortex` stays hidden.
-Finding those links scans the whole project before each sandboxed launch; a slow
+Finding those links scans the whole project before each sandboxed launch, in the
+same single parallel pass that finds every nested private entry; a slow
 scan is shown in the chat, never skipped or cached, and a sandboxed engine is
-never launched with the home directory or `/` as its project.
+never launched with the home directory or `/` as its project. A link count can change
+without any project directory changing, so no cached scan could stay exact; the
+guarantee is the tree as listed, and an entry or link created after its directory was
+listed and before launch is first covered by the next command. A launch that never
+released its payload records a fixed-vocabulary `cause` on its receipt, and stage
+timings (numbers only) are kept on its runtime events, never in the tool reply.
 
 ### Sandboxed command umask
 

@@ -480,8 +480,9 @@ impl Git {
             )
             .await
         {
-            Err(e) if e.code == "git_unavailable"
-                && crate::native_effects::no_checkout_marker(path) =>
+            Err(e)
+                if e.code == "git_unavailable"
+                    && crate::native_effects::no_checkout_marker(path) =>
             {
                 return Ok(false);
             }
@@ -1214,8 +1215,8 @@ impl Git {
         project: &str,
         product: &Value,
     ) -> Result<Option<String>> {
-        use sha2::Digest;
         use super::task_facts::{plain_folder_signal, PlainSignal};
+        use sha2::Digest;
 
         let generation = snapshot_reuse::generation();
         let is_repo = self.is_repo(root).await?;
@@ -2628,18 +2629,27 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(3100)).await;
             let context = json!({"tasks":{}});
             let mut git = Git::new();
-            let first = git.snapshot(&root, "p", &state, Some(&context)).await.unwrap();
+            let first = git
+                .snapshot(&root, "p", &state, Some(&context))
+                .await
+                .unwrap();
             assert_eq!(first["tree"], json!(["first"]));
 
             // Reusing a distinct cache entry proves folder_tree was not used again.
             let slot = snapshot_reuse::slot(&root, "p");
             slot.lock().await.as_mut().unwrap().value["tree"] = json!(["cached"]);
             fs::write(dependency.join("ignored"), "not in the snapshot").unwrap();
-            let second = git.snapshot(&root, "p", &state, Some(&context)).await.unwrap();
+            let second = git
+                .snapshot(&root, "p", &state, Some(&context))
+                .await
+                .unwrap();
             assert_eq!(second["tree"], json!(["cached"]));
 
             fs::rename(root.join("first"), root.join("second")).unwrap();
-            let changed = git.snapshot(&root, "p", &state, Some(&context)).await.unwrap();
+            let changed = git
+                .snapshot(&root, "p", &state, Some(&context))
+                .await
+                .unwrap();
             assert_eq!(changed["tree"], json!(["second"]));
             fs::remove_dir_all(base).unwrap();
         })

@@ -86,6 +86,45 @@ fn config_with(value: &str, effort: &str) -> Value {
     }
     options
 }
+/// The runtime sends its full recovery capsule once per context generation and only a
+/// reference after that. Like a model, the fixture then reads the current capsule with
+/// `read_capsule` through the session's own Cortex MCP relay.
+async fn read_capsule(server: &Value) -> Value {
+    let Some(command) = server["command"].as_str() else {
+        return Value::Null;
+    };
+    let mut relay = tokio::process::Command::new(command)
+        .args(
+            server["args"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str()),
+        )
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = relay.stdin.take().unwrap();
+    let mut stdout = BufReader::new(relay.stdout.take().unwrap());
+    wire::write_frame(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_capsule","arguments":{}}}),
+    )
+    .await
+    .unwrap();
+    let reply = wire::read_frame(&mut stdout).await.unwrap().unwrap();
+    assert!(reply.get("error").is_none(), "{reply}");
+    let result = &reply["result"];
+    if result["structuredContent"]["original_goal"].is_string() {
+        return result["structuredContent"].clone();
+    }
+    result["content"][0]["text"]
+        .as_str()
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or(Value::Null)
+}
 fn reconciliation_fixture(mode: &str, scenario: &str, context: &Value) -> Option<Value> {
     if mode != "desktop-coordinator" || !scenario.starts_with("reconcile-") {
         return None;
@@ -662,6 +701,69 @@ pub async fn main() {
                     .filter_map(|line| serde_json::from_str::<Value>(line).ok())
                     .find(|v| v["original_goal"].is_string() && v["recipient"].is_object())
                     .unwrap_or(Value::Null);
+                let context = if context.is_null()
+                    && mode.starts_with("desktop-")
+                    && raw.contains("the full capsule was already delivered in this context")
+                {
+                    read_capsule(servers.get(&sid).unwrap_or(&Value::Null)).await
+                } else {
+                    context
+                };
+                // A degenerate coordinator turn: the model streams its own prompt text back
+                // (`degenerate-once`, only the first coordinator session; every later one
+                // works normally) or loops on one handle (`degenerate-twice`, every
+                // session), and keeps generating until the runtime cancels the turn.
+                // `degenerate-worker`: the first worker session writes one message of more than
+                // 16,000 characters without a tool call; every later worker session works.
+                if (mode == "desktop-coordinator"
+                    && matches!(full_scenario.trim(), "degenerate-once" | "degenerate-twice"))
+                    || (mode == "desktop-worker" && full_scenario.trim() == "degenerate-worker")
+                {
+                    let turns: u32 = std::fs::read_to_string("degenerate-turns")
+                        .ok()
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(0);
+                    let twice = full_scenario.trim() == "degenerate-twice";
+                    if twice || turns == 0 {
+                        std::fs::write("degenerate-turns", (turns + 1).to_string()).unwrap();
+                        let looped = "guner@".repeat(400);
+                        let chunks: Vec<String> = if mode == "desktop-worker" {
+                            let mut n: u64 = 11;
+                            (0..60)
+                                .map(|_| {
+                                    (0..18)
+                                        .map(|_| {
+                                            n = n
+                                                .wrapping_mul(6364136223846793005)
+                                                .wrapping_add(1442695040888963407);
+                                            format!("{n:016x} ")
+                                        })
+                                        .collect()
+                                })
+                                .collect()
+                        } else if twice {
+                            looped
+                                .chars()
+                                .collect::<Vec<_>>()
+                                .chunks(60)
+                                .map(|c| c.iter().collect())
+                                .collect()
+                        } else {
+                            vec![
+                                "Understood. Continuing.\n<system-".into(),
+                                "reminder>\nRuntime status: PLANNING\n</system-reminder>".into(),
+                                "Further echoed prompt text.".into(),
+                            ]
+                        };
+                        for text in chunks {
+                            wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":sid,
+                                "update":{"sessionUpdate":"agent_message_chunk","messageId":format!("degenerate-{turns}"),
+                                "content":{"type":"text","text":text}}}})).await.unwrap();
+                        }
+                        held.insert(sid, id);
+                        continue;
+                    }
+                }
                 if matches!(
                     full_scenario.as_str(),
                     "compaction-start-only" | "compaction-title-only"
@@ -1284,7 +1386,21 @@ pub async fn main() {
                         .await
                         .expect("sibling release signal missing");
                     }
-                    wire::write_frame(&mut output,&json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":if reply.get("error").is_some(){"refusal"}else{"end_turn"}}})).await.unwrap();
+                    // A real engine reports a failed tool call as that call's result and ends
+                    // the turn normally; ACP `refusal` means the model declined, which the
+                    // runtime's turn loop treats as a degenerate turn. The driver-level
+                    // `native-host` fixture keeps `refusal` as its tool-error signal.
+                    let stop = if reply.get("error").is_some() && !mode.starts_with("desktop-") {
+                        "refusal"
+                    } else {
+                        "end_turn"
+                    };
+                    wire::write_frame(
+                        &mut output,
+                        &json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":stop}}),
+                    )
+                    .await
+                    .unwrap();
                     relay.kill().await.unwrap();
                     relay.wait().await.unwrap();
                     // The worker process dies while its question is still open.
@@ -1392,6 +1508,26 @@ pub async fn main() {
                         &mut output,
                         &json!({"jsonrpc":"2.0","id":id,
                         "result":{"stopReason":if held {"end_turn"} else {"refusal"}}}),
+                    )
+                    .await
+                    .unwrap();
+                    continue;
+                }
+                // `native-write:<json>`: an engine-native file edit made inside the
+                // turn without any Cortex tool (as codex-acp's sandboxed patch can),
+                // relative to the engine's working directory.
+                if let Some(body) = text.strip_prefix("native-write:") {
+                    let edit: Value = serde_json::from_str(body).unwrap();
+                    std::fs::write(
+                        std::env::current_dir()
+                            .unwrap()
+                            .join(edit["path"].as_str().unwrap()),
+                        edit["content"].as_str().unwrap(),
+                    )
+                    .unwrap();
+                    wire::write_frame(
+                        &mut output,
+                        &json!({"jsonrpc":"2.0","id":id,"result":{"stopReason":"end_turn"}}),
                     )
                     .await
                     .unwrap();

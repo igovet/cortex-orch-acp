@@ -75,6 +75,8 @@ pub(super) fn settle_unrecorded_tx(
     failure: &str,
     exit_code: Option<i64>,
     evidence: &str,
+    cause: Option<&str>,
+    timings: &Value,
 ) -> CoreResult<bool> {
     let row: Option<(String, String)> = db.query_row("SELECT operation,result_json FROM runtime_requests
         WHERE task_id=? AND actor=? AND request_key=? AND operation IN ('command_run','outside_command')",
@@ -107,6 +109,10 @@ pub(super) fn settle_unrecorded_tx(
     ] {
         object.insert(field.to_owned(), entry);
     }
+    if let Some(cause) = cause {
+        // Why the payload never left preparation: a fixed reason code.
+        object.insert("cause".to_owned(), json!(cause));
+    }
     db.execute(
         "UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=? AND result_json=?",
         (value.to_string(), task, actor, key, &raw),
@@ -121,7 +127,20 @@ pub(super) fn settle_unrecorded_tx(
         if let Some(o) = observation.as_object_mut() {
             o.remove("output");
             o.remove("handle");
+            if timings.is_object() {
+                o.insert("timings".into(), timings.clone());
+            }
         }
+        // A payload that never left preparation changed nothing; a run with an
+        // unknown outcome has no record of what it changed.
+        crate::native_change_set::add(
+            &mut observation,
+            &if started {
+                crate::native_change_set::incomplete("outcome_unknown")
+            } else {
+                crate::native_change_set::unchanged("not_launched")
+            },
+        );
         lifecycle::event_tx(
             db,
             task,
@@ -380,7 +399,10 @@ pub(super) async fn outside_capture(
         Ok(())
     })?)
     .await?;
-    let started_digest = check_digest(project_root.clone(), &argv).await;
+    let (started_digest, listed) = tokio::join!(
+        check_digest(project_root.clone(), &argv),
+        crate::native_change_set::snapshot(project_root.clone())
+    );
     let (stop, mut stopped) = watch::channel(false);
     let (done, finished) = watch::channel(false);
     running.lock().await.insert(
@@ -423,11 +445,18 @@ pub(super) async fn outside_capture(
         let (code,failure)=result.unwrap_or((None,Some("spawn_or_capture_failed")));
         let mut file=File::open(dir.join(&filename))?;let (hash,size)=fingerprint(&mut file)?;file.seek(SeekFrom::Start(0))?;
         let mut prefix=Vec::new();file.take(65536).read_to_end(&mut prefix)?;
-        let ended_digest = check_digest(project_root, &argv).await;
+        // The owner-confirmed host command may write anywhere: its change record
+        // comes from dirty-path listings before launch and after exit.
+        let (ended_digest, after) = tokio::join!(
+            check_digest(project_root.clone(), &argv),
+            crate::native_change_set::snapshot(project_root.clone())
+        );
+        let changes = crate::native_change_set::record(&listed, &after);
         let revision_digest = if started_digest == ended_digest { ended_digest } else { None };
         let value=json!({"revision_digest":revision_digest,"tool_call_ref":reference,"argv":argv,"cwd":root,"profile":"outside_confirmed","exit_code":code,"complete":failure.is_none()&&code.is_some(),
             "settled":true,"failure":failure,"output":String::from_utf8_lossy(&prefix),"output_truncated":size>65536,"byte_count":size,"large_output_id":id});
         let c=credential.clone();let mut event=value.clone();event.as_object_mut().unwrap().remove("output");
+        crate::native_change_set::add(&mut event,&changes);
         recv(executor.write(move|db|{
             db.execute("INSERT INTO large_outputs VALUES (?,?,?,'terminal',?,?,?,?,?,NULL,?,?)",
                 rusqlite::params![id,task,c.channel_id,hash,filename,size as i64,0,code,failure,cortex_core::now()])?;
@@ -834,7 +863,9 @@ pub(super) async fn execute(
         "development"
     };
     // Reservations coordinate writers; they are not the project's write boundary.
-    let _ = scopes;
+    // The scope still names the run's own work for a check's work-set binding.
+    let checks_work =
+        name == "command_run" && !cortex_core::lifecycle::completion::trivial_command(&argv);
     let writes = if !readonly && name != "project_git" {
         vec![root.clone()]
     } else {
@@ -851,7 +882,7 @@ pub(super) async fn execute(
     let denied_copy = denied.clone();
     let expected = i.clone();
     let _flight = Flight::new(&reference);
-    recv(executor.write(move |db| {
+    let work_set = recv(executor.write(move |db| {
         let i = expected;
         let current = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
         if current != i
@@ -880,11 +911,22 @@ pub(super) async fn execute(
             "NATIVE_COMMAND_STARTED",
             json!({"ref":r,"channel_id":c.channel_id,"argv":a["argv"]}),
         )?;
-        Ok(())
+        // Taken with the start record, so it names exactly the writes before it.
+        if !checks_work {
+            return Ok(None);
+        }
+        lifecycle::worker_checks::work_set_tx(db, &i.task, i.assignment.as_deref(), &scopes)
     })?)
     .await?;
     if name == "command_run" {
         drop(out);
+        // The work set's digest before launch (`native_work_set`); its end is observed
+        // once the process ended and the receipt settled.
+        let start = match &work_set {
+            Some(set) => crate::native_work_set::observe(root.clone(), set.clone()).await,
+            None => None,
+        };
+        let observer = (executor.clone(), running.clone(), i.clone(), root.clone());
         let mut protected = output_dir
             .parent()
             .and_then(|p| p.parent())
@@ -893,7 +935,7 @@ pub(super) async fn execute(
             .collect::<Vec<_>>();
         protected.extend(protected_roots);
         protected.extend(denied.iter().map(|p| root.join(p)));
-        return crate::native_command_handles::execute(
+        let reply = crate::native_command_handles::execute(
             executor,
             credential,
             running,
@@ -909,11 +951,20 @@ pub(super) async fn execute(
             output_dir,
             file,
             id,
-            reference,
+            reference.clone(),
             args,
             profile.to_owned(),
         )
         .await;
+        if let (Ok(_), Some(set), Some(start)) = (&reply, work_set, start) {
+            let (executor, running, i, root) = observer;
+            if let Some(assignment) = i.assignment {
+                crate::native_work_set::finish(
+                    executor, running, i.task, assignment, reference, root, set, start,
+                );
+            }
+        }
+        return reply;
     }
     let (cancel, mut cancelled) = watch::channel(false);
     let (done, finished) = watch::channel(false);
@@ -979,6 +1030,8 @@ pub(super) async fn execute(
         db.execute("UPDATE runtime_requests SET result_json=? WHERE task_id=? AND actor=? AND request_key=? AND operation=?",
             (v.to_string(),&task,&c.channel_id,key,n))?;
         let mut observation=v.clone();observation.as_object_mut().unwrap().remove("output");
+        // `project_git` only reads status or a diff: it changes no deliverable file.
+        crate::native_change_set::add(&mut observation,&crate::native_change_set::unchanged("read_only"));
         lifecycle::event_tx(db,&task,"NATIVE_COMMAND_FINISHED",json!({"receipt":{"tool_call_ref":v["tool_call_ref"],"argv":v["argv"],"observation":observation}}))?;Ok(())
     })?).await;
     recorded?;

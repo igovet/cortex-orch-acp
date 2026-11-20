@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
+import { isPlumbingOperation } from "../src/timeline-visibility.ts";
 import { KNOWN_CORTEX_TOOL_NAMES, presentToolSemantics } from "../src/tool-presentation.ts";
 import { nativeRow } from "../src/worker-panel-groups.ts";
 
@@ -19,6 +20,8 @@ it("names every advertised Cortex tool, whatever shape or kind the engine report
     for (const [title, toolKind] of [[`mcp.cortex.${name}`, "execute"], [`mcp__cortex__${name}`, "other"], [`mcp__cortex__${name}`, "execute"], [`cortex.${name}`, "execute"]]) {
       const row = presentToolSemantics({ name: title, title, toolKind, input: {} });
       expect(row.action, title).not.toBe("");
+      // The runtime's own plumbing is named like any tool, and marked as not shown in the simplified view.
+      expect(row.visible, title).toBe(!isPlumbingOperation(name));
       expect(row.label, title).not.toMatch(/mcp|cortex|_/i);
       if (!COMMANDS.has(name)) {
         expect(row.kind, `${title} (${toolKind})`).not.toBe("shell");
@@ -33,6 +36,7 @@ it("shows a Codex coordinator's route listing as itself, not as an empty Shell r
   const row = nativeRow({ id: 1, type: "tool_call", text: "", createdAt: "", title: "mcp.cortex.list_route_options", tool_kind: "execute", raw_input: {} });
   expect(row.label).toBe("List model routes");
   expect(presentToolSemantics({ title: "mcp.cortex.list_route_options", toolKind: "execute", input: {} }).kind).toBe("read");
+  expect(presentToolSemantics({ title: "mcp.cortex.list_route_options", toolKind: "execute", input: {} }).visible).toBe(false);
 });
 
 it("keeps a command's own command line on its row", () => {
@@ -40,4 +44,5 @@ it("keeps a command's own command line on its row", () => {
   expect(row.kind).toBe("shell");
   expect(row.label).toBe("Shell outside sandbox: git status");
   expect(presentToolSemantics({ name: "mcp__cortex__check_preflight", rawInput: { argv: ["node", "--version"] } }).label).toBe("Check tool availability: node --version");
+  expect(presentToolSemantics({ name: "mcp__cortex__check_preflight", rawInput: { argv: ["node", "--version"] } }).visible).toBe(false);
 });

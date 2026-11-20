@@ -13,10 +13,27 @@ bounded by construction and never stops a task for size:
   section that drops rows adds an entry to the top-level `clipping` array
   (`section`, `total`, `included`, `omitted`, `omitted_which`, `how_to_read`),
   so an omission is always visible and nothing is invented.
-- Per-command chatter (`NATIVE_COMMAND_*`, guidance, routing and delivery
-  events) is not restated. `command_events_not_restated` counts it, and
-  `unresolved_commands` lists every started command without a recorded outcome
-  (marked "do not replay").
+- Per-call chatter is not restated in `retained_decisions`: per-command events
+  (`NATIVE_COMMAND_*`), per-permission events (`NATIVE_PERMISSION_REQUESTED`,
+  `NATIVE_PERMISSION_DECIDED`, `NATIVE_PERMISSION_AUTO_ALLOWED`,
+  `NATIVE_PERMISSION_CANCELLED`), report page reads (`REPORT_PAGE_READ`), external
+  tool calls (`EXTERNAL_TOOL_AUTHORIZED`, `EXTERNAL_TOOL_RESULT`), session
+  configuration (`NATIVE_ACCESS_MODE_CONFIRMED`, `NATIVE_SESSION_CONFIGURED`),
+  route selection (`NATIVE_ROUTE_SELECTED`), degenerate-turn records
+  (`NATIVE_TURN_DEGENERATE`), guidance, routing and delivery events. The list is
+  `NOISE` in `crates/cortex-core/src/recovery_context.rs`; a busy worker turn
+  therefore no longer pushes the plan, verification and answer decisions out of
+  the 6,000-character decision budget. `command_events_not_restated` counts the
+  command events, and `unresolved_commands` lists every started command without
+  a recorded outcome (marked "do not replay").
+- Only a worker capsule carries `capacity` (its task's capacity reservations);
+  a coordinator capsule omits the section, which no coordinator decision uses.
+- The full capsule is sent once per context generation (session open, session
+  replacement, observed compaction). Later prompts in the same generation whose
+  engine confirmed the full capsule carry a one-line reference with the task
+  state and plan revision, saying whether the retained state changed since; the
+  model reads the current capsule with `read_capsule` (see
+  [context generations](../context-generations/index.md)).
 - The accepted plan is carried once. `plan_summary` holds node ids and a bounded
   verification list; `PLAN_ACCEPTED` and `WORKER_COMPLETED`/`WORKER_FAILED`
   decision rows are reduced to ids, and results live only in `current_nodes`.

@@ -156,6 +156,9 @@ pub(super) fn task(
                 if valid {
                     (phase, state) = mapped;
                     automatic_continuation = crate::lifecycle::automatic::projection(db, runtime)?;
+                    if let Some(value) = automatic_continuation.as_mut() {
+                        automatic_facts(db, runtime, value)?;
+                    }
                     if automatic_continuation
                         .as_ref()
                         .is_some_and(|v| v["pause"].is_object())
@@ -197,6 +200,14 @@ pub(super) fn task(
                         if reason.is_none() {
                             if let Some(hold) = native_exit_hold(db, runtime)? {
                                 warnings.push(hold.into());
+                                // A replan cancelled a live worker and waits for its session to stop:
+                                // the same hold, named for the owner with the worker's role.
+                                if hold == "process_exit_pending" {
+                                    if let Some(roles) = cancelled_worker_stopping(db, runtime)? {
+                                        warnings.push("cancelled_worker_stopping".into());
+                                        reason = Some(format!("cancelled_worker_stopping:{roles}"));
+                                    }
+                                }
                             }
                         }
                     }
@@ -457,6 +468,77 @@ fn native_exit_hold(db: &Connection, runtime: &str) -> CoreResult<Option<&'stati
             (true, false) => Some("process_exit_unconfirmed"),
         },
     )
+}
+/// The roles (comma-separated, `worker-` dropped) of the workers a replan cancelled whose
+/// sessions are still being stopped: the newest `LIVE_ASSIGNMENTS_CANCELLED` for replanning
+/// that no `LIVE_CANCELLATIONS_SETTLED` covers yet, with a provisioning or reservation of one
+/// of its assignments still live. Presentation only: the hold itself stays
+/// `process_exit_pending`, and the runtime settles it by itself.
+fn cancelled_worker_stopping(db: &Connection, runtime: &str) -> CoreResult<Option<String>> {
+    let Some(cancel) = row(
+        db,
+        "SELECT payload_json FROM runtime_events c WHERE c.task_id=?1 AND c.type='LIVE_ASSIGNMENTS_CANCELLED'
+            AND json_valid(c.payload_json) AND json_extract(c.payload_json,'$.reason')='replanning'
+            AND NOT EXISTS(SELECT 1 FROM runtime_events s WHERE s.task_id=?1 AND s.type='LIVE_CANCELLATIONS_SETTLED'
+                AND s.id>c.id AND coalesce(json_extract(s.payload_json,'$.through'),s.id)>=c.id)
+         ORDER BY c.id DESC LIMIT 1",
+        [runtime],
+    )?
+    else {
+        return Ok(None);
+    };
+    let roles = row(
+        db,
+        "SELECT group_concat(role, ',') AS roles FROM (SELECT DISTINCT
+            CASE WHEN p.role_id LIKE 'worker-%' THEN substr(p.role_id, 8) ELSE p.role_id END AS role
+         FROM json_each(?2, '$.assignment_refs') j
+         JOIN delegation_provisioning p ON p.task_id=?1 AND p.idempotency_key=j.value
+         WHERE p.status NOT IN ('terminated','ambiguous')
+            OR EXISTS(SELECT 1 FROM capacity_reservations r WHERE r.task_id=?1 AND r.assignment_ref=j.value
+                AND r.state NOT IN ('released','ambiguous'))
+         ORDER BY role)",
+        rusqlite::params![runtime, field(&cancel, "payload_json").unwrap_or("{}")],
+    )?;
+    Ok(roles
+        .as_ref()
+        .and_then(|r| field(r, "roles"))
+        .filter(|r| !r.is_empty())
+        .map(|r| r.chars().take(200).collect()))
+}
+/// Owner-facing facts beside the automatic continuation projection, from recorded events
+/// only; nothing here decides or holds anything:
+/// - `spentOn`: the stop reasons of the continuations counted against the current budget
+///   (since the owner last renewed it, or the task was reopened), most frequent first.
+/// - `reviewDeadEnd`: an item that the reviewer reported it cannot reach with its tools
+///   (`tool_unavailable`) in at least two dead-end reviews since the budget was renewed, the task
+///   resumed or reopened, while the newest dead end still names it (`repeated_review_dead_end`,
+///   the same rule that pauses the runtime). Items compare by their name before any detail.
+fn automatic_facts(db: &Connection, runtime: &str, value: &mut Value) -> CoreResult<()> {
+    let since: i64 = db.query_row(
+        "SELECT coalesce(max(id),0) FROM runtime_events WHERE task_id=?
+         AND type IN ('AUTOMATIC_CAP_RENEWED','TASK_REOPENED')",
+        [runtime],
+        |r| r.get(0),
+    )?;
+    let spent = db
+        .prepare(
+            "SELECT json_extract(payload_json,'$.reason'),count(*) FROM runtime_events
+             WHERE task_id=? AND type='AUTOMATIC_CONTINUATION' AND id>? AND json_valid(payload_json)
+             AND json_type(payload_json,'$.reason')='text' GROUP BY 1 ORDER BY 2 DESC,min(id) LIMIT 8",
+        )?
+        .query_map((runtime, since), |r| {
+            Ok(json!({"reason":r.get::<_, String>(0)?,"count":r.get::<_, i64>(1)?}))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !spent.is_empty() {
+        value["spentOn"] = json!(spent);
+    }
+    // The same rule the runtime uses to pause instead of continuing (one definition).
+    if let Some((item, count)) = crate::lifecycle::automatic::repeated_review_dead_end(db, runtime)?
+    {
+        value["reviewDeadEnd"] = json!({"item":item,"count":count});
+    }
+    Ok(())
 }
 fn observed_route(
     db: &Connection,

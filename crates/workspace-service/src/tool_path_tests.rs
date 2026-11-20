@@ -301,3 +301,64 @@ fn saved_extra_directories_are_read_bounded_and_without_links() {
     assert!(saved_extra(&linked).is_empty());
     assert!(saved_extra(&s.0.join("absent")).is_empty());
 }
+
+/// The observed failure: a shell path without `~/.cargo/bin` or the nvm Node left
+/// `cargo`/`npm` unfound (exit 127, `execvp npm`). The usual per-user tool folders
+/// that exist now fill gaps after the shell's own entries and the owner's extra
+/// folders, before the system folders; an entry the shell already has keeps its place.
+#[test]
+fn usual_tool_folders_fill_gaps_after_the_shell_path_and_for_unstarted_processes() {
+    let s = Scratch::new("usual");
+    let home = s.0.join("home");
+    let cargo = s.dir("home/.cargo/bin");
+    let local = s.dir("home/.local/bin");
+    let node = s.dir("home/.nvm/versions/node/v24.1.0/bin");
+    s.dir("home/.nvm/alias");
+    fs::write(home.join(".nvm/alias/default"), "24\n").unwrap();
+    let extra = s.dir("extra");
+    let state = State {
+        home: home.clone(),
+        private: vec![],
+        detected: Detected {
+            directories: vec![local.clone(), PathBuf::from("/usr/bin")],
+            source: Source::Shell,
+            shell: Some("bash".into()),
+            reason: None,
+            read_at: 0,
+            rejected: vec![],
+        },
+        extra: vec![extra.clone()],
+    };
+    let resolved = resolved_in(&state);
+    let order: Vec<_> = resolved.iter().map(|(p, o)| (p.clone(), *o)).collect();
+    assert_eq!(order[0], (local.clone(), "shell"));
+    assert_eq!(order[1], (PathBuf::from("/usr/bin"), "shell"));
+    assert_eq!(order[2], (extra.clone(), "extra"));
+    assert_eq!(order[3], (cargo.clone(), "fallback"));
+    assert_eq!(order[4], (node.clone(), "fallback"));
+    assert!(order[5..].iter().all(|(_, o)| *o == "system"), "{order:?}");
+    assert_eq!(
+        order.iter().filter(|(p, _)| *p == local).count(),
+        1,
+        "an entry the shell has is not repeated"
+    );
+    // An incoming ACP agent never started the shell read: its client's PATH, then
+    // the same usual folders, then the system folders.
+    let path = inherited_with_usual(&home, OsStr::new("/usr/bin"), &[]).unwrap();
+    let entries: Vec<_> = std::env::split_paths(&path).collect();
+    assert_eq!(entries[0], PathBuf::from("/usr/bin"));
+    assert!(entries.contains(&cargo) && entries.contains(&node) && entries.contains(&local));
+    assert!(entries.contains(&PathBuf::from("/usr/local/bin")));
+    // fnm's default version is found in its data directory.
+    let fnm = s.dir("home/.fnm/aliases/default/bin");
+    if std::env::var_os("FNM_DIR").is_none()
+        && !std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/share"))
+            .join("fnm/aliases/default/bin")
+            .is_dir()
+    {
+        assert_eq!(fnm_default(&home), Some(fnm.clone()));
+        assert!(usual(&home).contains(&fnm));
+    }
+}

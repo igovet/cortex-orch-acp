@@ -672,6 +672,10 @@ impl Inner {
         };
         if let Some(running) = running {
             running.accept.abort();
+            // Abort only marks the accept task; its endpoint clone (and with it the UDP
+            // socket) is dropped once the task is actually gone. Wait for that, bounded,
+            // so a disable has released the port by the time it returns.
+            let _ = tokio::time::timeout(Duration::from_secs(3), running.accept).await;
             let _ = tokio::time::timeout(Duration::from_secs(3), running.endpoint.close()).await;
         }
     }

@@ -208,7 +208,7 @@ fn require_read(state: Option<&Value>, hash: &str, complete: bool) -> CoreResult
 fn file_error(code: &str) -> Value {
     let correction = match code {
         "gateway_read_required" | "gateway_complete_read_required" =>
-            Some("Read the current target with project_read on this channel. For whole-file replacement, finish all non-truncated pages and use full_content_sha256; a partial sha256 is identity only. Use project_edit for partial changes."),
+            Some("Read the current target with project_read on this channel. For whole-file replacement, finish all pages (continue a truncated line with next_offset and next_column) and use full_content_sha256; a partial sha256 is identity only. Use project_edit for partial changes."),
         "gateway_stale_read" =>
             Some("Read the current target on this channel and rebuild the patch or replacement; never blindly retry a stale patch."),
         "gateway_write_conflict" =>
@@ -328,80 +328,140 @@ fn read(
             return Err(CoreError::Refused("file_too_large"));
         }
         meta["mime"] = json!(mime);
-        // The batch rejects image replies, so it must not grant image coverage.
+        // A direct read delivers the image and is hash-bound coverage of its bytes.
+        // The batch refuses image replies (`batch_multimodal_unsupported`): the image
+        // never reaches the model there, so a batched read grants no coverage, for a
+        // write or for review (an unread changed image is a review limit instead).
         if !batched {
             save_coverage(
                 store,
                 i,
                 c,
                 path,
-                &json!({"sha256":hash,"lines":[],"complete":true}),
+                &json!({"sha256":hash,"lines":[],"complete":true,"content":"image"}),
             )?;
+            meta["read_coverage_complete"] = json!(true);
         }
         let mut r = crate::native_sources::reply(meta);
         r["content"].as_array_mut().unwrap().push(json!({"type":"image","mimeType":mime,"data":base64::engine::general_purpose::STANDARD.encode(b)}));
         return Ok(r);
     }
-    let Ok(text) = std::str::from_utf8(&b) else {
-        meta["binary"] = json!(true);
-        return Ok(crate::native_sources::reply(meta));
-    };
-    if text.contains('\0') {
+    // Bytes with no text to show (not UTF-8, or containing NUL) are returned by
+    // identity only. That read is hash-bound coverage for a write precondition,
+    // single or batched; a review treats such a changed file as having no
+    // reviewable text (an `unverified` limit), never as reviewed.
+    if std::str::from_utf8(&b).map_or(true, |t| t.contains('\0')) {
         meta["binary"] = json!(true);
         save_coverage(
             store,
             i,
             c,
             path,
-            &json!({"sha256":hash,"lines":[],"complete":true}),
+            &json!({"sha256":hash,"lines":[],"complete":true,"content":"binary"}),
         )?;
+        meta["read_coverage_complete"] = json!(true);
         return Ok(crate::native_sources::reply(meta));
     }
+    let text = std::str::from_utf8(&b).expect("checked above");
     let lines = text.split_inclusive('\n').collect::<Vec<_>>();
+    // `column` continues the line at `offset` from that 1-based character, so a
+    // line longer than one segment is returned whole across consecutive pages.
+    let column = args["column"].as_u64().unwrap_or(1) as usize;
+    if column > 1
+        && lines
+            .get(start - 1)
+            .is_none_or(|line| column > line.chars().count())
+    {
+        return Err(CoreError::Refused("invalid_arguments"));
+    }
     let mut content = String::new();
     let mut truncated = Vec::new();
     let mut covered = coverage(store, i, c, path, &hash)?;
     let mut seen = covered["lines"].as_array().cloned().unwrap_or_default();
+    // Characters of an over-long line already returned contiguously from its
+    // start, by line number; the line joins `lines` once every one was returned.
+    let mut segments = covered["partial_lines"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
     let prior_complete = covered["complete"] == true;
+    let budget = 8000;
     let mut end = start - 1;
+    let mut next_column = Value::Null;
     for (idx, line) in lines.iter().enumerate().skip(start - 1).take(limit) {
-        let mut cut = line.chars().count() > 2000;
-        let rendered = line.chars().take(2000).collect::<String>();
-        let mut rendered = if args["line_numbers"] == false {
-            rendered
+        let skip = if idx + 1 == start { column - 1 } else { 0 };
+        let total = line.chars().count();
+        // At most 2000 characters per segment; a final line break rides along.
+        let body = total - usize::from(line.ends_with('\n'));
+        let mut take = body.saturating_sub(skip).min(2000);
+        if skip + take >= body {
+            take = total - skip;
+        }
+        let mut segment = line.chars().skip(skip).take(take).collect::<String>();
+        let number = if args["line_numbers"] == false {
+            String::new()
         } else {
-            format!("{}\t{}", idx + 1, rendered)
+            format!("{}\t", idx + 1)
         };
-        if serde_json::to_vec(&format!("{content}{rendered}"))?.len() > 8000 {
+        if serde_json::to_vec(&format!("{content}{number}{segment}"))?.len() > budget {
             if !content.is_empty() {
                 break;
             }
-            while serde_json::to_vec(&rendered)?.len() > 8000 {
-                rendered.pop();
+            while segment.chars().count() > 1
+                && serde_json::to_vec(&format!("{number}{segment}"))?.len() > budget
+            {
+                segment.pop();
             }
-            cut = true;
         }
-        content.push_str(&rendered);
+        let reached = skip + segment.chars().count();
+        content.push_str(&number);
+        content.push_str(&segment);
         end = idx + 1;
-        if cut {
+        let key = (idx + 1).to_string();
+        let prefix = segments.get(&key).and_then(Value::as_u64).unwrap_or(0) as usize;
+        let prefix = if skip <= prefix {
+            prefix.max(reached)
+        } else {
+            prefix
+        };
+        if prefix >= total {
+            segments.remove(&key);
+            if !seen.contains(&json!(idx + 1)) {
+                seen.push(json!(idx + 1));
+            }
+        } else if prefix > 0 {
+            segments.insert(key, json!(prefix));
+        }
+        if reached < total {
+            // The rest of this line is the next page: continue it from `next_column`.
             truncated.push(idx + 1);
-        } else if !seen.contains(&json!(idx + 1)) {
-            seen.push(json!(idx + 1));
+            next_column = json!(reached + 1);
+            break;
         }
     }
     covered["lines"] = json!(seen);
+    if segments.is_empty() {
+        covered.as_object_mut().unwrap().remove("partial_lines");
+    } else {
+        covered["partial_lines"] = Value::Object(segments);
+    }
     covered["complete"] = json!(prior_complete || seen.len() == lines.len());
     meta["content"] = json!(content);
     meta["total_lines"] = json!(lines.len());
     meta["start_line"] = json!(start);
+    meta["start_column"] = json!(column);
     meta["end_line"] = json!(end);
-    meta["complete"] = json!(start == 1 && end == lines.len() && truncated.is_empty());
+    meta["complete"] =
+        json!(start == 1 && column == 1 && end == lines.len() && truncated.is_empty());
     meta["partial"] = json!(meta["complete"] != true);
-    meta["next_offset"] = if end < lines.len() {
+    meta["next_offset"] = if !next_column.is_null() {
+        json!(end)
+    } else if end < lines.len() {
         json!(end + 1)
     } else {
         Value::Null
     };
+    meta["next_column"] = next_column;
     meta["truncated_lines"] = json!(truncated);
     meta["read_coverage_complete"] = covered["complete"].clone();
     meta["full_content_sha256"] = if covered["complete"] == true {
@@ -410,9 +470,19 @@ fn read(
         Value::Null
     };
     // Use the same structured result and byte bound as batch delivery. A
-    // retained output lookup does not record which project lines were read.
+    // retained output lookup does not record which project lines were read, so a
+    // page the batch would defer records nothing and claims only the coverage
+    // already recorded before it.
     if !batched || serde_json::to_vec(&meta)?.len() <= crate::native_batch::ITEM_BYTES {
         save_coverage(store, i, c, path, &covered)?;
+    } else {
+        meta["read_coverage_complete"] = json!(prior_complete);
+        meta["full_content_sha256"] = if prior_complete {
+            json!(hash)
+        } else {
+            Value::Null
+        };
+        meta["coverage_recorded"] = json!(false);
     }
     Ok(crate::native_sources::reply(meta))
 }
@@ -515,6 +585,333 @@ mod precondition_tests {
         ] {
             assert!(file_error(code).get("structuredContent").is_none());
         }
+    }
+}
+#[cfg(test)]
+mod long_line_tests {
+    use super::*;
+    use cortex_core::{
+        lifecycle::{completion, TaskMachine},
+        OpenMode, ProjectKey, StoreChannel,
+    };
+    struct Fixture(std::path::PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+    /// A running review-stage reviewer channel on a fresh project store.
+    fn reviewer() -> (Fixture, Store, Identity, Credential) {
+        let root = std::env::temp_dir().join(format!(
+            "long-lines-{}",
+            crate::native_effects::identity().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let f = Fixture(root);
+        let store = Store::open(
+            ProjectKey::new(&f.0, StoreChannel::Dev).unwrap(),
+            OpenMode::Initialize,
+        )
+        .unwrap();
+        let owner = TaskMachine::new(&store)
+            .create("t", "review", "owner")
+            .unwrap();
+        let c = store
+            .write(|db| {
+                db.execute("UPDATE runtime_tasks SET state='REVIEWING',revision=1", [])?;
+                db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'_review_1','worker-code-reviewer','Review','[]','[\"**\"]','review','running','ar',NULL)", [])?;
+                let c = channels::issue_tx(db, "t", &owner, channels::Principal::Worker { assignment: "ar" })?;
+                channels::bind_session_tx(db, &c, "engine")?;
+                Ok(c)
+            })
+            .unwrap();
+        let i = store
+            .read(|db| channels::authenticate(db, &c.channel_id, c.secret(), true))
+            .unwrap();
+        (f, store, i, c)
+    }
+    fn page(store: &Store, i: &Identity, c: &Credential, args: Value) -> Value {
+        read(store, i, c, &args, false).unwrap()["structuredContent"].take()
+    }
+    /// Follows next_offset/next_column from `(offset, column)` to the end of the
+    /// file: the raw text returned, the page count and the last page.
+    fn follow(
+        store: &Store,
+        i: &Identity,
+        c: &Credential,
+        path: &str,
+        (mut offset, mut column): (Value, Value),
+    ) -> (String, usize, Value) {
+        let (mut text, mut pages) = (String::new(), 0);
+        loop {
+            let r = page(
+                store,
+                i,
+                c,
+                json!({"path":path,"offset":offset,"column":column,"line_numbers":false}),
+            );
+            pages += 1;
+            text.push_str(r["content"].as_str().unwrap());
+            if r["next_offset"].is_null() {
+                return (text, pages, r);
+            }
+            if r["next_column"].is_null() {
+                assert_eq!(r["truncated_lines"], json!([]));
+                column = json!(1);
+            } else {
+                // A cut line ends its page and is continued, never skipped.
+                assert_eq!(r["truncated_lines"], json!([r["end_line"]]));
+                assert_eq!(r["next_offset"], r["end_line"]);
+                column = r["next_column"].clone();
+            }
+            offset = r["next_offset"].clone();
+        }
+    }
+    /// Following next_offset and next_column returns every character of a file
+    /// whose lines exceed one segment (by length, and by the inline byte budget of
+    /// escaped control characters), and only that contiguous read is coverage.
+    #[test]
+    fn long_lines_are_read_whole_by_segments_and_only_then_count_as_coverage() {
+        let (f, store, i, c) = reviewer();
+        let long = format!(
+            "{{\n\"ledger\":\"{}\"\n{}\n}}",
+            "é0123456789".repeat(450),
+            "\u{1}".repeat(2500)
+        );
+        fs::write(f.0.join("ledger.json"), &long).unwrap();
+        fs::write(f.0.join("skipped.json"), &long).unwrap();
+        let hash = digest(long.as_bytes());
+        let first = page(&store, &i, &c, json!({"path":"ledger.json"}));
+        assert_eq!(first["read_coverage_complete"], false);
+        assert!(first["full_content_sha256"].is_null());
+        let (text, pages, last) = follow(&store, &i, &c, "ledger.json", (json!(1), json!(1)));
+        assert_eq!(text, long, "every byte is returned exactly once");
+        assert!(pages > 4, "{pages}");
+        assert_eq!(last["read_coverage_complete"], true);
+        assert_eq!(last["full_content_sha256"], json!(hash));
+        // The reviewer's advertised project_read schema accepts the continuation.
+        let tools = cortex_engine::schema::catalogue(
+            "worker",
+            Some("worker-code-reviewer"),
+            Some("review"),
+        )
+        .unwrap();
+        let schema = &tools.iter().find(|t| t["name"] == "project_read").unwrap()["inputSchema"];
+        let args = json!({"path":"ledger.json","offset":2,"column":2001});
+        cortex_engine::schema::validate(schema, &args).unwrap();
+        assert!(cortex_engine::schema::validate(schema, &json!({"path":"a","column":0})).is_err());
+        // A numbered continuation keeps the line's own number.
+        let numbered = page(
+            &store,
+            &i,
+            &c,
+            json!({"path":"ledger.json","offset":2,"column":2001}),
+        );
+        assert!(numbered["content"].as_str().unwrap().starts_with("2\t"));
+        assert_eq!(numbered["start_column"], 2001);
+        // A column past the end of its line is refused.
+        let past = read(
+            &store,
+            &i,
+            &c,
+            &json!({"path":"ledger.json","offset":1,"column":3}),
+            false,
+        );
+        assert_eq!(past.unwrap_err().code(), "invalid_arguments");
+        // The other copy: the first page, then every page after a gap in line 2.
+        let cut = page(&store, &i, &c, json!({"path":"skipped.json"}));
+        assert_eq!(
+            (cut["truncated_lines"].clone(), cut["next_column"].clone()),
+            (json!([2]), json!(2001))
+        );
+        let (_, _, rest) = follow(&store, &i, &c, "skipped.json", (json!(2), json!(3000)));
+        assert_eq!(rest["read_coverage_complete"], false);
+        assert!(rest["full_content_sha256"].is_null());
+        store
+            .write(|db| {
+                let file = |path: &str| json!({"path":path,"change":"written","current_sha256":hash});
+                lifecycle::event_tx(db, "t", "REVIEW_PACKET", json!({"assignment_ref":"ar","node":"_review_1",
+                    "packet":{"changed_files":{"files":[file("ledger.json"),file("skipped.json")],"total":2,"complete":true},
+                    "read_scope_covers_change":true,"outside_read_scope":[]}}))?;
+                Ok(())
+            })
+            .unwrap();
+        let missing = store
+            .read(|db| {
+                completion::review_coverage_missing_tx(db, "t", "ar", &json!({"verdict":"APPROVE"}))
+            })
+            .unwrap();
+        assert_eq!(
+            missing,
+            vec![
+                json!({"path":"skipped.json","reason":"current complete read is missing or stale"})
+            ]
+        );
+    }
+    /// Owner store 2026-11: a packet named `review_lines` [242,254] for a 253-line
+    /// file (a final newline counted as a phantom line 254), and no read could cover
+    /// it. Ranges now end at the last line project_read reports.
+    #[test]
+    fn review_lines_end_at_the_last_line_project_read_reports() {
+        let (f, store, i, c) = reviewer();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(&f.0)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let lines: String = (1..=40).map(|n| format!("line {n}\n")).collect();
+        fs::write(f.0.join("a.txt"), &lines).unwrap();
+        git(&["init", "-q"]);
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "base"]);
+        let base = git(&["rev-parse", "HEAD"]).trim().to_owned();
+        fs::write(
+            f.0.join("a.txt"),
+            lines.replace("line 40\n", "line forty\n"),
+        )
+        .unwrap();
+        let ranges = review_line_ranges(&f.0, &base, "a.txt").unwrap();
+        assert_eq!(ranges, vec![[37, 40]]);
+        let last = page(
+            &store,
+            &i,
+            &c,
+            json!({"path":"a.txt","offset":37,"limit":4}),
+        );
+        assert_eq!(last["total_lines"], 40);
+        assert_eq!(last["end_line"], 40);
+        assert!(last["next_offset"].is_null());
+    }
+    /// Owner stores 2026-11: a changed woff2 font could never be covered (a binary
+    /// read recorded nothing), and batched pages over the inline bound were not
+    /// recorded although the read claimed coverage, so reviews looped on
+    /// `review_file_coverage_required`.
+    #[test]
+    fn binary_image_and_batched_reads_record_only_what_they_returned() {
+        let (f, store, i, c) = reviewer();
+        let font = b"wOF2\x00\x01\xff\xfe".repeat(2000);
+        let png = [b"\x89PNG\r\n\x1a\n".as_slice(), &[0u8; 64]].concat();
+        let encoded = format!("{}\n", "QUJDRA==".repeat(12)).repeat(400);
+        let text: String = (1..=300)
+            .map(|n| format!("{n:>4} {}\n", "x".repeat(60)))
+            .collect();
+        for (name, body) in [
+            ("font.woff2", font.as_slice()),
+            ("logo.png", png.as_slice()),
+            ("blob.txt", encoded.as_bytes()),
+            ("code.rs", text.as_bytes()),
+        ] {
+            fs::write(f.0.join(name), body).unwrap();
+        }
+        let state = |path: &str| read_state(&store, &i, &c, path).unwrap();
+        // A binary read is hash-bound coverage, single or batched.
+        let reply = read(&store, &i, &c, &json!({"path":"font.woff2"}), true).unwrap();
+        assert_eq!(reply["structuredContent"]["binary"], true);
+        assert_eq!(reply["structuredContent"]["read_coverage_complete"], true);
+        assert_eq!(state("font.woff2").unwrap()["content"], "binary");
+        assert_eq!(state("font.woff2").unwrap()["sha256"], digest(&font));
+        // The batch refuses an image reply, so a batched image read grants nothing;
+        // a direct read, which shows the image, is hash-bound coverage.
+        read(&store, &i, &c, &json!({"path":"logo.png"}), true).unwrap();
+        assert!(state("logo.png").is_none());
+        let direct = read(&store, &i, &c, &json!({"path":"logo.png"}), false).unwrap();
+        assert!(direct["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["type"] == "image"));
+        assert_eq!(state("logo.png").unwrap()["content"], "image");
+        // A batched page past the inline item bound (which the batch defers) records
+        // nothing and claims only the coverage recorded before it.
+        let r = read(&store, &i, &c, &json!({"path":"code.rs","limit":300}), true).unwrap();
+        let v = &r["structuredContent"];
+        assert!(serde_json::to_vec(v).unwrap().len() > crate::native_batch::ITEM_BYTES);
+        assert_eq!(v["coverage_recorded"], false);
+        assert_eq!(v["read_coverage_complete"], false);
+        assert!(v["full_content_sha256"].is_null());
+        assert!(state("code.rs").is_none());
+        // Pages within the bound are recorded as usual.
+        let mut offset = json!(1);
+        loop {
+            let r = read(
+                &store,
+                &i,
+                &c,
+                &json!({"path":"code.rs","offset":offset,"limit":40}),
+                true,
+            )
+            .unwrap();
+            let v = &r["structuredContent"];
+            assert!(v["coverage_recorded"].is_null());
+            if v["next_offset"].is_null() {
+                assert_eq!(v["read_coverage_complete"], true);
+                break;
+            }
+            offset = v["next_offset"].clone();
+        }
+        assert_eq!(state("code.rs").unwrap()["complete"], true);
+        // Once complete, a later deferred page still claims that recorded coverage.
+        let r = read(&store, &i, &c, &json!({"path":"code.rs","limit":300}), true).unwrap();
+        assert_eq!(r["structuredContent"]["read_coverage_complete"], true);
+        // The packet marks content without reviewable text; review needs no text read
+        // of it, and an approval records it as an unverified limit instead.
+        let file = |path: &str, bytes: &[u8]| json!({"path":path,"change":"added","current_sha256":digest(bytes)});
+        let mut packet = json!({"changed_files":{"files":[file("font.woff2",&font),file("logo.png",&png),
+            file("blob.txt",encoded.as_bytes()),file("code.rs",text.as_bytes()),
+            {"path":"stale.bin","change":"added","current_sha256":"0".repeat(64)}],"total":5,"complete":true},
+            "read_scope_covers_change":true,"outside_read_scope":[]});
+        fs::write(f.0.join("stale.bin"), [0u8, 1, 2]).unwrap();
+        add_review_lines(&f.0, None, &mut packet);
+        let kinds: Vec<Value> = packet["changed_files"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["review_content"].clone())
+            .collect();
+        // Content is classified only when its bytes are the packet's current bytes.
+        assert_eq!(
+            kinds,
+            vec![
+                json!("binary"),
+                json!("image"),
+                json!("opaque"),
+                Value::Null,
+                Value::Null
+            ]
+        );
+        store
+            .write(|db| {
+                lifecycle::event_tx(
+                    db,
+                    "t",
+                    "REVIEW_PACKET",
+                    json!({"assignment_ref":"ar","node":"_review_1","packet":packet}),
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let missing = store
+            .read(|db| {
+                completion::review_coverage_missing_tx(db, "t", "ar", &json!({"verdict":"APPROVE"}))
+            })
+            .unwrap();
+        assert_eq!(
+            missing,
+            vec![json!({"path":"stale.bin","reason":"current complete read is missing or stale"})]
+        );
+        let limits = store
+            .read(|db| completion::review_change_set_limits_tx(db, "t", "ar"))
+            .unwrap();
+        assert_eq!(limits.len(), 1, "{limits:?}");
+        assert_eq!(limits[0]["outcome"], "unverified");
+        // The shown image is reviewed; the font and the encoded blob are not text.
+        assert_eq!(limits[0]["paths"], json!(["font.woff2", "blob.txt"]));
     }
 }
 #[cfg(test)]
@@ -1032,9 +1429,12 @@ pub(crate) fn review_line_ranges(root: &Path, base: &str, path: &str) -> Option<
         &literal,
     ])?;
     let text = String::from_utf8(out.stdout).ok()?;
+    // Count lines exactly as project_read does (`split_inclusive`): a final line
+    // break ends the last line and starts no further one, so a range never names a
+    // line past `total_lines` that no read could cover.
     let total = fs::read(root.join(path))
         .ok()?
-        .split(|b| *b == b'\n')
+        .split_inclusive(|b| *b == b'\n')
         .count() as u64;
     let mut ranges: Vec<[u64; 2]> = Vec::new();
     for line in text.lines().filter(|l| l.starts_with("@@ ")) {
@@ -1062,11 +1462,49 @@ pub(crate) fn review_line_ranges(root: &Path, base: &str, path: &str) -> Option<
     let required: u64 = ranges.iter().map(|[a, b]| b + 1 - a).sum();
     (!ranges.is_empty() && required < total).then_some(ranges)
 }
+/// Bytes of a changed file a reviewer cannot review as text: `image`, `binary` (not
+/// UTF-8, or containing NUL) or `opaque` (encoded or minified text: at least 8 KiB
+/// with lines averaging over 1,000 bytes, or base64-like lines without spaces).
+/// `None` for ordinary text, which a review must read.
+pub(crate) fn review_text(b: &[u8]) -> Option<&'static str> {
+    if mime(b).is_some() {
+        return Some("image");
+    }
+    let Ok(text) = std::str::from_utf8(b) else {
+        return Some("binary");
+    };
+    if text.contains('\0') {
+        return Some("binary");
+    }
+    if b.len() < 8192 {
+        return None;
+    }
+    let lines = text.split_inclusive('\n').count().max(1);
+    if b.len() / lines > 1000 {
+        return Some("opaque");
+    }
+    // Base64/base64url text: every non-empty line uses only that alphabet, and
+    // nearly all of them are long (wrapped encoded data, not words or code).
+    let body: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let alphabet = |l: &&str| {
+        l.trim_end_matches('\r')
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"+/=-_".contains(&c))
+    };
+    let long = body.iter().filter(|l| l.len() >= 40).count();
+    (body.iter().all(alphabet) && long * 10 >= body.len() * 9).then_some("opaque")
+}
 /// Adds `review_lines` to each modified, tracked file of a review packet whose
 /// changed lines are fewer than the whole file (`review_line_ranges`), and drops a
 /// stale one. Called whenever the packet names the files' current bytes.
 /// `base` is the `head` of the packet's `change_boundary.baseline_event`; without
 /// one (no commit yet, or it is unknown) every file stays a complete read.
+///
+/// It also marks a changed file whose current bytes (exactly those of its
+/// `current_sha256`) have no reviewable text with `review_content` (`review_text`):
+/// such a file is never a missing review read; an approval records it as an
+/// `unverified` limit (`completion::review_change_set_limits_tx`) unless the review
+/// read it completely (an image directly, so that it was shown).
 pub(crate) fn add_review_lines(root: &Path, base: Option<&str>, packet: &mut Value) {
     let Some(files) = packet["changed_files"]["files"].as_array_mut() else {
         return;
@@ -1075,14 +1513,27 @@ pub(crate) fn add_review_lines(root: &Path, base: Option<&str>, packet: &mut Val
     for file in files {
         if let Some(entry) = file.as_object_mut() {
             entry.remove("review_lines");
+            entry.remove("review_content");
         }
-        if file["change"] != "modified" || !file["current_sha256"].is_string() {
-            continue;
-        }
-        let Some(path) = file["path"].as_str() else {
+        let Some(hash) = file["current_sha256"].as_str().map(str::to_owned) else {
             continue;
         };
-        if let Some(ranges) = base.and_then(|base| review_line_ranges(root, base, path)) {
+        let Some(path) = file["path"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let current = parent(root, &path, false)
+            .ok()
+            .and_then(|(folder, name)| bytes(&folder, &name).ok().flatten())
+            .map(|(b, _)| b)
+            .filter(|b| digest(b) == hash);
+        if let Some(kind) = current.as_deref().and_then(review_text) {
+            file["review_content"] = json!(kind);
+            continue;
+        }
+        if file["change"] != "modified" {
+            continue;
+        }
+        if let Some(ranges) = base.and_then(|base| review_line_ranges(root, base, &path)) {
             file["review_lines"] = json!(ranges);
             any = true;
         }

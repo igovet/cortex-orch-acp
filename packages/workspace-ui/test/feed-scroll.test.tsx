@@ -68,6 +68,29 @@ it("pins streaming growth, preserves the reading anchor, and never writes during
   height=1400;resize();expect(top).toBe(1000);
 });
 
+it("waits for earlier rows before restoring a paused worker's offset", async () => {
+  const box = document.createElement("div");
+  box.append(document.createElement("div")); document.body.append(box);
+  let top = 0, height = 500, resize!: () => void;
+  Object.defineProperties(box, {
+    clientHeight: { get: () => 400 }, scrollHeight: { get: () => height },
+    scrollTop: { get: () => top, set: (v: number) => { top = Math.min(v, height - 400); } },
+  });
+  vi.stubGlobal("ResizeObserver", class { constructor(cb: () => void) { resize = cb; } observe() {} disconnect() {} });
+  const [ready, setReady] = createSignal(false);
+  const position = { top: 700 };
+  const follow = createRoot(d => { dispose = d; return createFollow(() => box, () => 0, { position, ready }); });
+  await flush();
+  resize();
+  expect(top).toBe(0);
+  expect(follow.following()).toBe(false);
+
+  height = 1400;
+  setReady(true); await flush();
+  expect(top).toBe(700);
+  expect(follow.following()).toBe(false);
+});
+
 // Rendered in WebKitGTK: a background read replaced rows inside the result card at the end, and the engine moved scrollTop up by
 // itself (16 px, no height change, no script write). Taken as the reader scrolling up, following stopped and Latest stayed.
 it("pins the end again when the engine moves the scroll position without reader input, and leaves it only for the reader", async () => {

@@ -157,11 +157,14 @@ export function mapTask(task: WireTask, context: { projectId: string }, result?:
   // a recovery without a stated reason stays unconfirmed.
   const continuation = isAutomaticContinuation(task.automaticContinuation) ? task.automaticContinuation : undefined;
   const consistent = !task.warnings.includes("contradictory_evidence");
+  // A replan waiting for a worker it cancelled to stop names that worker in `waitReason`; it is still the unconfirmed
+  // `process_exit_pending` hold the runtime settles by itself, never a recorded recovery that waits for the owner.
+  const replanStop = task.warnings.includes("cancelled_worker_stopping");
   const pending = consistent && !!continuation && task.phase === "recovery" && task.runtimeState === "RECOVERING"
     && task.executionState === "recovering" && task.waitReason === "automatic_continuation_pending";
   const paused = consistent && !!continuation?.pause && task.phase === "paused" && task.executionState === "paused"
     && task.runtimeState === "RECOVERING";
-  const interrupted = !pending && task.executionId !== null && task.phase === "recovery" && task.runtimeState === "RECOVERING"
+  const interrupted = !pending && !replanStop && task.executionId !== null && task.phase === "recovery" && task.runtimeState === "RECOVERING"
     && task.executionState === "recovering" && typeof task.waitReason === "string" && task.waitReason.trim() !== ""
     && !task.warnings.includes("contradictory_evidence");
   const phase = paused ? "paused" : interrupted || pending ? "recovery" : phaseOf(task), mapped = result ? mapResult(result) : null;

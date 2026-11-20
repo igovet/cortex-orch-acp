@@ -134,7 +134,8 @@ const filtered = groupWorkerEvents([
   event(80, { tool_kind: "agent_thought_chunk", text: "internal thought" }),
   event(81, { content: { sessionUpdate: "agent_thought_chunk", content: { text: "thought" } } }),
   event(82, { title: "mcp__claude__wait" }),
-  event(83, { activity_ref: "tool:read", title: "mcp.cortex.read_skill", tool_kind: "read" }),
+  event(83, { activity_ref: "tool:read", title: "mcp.cortex.project_read", tool_kind: "read" }),
+  event(86, { activity_ref: "tool:skill", title: "mcp.cortex.read_skill", tool_kind: "read" }),
   event(84, { type: "assignment_failed", text: "Real failure" }),
   event(85, { text: "[final response] Answer" }),
 ]);

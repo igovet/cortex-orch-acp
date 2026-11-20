@@ -147,7 +147,7 @@ impl NativeHost {
                     // lets a clean first-review path list the files the work changed.
                     // The same pass also gives the per-file manifest: the execution
                     // baseline keeps it, and a review packet lists the files changed since.
-                    let (e, baseline_manifest, raw_manifest) =
+                    let (mut e, baseline_manifest, raw_manifest) =
                         native_effects::observe_review_manifest(self.root.clone()).await?;
                     let review_root = self.root.clone();
                     let t = task.clone();
@@ -216,16 +216,14 @@ impl NativeHost {
                             .collect::<Result<Vec<_>,_>>()?;
                         let mut assignments=Vec::new();
                         for (a,node,role,objective,scope,stage) in rows{
-                            if stage=="review"{
-                                let bound:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED' AND json_extract(payload_json,'$.assignment_ref')=?)",
-                                    (&t,&a),|r|r.get(0))?;
-                                if !bound{completion::start_review_tx(db,&t,&a,&e)?;}
-                            }
                             let mut item=assignment_brief(db,&t,&a,&node,&role,&objective,&scope,&stage)?;
                             // A reviewer is told exactly what the work changed and how much
                             // predecessor evidence there is to read.
                             if stage=="review"{
                                 let mut packet=lifecycle::reconciliation::review_packet_tx(db,&t,&node,baseline_manifest.as_ref(),e.ignored_digest.as_deref(),&raw_manifest)?;
+                                // What the review binds is kept with the recorded packet,
+                                // not in the reviewer's brief.
+                                let binding=packet.as_object_mut().and_then(|p|p.remove("review_binding")).unwrap_or(Value::Null);
                                 // Required reading is bounded to this review's round
                                 // (`assignment_brief::review_reports`); older reports are optional.
                                 review_reading(db,&t,&node,&mut packet)?;
@@ -236,7 +234,17 @@ impl NativeHost {
                                 // reviewer.  Result submission must validate coverage
                                 // against this packet, not against a model's recollection.
                                 let recorded:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='REVIEW_PACKET' AND json_extract(payload_json,'$.assignment_ref')=?)",(&t,&a),|r|r.get(0))?;
-                                if !recorded { lifecycle::event_tx(db,&t,"REVIEW_PACKET",serde_json::json!({"assignment_ref":a,"node":node,"packet":packet}))?; }
+                                if !recorded { lifecycle::event_tx(db,&t,"REVIEW_PACKET",serde_json::json!({"assignment_ref":a,"node":node,"packet":packet,"binding":binding}))?; }
+                                // The review binds its packet's binding: the task files' current
+                                // bytes, or the whole checkout.
+                                let bound:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED' AND json_extract(payload_json,'$.assignment_ref')=?)",
+                                    (&t,&a),|r|r.get(0))?;
+                                if !bound{
+                                    if let Some(paths)=completion::review_bound_files(db,&t,&a)? {
+                                        e.task_files.extend(crate::native_change_set::identify(&review_root,paths.into_iter().collect()));
+                                    }
+                                    completion::start_review_tx(db,&t,&a,&e)?;
+                                }
                             }
                             assignments.push(item);
                         }
@@ -306,6 +314,8 @@ impl NativeHost {
                             let workers=db.prepare("SELECT attempt_id FROM delegation_provisioning WHERE task_id=? AND role_id!='orchestrator' AND status='terminated'")?
                                 .query_map([&t],|r|r.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
                             for a in workers{e.workers.insert(a,ProcessObservation::ConfirmedExited);}
+                            // Completion compares what the approving review bound.
+                            crate::native_change_set::bind_task_files_tx(db,store.key().root(),&t,&mut e)?;
                             // Owner messages recorded while this revision ran apply here, after its
                             // workers, review and verification: the coordinator replans with them
                             // instead of the result completing past them.
@@ -365,7 +375,11 @@ impl NativeHost {
     async fn verify_plan(&self, task: &str, owner: &OwnerEpoch) -> CoreResult<()> {
         // One observation anchors the review preflight, the recorded intent
         // digest, every post-command drift check and the final record.
-        let e = std::sync::Arc::new(native_effects::observe(self.root.clone()).await?);
+        // Verification compares what the approving review bound: the task's own files
+        // (identified in the observation) or the whole checkout.
+        let mut e = native_effects::observe(self.root.clone()).await?;
+        crate::native_change_set::bind_task_files(&self.executor, &self.root, task, &mut e).await?;
+        let e = std::sync::Arc::new(e);
         let digest = e.project_digest.clone();
         let t = task.to_owned();
         let o = owner.clone();
@@ -397,11 +411,12 @@ impl NativeHost {
             }
             let p:String=db.query_row("SELECT plan_json FROM runtime_tasks WHERE task_id=?",[&t],|r|r.get(0))?;
             let commands=plan::verification(&serde_json::from_str::<Value>(&p)?["verification"])?;
+            let bound=completion::current_binding_digest(db,&t,&preflight)?;
             lifecycle::request_tx(db,&t,"native-verifier",&run,"native_verification_intent",
-                &json!({"revision":revision,"digest":intent_digest,"commands":commands}),||Ok(json!({"revision":revision,"digest":intent_digest})))?;
-            Ok(Some((commands,run)))
+                &json!({"revision":revision,"digest":intent_digest,"binding_digest":bound,"commands":commands}),||Ok(json!({"revision":revision,"digest":intent_digest,"binding_digest":bound})))?;
+            Ok(Some((commands,run,bound)))
         })?).await?;
-        let Some((commands, run)) = intent else {
+        let Some((commands, run, bound)) = intent else {
             return Ok(());
         };
         let mut keys = Vec::new();
@@ -414,7 +429,10 @@ impl NativeHost {
                     "observation":{"complete":false,"failure":err.code(),"exit_code":null}})
                 }
             };
-            receipt["revision_digest"] = json!(digest);
+            // The run binds what the verification binds; the checkout it ran in is
+            // kept beside it.
+            receipt["revision_digest"] = json!(bound);
+            receipt["checkout_digest"] = json!(digest);
             receipt["owner_epoch"] = json!(owner.epoch);
             receipt["run"] = json!(run);
             let t = task.to_owned();
@@ -430,10 +448,20 @@ impl NativeHost {
                 lifecycle::request_tx(db,&t,"native-verifier-output",&output_key,"native_command_output",&raw,||Ok(raw.clone()))?;
                 Ok(())
             })?).await?;
-            let fresh = native_effects::observe(self.root.clone()).await?;
+            // Drift is a change of what the review bound: with a task-file binding,
+            // another actor's edit elsewhere in the checkout is not drift.
+            let mut fresh = native_effects::observe(self.root.clone()).await?;
+            crate::native_change_set::bind_task_files(&self.executor, &self.root, task, &mut fresh)
+                .await?;
+            let t = task.to_owned();
+            let (fresh, fresh_bound) = recv(self.executor.read(move |db| {
+                let d = completion::current_binding_digest(db, &t, &fresh).ok();
+                Ok((fresh, d))
+            })?)
+            .await?;
             all_exits_observed &= receipt["observation"]["complete"] == true
                 && receipt["observation"]["exit_code"].is_i64();
-            if fresh.project_digest != digest {
+            if fresh_bound.as_deref() != Some(bound.as_str()) {
                 if !all_exits_observed {
                     return Err(CoreError::Refused("native_verification_outcome_unknown"));
                 }
@@ -4966,6 +4994,9 @@ pub(crate) mod sprints {
             // A route, login or quota blocker: the runtime resumes once the route qualifies.
             ("continuation", "external_blocker") => (BY_RUNTIME, vec![]),
             ("continuation", "continuation_cap") => (BY_OWNER, close(vec!["allow_retries"])),
+            // Another automatic attempt would not change it, and the route recovering
+            // does not clear it: only the owner resumes (with a renewed budget) or closes.
+            ("continuation", "owner_blocker") => (BY_OWNER, close(vec!["allow_retries"])),
             // An effect whose outcome is unknown is never replayed automatically.
             ("continuation", _) => (BY_OWNER, close(vec!["confirm_and_continue"])),
             ("owner_integration", "owner_accepted") => (BY_OWNER, close(vec!["allow_finish"])),
@@ -5257,6 +5288,11 @@ pub(crate) mod sprints {
             let reason = match code {
                 "continuation_cap" => "The agent used all of its automatic attempts for this task.",
                 "outcome_unknown" => "An action of this task may or may not have finished. It is not repeated automatically.",
+                "owner_blocker" => match held["reason"].as_str() {
+                    Some("native_turn_degenerate") => "The model produced unusable output twice in a row, so the task stopped instead of trying the same model again. Choose another model in the task settings, then allow more attempts, or close it as is.",
+                    Some("review_incomplete") => "The reviewer cannot read an item with its tools, so another automatic review would not complete it. Change the file so it can be read, then allow more attempts, or close the task as is.",
+                    _ => "Another automatic attempt would not change what stopped this task. Allow more attempts after changing it, or close the task as is.",
+                },
                 _ => match held["reason"].as_str() {
                     Some("engine_authentication_required" | "authorization_required") => "The engine needs you to sign in again. Automatic continues by itself once it can connect.",
                     Some("engine_quota_exhausted") => "The engine usage limit is reached. Automatic continues by itself when the engine is available again.",

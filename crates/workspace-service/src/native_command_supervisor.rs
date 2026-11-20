@@ -67,6 +67,22 @@ fn publish(path: &Path, value: &Value) -> io::Result<()> {
     std::fs::rename(temp, path)?;
     File::open(path.parent().unwrap())?.sync_all()
 }
+/// The fixed reason code of a failed sandbox preparation: the sandbox's own
+/// `native_command_sandbox_unavailable: <reason>` code, or the I/O error class.
+pub(crate) fn preparation_cause(e: &io::Error) -> String {
+    let text = e.to_string();
+    match text.strip_prefix("native_command_sandbox_unavailable: ") {
+        Some(reason)
+            if !reason.is_empty()
+                && reason.len() <= 64
+                && reason.bytes().all(|b| b.is_ascii_lowercase() || b == b'_') =>
+        {
+            format!("sandbox_unavailable:{reason}")
+        }
+        _ if text == "command_launch_not_authorized" => "launch_not_authorized".into(),
+        _ => format!("preparation_io_{:?}", e.kind()),
+    }
+}
 fn handshake(input: &mut impl BufRead, message: Value) -> io::Result<()> {
     let mut out = io::stdout().lock();
     writeln!(out, "{message}")?;
@@ -129,13 +145,30 @@ pub fn run() -> io::Result<()> {
         "development" => Profile::Development,
         _ => return Err(io::Error::other("command_profile_invalid")),
     };
-    let mut sandbox = Sandbox::prepare_authorized(
+    let mut timings = std::collections::BTreeMap::new();
+    let prepared = Sandbox::prepare_authorized(
         &spec.root,
         profile,
         &spec.writes,
         &spec.protected,
         &mut || handshake(&mut input, json!({"authorize":true})),
-    )?;
+        &mut timings,
+    );
+    let mut sandbox = match prepared {
+        Ok(sandbox) => sandbox,
+        Err(e) => {
+            // Tell the service why nothing will launch: a fixed reason code and the
+            // stage timings (numbers), never a path, an argument or host output.
+            let mut out = io::stdout().lock();
+            let _ = writeln!(
+                out,
+                "{}",
+                json!({"failed":preparation_cause(&e),"timings":timings})
+            );
+            let _ = out.flush();
+            return Err(e);
+        }
+    };
     let own = identity(std::process::id())
         .ok_or_else(|| io::Error::other("command_identity_unavailable"))?;
     publish(
@@ -143,7 +176,8 @@ pub fn run() -> io::Result<()> {
         &json!({"ref":spec.reference,"supervisor":own,"state":"ready"}),
     )?;
     // The service durably binds this exact supervisor before granting launch.
-    handshake(&mut input, json!({"ready":own}))?;
+    handshake(&mut input, json!({"ready":own,"timings":timings}))?;
+    let launched_at = Instant::now();
     let output = Arc::new(Mutex::new(private(&spec.output)?));
     let mut command: Command = sandbox.command_at(&spec.argv, Some(&spec.cwd))?;
     command
@@ -255,7 +289,8 @@ pub fn run() -> io::Result<()> {
     publish(
         &spec.status,
         &json!({"ref":spec.reference,"supervisor":own,"state":"finished",
-        "exit_code":code,"signal":signal,"failure":failure,"hash":hash,"byte_count":count}),
+        "exit_code":code,"signal":signal,"failure":failure,"hash":hash,"byte_count":count,
+        "process_ms":launched_at.elapsed().as_millis() as u64}),
     )?;
     Ok(())
 }

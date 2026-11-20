@@ -40,11 +40,17 @@ pub fn preflight_result_tx(
     if !current {
         return Ok(None);
     }
-    let d = e
-        .project_digest
-        .as_deref()
-        .filter(|s| s.len() == 64)
-        .ok_or(CoreError::Refused("review_revision_unavailable"))?;
+    // What the review binds: its task files' bytes, or the whole checkout when its
+    // packet could not attribute the change set (`completion::review_bound_files`).
+    // An unrelated file another actor changes never re-binds a task-file binding.
+    let (d, _) = super::completion::review_digest_tx(db, task, assignment, e).map_err(|e| {
+        if e.code() == "project_revision_unavailable" {
+            CoreError::Refused("review_revision_unavailable")
+        } else {
+            e
+        }
+    })?;
+    let d = d.as_str();
     let rows = db
         .prepare(
             "SELECT payload_json FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED'
@@ -59,7 +65,13 @@ pub fn preflight_result_tx(
     if bindings.is_empty() {
         return refuse("review_revision_unavailable");
     }
-    if bindings.iter().any(|b| b["refused_request_key"] == key) {
+    let refused_unstable: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND type='REVIEW_REVISION_UNSTABLE'
+         AND json_extract(payload_json,'$.assignment_ref')=? AND json_extract(payload_json,'$.refused_request_key')=?)",
+        (task, assignment, key),
+        |r| r.get(0),
+    )?;
+    if refused_unstable || bindings.iter().any(|b| b["refused_request_key"] == key) {
         return Ok(Some(
             json!({"outcome":"refused","error":"review_resubmit_required"}),
         ));
@@ -68,16 +80,44 @@ pub fn preflight_result_tx(
         return Ok(None);
     }
     if bindings.len() > MAX_REVIEW_REBINDS {
-        return Ok(Some(
-            json!({"outcome":"refused","error":"review_project_revision_unstable"}),
-        ));
+        // Past the rebind budget the project counts as unstable while it keeps
+        // changing between submissions. Once a submission finds the same digest as
+        // the previous unstable refusal (nothing changed in between), the review is
+        // re-bound to that state like an ordinary rebind; without that, every later
+        // submission compared with the stale binding and could never clear.
+        let last: Option<String> = db
+            .query_row(
+                "SELECT json_extract(payload_json,'$.observed_digest') FROM runtime_events
+                 WHERE task_id=? AND type='REVIEW_REVISION_UNSTABLE'
+                 AND json_extract(payload_json,'$.assignment_ref')=?
+                 AND id>(SELECT max(id) FROM runtime_events WHERE task_id=? AND type='REVIEW_STARTED'
+                   AND json_extract(payload_json,'$.assignment_ref')=?)
+                 ORDER BY id DESC LIMIT 1",
+                (task, assignment, task, assignment),
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        if last.as_deref() != Some(d) {
+            event_tx(
+                db,
+                task,
+                "REVIEW_REVISION_UNSTABLE",
+                json!({"assignment_ref":assignment,"observed_digest":d,
+                    "bound_digest":bindings.last().unwrap()["revision_digest"],"refused_request_key":key}),
+            )?;
+            return Ok(Some(
+                json!({"outcome":"refused","error":"review_project_revision_unstable"}),
+            ));
+        }
     }
     event_tx(
         db,
         task,
         "REVIEW_STARTED",
         json!({"assignment_ref":assignment,"revision_digest":d,
-        "rebound_from":bindings.last().unwrap()["revision_digest"],"rebind":bindings.len(),"refused_request_key":key}),
+        "rebound_from":bindings.last().unwrap()["revision_digest"],"rebind":bindings.len(),"refused_request_key":key,
+        "after_unstable":bindings.len() > MAX_REVIEW_REBINDS}),
     )?;
     Ok(Some(
         json!({"outcome":"refused","error":"review_project_revision_changed"}),
@@ -250,8 +290,15 @@ fn no_progress_tx(
     ) {
         return Ok(None);
     }
+    // What each review bound: its task files when both have that binding (another
+    // actor's edits elsewhere are not progress), otherwise the whole checkout.
+    let field = if result["review_digest"].is_string() && previous["review_digest"].is_string() {
+        "review_digest"
+    } else {
+        "project_digest"
+    };
     let digest = |v: &Value| {
-        v["project_digest"]
+        v[field]
             .as_str()
             .filter(|d| d.len() == 64)
             .map(str::to_owned)
