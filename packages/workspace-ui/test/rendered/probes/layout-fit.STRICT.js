@@ -54,7 +54,7 @@ for (const el of elements) {
 }
 
 // A label that shrank to nothing has no area left for the rules above to measure.
-for (const el of scope.querySelectorAll('.trunc, .l-row-t, .l-sect-t, .l-z-mid > *, .l-branch, .l-fact b')) { if (!el.getClientRects().length || !el.textContent.trim()) continue; const w = el.getBoundingClientRect().width; if (w < 24 && el.scrollWidth > el.clientWidth + 1) problems.push(`text squeezed out: ${name(el)} "${label(el)}" ${R(w)}px`); }
+for (const el of scope.querySelectorAll('.trunc, .l-row-t, .l-sect-t, .l-z-mid > *, .l-branch, .l-fact b')) { if (el.closest(SKIP) || !el.getClientRects().length || !el.textContent.trim()) continue; const w = el.getBoundingClientRect().width; if (w < 24 && el.scrollWidth > el.clientWidth + 1) problems.push(`text squeezed out: ${name(el)} "${label(el)}" ${R(w)}px`); }
 
 // No text or control overlaps another that is not its ancestor or descendant. The sprint graph's canvas is a zoomable drawing
 // whose labels follow its own detail levels and pins, like the SVG elements skipped above; the panels around it are held here.
@@ -98,16 +98,40 @@ for (const b of barEls) {
 const strips = [...scope.querySelectorAll('.l-strip')].filter(el => seen(el)).map(s => R(s.getBoundingClientRect().height));
 for (const h of strips) if (h < 35.5 || h > 56.5) problems.push(`strip height ${h}`);
 for (const el of scope.querySelectorAll('.l-region')) if (seen(el) && inScroller(el, scrollsY)) problems.push(`region inside another scroller: ${name(el)}`);
+// Surface controls without a reason slot explain themselves in a popover. Exercise the real
+// interaction: a data attribute alone does not prove that the disabled control explains itself.
+const controlTip = el => {
+  const tip = document.querySelector('.l-why-tip:not(.ws-fe-tip)'), why = el.dataset.why;
+  if (!tip || !why || el.closest('.l-bar') || !el.matches('button:not(:disabled), input[readonly]:not(:disabled)') ||
+      el.tabIndex < 0 || tip.matches(':popover-open')) return null;
+  const box = el.getBoundingClientRect();
+  const keyboard = document.documentElement.hasAttribute('data-keyboard');
+  try {
+    el.click();
+    const after = el.getBoundingClientRect(), r = tip.getBoundingClientRect();
+    const steady = ['left', 'top', 'width', 'height'].every(k => Math.abs(box[k] - after[k]) < .5);
+    const beside = r.bottom <= after.top || r.top >= after.bottom || r.right <= after.left || r.left >= after.right;
+    return steady && beside && el.getAttribute('aria-disabled') === 'true' && tip.matches(':popover-open') && seen(tip) &&
+      r.left >= 0 && r.top >= 0 && r.right <= V.w && r.bottom <= V.h && tip.textContent.trim() === why ? why : null;
+  } finally {
+    // Close by pressing elsewhere, without moving focus or sending Escape to a parent dialog.
+    document.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true}));
+    document.documentElement.toggleAttribute('data-keyboard', keyboard);
+  }
+};
 const reasons = [];
 for (const el of scope.querySelectorAll('[aria-disabled="true"]')) { if (!seen(el)) continue;
   const after = css(el, '::after').content, before = css(el, '::before').content, id = el.getAttribute('aria-describedby'), t = id && document.getElementById(id);
   const s = css(el), shaped = !el.matches('.btn-primary, .btn-danger') || (s.backgroundColor !== 'rgba(0, 0, 0, 0)' && s.backgroundColor !== 'transparent') || s.boxShadow !== 'none';
-  reasons.push({control: label(el), reason: t ? t.textContent.trim().slice(0, 60) : null, background: s.backgroundColor, h: R(el.getBoundingClientRect().height)});
   // A menu row carries its reason as its own second line, so it needs nothing beside it.
   const ownLine = el.matches('.mi') && !!el.dataset.why && el.textContent.includes(el.dataset.why);
-  // A closed composer says its reason once, as the placeholder of its empty writing area, which its disabled tools name.
-  const said = t && (t.textContent.trim() || (t.matches('textarea, input') && !t.value ? (t.placeholder || '').trim() : ''));
-  if (!ownLine && (!t || !seen(t) || !said)) problems.push(`disabled control has no visible reason: "${label(el)}"`);
+  // A placeholder explains a disabled control only when it visibly says that control's reason.
+  const said = t && seen(t) && (t.matches('textarea, input')
+    ? t.disabled && !t.value && t.placeholder.trim() === el.dataset.why && t.placeholder.trim()
+    : t.textContent.trim());
+  const why = ownLine ? el.dataset.why : said || controlTip(el);
+  reasons.push({control: label(el), reason: why ? why.slice(0, 60) : null, background: s.backgroundColor, h: R(el.getBoundingClientRect().height)});
+  if (!why) problems.push(`disabled control has no visible reason: "${label(el)}"`);
   if ((after && after !== 'none' && after !== 'normal') || (before && before !== 'none' && before !== 'normal') || (!el.matches('.mi') && el.textContent.includes(el.dataset.why || ' never '))) problems.push(`reason drawn inside control: "${label(el)}"`);
   if (!shaped) problems.push(`disabled primary lost its shape: "${label(el)}"`);
 }

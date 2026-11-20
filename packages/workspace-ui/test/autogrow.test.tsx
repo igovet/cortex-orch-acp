@@ -7,11 +7,12 @@ import { render } from "solid-js/web";
 import { WsContext, type Ws } from "../src/ctx";
 import { autoGrow } from "../src/autogrow";
 import { createAttachments, createDictation, MessageComposer } from "../src/composer";
+import { ReasonTip } from "../src/layout";
 
-function Answer(props: { onSend: (text: string, files: unknown[]) => void }) {
+function Answer(props: { onSend: (text: string, files: unknown[]) => void; off?: string }) {
   const [text, setText] = createSignal("");
   const files = createAttachments(), mic = createDictation();
-  return <MessageComposer label="Your answer" placeholder="Your answer" text={text()} onText={setText} files={files} mic={mic}
+  return <MessageComposer label="Your answer" placeholder="Your answer" text={text()} onText={setText} files={files} mic={mic} off={props.off}
     send={{ label: "Send answer", why: text().trim() ? undefined : "Write an answer first", go: () => props.onSend(text(), files.files()) }} />;
 }
 
@@ -147,5 +148,35 @@ describe("the fields that grow", () => {
     expect(send).not.toHaveBeenCalled();
     box.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     expect(send).toHaveBeenCalledWith("two\nlines", []);
+  });
+
+  it("keeps a retained draft and explains why it cannot be sent without describing Send by an unrelated placeholder", () => {
+    const send = vi.fn(), root = document.body.appendChild(document.createElement("div"));
+    const ws = { can: () => false, t: () => "", store: {} } as unknown as Ws;
+    const [off, setOff] = createSignal<string>();
+    dispose = render(() => <WsContext.Provider value={ws}><ReasonTip /><Answer onSend={send} off={off()} /></WsContext.Provider>, root);
+    const box = root.querySelector("textarea")!;
+    const submit = root.querySelector<HTMLButtonElement>('button[aria-label="Send answer"]')!;
+    expect(submit.getAttribute("aria-describedby")).toBeNull();
+    submit.click();
+    expect(root.querySelector(".l-why-tip")?.textContent).toBe("Write an answer first");
+    expect(send).not.toHaveBeenCalled();
+
+    box.value = "Unsent draft";
+    box.dispatchEvent(new Event("input", { bubbles: true }));
+    setOff("The machine disconnected. Reconnect to send.");
+    expect(box.value).toBe("Unsent draft");
+    expect(box.disabled).toBe(true);
+    const reason = submit.getAttribute("aria-describedby")!;
+    expect(reason).not.toBe(box.id);
+    expect(box.getAttribute("aria-describedby")).toBe(reason);
+    expect(document.getElementById(reason)?.textContent).toBe(off());
+    submit.click();
+    expect(send).not.toHaveBeenCalled();
+
+    setOff(undefined);
+    expect(box.value).toBe("Unsent draft");
+    expect(box.disabled).toBe(false);
+    expect(submit.getAttribute("aria-describedby")).toBeNull();
   });
 });

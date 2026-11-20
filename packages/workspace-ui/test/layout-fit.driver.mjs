@@ -35,6 +35,11 @@ const automatic_finish_hold_conversation_at = review_at("auto-finish-hold");
 const RESULT = "document.querySelector('.rcard [data-bar=card]') && document.querySelector('.rcard .rv-checks')";
 const CHANGES = "document.querySelector('.rv-bar [data-bar=action]') && document.querySelector('.evid .l-row')";
 const READY = "document.querySelector('.ready .rcard [data-bar=card]')";
+const HOLD_CARD = "document.querySelector('.chat-review-hold [data-bar=card] button')";
+const HOLD_HEADER = "[...document.querySelectorAll('.titlebar button')].some(b=>b.textContent.trim()==='See what is needed')";
+const HOLD_CHANGES = CHANGES + " && " + HOLD_HEADER + " && document.querySelector('.rv-bar [role=note]')?.textContent.includes('pinned in its conversation')";
+const STALE_CARD = HOLD_CARD + " && document.querySelector('.rcard .rv-stale')";
+const REPAIR_SENT = "[...document.querySelectorAll('.chat-review-hold button[aria-disabled=true]')].some(b=>b.textContent.trim()==='Let the agent fix it' && b.dataset.why?.startsWith('Sent.'))";
 const SCREENS = [
   ["result-conversation", review_at("rv"), RESULT, OWNER],
   ["changes-no-git", review_at("rv/changes"), CHANGES, OWNER],
@@ -43,11 +48,11 @@ const SCREENS = [
   ["ready-no-git", review_at("rn/changes"), READY, OWNER],
   // Automatic settlement blocked on a required check. The task must explain the hold
   // and keep an explicit Close as is action reachable from the linked task.
-  ["automatic-hold", review_at("auto-hold/changes"), CHANGES + " && document.querySelector('.rv-bar')", OWNER],
-  ["automatic-stale", stale_automatic_at, "document.querySelector('.rv-bar') && document.querySelector('.rv-stale') && document.querySelector('.rv-close')", OWNER],
-  ["automatic-stale-conversation", stale_automatic_conversation_at, "document.querySelector('.rcard .rv-stale') && document.querySelector('.rcard .rv-close')", OWNER],
-  ["automatic-owner-hold-conversation", automatic_owner_hold_conversation_at, "document.querySelector('.chat-review-hold') && document.querySelector('.chat-review-hold button')", OWNER],
-  ["automatic-finish-hold-conversation", automatic_finish_hold_conversation_at, "document.querySelector('.rcard') && document.querySelector('.rv-bar') && document.querySelector('.btn-primary')", OWNER],
+  ["automatic-hold", review_at("auto-hold/changes"), HOLD_CHANGES, OWNER],
+  ["automatic-stale", stale_automatic_at, HOLD_CHANGES, OWNER],
+  ["automatic-stale-conversation", stale_automatic_conversation_at, STALE_CARD, OWNER],
+  ["automatic-owner-hold-conversation", automatic_owner_hold_conversation_at, HOLD_CARD, OWNER],
+  ["automatic-finish-hold-conversation", automatic_finish_hold_conversation_at, HOLD_CARD, OWNER],
   ["board-paused", board_at("b-pause"), QUEUE, [[960, 540], ...OWNER]],
   ["board-running", board_at("b-run"), QUEUE, [[960, 540], ...OWNER]],
   ["board-blocked", board_at("b-need"), QUEUE, OWNER],
@@ -175,6 +180,7 @@ const FAULTS = [
   ["label wraps in a growing box", "primitives", ".l-bar-actions .btn{white-space:normal!important;width:42px!important;height:auto!important}", null, "wrapped label: button"],
   ["strip out of bounds", "primitives", ".l-strip{min-height:10px!important;max-height:20px!important;padding:0!important}", null, "strip height"],
   ["reason not visible", "primitives", ".l-reason{visibility:hidden!important}", null, "no visible reason"],
+  ["composer reason popup not visible", "result-conversation", ".l-why-tip{visibility:hidden!important}", null, 'no visible reason: "Send and reopen"'],
   ["disabled primary flat", "primitives", ".btn-primary[aria-disabled=true]{background:none!important;box-shadow:none!important}", null, "lost its shape"],
   ["heading on top of the row above", "primitives", ".l-sect{margin-top:-14px!important}", null, "heading crowds"],
   ["heading off the row edge", "primitives", ".l-sect{padding-inline-start:40px!important}", null, "row edge"],
@@ -202,6 +208,10 @@ const DIALOG_OPEN = "document.querySelector('dialog[open] [data-bar=dialog]')";
 const WHOLE = "document.querySelector('.rv-more').click()";
 const LONG_REQUEST = "Пожалуйста, верните прежний порядок пунктов бокового меню и оставьте подписи только у групп. ".repeat(6);
 const FILL = "const f=document.querySelector('dialog[open] textarea');f.focus();document.execCommand('insertText',false," + json(LONG_REQUEST) + ")";
+const OPEN_HOLD = [press(".titlebar button", "See what is needed"), HOLD_CARD];
+const OPEN_STALE_HOLD = [OPEN_HOLD[0], STALE_CARD];
+const CLOSE_HOLD = [press(".chat-review-hold button", "Close as is…"), 'document.querySelector(\'dialog[open][data-dialog="Close task"] [data-bar=dialog]\')'];
+const REPAIR_HOLD = [press(".chat-review-hold button", "Let the agent fix it"), REPAIR_SENT];
 const FLOWS = [
   ["task-unknown-state-rechecked", UNKNOWN_AT, UNKNOWN_READY, [[press(".l-task .l-strip button", "Re-check state"), "document.querySelector('.l-task .l-strip-t').textContent.includes('Still not confirmed')"]], FULL],
   ["changes-whole", review_at("rv/changes"), CHANGES, [[WHOLE, "document.querySelector('.rv-sum.open')"]], OWNER],
@@ -211,12 +221,14 @@ const FLOWS = [
   ["dialog-accept-open-checks", review_at("rv/changes"), CHANGES, [[press(".rv-bar button", "Accept v1"), "document.querySelector('dialog[open][data-dialog=\"Accept with open checks\"] [data-bar=dialog]')"]], OWNER],
   ["dialog-merge", review_at("rm/changes"), READY, [[press(".ready button", "Review and merge…"), "document.querySelector('dialog[open][data-dialog=\"Finish task\"] [data-bar=dialog]')"]], OWNER],
   ["dialog-close", review_at("rn/changes"), READY, [[press(".ready button", "Close as is…"), "document.querySelector('dialog[open][data-dialog=\"Close task\"] [data-bar=dialog]')"]], OWNER],
-  ["automatic-hold-close", review_at("auto-hold/changes"), CHANGES, [[press(".rv-bar button", "Close as is…"), "document.querySelector('dialog[open][data-dialog=\"Close task\"] [data-bar=dialog]')"]], OWNER],
-  ["automatic-stale-actions", stale_automatic_at, "document.querySelector('.rv-bar') && document.querySelector('.rv-stale')", [[press(".rv-bar button", "Close as is…"), "document.querySelector('dialog[open][data-dialog=\"Close task\"] [data-bar=dialog]')"]], OWNER],
-  ["automatic-stale-ask-agent", stale_automatic_conversation_at, "document.querySelector('.rcard .rv-stale')", [[press(".rcard button", "Ask agent to fix"), "[...document.querySelectorAll('[role=status]')].some(e=>e.textContent.includes('Sending repair request'))"]], OWNER],
-  ["automatic-stale-conversation-close", stale_automatic_conversation_at, "document.querySelector('.rcard .rv-stale')", [[press(".rcard button", "Close as is…"), "document.querySelector('dialog[open][data-dialog=\"Close task\"] [data-bar=dialog]')"]], OWNER],
-  ["automatic-owner-hold-ask-agent", automatic_owner_hold_conversation_at, "document.querySelector('.chat-review-hold')", [[press(".chat-review-hold button", "Ask agent to fix"), "[...document.querySelectorAll('[role=status]')].some(e=>e.textContent.includes('Sending repair request'))"]], OWNER],
-  ["automatic-finish-hold-authorize", automatic_finish_hold_conversation_at, "document.querySelector('.rcard')", [[press(".rv-close button", "Allow Automatic to finish…"), "document.querySelector('dialog[open]')?.textContent.includes('Staging check') && document.querySelector('dialog[open]')?.textContent.includes('main')"]], [[960, 540], [1280, 800]]],
+  // Queue decisions moved from the review strip into the pinned Conversation card. Start on Changes
+  // where applicable and exercise the header shortcut before opening the same close dialog.
+  ["automatic-hold-close", review_at("auto-hold/changes"), HOLD_CHANGES, [OPEN_HOLD, CLOSE_HOLD], OWNER],
+  ["automatic-stale-actions", stale_automatic_at, HOLD_CHANGES, [OPEN_STALE_HOLD, CLOSE_HOLD], OWNER],
+  ["automatic-stale-ask-agent", stale_automatic_conversation_at, STALE_CARD, [REPAIR_HOLD], OWNER],
+  ["automatic-stale-conversation-close", stale_automatic_conversation_at, STALE_CARD, [CLOSE_HOLD], OWNER],
+  ["automatic-owner-hold-ask-agent", automatic_owner_hold_conversation_at, HOLD_CARD, [REPAIR_HOLD], OWNER],
+  ["automatic-finish-hold-authorize", automatic_finish_hold_conversation_at, HOLD_CARD, [[press(".chat-review-hold button", "Allow Automatic to finish…"), "document.querySelector('dialog[open]')?.textContent.includes('Staging check') && document.querySelector('dialog[open]')?.textContent.includes('main')"]], [[960, 540], [1280, 800]]],
   ["sidebar-automatic-reasons-check", at("/m/<M>/p/p/board") + "&sidebarRows=1", "document.querySelector('.sidebar .task-row')", [["window.__sidebarReasons=" + SIDEBAR_REASONS + ";return 1", "window.__sidebarReasons?.ok === true"]], [[1280, 800], [960, 540]]],
   ["automatic-board-open-task", automatic_board_at, "document.querySelector('.l-strip a')", [[press(".l-strip a", "Open task"), "document.querySelector('.chat-review-hold')"]], OWNER],
 ];
@@ -266,6 +278,18 @@ await main(async () => {
   };
   const check = async (results, name) => { const result = await js(PROBE); results[name] = result; await capture(name); return result.problems; };
   const check_strict = async (results, name) => { const result = await js(STRICT); results[name] = result; await capture(name); return result.problems; };
+  // A stale locator is a hard failure, but must not discard measurements from independent screens.
+  // A dead host or other infrastructure error still aborts immediately.
+  const measure = async (results, failures, key, run) => {
+    try { await run(); }
+    catch (error) {
+      if (!(error instanceof TimeoutError) && !error.message.includes("TypeError:")) throw error;
+      const problem = `measurement incomplete: ${error.name}: ${error.message}`;
+      (results.measurement_errors ??= {})[key] = problem;
+      (failures[key] ??= []).push(problem);
+      await capture(key + "-incomplete");
+    }
+  };
   const inject = async style => {
     await js("const s=document.createElement('style');s.id='fault';s.textContent=" + json("@layer fault{" + style + "}") + ";document.head.prepend(s);return 1");
     await sleep(.25);
@@ -277,12 +301,15 @@ await main(async () => {
   };
 
   // A press on a disabled control with no slot of its own opens its whole reason beside it and moves nothing.
-  const TIP = `const t=document.querySelector('.l-why-tip'),b=document.querySelector(SEL).getBoundingClientRect(),r=t.getBoundingClientRect(),bar=document.querySelector(SEL).parentElement.getBoundingClientRect();
-return {open:t.matches(':popover-open'),text:t.textContent,why:document.querySelector(SEL).dataset.why,box:[b.left,b.top,b.width,b.height],bar:[bar.left,bar.top,bar.width,bar.height],tip:[r.left,r.top,r.right,r.bottom],view:[innerWidth,innerHeight]}`;
+  const TIP = `const t=document.querySelector('.l-why-tip'),c=document.querySelector(SEL),b=c.getBoundingClientRect(),r=t.getBoundingClientRect(),bar=c.parentElement.getBoundingClientRect();
+const desc=document.getElementById(c.getAttribute('aria-describedby'))?.querySelector('.l-strip-t');
+return {open:t.matches(':popover-open'),text:t.textContent,why:c.dataset.why,cut:!!desc&&desc.scrollHeight>desc.clientHeight+1,box:[b.left,b.top,b.width,b.height],bar:[bar.left,bar.top,bar.width,bar.height],tip:[r.left,r.top,r.right,r.bottom],view:[innerWidth,innerHeight]}`;
 
   async function reason_tip(results, failures) {
     // A reason too long for its strip: the two lines there are cut, so the press has to bring the whole of it.
-    await open_state("board-clamped");
+    // The board's Continue queue can now be enabled on this saved state. The stressed
+    // primitive always supplies a disabled toolbar control with a clamped description.
+    await open_state("primitives-tight-long");
     const selector = ".l-toolbar .btn[aria-disabled='true'][data-why]";
     const probeCode = sub(TIP, "SEL", json(selector));
     const before = await js(probeCode);
@@ -295,7 +322,7 @@ return {open:t.matches(':popover-open'),text:t.textContent,why:document.querySel
     const closed = await js(probeCode);
     results.reason_tip = {before, after, closed};
     const [l, t, r, b] = after.tip, [w, h] = after.view;
-    failures.reason_tip = [...(!before.open ? [] : ["open before the press"]), ...(after.open && after.text === after.why && after.why ? [] : ["the press did not open the whole reason"]),
+    failures.reason_tip = [...(before.cut ? [] : ["the fixture reason was not clamped"]), ...(!before.open ? [] : ["open before the press"]), ...(after.open && after.text === after.why && after.why ? [] : ["the press did not open the whole reason"]),
       ...(eq(after.box, before.box) && eq(after.bar, before.bar) ? [] : ["the press moved its control"]), ...(l >= 0 && t >= 0 && r <= w && b <= h ? [] : ["the reason left the window"]), ...(!closed.open ? [] : ["did not close on the next press"])];
   }
 
@@ -409,11 +436,11 @@ return {open:t.matches(':popover-open'),text:t.textContent,why:document.querySel
     failures.areas_fold = await js("return getComputedStyle(document.querySelector('.pstrip [aria-label=\"More project areas\"]')).display !== 'none'") ? [] : ["no menu for the folded areas at 1024"];
     // The explanation is one press or one key from the queue's mode, and no longer takes a row.
     await open_state("board-paused");
-    const hint = await js("return {strip:[...document.querySelectorAll('.l-strip')].some(s=>s.textContent.includes('Passed checks leave')),review:document.body.textContent.includes('Review this task'),button:!!document.querySelector('.l-z-start .ws-hint')}");
+    const hint = await js("return {strip:[...document.querySelectorAll('.l-strip')].some(s=>s.textContent.includes('Tasks go to Done on their own in the current branch')),review:document.body.textContent.includes('Review this task'),button:!!document.querySelector('.l-z-start .ws-hint')}");
     results.hint = hint;
     await js("document.querySelector('.l-z-start .ws-hint').focus();document.querySelector('.l-z-start .ws-hint').click();return 1");
     await sleep(.3);
-    const opened = await js("return [...document.querySelectorAll('.ws-hint-pop')].some(p=>p.matches(':popover-open') && p.textContent.includes('Passed checks leave'))");
+    const opened = await js("return [...document.querySelectorAll('.ws-hint-pop')].some(p=>p.matches(':popover-open') && p.textContent.includes('Tasks go to Done on their own in the current branch'))");
     await capture("board-hint-open");
     failures.hint = [...(!hint.strip ? [] : ["the explanation still takes a strip"]), ...(!hint.review ? [] : ["the banner still says Review this task"]), ...(hint.button ? [] : ["no ? control"]), ...(opened ? [] : ["the ? did not open the explanation"])];
   }
@@ -518,9 +545,11 @@ return {label:(el.getAttribute('aria-label')||el.textContent).trim().slice(0,32)
     for (const [name, query, ready, steps, sizes] of FLOWS) {
       for (const [width, height] of sizes) {
         const key = `${name}-${width}x${height}`;
-        await open_page(query, width, height, ready);
-        for (const [script, after] of steps) { await js(script + ";return 1"); await wait(after); await sleep(.3); }
-        failures[key] = await check_strict(results, key);
+        await measure(results, failures, key, async () => {
+          await open_page(query, width, height, ready);
+          for (const [script, after] of steps) { await js(script + ";return 1"); await wait(after); await sleep(.3); }
+          failures[key] = await check_strict(results, key);
+        });
       }
     }
   }
@@ -563,21 +592,26 @@ return {label:(el.getAttribute('aria-label')||el.textContent).trim().slice(0,32)
     results.reveal = {path, tip, row, opened};
     failures.reveal = [...(path && path.role === "button" && !path.before ? [] : [`no cut path to press: ${json(path)}`]), ...(path && tip.open && tip.text === path.whole ? [] : [`the press did not show the whole path: ${json(tip)}`]),
       ...(row && opened && !opened.cut && opened.h > row.h ? [] : [`a cut check name did not open: ${json(row)} ${json(opened)}`])];
-    // Enabling Send and reopen changes the words in the composer's reason slot and moves nothing.
+    // Empty Send and reopen explains itself on press; once enabled it stops offering
+    // that reason. Neither state moves the controls relative to their row.
     await open_state("changes-git");
     await js(press(".rv-bar button", "Request changes…") + ";return 1");
     await wait(DIALOG_OPEN);
     await sleep(.3);
     // Measured within the composer's tools row: the field above grows with its text, so the dialog may grow, but the row must not change.
-    const boxes = "const bar=document.querySelector('dialog[open] .mc .c-bar'),f=bar.getBoundingClientRect();return {slot:bar.querySelector('.l-reason').textContent,bar:[f.width,f.height],boxes:[...bar.querySelectorAll('.btn, .ib')].map(b=>{const r=b.getBoundingClientRect();return [(b.getAttribute('aria-label')||b.textContent).trim(),r.left-f.left,r.top-f.top,r.width,r.height,b.getAttribute('aria-disabled')]})}";
+    const boxes = "const bar=document.querySelector('dialog[open] .mc .c-bar'),f=bar.getBoundingClientRect();return {bar:[f.width,f.height],boxes:[...bar.querySelectorAll('.btn, .ib')].map(b=>{const r=b.getBoundingClientRect();return [(b.getAttribute('aria-label')||b.textContent).trim(),r.left-f.left,r.top-f.top,r.width,r.height,b.getAttribute('aria-disabled'),b.dataset.why??null]})}";
     const before = await js(boxes);
+    await js("document.querySelector('dialog[open] .c-send').click();return 1");
+    await wait("document.querySelector('.l-why-tip:popover-open')");
+    const sendTip = await js(TIP_STATE);
+    await js("document.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));return 1");
     await js(FILL + ";return 1");
     await sleep(.3);
     const after = await js(boxes);
-    results.dialog_flip = {before, after};
-    const moved = before.boxes.filter((b, i) => !eq(b.slice(0, 5), after.boxes[i]?.slice(0, 5)) && i < after.boxes.length);
-    failures.dialog_flip = [...(before.slot === "Say what should change" ? [] : [`empty: slot says ${json(before.slot)}`]), ...(before.boxes.some(b => b[0] === "Send and reopen" && b[5] === "true") ? [] : ["Send and reopen is not a disabled button"]),
-      ...(after.boxes.some(b => b[0] === "Send and reopen" && b[5] === null) ? [] : ["Send and reopen did not enable"]), ...moved.map(m => `moved: ${json(m)}`), ...(after.slot !== before.slot ? [] : ["the footer kept the reason"]), ...(eq(after.bar, before.bar) ? [] : [`the footer changed size: ${json(before.bar)} ${json(after.bar)}`])];
+    results.dialog_flip = {before, after, tip: sendTip};
+    const moved = before.boxes.filter((b, i) => !eq(b.slice(0, 5), after.boxes[i]?.slice(0, 5)));
+    failures.dialog_flip = [...(sendTip.open && sendTip.text === "Say what should change" ? [] : [`empty: reason says ${json(sendTip)}`]), ...(before.boxes.some(b => b[0] === "Send and reopen" && b[5] === "true") ? [] : ["Send and reopen is not a disabled button"]),
+      ...(after.boxes.some(b => b[0] === "Send and reopen" && b[5] === null && b[6] === null) ? [] : ["Send and reopen did not enable and clear its reason"]), ...moved.map(m => `moved: ${json(m)}`), ...(after.boxes.length === before.boxes.length ? [] : ["the controls changed number"]), ...(eq(after.bar, before.bar) ? [] : [`the footer changed size: ${json(before.bar)} ${json(after.bar)}`])];
   }
 
   // Dark and light differ in colour only: every visible box must sit at the same place, at the same size, in both.
@@ -610,7 +644,11 @@ if(!card)return {problems:['the card is not on the page']};
 const r=card.getBoundingClientRect(),dock=document.querySelector('.dock');
 if(!(r.width>0&&r.height>0))problems.push('the card has no size');
 if(r.top<0||r.bottom>vh||r.left<0||r.right>vw)problems.push('the card is not whole in the window without scrolling '+JSON.stringify([r.left,r.top,r.right,r.bottom,vw,vh]));
-if(!dock)problems.push('no message box');else{const d=dock.getBoundingClientRect();if(r.bottom>d.top+1)problems.push('the card is not above the message box '+JSON.stringify([r.bottom,d.top]));if(!(d.top>=0&&d.bottom<=vh+1))problems.push('the message box is outside the window');
+if(!dock)problems.push('no message box');else{
+ const d=dock.getBoundingClientRect(),feed=document.querySelector('.timeline').getBoundingClientRect(),composer=dock.querySelector('.composer');
+ if(Math.abs(feed.bottom-d.top)>1)problems.push('the feed does not end at the dock '+JSON.stringify([feed.bottom,d.top]));
+ if(!composer||r.bottom>composer.getBoundingClientRect().top+1)problems.push('the card is not above the message box');
+ if(!(d.top>=0&&d.bottom<=vh+1))problems.push('the dock is outside the window');
  const ta=dock.querySelector('textarea,[contenteditable]');if(COMPOSER&&(!ta||ta.disabled||ta.getAttribute('aria-disabled')==='true'))problems.push('the message box is not enabled');}
 const buttons=[...card.querySelectorAll('button,a.btn,a[role=button]')];
 const names=buttons.map(b=>b.textContent.trim());
@@ -638,7 +676,7 @@ return {problems,names,card:[r.left,r.top,r.right,r.bottom],text:card.innerText}
     ["agent", "oh-agent", "quiet", [], true, false],
     ["manual", "oh-manual", "card", ["Ask the agent to try again", "Close as is…"], true, true],
   ];
-  async function owner_card_gate(results, failures, wanted, narrow) {
+  async function owner_card_gate(results, failures, wanted = () => true, narrow = sizes => sizes) {
     for (const [name, task, kind, buttons, composer, header] of OWNER_CARDS) {
       for (const [width, height] of wanted("owner-card-" + name) ? narrow([[1280, 800], MINIMUM]) : []) {
         const key = `owner-card-${name}-${width}x${height}`;
@@ -661,6 +699,17 @@ return {problems,names,card:[r.left,r.top,r.right,r.bottom],text:card.innerText}
       results[key] = result;
       await capture(key);
       failures[key] = result.problems;
+    }
+    // Moving away from the end makes Latest appear. Its opaque band may cover the feed only, never the pinned decision.
+    for (const [width, height] of wanted("owner-card-latest") ? narrow([MINIMUM, [1024, 768], [1280, 800]]) : []) {
+      const key = `owner-card-latest-${width}x${height}`;
+      await open_page(stale_automatic_conversation_at, width, height, STALE_CARD);
+      await js("const feed=document.querySelector('.timeline');feed.dispatchEvent(new WheelEvent('wheel',{deltaY:-80}));feed.scrollTop=0;return 1");
+      await wait("document.querySelector('.dock > .pill-band .new-pill')");
+      const overlap = await js("const pill=document.querySelector('.pill-band').getBoundingClientRect(),card=document.querySelector('.chat-review-hold').getBoundingClientRect(); return {pillBottom:pill.bottom,cardTop:card.top}");
+      const strict = await check_strict(results, key);
+      results[key].latest = overlap;
+      failures[key] = [...strict, ...(overlap.pillBottom <= overlap.cardTop + 1 ? [] : ["Latest covers the owner decision: " + json(overlap)])];
     }
   }
   // Every page's title band at the narrow sizes, with the window's own controls: nothing overlaps, is cut off or runs out of it.
@@ -758,11 +807,14 @@ return {problems,names,card:[r.left,r.top,r.right,r.bottom],text:card.innerText}
     for (const [name, query, ready, sizes] of SCREENS) {
       for (const [width, height] of sizes) {
         const key = `${name}-${width}x${height}`;
-        await open_page(query, width, height, ready);
-        failures[key] = await check_strict(results, key);
+        await measure(results, failures, key, async () => {
+          await open_page(query, width, height, ready);
+          failures[key] = await check_strict(results, key);
+        });
       }
     }
-    await title_gate(results, failures);
+    await measure(results, failures, "title-gate", () => title_gate(results, failures));
+    await measure(results, failures, "owner-card-gate", () => owner_card_gate(results, failures));
     // Enabling a control changes the words in its bar and nothing else.
     await open_state("primitives");
     const before = await js(STRICT);
@@ -773,16 +825,11 @@ return {problems,names,card:[r.left,r.top,r.right,r.bottom],text:card.innerText}
     const moved = Object.fromEntries(compared.filter(k => !eq(before.stable[k], after.stable[k])).map(k => [k, [before.stable[k], after.stable[k]]]));
     results.flip = {compared: compared.length, moved, slotsBefore: before.slots, slotsAfter: after.slots};
     failures.flip = [...(compared.length ? [] : ["nothing to compare"]), ...Object.keys(moved).map(k => `moved when enabled: ${k}`), ...(!eq(before.slots, after.slots) ? [] : ["the reason slot did not change"]), ...after.problems];
-    await reason_tip(results, failures);
-    await theme_gate(results, failures);
-    await flow_gate(results, failures);
-    await review_gate(results, failures);
-    await board_gate(results, failures);
-    await startup_gate(results, failures);
-    await keys_gate(results, failures);
-    await queue_gate(results, failures);
-    await output_gate(results, failures);
-    await fit_gate(results, failures);
+    for (const [name, gate] of [
+      ["reason-tip", reason_tip], ["themes", theme_gate], ["flows", flow_gate], ["review", review_gate],
+      ["board", board_gate], ["startup", startup_gate], ["keys", keys_gate], ["queue", queue_gate],
+      ["output", output_gate], ["fit", fit_gate],
+    ]) await measure(results, failures, name + "-gate", () => gate(results, failures));
     // A reason drawn over the button by a pseudo-element moves nothing, so only the reason rule can see it.
     await open_state("primitives");
     const boxes = await js(DISABLED_BOXES);
@@ -796,13 +843,15 @@ return {problems,names,card:[r.left,r.top,r.right,r.bottom],text:card.innerText}
     results.faults = {}; failures.faults = [];
     for (const [fault, state, style, script, expect] of FAULTS) {
       const [named, , size] = state.split(/(@)/);
-      await open_state(named, ...(size ? size.split("x").map(Number) : []));
-      if (style) await inject(style);
-      if (script) { await js(script + "return 1"); await sleep(.2); }
-      const problems = (await js(STRICT)).problems;
-      const hits = problems.filter(p => p.includes(expect));
-      results.faults[fault] = {state, reported: problems.length, matching: hits.length, first: hits.slice(0, 2)};
-      if (!hits.length) failures.faults.push(`not reported: ${fault} (expected '${expect}', got ${json(problems.slice(0, 3))})`);
+      await measure(results, failures, "fault-" + fault.replaceAll(" ", "-"), async () => {
+        await open_state(named, ...(size ? size.split("x").map(Number) : []));
+        if (style) await inject(style);
+        if (script) { await js(script + "return 1"); await sleep(.2); }
+        const problems = (await js(STRICT)).problems;
+        const hits = problems.filter(p => p.includes(expect));
+        results.faults[fault] = {state, reported: problems.length, matching: hits.length, first: hits.slice(0, 2)};
+        if (!hits.length) failures.faults.push(`not reported: ${fault} (expected '${expect}', got ${json(problems.slice(0, 3))})`);
+      });
     }
   }
 
@@ -1024,6 +1073,11 @@ return {problems,names,card:[r.left,r.top,r.right,r.bottom],text:card.innerText}
     return 0;
   } catch (error) {
     console.error(error.name + ": " + error.message);
+    if (!results.failures) {
+      results.aborted = error.name + ": " + error.message;
+      summary(results, failures);
+      await save(results);
+    }
     return 1;
   }
 });

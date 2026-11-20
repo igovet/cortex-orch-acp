@@ -2,6 +2,14 @@
 
 > Historical record. Module, test and script paths in this page that name `.py` files, `src/`, `tests/test_*.py` or the former Python scripts refer to the former Python runtime, which was removed on 2026-11-16; they are kept as dated history, no longer exist in the checkout and are not current commands. The behavior statements are unverified against the Rust runtime unless a Rust source path is given.
 
+## Conversation dock and the Latest band
+
+The feed's scroll box must end at the top of the dock. The dock anchors **Latest**
+at `bottom: 100%`, so the band covers the bottom of the feed without changing its
+scroll height. Keep pinned decisions inside the dock: placing one between the
+feed and the dock puts it under that band when the reader scrolls up. Measure
+that state with the [rendered layout geometry gate](verification.md#cortex-workspace-local-slice-checks-no-paid-plus-container).
+
 ## Final disclosure ownership
 
 Only structured `not_verified` supplies the runtime's gap section. Matching just

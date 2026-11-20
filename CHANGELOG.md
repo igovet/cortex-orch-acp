@@ -4,6 +4,8 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+Workspace keeps the pinned decision and composer together at the bottom of a conversation. Scrolling back puts **Latest** over the conversation instead of the decision. When a draft becomes read-only, its text stays visible and the reason is shown separately. The running-task label keeps room in the narrow sprint toolbar, routing selectors fit their columns, and New sprint no longer repeats its planning hint in a sticky footer.
+
 A task no longer hangs on a worker question whose engine session was lost. Such a question could not be answered and Resume could not revive it, yet the task kept waiting on it: the lost worker was not retried and the owner's queued messages were never delivered. The runtime now cancels that question, retries the worker and delivers queued messages at the next boundary. A question kept by Pause is unaffected.
 
 Workspace can close a **Not confirmed** task whose saved records disagree. **Close as is…** records the owner's decision without changing the run or replaying work. The task stays closed after restart, shows **Closed by you · Not verified**, and keeps the disagreement available in Diagnostics.

@@ -341,9 +341,11 @@ export type MessageComposerProps = {
  */
 export function MessageComposer(props: MessageComposerProps) {
   const off = () => props.off;
-  // A closed composer says why once, in its writing area; its disabled tools point there instead of repeating it below.
+  // Only an empty, closed writing area shows the reason as its placeholder. A retained draft must remain readable.
   const fieldId = props.inputId ?? createUniqueId();
-  const said = () => off() ? fieldId : undefined;
+  const offId = createUniqueId();
+  const offWithDraft = () => !!off() && props.text.length > 0;
+  const said = () => off() ? (offWithDraft() ? offId : fieldId) : undefined;
   const append = (spoken: string) => props.onText(props.text.trim() ? `${props.text.trimEnd()} ${spoken}` : spoken);
   const sendWhy = () => props.send ? (props.send.run ? props.send.why : off() ?? props.send.why) : undefined;
   const submit = () => { if (props.send && !sendWhy()) props.send.go(); };
@@ -364,7 +366,8 @@ export function MessageComposer(props: MessageComposerProps) {
     <AttachmentStatus a={props.files} />
     <MicBar mic={props.mic} onInsert={append} onInsertAndSend={insertAndSend()} />
     <AttachChips files={props.files.files()} onRemove={props.files.remove} />
-    <textarea id={fieldId} aria-label={props.label} placeholder={off() ?? props.placeholder} disabled={!!off()} value={props.text}
+    <Show when={offWithDraft()}><div id={offId} class="mc-effect">{off()}</div></Show>
+    <textarea id={fieldId} aria-label={props.label} aria-describedby={offWithDraft() ? offId : undefined} placeholder={off() ?? props.placeholder} disabled={!!off()} value={props.text}
       onInput={e => { props.onText(e.currentTarget.value); suggest.onInput(); }} onKeyDown={onKey}
       onKeyUp={e => { if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) suggest.onCaret(); }} onClick={() => suggest.onCaret()} onBlur={() => suggest.close()}
       onCompositionStart={() => suggest.onCompositionStart()} onCompositionEnd={() => suggest.onCompositionEnd()}
@@ -377,7 +380,7 @@ export function MessageComposer(props: MessageComposerProps) {
       <div class="c-end">
         {props.delivery}
         {props.extra}
-        <Show when={props.send}>{s => <SendButton label={s().label} why={sendWhy()} needs={s().needs} onClick={submit} describedBy={s().run ? undefined : (sendWhy() ? fieldId : undefined)} icon={s().run?.icon} />}</Show>
+        <Show when={props.send}>{s => <SendButton label={s().label} why={sendWhy()} needs={s().needs} onClick={submit} describedBy={s().run ? undefined : said()} icon={s().run?.icon} />}</Show>
       </div>
     </CBar>
   </div>;
@@ -445,7 +448,7 @@ function Delivery(props: { value: "send_now" | "queue"; onChange: (value: "send_
  * Stop, Resume and Start stay in the task's "…" menu too. While a question waits, it folds to one line so a general message is
  * never mistaken for an answer. The dock stands below the conversation in the panel's column, never over it.
  */
-export function Composer(props: { model: Accessor<SessionModel>; pill?: JSX.Element; team?: JSX.Element; folded?: boolean }) {
+export function Composer(props: { model: Accessor<SessionModel>; team?: JSX.Element; folded?: boolean }) {
   const ws = useWs();
   const m = () => props.model();
   const id = () => m().view.id;
@@ -564,8 +567,7 @@ export function Composer(props: { model: Accessor<SessionModel>; pill?: JSX.Elem
   createEffect(() => { if (!props.folded) setOpened(false); });
   let input: HTMLTextAreaElement | undefined;
   createEffect(() => { if (planning() ? readOnly() : mode() !== "live" && mode() !== "paused") mic.stop(); });
-  return <div class="dock">
-    {props.pill}
+  return <>
     <Show when={showQueue()}>
       <div class="queue" role="group" aria-label="Queued messages, not sent">
         <div class="queue-h"><I n="queue" s={14} class="faint" />Queued {queueIds().length + queueSending().length}, not sent yet<span class="warn">Saved on this machine · not sent</span></div>
@@ -599,5 +601,5 @@ export function Composer(props: { model: Accessor<SessionModel>; pill?: JSX.Elem
         send={control() ? { label: control()!.label, needs: control()!.needs, why: control()!.why, go: control()!.go, run: { icon: control()!.icon } }
           : { label: plane().label, needs: plane().needs, why: sendWhy(), go: () => send(text()), insertAndSend: planning() || mode() === "live" || mode() === "review" || mode() === "paused" ? send : undefined }} />
     </Show>
-  </div>;
+  </>;
 }

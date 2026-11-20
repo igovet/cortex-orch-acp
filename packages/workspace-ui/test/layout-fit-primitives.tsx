@@ -1,5 +1,5 @@
 import { createSignal, Show, type JSX } from "solid-js";
-import { Action, ActionBar, Page, Region, Row, SectionHead, StatusLane, Strip, Toolbar } from "../src/layout";
+import { Action, ActionBar, Page, ReasonTip, Region, Row, SectionHead, StatusLane, Strip, Toolbar } from "../src/layout";
 import { Modal } from "../src/kit";
 
 // Every primitive at once, for the rendered layout gate. Real components and real sheets; only the words here are invented.
@@ -73,5 +73,6 @@ export function Primitives(props: { stress: boolean; dialog: boolean; pane: numb
         <Action kind="primary" why={why(long("Say what should change", REASON_LONG))}>Send and reopen</Action>
       </ActionBar>
     </Modal>
+    <ReasonTip />
   </div>;
 }

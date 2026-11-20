@@ -138,7 +138,7 @@ export function reviewWorld(): WorkspaceState {
     automaticQueue: {
       kind: "settlement_blocked", taskId: "auto-hold", code: "automatic_acceptance_blocked",
       reason: "Automatic acceptance is waiting for the required check: Paid browser task on the staging host.",
-      needsOwner: true,
+      needsOwner: true, nextActor: "owner", ownerActions: ["close_as_is"], asks: ["Close without running the required check"],
     }, conversation: [],
   }, {
     id: "auto-stale-sprint", projectId: "nogit", description: "Automatic queue with a stale accepted result",
@@ -149,6 +149,7 @@ export function reviewWorld(): WorkspaceState {
     automaticQueue: {
       kind: "settlement_blocked", taskId: "auto-stale", code: "stale_result",
       reason: "The accepted result is stale because the workspace changed.", needsOwner: true,
+      nextActor: "owner", ownerActions: ["allow_repair", "close_as_is"], asks: ["Let the agent reconcile the changed worktree and verify a new result"],
     }, conversation: [],
   }, {
     id: "auto-owner-hold-sprint", projectId: "nogit", description: "Automatic queue with an owner hold",
@@ -156,7 +157,7 @@ export function reviewWorld(): WorkspaceState {
     planning: "created", materializedVersion: 1,
     plan: { version: 1, items: [{ key: "auto-owner-hold", title: TITLE, description: TITLE, dependsOn: [] }] },
     taskIds: ["auto-owner-hold"], queueState: "paused", pauseReason: "Automatic acceptance is waiting for an owner decision.",
-    automaticQueue: { kind: "settlement_blocked", taskId: "auto-owner-hold", code: "task_content_unknown", reason: "Automatic acceptance is waiting for an owner decision before the queue can settle. The runtime could not confirm the task content after the worker result.", needsOwner: true },
+    automaticQueue: { kind: "settlement_blocked", taskId: "auto-owner-hold", code: "task_content_unknown", reason: "Automatic acceptance is waiting for an owner decision before the queue can settle. The runtime could not confirm the task content after the worker result.", needsOwner: true, nextActor: "owner", ownerActions: ["allow_repair", "close_as_is"], asks: ["Let the agent confirm the task content and verify a new result"] },
     conversation: [],
   }, {
     id: "auto-finish-hold-sprint", projectId: "p", description: "Automatic finish awaiting owner check acknowledgement",
@@ -164,7 +165,7 @@ export function reviewWorld(): WorkspaceState {
     planning: "created", materializedVersion: 1,
     plan: { version: 1, items: [{ key: "auto-finish-hold", title: TITLE, description: TITLE, dependsOn: [] }] },
     taskIds: ["auto-finish-hold"], queueState: "paused", pauseReason: "The staging check requires owner acknowledgement.",
-    automaticQueue: { kind: "owner_integration", taskId: "auto-finish-hold", code: "owner_accepted", reason: "The staging check requires owner acknowledgement.", needsOwner: true },
+    automaticQueue: { kind: "owner_integration", taskId: "auto-finish-hold", code: "owner_accepted", reason: "The staging check requires owner acknowledgement.", needsOwner: true, nextActor: "owner", ownerActions: ["allow_finish", "close_as_is"], asks: ["Acknowledge the staging check and let Automatic finish on main"] },
     conversation: [],
   }];
   s.sessions = [{ ...emptySession("rg"), changes: { files: FILES.length, add: FILES.reduce((n, f) => n + f.add, 0), del: FILES.reduce((n, f) => n + f.del, 0) } }];

@@ -536,7 +536,7 @@ describe("dialogs and comments", () => {
       } as unknown as Ws;
       openDialog = setDialog;
       return <WsContext.Provider value={ws}><ReviewDialogs /><div id="diff"><Diff file={{ path: "a.ts", hunks: [{ header: "@@", lines: [{ kind: "add", old: null, new: 1, text: "x" }] }] } as never} layout="unified" taskId="t" comments={options.comments ?? []} /></div>
-        {options.composer ? <Composer model={() => sessionModel(store.index(), "t")!} /> : null}</WsContext.Provider>;
+        {options.composer ? <div class="dock"><Composer model={() => sessionModel(store.index(), "t")!} /></div> : null}</WsContext.Provider>;
     }, root);
     return { script, open: (d: WsDialog) => openDialog(d) };
   }

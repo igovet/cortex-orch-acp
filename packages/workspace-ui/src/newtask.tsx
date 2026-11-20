@@ -218,10 +218,10 @@ export function NewPage(props: { route: Extract<Route, { name: "new" }> }) {
       </div>
     </Show>
 
-    <ActionBar class="create-foot" hint={kind() === "task" ? (ws.store.mode === "real" ? "Save draft saves the task without starting it." : ws.t("newTaskNote")) : "Start planning plans the sprint on the chosen model."}>
-      <Show when={kind() === "task"}>
+    <Show when={kind() === "task"}>
+      <ActionBar class="create-foot" hint={ws.store.mode === "real" ? "Save draft saves the task without starting it." : ws.t("newTaskNote")}>
         <button class="btn btn-line btn-lg" {...ws.needs("start_task")} onClick={e => { if (!ws.gate("start_task")) submit(true, e.currentTarget); }}><I n="play" />Start now</button>
-      </Show>
-    </ActionBar>
+      </ActionBar>
+    </Show>
   </div></div>;
 }

@@ -19,7 +19,7 @@
   <strong>Recommended client: <a href="https://github.com/getpaseo/paseo">Paseo</a></strong>
 </p>
 
-Conversation waits explain when decision details are unavailable and point to Answer in the header. Open decisions also render before their timeline reference arrives. Sent attachment chips tolerate the whitespace normalization used by runtime history.
+Conversation waits explain when decision details are unavailable and point to Answer in the header. Open decisions also render before their timeline reference arrives. In Workspace, a pinned decision stays above the message box even when **Latest** appears over the conversation. If a draft becomes read-only, the composer keeps the text and displays the reason separately. Sent attachment chips tolerate the whitespace normalization used by runtime history.
 
 In Workspace, Changes excludes target-only changes after **Update from target**, including when **Finish merge** confirms an update you committed in Git. See [IDE and Git](docs/cortex-workspace/ide-and-git.md).
 

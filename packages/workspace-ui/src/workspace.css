@@ -1107,6 +1107,11 @@ button.step-t { text-align: left; font: inherit; }
   .sp-plan .pt-row:not(.ws-plain) { grid-template-columns: 22px minmax(0, 1fr) 104px; }
   .sp-plan .pt-row > .ac, .sp-plan .pt-row.th:not(.ws-plain) > :nth-child(3) { display: none; }
 }
+/* Before the queue toolbar collapses, let its branch chip shorten further rather than leaving the running task a single letter. */
+@container page (width < 800px) {
+  .l-toolbar[aria-label="Sprint queue"] .l-branch { max-width: 8ch; }
+}
+
 /* New task: the choice row is a toolbar on the form's own edge, and the foot is the page's bar, pinned under the form. */
 .create-top.l-toolbar { border-bottom: 0; padding-inline: 0; }
 .create-foot.l-bar { position: sticky; bottom: 0; z-index: 1; padding-inline: 0; border-top: 1px solid var(--line); background: var(--bg-canvas); }
@@ -1277,7 +1282,7 @@ button.step-t { text-align: left; font: inherit; }
 .ws-sent-meta .act { display: inline-flex; gap: 8px; }
 .qrow[data-sent] .qrow-end .cap { white-space: nowrap; }
 
-.chat-review-hold { flex: 0 0 auto; width: 100%; max-width: 830px; margin-inline: auto; padding: 0 35px 8px; }
+.dock > .chat-review-hold { margin-bottom: 8px; }
 .chat-review-hold .rv-why { white-space: normal; overflow-wrap: anywhere; }
 /* One box holds the decision and its buttons, so the buttons read as part of it and never float beside the message box. */
 .chat-review-box { border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel); min-width: 0; }
@@ -1288,4 +1293,4 @@ button.step-t { text-align: left; font: inherit; }
 .chat-review-asks { margin: 2px 0 0; padding-left: 20px; list-style: disc; }
 .chat-review-asks li { margin: 2px 0; line-height: 1.4; }
 .chat-review-decision .chat-review-reason { font-weight: 500; }
-.ws-hold-quiet { flex: 0 0 auto; width: 100%; max-width: 830px; margin-inline: auto; padding: 0 35px 8px; box-sizing: border-box; }
+.dock > .ws-hold-quiet { margin-bottom: 8px; }

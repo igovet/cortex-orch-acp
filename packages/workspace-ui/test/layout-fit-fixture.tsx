@@ -145,7 +145,7 @@ const s = scriptedTransport({
   "machine.call": message => {
     const { op, params } = message as { op: string; params: { file: string } };
     if (op === "repo.snapshot") return { ok: true, result: repoFacts };
-    if (op === "product.read") { refusedRead(); const allSprints = [sprint, pausedSprint, ...boardSprints, ...graphs.map(x => x.sprint)]; const sprints = query.has("sidebarRows") ? allSprints.filter(s => s.id === "b-auto-cont" || s.id === "b-auto-files") : allSprints; return { ok: true, result: structuredClone({ tasks: Object.assign({ "task-1": { planning: true }, ...boardOverlays }, ...graphs.map(x => x.overlays)), sprints, messages: queued }) }; }
+    if (op === "product.read") { const allSprints = [sprint, pausedSprint, ...boardSprints, ...graphs.map(x => x.sprint)]; const sprints = query.has("sidebarRows") ? allSprints.filter(s => s.id === "b-auto-cont" || s.id === "b-auto-files") : allSprints; return { ok: true, result: structuredClone({ tasks: Object.assign({ "task-1": { planning: true }, ...boardOverlays }, ...graphs.map(x => x.overlays)), sprints, messages: queued }) }; }
     if (op === "workers") return { ok: true, result: [] };
     if (op === "overview") return { ok: true, result: { name: "Desk", retentionDays: 30, autoArchiveDays: 7, worktreeRoot: "~/t", version: "1", diskMb: 2, storage: [], cleanup: null, diagnostics: null } };
     if (op === "config.read") return { ok: true, result: { config, connections: [], tokens: {}, usage: [] } };
@@ -157,6 +157,15 @@ const s = scriptedTransport({
 if (query.get("world") === "review") {
   // Results, Changes, Ready to merge and their dialogs, from one projection: what the real port would hand the screens.
   const port = scriptedPort({ capabilities: { everything: true, operations: [] } });
+  const command = port.port.command;
+  port.port.command = envelope => {
+    const reply = command(envelope);
+    const payload = envelope.payload;
+    if (payload.type === "allow_queue_repair" && payload.sprintId === `${payload.taskId}-sprint` &&
+        ((payload.taskId === "auto-stale" && payload.code === "stale_result") ||
+         (payload.taskId === "auto-owner-hold" && payload.code === "task_content_unknown"))) port.receipt();
+    return reply;
+  };
   history.replaceState(null, "", (query.get("route") ?? "/m/<M>/t/rg/changes").replaceAll("<M>", LOCAL_MACHINE_ID));
   render(() => <Workspace port={port.port} />, document.getElementById("root")!);
   setTimeout(() => port.emit(projection("1", reviewWorld())), 0);
@@ -215,8 +224,16 @@ if (query.get("world") === "review") {
       select: async () => undefined, rename: async () => undefined, forget: async () => undefined, retry: async () => undefined, transport: () => s.transport });
     // `menu`: the same app with its menu open, to compare the two heads.
     if (query.has("menu")) setTimeout(() => document.querySelector<HTMLElement>("[aria-label=\"Menu\"]")?.click(), 1500);
-  } else
-  render(() => <Workspace port={createRealPort({ transport: s.transport, actorId: "owner", registry: true })} terminal={terminal} chrome={startup || query.has("chrome") ? chrome : undefined} logo={startup ? <img src={logo} alt="" width="96" height="96" /> : undefined} />, document.getElementById("root")!);
+  } else {
+    const port = createRealPort({ transport: s.transport, actorId: "owner", registry: true });
+    // Port-internal project failures can now yield an incomplete projection. Refuse the
+    // coherent facts read itself to exercise the startup failure, while capabilities still answer.
+    if (startup === "failed") {
+      const read = port.query.bind(port);
+      port.query = (op, params) => { if (op === "project.facts") refusedRead(); return read(op, params); };
+    }
+    render(() => <Workspace port={port} terminal={terminal} chrome={startup || query.has("chrome") ? chrome : undefined} logo={startup ? <img src={logo} alt="" width="96" height="96" /> : undefined} />, document.getElementById("root")!);
+  }
 }
 // `stopq`: the waiting task's question is the runtime's stop question, in Russian, with a long consequence under each answer,
 // a Recommended mark and the targets it names (as the live run showed it breaking one word a line).

@@ -354,11 +354,6 @@ function Waiting(props: { m: SessionModel }) {
   </div>;
 }
 
-/** The dock of a task that takes no message: the team bar below the feed, and the follow pill over the feed just above it. */
-function PlainDock(props: { children: JSX.Element }) {
-  return <div class="dock">{props.children}</div>;
-}
-
 /** What each owner action of a hold is called on its button. */
 const HOLD_ACTION_LABEL: Record<OwnerHoldAction, string> = {
   allow_finish: "Allow Automatic to finish…", accept_result: "Accept with recorded checks…", allow_repair: "Let the agent fix it",
@@ -650,9 +645,12 @@ export function Conversation(props: { model: Accessor<SessionModel>; now: number
         </Show>
       </div>
     </div>
-    <Show when={props.route && !planning()}><OwnerHoldCard m={m()} route={props.route!} /><UnconfirmedCard m={m()} route={props.route!} /></Show>
-    <Show when={!ws.can(capabilityOf("send_message"))}><PlainDock><Pill follow={follow} />{team()}</PlainDock></Show>
-    <Show when={ws.can(capabilityOf("send_message"))}><Composer model={props.model} pill={<Pill follow={follow} />} team={team()} folded={m().open.some(d => d.kind === "question")} /></Show>
+    {/* Everything pinned below the feed is in the dock. Latest hangs over the feed, not over a decision card. */}
+    <div class="dock">
+      <Pill follow={follow} />
+      <Show when={props.route && !planning()}><OwnerHoldCard m={m()} route={props.route!} /><UnconfirmedCard m={m()} route={props.route!} /></Show>
+      <Show when={ws.can(capabilityOf("send_message"))} fallback={team()}><Composer model={props.model} team={team()} folded={m().open.some(d => d.kind === "question")} /></Show>
+    </div>
   </section>;
 }
 

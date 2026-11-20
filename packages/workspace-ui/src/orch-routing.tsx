@@ -78,7 +78,7 @@ function WorkKinds(props: { c: Ctx }) {
   // One list for every reader, held as the old objects while it reads the same: the chips and the open Add menu are not drawn
   // again at each machine read, and `preferred().includes(x)` compares the same objects.
   const models = createMemo<{ engine: EngineKey; id: string; label: string }[]>(prev => share(prev, ENGINE_KEYS.flatMap(e => r().engines[e].enabled.map(id => ({ engine: e, id, label: modelLabel(cat(), e, id) })))), []);
-  const lean = (kind: string, builtIn: EngineKey | null) => <Pick id={`m-lean-${slug(kind)}`} label={`Lean to engine for ${kind === "*" ? "all kinds" : kindLabel(kind)}`} width="160px" value={kind in r().affinity ? r().affinity[kind] ?? "none" : "builtin"} disabled={props.c.off()}
+  const lean = (kind: string, builtIn: EngineKey | null) => <Pick id={`m-lean-${slug(kind)}`} label={`Lean to engine for ${kind === "*" ? "all kinds" : kindLabel(kind)}`} width="min(160px, 100%)" value={kind in r().affinity ? r().affinity[kind] ?? "none" : "builtin"} disabled={props.c.off()}
     options={[{ id: "builtin", label: builtIn ? `Built in (${engineLabel(builtIn)})` : "Built in (no lean)" }, ...ENGINES.map(e => ({ id: e.id as string, label: e.label })), { id: "none", label: "No lean" }]} onPick={x => props.c.set(setAffinity(r(), kind, x === "builtin" ? "builtin" : x === "none" ? null : x as EngineKey))} />;
   return <>
     <div class="surface"><div class="gt">
