@@ -8,7 +8,7 @@ Updating a task from its target advances only the Changes comparison baseline, n
 
 A skipped check in Workspace result facts records its reason in `detail`, including when paid qualification was not requested. The row is not execution evidence and grants no permission to rerun a prohibited command.
 
-Conversation fallback text grants no decision authority. Answers still require the existing decision identity, capability and runtime validation.
+Conversation fallback text grants no decision authority. Answers still require the existing decision identity, capability and runtime validation. For route consent, an option plus a comment must match exactly one recorded option in the stored answer format. The comment cannot grant another route or set effort, but recognized refusals still apply.
 
 Workspace model catalogues distinguish connection readiness from policy permission:
 engine/model denials make routes unselectable for new work. Displayed unknown

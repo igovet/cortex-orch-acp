@@ -71,7 +71,9 @@ caps, but never hard owner authorization or engine availability. Refusals are
 visible and never silently substitute another model. Effort remains supported
 and bounded by the configured per-model policy. `list_route_options` is a
 read-only snapshot for coordinators; dispatch validates current eligibility
-again.
+again. A recorded option with an added comment uses the option label for the
+route and effort. The comment remains in the answer, and any refusal recognized
+by the routing grammar still applies.
 
 The runtime-created mandatory review node has no plan hint. When a user message
 names a model for review or audit ("Ревью делай через sonnet", "за аудит отвечает

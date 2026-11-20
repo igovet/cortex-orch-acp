@@ -299,6 +299,15 @@ impl RouteResolver {
                     grant = None;
                 }
             }
+            // Refusals above see the entire answer. Only the selected label
+            // may supply a positive route, purpose, or effort.
+            let (source, text) = if let Some(label) = &input.option_with_comment {
+                let source = plain(label);
+                let text = normalize_effort(&source, &names);
+                (source, text)
+            } else {
+                (source, text)
+            };
             let mut purpose = BTreeMap::new();
             let mut direct = BTreeMap::new();
             for sentence in g::sentences(&text) {

@@ -1297,9 +1297,14 @@ The bounded Rust recognizer has static, source-labelled table tests in
 `native_routes::consent_tests::legacy_consent_case_matrix`. They cover English
 and Russian requests/refusals, restrictive selections, passive requirements,
 role-purpose binding, selected versus merely mentioned models, opaque identity
-punctuation and attached effort. A chosen answer may match its recorded option
-with normalized whitespace, case and terminal `.`/`!`; unselected options and
-question wording still grant nothing. Newer direct owner messages and answers
+punctuation and attached effort. A whole answer may match an option with normalized
+whitespace, case and terminal `.`/`!`. For an answer with a comment, the stored
+form is the exact option label, a blank line, and nonempty comment text. There
+must be exactly one matching option; a mere mention or a partial label does not
+count. The full answer remains recorded. Only the option label can grant a route
+or specify its scope or effort; the refusal grammar still reads the full answer
+and can block or revoke consent. Unselected options and question wording still
+grant nothing. Newer direct owner messages and answers
 retain their own source identities; imported history cannot preserve an older
 user grant or hide an earlier direct refusal of a project requirement.
 

@@ -747,13 +747,19 @@ impl Fixture {
         );
     }
     fn task(&self, goal: &str) -> cortex_core::Store {
+        self.task_with_owner(goal).0
+    }
+    fn task_with_owner(
+        &self,
+        goal: &str,
+    ) -> (cortex_core::Store, cortex_core::ownership::OwnerEpoch) {
         use cortex_core::{lifecycle::TaskMachine, OpenMode, ProjectKey, Store, StoreChannel};
         let store = Store::open(
             ProjectKey::new(self.base.join("project"), StoreChannel::Dev).unwrap(),
             OpenMode::Initialize,
         )
         .unwrap();
-        TaskMachine::new(&store)
+        let owner = TaskMachine::new(&store)
             .create("t_fixture", goal, "owner")
             .unwrap();
         store
@@ -762,7 +768,7 @@ impl Fixture {
                 Ok(())
             })
             .unwrap();
-        store
+        (store, owner)
     }
     fn evidence(&self, store: &cortex_core::Store) -> cortex_core::routing::Evidence {
         store
@@ -1649,6 +1655,104 @@ fn legacy_preview_fields_and_dispatch_agree_table() {
             p[0]["project_instruction"]
         );
         assert_ne!(dispatch.model(), "opus");
+    }
+}
+
+#[test]
+fn recorded_route_option_comment_grants_only_the_selected_route() {
+    let options = json!(["Opus", "Sonnet"]);
+    for (answer, labels, selected_option, expected) in [
+        (
+            "Opus\n\nUse Sonnet for the audit; keep the report short.",
+            options.clone(),
+            true,
+            Some("opus"),
+        ),
+        (
+            "Opus\n\nDo not use Opus for the audit. Use Sonnet for the audit.",
+            options.clone(),
+            true,
+            None,
+        ),
+        (
+            "Use Sonnet for the audit.",
+            options.clone(),
+            false,
+            Some("sonnet"),
+        ),
+        ("Opus is an option.", options.clone(), false, None),
+        ("Opus\nKeep the report short.", options.clone(), false, None),
+        (
+            "Opus\n\nKeep the report short.",
+            json!(["Opus", "Opus\n\nKeep the report short."]),
+            false,
+            None,
+        ),
+        ("Opus", json!(["Opus", "opus."]), false, None),
+    ] {
+        let f = Fixture::new();
+        f.parity();
+        use cortex_core::{
+            lifecycle::{skill_proposals, waits, FoundationGuards, TaskMachine},
+            TaskState,
+        };
+        let (store, owner) = f.task_with_owner("Audit.");
+        TaskMachine::new(&store)
+            .transition(
+                "t_fixture",
+                &owner,
+                "plan",
+                TaskState::Planning,
+                None,
+                &FoundationGuards,
+            )
+            .unwrap();
+        let question = store
+            .write(|db| {
+                let receipt = skill_proposals::request(
+                    db,
+                    &f.base.join("project"),
+                    "t_fixture",
+                    "fixture-coordinator",
+                    "ask-audit-route",
+                    &json!({"question":"Which model for the audit?", "options":labels}),
+                )?;
+                let id = receipt["question_id"].as_str().unwrap();
+                assert!(waits::answer_tx(db, "t_fixture", id, answer, "text", None)?);
+                Ok(id.to_owned())
+            })
+            .unwrap();
+        let e = f.evidence(&store);
+        let input = e.inputs.last().unwrap();
+        assert_eq!(input.text, answer);
+        assert_eq!(input.selected_option, selected_option, "{answer:?}");
+        assert_eq!(
+            input.option_with_comment.as_deref(),
+            selected_option.then_some("Opus"),
+            "{answer:?}"
+        );
+        let route = f
+            .load()
+            .unwrap()
+            .choose(
+                "worker-security-auditor",
+                &json!({"model":"auto"}),
+                &e,
+                false,
+                None,
+            )
+            .unwrap();
+        let consent = &route.decision["user_model_request"];
+        if let Some(model) = expected {
+            assert_eq!(route.model(), model, "{answer:?}");
+            assert_eq!(
+                consent["source_ref"],
+                format!("{question}:answer"),
+                "{answer:?}"
+            );
+        } else {
+            assert!(consent.is_null(), "{answer:?}: {consent}");
+        }
     }
 }
 

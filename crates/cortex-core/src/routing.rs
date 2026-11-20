@@ -53,6 +53,8 @@ pub struct UserInput {
     /// Only a recorded answer may select a bare model name.
     pub question: Option<String>,
     pub selected_option: bool,
+    /// The option label alone for an answer with a retained comment in `text`.
+    pub option_with_comment: Option<String>,
 }
 pub struct Instruction {
     pub path: String,
@@ -73,6 +75,35 @@ fn choice(text: &str) -> String {
         .trim_end_matches(['.', '!'])
         .to_string()
 }
+/// Match the two stored forms: a whole answer or the exact label followed by
+/// the blank line that `workspace_control` puts before the owner's comment.
+fn selected_choice<'a>(text: &str, options: &'a [Value]) -> (bool, Option<&'a str>) {
+    let normalized = choice(text);
+    if normalized.is_empty() {
+        return (false, None);
+    }
+    let mut matches = options
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(|label| {
+            if choice(label) == normalized {
+                Some(None)
+            } else if !label.trim().is_empty()
+                && text
+                    .strip_prefix(label)
+                    .and_then(|tail| tail.strip_prefix("\n\n"))
+                    .is_some_and(|comment| !comment.trim().is_empty())
+            {
+                Some(Some(label))
+            } else {
+                None
+            }
+        });
+    match (matches.next(), matches.next()) {
+        (Some(label), None) => (true, label),
+        _ => (false, None),
+    }
+}
 /// Exact recorded owner input only. Question wording is not appended to answer text.
 pub fn evidence(db: &Connection, task: &str, root: &Path) -> CoreResult<Evidence> {
     let mut result = Evidence::default();
@@ -88,6 +119,7 @@ pub fn evidence(db: &Connection, task: &str, root: &Path) -> CoreResult<Evidence
             source_ref: format!("{task}:goal"),
             question: None,
             selected_option: false,
+            option_with_comment: None,
         },
     )];
     let mut stmt = db.prepare("SELECT id,payload_json,created_at FROM runtime_events WHERE task_id=? AND type='USER_STEERING' ORDER BY id")?;
@@ -108,6 +140,7 @@ pub fn evidence(db: &Connection, task: &str, root: &Path) -> CoreResult<Evidence
                     source_ref: format!("event:{id}"),
                     question: None,
                     selected_option: false,
+                    option_with_comment: None,
                 },
             ));
         }
@@ -124,18 +157,10 @@ pub fn evidence(db: &Connection, task: &str, root: &Path) -> CoreResult<Evidence
         ))
     })? {
         let (id, question, options, text, time) = row?;
-        let selected_option = options
-            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-            .and_then(|v| {
-                v.as_array().map(|a| {
-                    a.iter().any(|x| {
-                        x.as_str().is_some_and(|option| {
-                            !choice(&text).is_empty() && choice(option) == choice(&text)
-                        })
-                    })
-                })
-            })
-            .unwrap_or(false);
+        let options = options.and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok());
+        let (selected_option, option_with_comment) = options
+            .as_deref()
+            .map_or((false, None), |options| selected_choice(&text, options));
         inputs.push((
             time,
             UserInput {
@@ -143,6 +168,7 @@ pub fn evidence(db: &Connection, task: &str, root: &Path) -> CoreResult<Evidence
                 source_ref: format!("{id}:answer"),
                 question: Some(question),
                 selected_option,
+                option_with_comment: option_with_comment.map(str::to_owned),
             },
         ));
     }

@@ -103,6 +103,7 @@ fn legacy_consent_case_matrix() {
             source_ref: "goal".into(),
             question: c["question"].as_str().map(str::to_string),
             selected_option: c["selected"] == true,
+            option_with_comment: None,
         });
         if let Some(steps) = c["steps"].as_array() {
             for (i, s) in steps.iter().enumerate() {
@@ -111,6 +112,7 @@ fn legacy_consent_case_matrix() {
                     source_ref: format!("step:{i}"),
                     question: None,
                     selected_option: false,
+                    option_with_comment: None,
                 });
             }
         }

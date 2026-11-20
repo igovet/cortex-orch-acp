@@ -23,6 +23,8 @@ Conversation waits explain when decision details are unavailable and point to An
 
 In Workspace, Changes excludes target-only changes after **Update from target**, including when **Finish merge** confirms an update you committed in Git. See [IDE and Git](docs/cortex-workspace/ide-and-git.md).
 
+In Workspace, you can add a comment to a route choice without changing the selected route. Explicit refusals still apply. See [routing and consent](docs/project/native-incoming-acp.md#native-routing-and-retained-consent).
+
 Workspace result checks list recorded skips with their reasons, including checks that required authorization and did not run.
 
 Workspace engine limits retain connected engines with an explicit Unavailable state when no provider usage is observed. Coordinator choices exclude switched-off engines. See [desktop engine controls](docs/cortex-workspace/maintenance-and-controls.md).
