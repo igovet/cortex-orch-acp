@@ -108,6 +108,27 @@ it("opens a 22,000-row conversation on its latest part in a bounded number of re
   expect(session()!.historyEarlier?.state).toBe("available");
 });
 
+it("reads a 20,050-entry conversation to the end through forward history pages", async () => {
+  const svc = service({ backward: false });
+  // Each row is a separate owner message so the normal transcript folding does not hide lost rows.
+  const expected = Array.from({ length: 20_050 }, (_, i) => `Message ${i + 1}`);
+  for (const text of expected) svc.add("user", text);
+
+  const { session, timeline } = open(svc.s);
+  const entries = () => timeline().filter(e => e.id.startsWith("history:"));
+  // The port publishes the collected forward read as a unit. Wait for publication, not for the expected count.
+  await vi.waitFor(() => expect(entries().length).toBeGreaterThan(0), { timeout: 4000 });
+
+  expect(entries()).toHaveLength(expected.length);
+  expect(entries().at(-1)).toMatchObject({ kind: "said", text: "Message 20050" });
+  expect(entries().map(e => e.kind === "said" ? e.text : null)).toEqual(expected);
+  expect(session()!.historyEarlier).toBeUndefined();
+  expect(svc.reads[0]).toEqual({ operation: "history.earlier", cursor: null });
+  expect(svc.reads[1]).toEqual({ operation: "history.page", cursor: null });
+  expect(svc.reads.slice(2).length).toBeGreaterThan(0);
+  expect(svc.reads.slice(2).every(r => r.operation === "history.page" && r.cursor !== null)).toBe(true);
+});
+
 it("puts each earlier part before the rows held, keeps every entry already shown, and stops at the beginning", async () => {
   const svc = service();
   long(svc, 700);

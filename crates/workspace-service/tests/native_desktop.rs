@@ -7,6 +7,8 @@ mod hermetic;
 mod namespace_host;
 #[path = "../../cortex-engine/src/bin/fake-engine.rs"]
 mod peer;
+#[path = "support/service_regressions.rs"]
+mod service_regressions;
 use cortex_core::{lifecycle::TaskMachine, CoreResult, OpenMode, Store};
 use cortex_engine::environment::{EngineKind, LaunchSpec as EngineLaunch};
 use namespace_host::native_effects;
@@ -45,10 +47,12 @@ impl NativeRoutes for Routes {
         let exe = std::env::current_exe()?;
         // The installed gate launches the packaged peer as `desktop-auto`, which infers the role
         // from each prompt; the batch journey exercises that same peer mode.
-        let auto =
-            std::fs::read_to_string(root.join("scenario.txt")).is_ok_and(|s| s.trim() == "batch");
+        let scenario = std::fs::read_to_string(root.join("scenario.txt")).unwrap_or_default();
         let mode = match role {
-            _ if auto => "desktop-auto",
+            "orchestrator" if scenario.starts_with("service-regression-") => {
+                "service-regression-peer"
+            }
+            _ if scenario.trim() == "batch" => "desktop-auto",
             "orchestrator" => "desktop-coordinator",
             "worker-code-reviewer" => "desktop-reviewer",
             _ => "desktop-worker",
@@ -3421,6 +3425,15 @@ fn main() {
         );
     }
     let mode = std::env::args().nth(1).unwrap_or_default();
+    if mode == "service-regression-peer" {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(service_regressions::peer());
+        return;
+    }
+    if service_regressions::run(&mode) {
+        return;
+    }
     if mode.starts_with("desktop-") || mode.starts_with('/') {
         peer::main();
         return;
@@ -3438,6 +3451,12 @@ fn main() {
         });
         println!("owner attachments: draft Start, follow-up message and answer retained and delivered to the engine");
         return;
+    }
+    if mode.is_empty() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            service_regressions::batch().await;
+            service_regressions::sprint().await;
+        });
     }
     // Coordinator admission and configure need no namespace sandbox, so the
     // saved-settings Start regression runs on every host.
@@ -3460,6 +3479,9 @@ fn main() {
         return;
     }
     tokio::runtime::Runtime::new().unwrap().block_on(async {
+        if mode.is_empty() {
+            service_regressions::verification().await;
+        }
         if mode == "batch-probe" {
             tokio::time::timeout(Duration::from_secs(35), controls("batch", "answer_batch"))
                 .await
