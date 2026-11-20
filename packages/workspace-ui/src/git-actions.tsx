@@ -216,20 +216,25 @@ export function CommitDialog(props: { checkoutId: string; taskId?: string; onClo
   const count = (stage: string) => files().filter(f => f.stage === stage).length;
   const staged = () => count("staged");
   const fallback = () => { const n = staged() || files().length; return n ? `Update ${n} file${n === 1 ? "" : "s"}` : ""; };
-  const [message, setMessage] = createSignal(c()?.draft.trim() ? c()!.draft : fallback());
   let edited = !!c()?.draft.trim();
-  const [writing, setWriting] = createSignal<"writing" | "model" | "fallback" | null>(edited ? null : "fallback");
+  // While the message is being written from the changes the field stays empty and Commit stays off: a placeholder
+  // message is never what gets committed. The file-list fallback appears only once writing has finished without text.
+  const drafting = !edited && !!props.taskId && files().length > 0;
+  const [message, setMessage] = createSignal(edited ? c()!.draft : drafting ? "" : fallback());
+  const [writing, setWriting] = createSignal<"writing" | "model" | "fallback" | null>(edited ? null : drafting ? "writing" : "fallback");
   // Offered once as the dialog opens, written from these files for the task they belong to. Typed text is never replaced.
-  if (!edited && props.taskId && files().length) {
-    const v = ws.store.index().byId.get(props.taskId);
-    setWriting("writing");
-    void ws.store.draftIntegrationText({ taskId: props.taskId, method: "commit", targetBranch: c()!.branch, paths: files().map(f => f.path), summary: v?.task.result?.summary }).then(text => {
-      if (text?.message && !edited) setMessage(text.message);
-      setWriting(text ? text.source : "fallback");
-    });
+  if (drafting) {
+    const v = ws.store.index().byId.get(props.taskId!);
+    void ws.store.draftIntegrationText({ taskId: props.taskId!, method: "commit", targetBranch: c()!.branch, paths: files().map(f => f.path), summary: v?.task.result?.summary })
+      .catch(() => null)
+      .then(text => {
+        if (edited) return;
+        setMessage(text?.message || fallback());
+        setWriting(text?.message ? text.source : "fallback");
+      });
   }
   const note = () => writing() === "writing" ? "Writing from the changes…" : writing() === "model" ? "Written from the changes, you can edit it" : writing() === "fallback" ? "Listed from the changed files, you can edit it" : "Your saved draft";
-  const why = () => !c() ? "This checkout is no longer in the last Git read" : !files().length ? "Nothing to commit" : !message().trim() ? "Write a commit message first" : writer() && !anyway() ? `${LIVE_WRITER} Stop it first, or choose Commit anyway.` : ws.gate("git_commit");
+  const why = () => !c() ? "This checkout is no longer in the last Git read" : !files().length ? "Nothing to commit" : writing() === "writing" ? "The commit message is still being written" : !message().trim() ? "Write a commit message first" : writer() && !anyway() ? `${LIVE_WRITER} Stop it first, or choose Commit anyway.` : ws.gate("git_commit");
   let working = false;
   const commit = (e: MouseEvent) => {
     if (why() || working) return;
@@ -248,7 +253,7 @@ export function CommitDialog(props: { checkoutId: string; taskId?: string; onClo
       <div class="pre"><For each={shown()}>{f => <div class="mono trunc">{f.status} {f.path}</div>}</For>
         <Show when={files().length > shown().length}><div class="cap faint">{files().length - shown().length} more</div></Show></div>
       <label class="fld"><span class="lab">Commit message <span class="faint">{note()}</span></span>
-        <textarea class="inp" rows="3" data-autofocus ref={el => autoGrow(el, message)} value={message()} onInput={e => { edited = true; setWriting(null); setMessage(e.currentTarget.value); }} /></label>
+        <textarea class="inp" rows="3" data-autofocus ref={el => autoGrow(el, message)} value={message()} placeholder={writing() === "writing" ? "Writing the message from the changes…" : undefined} onInput={e => { edited = true; setWriting(null); setMessage(e.currentTarget.value); }} /></label>
     </div>
     <ActionBar place="dialog" start={<Show when={gitPage()}>{to => <A class="lnk" to={to()} onClick={() => props.onClose()}>Stage files in Git</A>}</Show>} hint="Nothing is committed until you confirm. Nothing is pushed.">
       <button class="btn btn-line btn-lg" onClick={() => props.onClose()}>Cancel</button>

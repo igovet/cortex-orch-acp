@@ -320,9 +320,12 @@ pub async fn run(
                         && reply["done"] == true
                     {
                         if let Some(task) = params["taskId"].as_str() {
-                            reply["asIsCommit"] =
+                            if let Some(outcome) =
                                 super::close_commit::commit(root, project, state, task, &mut git)
-                                    .await;
+                                    .await
+                            {
+                                reply["asIsCommit"] = outcome;
+                            }
                         }
                     }
                     Ok(reply)

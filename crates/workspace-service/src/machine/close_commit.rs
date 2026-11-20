@@ -57,12 +57,18 @@ fn recorded_paths(root: &Path, project: &str, task: &str) -> Vec<String> {
         .collect()
 }
 
-/// Commits the recorded paths of `task` after the owner closed it as is. Returns what
-/// happened for the reply; it never fails the close, which is already recorded.
-pub(super) async fn commit(root: &Path, project: &str, state: &Path, task: &str, git: &mut Git) -> Value {
+/// Reports the commit outcome for an eligible Automatic close. An ineligible close
+/// has no commit outcome; a commit error never fails the already recorded close.
+pub(super) async fn commit(
+    root: &Path,
+    project: &str,
+    state: &Path,
+    task: &str,
+    git: &mut Git,
+) -> Option<Value> {
     match run(root, project, state, task, git).await {
         Ok(outcome) => outcome,
-        Err(error) => json!({"committed":false,"reason":error.code}),
+        Err(error) => Some(json!({"committed":false,"reason":error.code})),
     }
 }
 
@@ -72,7 +78,7 @@ async fn run(
     state: &Path,
     task: &str,
     git: &mut Git,
-) -> super::native::Result<Value> {
+) -> super::native::Result<Option<Value>> {
     let product = super::native::product(state, project)?;
     let record = &product["tasks"][task];
     let automatic = product["sprints"].as_array().into_iter().flatten().any(|s| {
@@ -83,18 +89,19 @@ async fn run(
         || !automatic
         || record["checkout"]["kind"] != "main"
     {
-        return Ok(json!({"committed":false,"reason":"not_an_automatic_as_is_close"}));
+        return Ok(None);
     }
+    let skipped = |reason: &str| Ok(Some(json!({"committed":false,"reason":reason})));
     if !git.is_repo(root).await? || !git.has_history(root).await? {
-        return Ok(json!({"committed":false,"reason":"no_git_history"}));
+        return skipped("no_git_history");
     }
     let branch = git.out(root, &["branch", "--show-current"]).await?.trim().to_owned();
     if branch.is_empty() {
-        return Ok(json!({"committed":false,"reason":"detached_checkout"}));
+        return skipped("detached_checkout");
     }
     let paths = recorded_paths(root, project, task);
     if paths.is_empty() {
-        return Ok(json!({"committed":false,"reason":"no_recorded_paths"}));
+        return skipped("no_recorded_paths");
     }
     // The same order as every other holder of both: the repository lock is taken
     // here, after the close released the machine lock.
@@ -108,7 +115,7 @@ async fn run(
     let mut status = vec!["status", "--porcelain", "-z", "--"];
     status.extend(literal.iter().map(String::as_str));
     if git.out(root, &status).await?.trim_matches('\0').trim().is_empty() {
-        return Ok(json!({"committed":false,"reason":"nothing_to_commit"}));
+        return skipped("nothing_to_commit");
     }
     let title = record["title"].as_str().unwrap_or(task).trim();
     let message = format!("Close task as is (not verified): {title}");
@@ -125,5 +132,5 @@ async fn run(
         return Err(error);
     }
     let head = git.out(root, &["rev-parse", "HEAD"]).await?.trim().to_owned();
-    Ok(json!({"committed":true,"branch":branch,"commit":head}))
+    Ok(Some(json!({"committed":true,"branch":branch,"commit":head})))
 }

@@ -375,6 +375,39 @@ async fn owner_lifecycle_matches_without_an_engine() {
     check_actions(&fixture).await;
 }
 #[tokio::test]
+async fn as_is_close_reports_a_commit_outcome_only_for_eligible_automatic_tasks() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for mode in ["manual", "hybrid", "automatic"] {
+        let f = Fixture::new().await;
+        seed(&f, &f.store());
+        let path = f.path();
+        let parent = path.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(
+            &path,
+            json!({
+                "tasks":{"t1":{"sprintId":"s1","checkout":{"kind":"main"}}},
+                "sprints":[{"id":"s1","runMode":mode}],
+                "sprintRunModeVersion":1
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let reply = f
+            .call(json!({"action":"close","taskId":"t1","choice":"as_is","confirmed":true}))
+            .await;
+        let mut expected = json!({"ok":true,"result":{"done":true,"reclamation":null}});
+        if mode == "automatic" {
+            expected["result"]["asIsCommit"] = json!({"committed":false,"reason":"no_git_history"});
+        }
+        assert_eq!(reply, expected, "{mode}");
+        assert!(!f.root.join(".git").exists());
+    }
+}
+#[tokio::test]
 async fn owner_deletion_matches_without_an_engine() {
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/task-deletion-python.json")).unwrap();
