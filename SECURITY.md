@@ -851,11 +851,13 @@ temporary targets, PRs, cleanup and legacy input shapes are refused before effec
 not freeze external same-user Git writers or provide hostile-code isolation.
 
 Core's native project digest of a plain project folder (one in no Git repository)
-is made by a no-follow walk instead of Git listings. The walk is selected only when
+is made by a no-follow walk instead of Git listings. The walk is selected when
 fixed installed Git, run without inherited configuration, answers "not a git
-repository" and the folder holds no `.git` entry; any other Git failure (a damaged,
-locked, foreign-owned or untrusted repository) stays the `project_revision_unavailable`
-refusal and is never observed as a plain folder. The walk skips the private stores,
+repository" and the folder holds no `.git` entry. If the fixed executable is absent,
+the walk instead requires that neither the folder nor any ancestor has a `.git` entry,
+including broken links and worktree pointers. An unreadable or untrusted repository
+is not observed as a plain folder. Acceptance and integration always observe fresh;
+the metadata-only reuse signal is for presentation only. The walk skips the private stores,
 hashes every other non-directory entry with the same descriptor-relative no-follow
 reads and limits as a repository observation, refuses an unreadable directory, and
 returns no partial listing. Its digest is domain-separated from every repository digest.

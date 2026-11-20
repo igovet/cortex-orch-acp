@@ -532,34 +532,72 @@ async fn observe_checkout(
     with_manifest: ManifestMode,
     with_ignored: bool,
 ) -> CoreResult<Observed> {
-    // A plain project folder (in no Git repository at all) is observed by walking it.
-    // Only Git's own "not a git repository" answer selects that walk: any other Git
-    // failure (a broken, unreadable or untrusted repository) stays a refusal, and a
-    // repository is always observed by Git, so its digest never depends on this.
-    let listing = match git_listing(&root, with_ignored).await {
-        Ok(listing) => listing,
-        Err(e) if e.code() == "project_revision_unavailable" && no_repository(&root).await => {
+    observe_checkout_with_git(root, depth, with_manifest, with_ignored, "/usr/bin/git").await
+}
+
+async fn observe_checkout_with_git(
+    root: PathBuf,
+    depth: u8,
+    with_manifest: ManifestMode,
+    with_ignored: bool,
+    git_program: &str,
+) -> CoreResult<Observed> {
+    // A genuinely plain folder can be walked even without installed Git. Other
+    // Git failures (e.g. an unreadable or untrusted repository) remain refusals.
+    let git = if git_program_missing(git_program) {
+        if !root.is_dir() || !no_checkout_marker(&root) {
+            return Err(CoreError::Refused("project_revision_unavailable"));
+        }
+        None
+    } else {
+        match git_listing(&root, with_ignored).await {
+            Ok(listing) => Some(listing),
+            Err(e) if e.code() == "project_revision_unavailable" && no_repository(&root).await => {
+                None
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let listing = match git {
+        Some(listing) => listing,
+        None => {
             let r = root.clone();
             tokio::task::spawn_blocking(move || plain_listing(&r, with_ignored))
                 .await
                 .map_err(|_| refused())??
         }
-        Err(e) => return Err(e),
     };
     observe_listed(root, depth, with_manifest, with_ignored, listing).await
 }
-/// True only when Git itself answers that `root` is in no repository (its own
-/// "not a git repository" refusal, which also names a filesystem boundary) and `root`
-/// holds no `.git` entry. A Git that cannot run, times out or fails otherwise is not
-/// such an answer.
-async fn no_repository(root: &Path) -> bool {
+/// Without Git's discovery, require positive evidence that no ancestor has a
+/// checkout marker. Broken links, worktree pointer files and lookup errors are
+/// not evidence of absence.
+pub(crate) fn no_checkout_marker(root: &Path) -> bool {
+    root.ancestors().all(|dir| {
+        dir.join(".git")
+            .symlink_metadata()
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
+fn git_program_missing(program: &str) -> bool {
+    std::fs::metadata(program).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Use Git's own discovery result, or check ancestors if the fixed executable
+/// is absent. An installed but broken Git, timeout or lookup error is not enough.
+pub(crate) async fn no_repository(root: &Path) -> bool {
+    let git_program = "/usr/bin/git";
+    if git_program_missing(git_program) {
+        return root.is_dir() && no_checkout_marker(root);
+    }
     if !matches!(std::fs::symlink_metadata(root.join(".git")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound)
     {
         return false;
     }
     let argv = [
-        "/usr/bin/git".to_owned(),
+        git_program.to_owned(),
         "-c".into(),
         "core.fsmonitor=false".into(),
         "rev-parse".into(),
@@ -583,6 +621,11 @@ const PRIVATE_TOP: [&str; 4] = [
     ".cortex-dev-owner.json",
     ".cortex-workspace-dev.json",
 ];
+pub(crate) fn plain_listing_excludes(name: &[u8], top: bool, is_dir: bool) -> bool {
+    (top && PRIVATE_TOP.iter().any(|t| t.as_bytes() == name))
+        || (is_dir && matches!(name, b".cortex" | b".cortex-dev"))
+}
+
 /// The listing of a plain project folder, in no Git repository: every entry that is
 /// not a directory (regular files, symlinks by their target, special files) is a
 /// deliverable path, as Git lists an untracked one; a directory holding a `.git` entry
@@ -606,7 +649,8 @@ fn plain_listing(root: &Path, with_ignored: bool) -> CoreResult<Listing> {
             }
             let name = entry.file_name();
             let name = name.as_bytes();
-            if rel.is_empty() && PRIVATE_TOP.iter().any(|t| t.as_bytes() == name) {
+            let is_dir = entry.file_type().map_err(|_| unreadable())?.is_dir();
+            if plain_listing_excludes(name, rel.is_empty(), is_dir) {
                 continue;
             }
             let mut path = rel.clone();
@@ -614,10 +658,7 @@ fn plain_listing(root: &Path, with_ignored: bool) -> CoreResult<Listing> {
                 path.push(b'/');
             }
             path.extend_from_slice(name);
-            if entry.file_type().map_err(|_| unreadable())?.is_dir() {
-                if name == b".cortex" || name == b".cortex-dev" {
-                    continue;
-                }
+            if is_dir {
                 if entry.path().join(".git").symlink_metadata().is_ok() {
                     path.push(b'/');
                     paths.extend_from_slice(&path);
@@ -1356,8 +1397,36 @@ mod tests {
                 .unwrap();
         }
     }
-    /// "No repository" is only Git's own answer: a broken repository (a `.git` entry Git
-    /// cannot use) stays a refusal and is never observed as a plain folder.
+    #[tokio::test]
+    async fn plain_folder_digest_with_git_executable_absent() {
+        let base = std::env::temp_dir().join(format!("cw-no-git-{}", identity().unwrap()));
+        std::fs::create_dir(&base).unwrap();
+        let missing = base.join("missing-git");
+        let observe = || {
+            observe_checkout_with_git(
+                base.clone(),
+                0,
+                ManifestMode::None,
+                false,
+                missing.to_str().unwrap(),
+            )
+        };
+        std::fs::write(base.join("file"), "one").unwrap();
+        let first = observe().await.unwrap().digest;
+        assert_eq!(observe().await.unwrap().digest, first);
+        std::fs::write(base.join("file"), "two").unwrap();
+        assert_ne!(observe().await.unwrap().digest, first);
+
+        std::os::unix::fs::symlink("missing", base.join(".git")).unwrap();
+        assert_eq!(
+            observe().await.err().unwrap().code(),
+            "project_revision_unavailable"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A broken repository (a `.git` entry Git cannot use) stays a refusal and is
+    /// never observed as a plain folder.
     #[tokio::test]
     async fn a_broken_repository_is_refused_not_walked() {
         let f = Fixture::new();

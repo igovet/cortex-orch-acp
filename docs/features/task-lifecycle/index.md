@@ -375,11 +375,11 @@ unborn branch or a plain folder; a nested checkout's commit does not replace it.
 
 A plain project folder, in no Git repository at all, runs the same lifecycle (execution
 baseline, worker change lists, review packet, verification, completion and acceptance) on
-an observation made without Git. It is chosen only when Git itself answers "not a git
-repository" for the folder and the folder holds no `.git` entry; a repository, or a folder
-inside one, is always observed by Git exactly as above, and a repository Git cannot read
-(damaged, locked, owned by another user or untrusted) stays refused with
-`project_revision_unavailable`. The plain observation walks the folder without following
+an observation made without Git. It is chosen when Git itself answers "not a git
+repository" and the folder holds no `.git` entry, or when the fixed Git executable is
+absent and neither the folder nor any ancestor has a `.git` entry. Git checkouts are
+observed by Git, not by the plain walk; a repository Git cannot read (damaged, locked,
+owned by another user or untrusted) stays refused with `project_revision_unavailable`. The plain observation walks the folder without following
 links: every non-directory entry is deliverable content hashed exactly as above (there are
 no ignore rules without a repository, so nothing is ignored and the ignored digest covers
 an empty set), the private stores (`.cortex`, `.cortex-dev`, and at the top

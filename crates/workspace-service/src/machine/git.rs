@@ -448,14 +448,22 @@ impl Git {
         Ok(self.run(path, args(a), false, None).await?.ok)
     }
     pub async fn is_repo(&mut self, path: &Path) -> Result<bool> {
-        let out = self
+        let out = match self
             .run(
                 path,
                 args(&["rev-parse", "--is-inside-work-tree"]),
                 false,
                 None,
             )
-            .await?;
+            .await
+        {
+            Err(e) if e.code == "git_unavailable"
+                && crate::native_effects::no_checkout_marker(path) =>
+            {
+                return Ok(false);
+            }
+            result => result?,
+        };
         if out.ok {
             return Ok(out.text.trim() == "true");
         }
@@ -1140,10 +1148,9 @@ impl Git {
             .await?
             .is_none())
     }
-    /// The repository snapshot. A repeated read whose inputs did not change (the task
-    /// context, every ref, the worktree list, the fetch marker, the origin URL and the
-    /// `folder_signal` of each checkout) within `task_facts::RECENT` is served from the
-    /// bounded reuse slot; any Git-changing command through the service ends reuse.
+    /// A repeated snapshot with unchanged task context and filesystem signals within
+    /// `task_facts::RECENT` uses the bounded reuse slot. Git snapshots also key on
+    /// refs, worktree list, fetch marker and origin; a Git-changing command ends reuse.
     pub async fn snapshot(
         &mut self,
         root: &Path,
@@ -1176,8 +1183,8 @@ impl Git {
         }
         Ok(value)
     }
-    /// The cheap reuse key of a snapshot, or None when it must be read fresh (no Git,
-    /// or a checkout whose `folder_signal` is unavailable, e.g. a file changed just now).
+    /// The cheap reuse key of a snapshot, or None when a filesystem signal is
+    /// unavailable (for example, when a file changed just now).
     async fn snapshot_key(
         &mut self,
         root: &Path,
@@ -1185,10 +1192,10 @@ impl Git {
         product: &Value,
     ) -> Result<Option<String>> {
         use sha2::Digest;
+        use super::task_facts::{plain_folder_signal, PlainSignal};
+
         let generation = snapshot_reuse::generation();
-        if !self.is_repo(root).await? {
-            return Ok(None);
-        }
+        let is_repo = self.is_repo(root).await?;
         let mut h = sha2::Sha256::new();
         // Only what `snapshot_fresh` reads of the task context: a new message, comment
         // or task timestamp does not end reuse.
@@ -1219,6 +1226,20 @@ impl Git {
         ] {
             h.update(part.as_bytes());
             h.update(b"\0\x1e");
+        }
+        if !is_repo {
+            let root = root.to_owned();
+            let signal = tokio::task::spawn_blocking(move || {
+                plain_folder_signal(&root, PlainSignal::Snapshot)
+            })
+            .await
+            .ok()
+            .flatten();
+            return Ok(signal.map(|signal| {
+                h.update(b"plain-folder\0");
+                h.update(signal.as_bytes());
+                format!("{:x}", h.finalize())
+            }));
         }
         let refs = self
             .out(
@@ -2571,6 +2592,35 @@ mod tests {
     #[tokio::test]
     async fn an_unchanged_snapshot_is_reused_until_an_owner_action() {
         snapshot_reuse::isolated(check_snapshot_reuse()).await;
+    }
+
+    #[tokio::test]
+    async fn plain_folder_snapshot_reuses_tree_until_metadata_changes() {
+        snapshot_reuse::isolated(async {
+            let (base, root, state) = fixture("plain-reuse");
+            fs::remove_dir_all(root.join(".git")).unwrap();
+            fs::write(root.join("first"), "a").unwrap();
+            let dependency = root.join("node_modules/dep");
+            fs::create_dir_all(&dependency).unwrap();
+            tokio::time::sleep(Duration::from_millis(3100)).await;
+            let context = json!({"tasks":{}});
+            let mut git = Git::new();
+            let first = git.snapshot(&root, "p", &state, Some(&context)).await.unwrap();
+            assert_eq!(first["tree"], json!(["first"]));
+
+            // Reusing a distinct cache entry proves folder_tree was not used again.
+            let slot = snapshot_reuse::slot(&root, "p");
+            slot.lock().await.as_mut().unwrap().value["tree"] = json!(["cached"]);
+            fs::write(dependency.join("ignored"), "not in the snapshot").unwrap();
+            let second = git.snapshot(&root, "p", &state, Some(&context)).await.unwrap();
+            assert_eq!(second["tree"], json!(["cached"]));
+
+            fs::rename(root.join("first"), root.join("second")).unwrap();
+            let changed = git.snapshot(&root, "p", &state, Some(&context)).await.unwrap();
+            assert_eq!(changed["tree"], json!(["second"]));
+            fs::remove_dir_all(base).unwrap();
+        })
+        .await;
     }
 
     async fn check_snapshot_reuse() {

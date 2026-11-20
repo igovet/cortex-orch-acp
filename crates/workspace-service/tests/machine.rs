@@ -24,6 +24,22 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        let f = Self::plain().await;
+        f.git(&["init", "-b", "main"]);
+        f.git(&["config", "user.name", "Owner"]);
+        f.git(&["config", "user.email", "owner@example.invalid"]);
+        f.git(&["config", "commit.gpgsign", "false"]);
+        f.git(&[
+            "config",
+            "core.hooksPath",
+            f.base.join("hooks").to_str().unwrap(),
+        ]);
+        f.write("a.txt", b"one\ntwo\n");
+        f.git(&["add", "a.txt"]);
+        f.git(&["commit", "-m", "first"]);
+        f
+    }
+    async fn plain() -> Self {
         let base = std::env::temp_dir().join(format!(
             "cw-native-{}-{}",
             std::process::id(),
@@ -50,26 +66,13 @@ impl Fixture {
             .as_str()
             .unwrap()
             .to_owned();
-        let f = Self {
+        Self {
             base,
             repo,
             state,
             service,
             id,
-        };
-        f.git(&["init", "-b", "main"]);
-        f.git(&["config", "user.name", "Owner"]);
-        f.git(&["config", "user.email", "owner@example.invalid"]);
-        f.git(&["config", "commit.gpgsign", "false"]);
-        f.git(&[
-            "config",
-            "core.hooksPath",
-            f.base.join("hooks").to_str().unwrap(),
-        ]);
-        f.write("a.txt", b"one\ntwo\n");
-        f.git(&["add", "a.txt"]);
-        f.git(&["commit", "-m", "first"]);
-        f
+        }
     }
     fn store(&self) -> cortex_core::Store {
         let key = cortex_core::ProjectKey::new(
@@ -840,6 +843,53 @@ async fn plain_folder_snapshot_init_and_file_operations() {
     );
     f.stop().await;
 }
+#[tokio::test]
+async fn plain_folder_opens_with_git_absent() {
+    const CHILD: &str = "CORTEX_TEST_PLAIN_FOLDER_NO_GIT_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // Isolate PATH in a child process instead of mutating the shared test environment.
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "plain_folder_opens_with_git_absent"])
+            .env(CHILD, "1")
+            .env("PATH", "")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let f = Fixture::plain().await;
+    assert_eq!(
+        Command::new("git")
+            .current_dir(&f.repo)
+            .arg("--version")
+            .output()
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    f.write("a.txt", b"read without git");
+    let snapshot = f.snapshot().await;
+    assert_eq!(snapshot["hasGit"], false);
+    assert_eq!(snapshot["tree"], json!(["a.txt"]));
+    assert_eq!(
+        f.ok("repo.file", json!({"file":"a.txt"})).await["text"],
+        "read without git"
+    );
+    assert_eq!(f.call("git_init", json!({})).await["code"], "git_unavailable");
+
+    fs::create_dir(f.repo.join(".git")).unwrap();
+    assert_eq!(
+        f.call("repo.snapshot", json!({})).await["code"],
+        "git_unavailable"
+    );
+    f.stop().await;
+}
+
 #[tokio::test]
 async fn branches_worktree_identity_dirty_deletion_and_revert_commit() {
     let f = Fixture::new().await;

@@ -130,6 +130,15 @@ pub(crate) async fn recent_observation(
         .await
         .ok()
         .flatten();
+    let signal = if signal.is_none() && crate::native_effects::no_repository(&root).await {
+        let probe = root.clone();
+        tokio::task::spawn_blocking(move || plain_folder_signal(&probe, PlainSignal::Observation))
+            .await
+            .ok()
+            .flatten()
+    } else {
+        signal
+    };
     if let (Some(signal), Some(seen)) = (&signal, held.as_ref()) {
         if seen.signal == *signal && seen.at.elapsed() < RECENT {
             return Ok(seen.digest.clone());
@@ -267,6 +276,98 @@ pub(super) fn folder_signal(root: &Path) -> Option<String> {
     }
     Some(format!("{:x}", h.finalize()))
 }
+pub(super) enum PlainSignal {
+    Observation,
+    Snapshot,
+}
+
+/// Cache hint only: sorted directory entries and no-follow metadata, never file
+/// bytes. The snapshot skips directories Code lists on demand; the observation
+/// includes their contents because plain folders have no Git ignore rules.
+pub(super) fn plain_folder_signal(root: &Path, purpose: PlainSignal) -> Option<String> {
+    use super::git::UNWALKED;
+    use sha2::Digest;
+    use std::{fs, os::unix::fs::MetadataExt, time::SystemTime};
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    let mut h = sha2::Sha256::new();
+    h.update(b"plain-folder\0");
+    let mut add = |rel: &Path, m: fs::Metadata| {
+        // Whole-second filesystems can give two writes the same timestamp.
+        if m.mtime() >= now - 2 || m.ctime() >= now - 2 {
+            return None;
+        }
+        let name = rel.as_os_str().as_bytes();
+        h.update((name.len() as u64).to_be_bytes());
+        h.update(name);
+        for v in [m.dev(), m.ino(), u64::from(m.mode()), m.size()] {
+            h.update(v.to_be_bytes());
+        }
+        for v in [m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec()] {
+            h.update(v.to_be_bytes());
+        }
+        Some(())
+    };
+    let metadata = fs::symlink_metadata(root).ok()?;
+    if !metadata.is_dir() {
+        return None;
+    }
+    add(Path::new(""), metadata)?;
+
+    let mut pending = vec![root.to_owned()];
+    let mut seen = 0;
+    while let Some(dir) = pending.pop() {
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(&dir).ok()? {
+            seen += 1;
+            if seen > 100_000 {
+                return None;
+            }
+            entries.push(entry.ok()?);
+        }
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let name = entry.file_name();
+            let is_dir = entry.file_type().ok()?.is_dir();
+            let excluded = match purpose {
+                PlainSignal::Snapshot => {
+                    let name = name.to_string_lossy();
+                    RESERVED.contains(&name.as_ref())
+                        || (is_dir && UNWALKED.contains(&name.as_ref()))
+                }
+                PlainSignal::Observation => {
+                    // A nested checkout's digest depends on Git state, potentially
+                    // outside this tree (a linked worktree's private Git directory).
+                    if name == ".git" {
+                        return None;
+                    }
+                    crate::native_effects::plain_listing_excludes(
+                        name.as_bytes(),
+                        dir == root,
+                        is_dir,
+                    )
+                }
+            };
+            if excluded {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = entry.metadata().ok()?;
+            if metadata.is_dir() != is_dir {
+                return None;
+            }
+            add(path.strip_prefix(root).ok()?, metadata)?;
+            if is_dir {
+                pending.push(path);
+            }
+        }
+    }
+    Some(format!("{:x}", h.finalize()))
+}
+
 /// One bounded read-only Git listing for `folder_signal`: no hooks, filters, file
 /// monitor, optional locks or global configuration; None unless it completes in time.
 pub(super) fn signal_git(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
@@ -836,6 +937,36 @@ mod recent_tests {
     fn settle() {
         std::thread::sleep(std::time::Duration::from_millis(3100));
     }
+    #[tokio::test]
+    async fn plain_folder_observation_reuses_digest_until_metadata_changes() {
+        let root =
+            std::env::temp_dir().join(format!("cw-plain-{}", super::super::settings::unique()));
+        let file = root.join("node_modules/local/a.txt");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "before").unwrap();
+        // Backdating mtime would itself change ctime; let both timestamps settle.
+        settle();
+
+        let first = recent_observation(root.clone()).await.unwrap();
+        let slot = OBSERVED.lock().unwrap().get(&root).unwrap().clone();
+        // A distinguishable cached value proves the second call did not rehash files.
+        slot.lock().await.as_mut().unwrap().digest = "cached-only".to_owned();
+        assert_eq!(
+            recent_observation(root.clone()).await.unwrap(),
+            "cached-only"
+        );
+        assert_eq!(native_observation(&root).await.unwrap(), first);
+
+        // The snapshot skips node_modules, but the digest must detect changes inside it.
+        std::fs::write(&file, "after").unwrap();
+        let fresh = native_observation(&root).await.unwrap();
+        assert_ne!(fresh, first);
+        assert_eq!(recent_observation(root.clone()).await.unwrap(), fresh);
+        assert!(slot.lock().await.is_none(), "recent metadata must not be reused");
+        OBSERVED.lock().unwrap().remove(&root);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// Acceptance and integration observe fresh even right after a cached presentation
     /// read, and the reuse signal itself moves when an empty directory appears.
     #[tokio::test]
@@ -919,7 +1050,7 @@ mod recent_tests {
         let staged = folder_signal(&root).unwrap();
         std::fs::remove_file(root.join("loose.txt")).unwrap();
         assert_ne!(folder_signal(&root).as_deref(), Some(staged.as_str()));
-        // No Git: never reused.
+        // This Git-specific signal no longer applies once the repository is gone.
         let plain = root.join("src");
         std::fs::remove_dir_all(root.join(".git")).unwrap();
         assert_eq!(folder_signal(&plain), None);
