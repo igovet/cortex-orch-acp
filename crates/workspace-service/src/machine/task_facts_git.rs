@@ -407,6 +407,28 @@ async fn same_branch(
     if content.values().any(|v| v.0.is_none()) {
         return Ok(());
     }
+    // A Git-ignored, untracked file the task wrote (evidence, scratch output) is not
+    // deliverable: it is never committed (`git add` refuses it), so it neither blocks
+    // the commit nor joins it.
+    let mut content = content;
+    let mut ignored = Vec::new();
+    for name in content.keys() {
+        if git
+            .success(path, &["check-ignore", "-q", "--", name])
+            .await?
+        {
+            ignored.push(name.clone());
+        }
+    }
+    for name in &ignored {
+        content.remove(name);
+    }
+    if content.is_empty() {
+        facts["noChanges"] = json!(true);
+        facts["alreadyInTarget"] = json!(true);
+        facts["reason"] = Value::Null;
+        return Ok(());
+    }
     let mut dirty = std::collections::BTreeSet::new();
     for args in [
         &["diff", "--name-only", "-z", "HEAD"][..],
@@ -443,6 +465,12 @@ async fn same_branch(
         None => {
             let at = std::time::Instant::now();
             let Some(outcome) = landings(path, record, target, git, &content).await? else {
+                // The inspection outran its deadline: nothing is known yet, which is
+                // not unconfirmed content. Automatic checks again instead of asking.
+                facts["inspectionIncomplete"] = json!(true);
+                facts["reason"] = json!(
+                    "Cortex is still checking this task's files. It checks them again shortly."
+                );
                 return Ok(());
             };
             if let (Some(signal), Ok(mut recent)) = (signal, LANDINGS.lock()) {

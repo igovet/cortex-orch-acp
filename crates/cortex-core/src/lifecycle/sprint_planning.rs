@@ -133,7 +133,9 @@ pub fn submit_tx(
             SUBMITTED,
             json!({"revision":revision,"tasks":tasks}),
         )?;
-        if cycle > super::MAX_REVIEW_CYCLES as i64 {
+        // Rounds past the usual budget were allowed by the review stage only while
+        // the plan converged (`fewer_findings_tx`); the hard cap still bounds them.
+        if cycle > MAX_PLAN_REVIEW_CYCLES {
             domain::stop_tx(db, task, "review_cycle_limit")?;
             return Ok(json!({"recorded":true,"tasks":count,"review":"limit_reached"}));
         }
@@ -238,6 +240,26 @@ pub fn record_part_tx(
         event_tx(db, task, PART, json!({"part":part,"tasks":tasks}))?;
         Ok(json!({"recorded":true,"part":part,"final":false,"tasks":total}))
     })
+}
+
+/// Hard cap on independent reviews of one sprint plan within one owner-granted budget.
+pub const MAX_PLAN_REVIEW_CYCLES: i64 = 8;
+
+/// Whether a plan review found fewer problems than the previous review of this
+/// task's plan: the plan is converging, so another round needs no owner decision.
+pub(super) fn fewer_findings_tx(db: &Connection, task: &str, result: &Value) -> CoreResult<bool> {
+    let now = result["findings"].as_array().map_or(0, Vec::len) as i64;
+    let previous: Option<i64> = db
+        .query_row(
+            "SELECT json_array_length(json_extract(payload_json,'$.findings')) FROM runtime_events
+             WHERE task_id=? AND type='SPRINT_PLAN_CHANGES_REQUESTED' AND json_valid(payload_json)
+             ORDER BY id DESC LIMIT 1",
+            [task],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(now > 0 && previous.is_some_and(|previous| now < previous))
 }
 
 /// Review findings on a plan: the coordinator revises it. Past the coordinator's

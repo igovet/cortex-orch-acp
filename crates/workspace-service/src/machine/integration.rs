@@ -368,6 +368,10 @@ async fn integrate(
         return Err(malformed());
     }
     let facts = task_facts_git::read_for_finish(root, &inspected, task, git).await?;
+    // An inspection that did not finish decides nothing: the next pass checks again.
+    if automatic && facts["inspectionIncomplete"] == true {
+        return Ok(json!({"deferred":true}));
+    }
     if !automatic && facts["alreadyInTarget"] == true {
         return Err(refuse(
             "already_in_target",

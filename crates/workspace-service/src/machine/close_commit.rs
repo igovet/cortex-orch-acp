@@ -4,12 +4,7 @@
 //! as is and not verified. Nothing else is staged or committed, nothing is pushed.
 //! Without this every as-is close left its files uncommitted, and the next tasks'
 //! change lists and reviews carried them.
-use super::{
-    context,
-    git::Git,
-    integration::REPO_BUSY,
-    settings::Lock,
-};
+use super::{context, git::Git, integration::REPO_BUSY, settings::Lock};
 use cortex_core::OpenMode;
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
@@ -81,9 +76,11 @@ async fn run(
 ) -> super::native::Result<Option<Value>> {
     let product = super::native::product(state, project)?;
     let record = &product["tasks"][task];
-    let automatic = product["sprints"].as_array().into_iter().flatten().any(|s| {
-        s["id"] == record["sprintId"] && super::product::automatic_sprint(s)
-    });
+    let automatic = product["sprints"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|s| s["id"] == record["sprintId"] && super::product::automatic_sprint(s));
     if record["status"] != "done"
         || record["closedAs"] != "as_is"
         || !automatic
@@ -95,11 +92,24 @@ async fn run(
     if !git.is_repo(root).await? || !git.has_history(root).await? {
         return skipped("no_git_history");
     }
-    let branch = git.out(root, &["branch", "--show-current"]).await?.trim().to_owned();
+    let branch = git
+        .out(root, &["branch", "--show-current"])
+        .await?
+        .trim()
+        .to_owned();
     if branch.is_empty() {
         return skipped("detached_checkout");
     }
-    let paths = recorded_paths(root, project, task);
+    // Git-ignored, untracked paths are not deliverable and `git add` refuses them.
+    let mut paths = Vec::new();
+    for path in recorded_paths(root, project, task) {
+        if !git
+            .success(root, &["check-ignore", "-q", "--", &path])
+            .await?
+        {
+            paths.push(path);
+        }
+    }
     if paths.is_empty() {
         return skipped("no_recorded_paths");
     }
@@ -114,7 +124,13 @@ async fn run(
     let literal: Vec<String> = paths.iter().map(|p| format!(":(literal){p}")).collect();
     let mut status = vec!["status", "--porcelain", "-z", "--"];
     status.extend(literal.iter().map(String::as_str));
-    if git.out(root, &status).await?.trim_matches('\0').trim().is_empty() {
+    if git
+        .out(root, &status)
+        .await?
+        .trim_matches('\0')
+        .trim()
+        .is_empty()
+    {
         return skipped("nothing_to_commit");
     }
     let title = record["title"].as_str().unwrap_or(task).trim();
@@ -131,6 +147,12 @@ async fn run(
         let _ = git.out(root, &reset).await;
         return Err(error);
     }
-    let head = git.out(root, &["rev-parse", "HEAD"]).await?.trim().to_owned();
-    Ok(Some(json!({"committed":true,"branch":branch,"commit":head})))
+    let head = git
+        .out(root, &["rev-parse", "HEAD"])
+        .await?
+        .trim()
+        .to_owned();
+    Ok(Some(
+        json!({"committed":true,"branch":branch,"commit":head}),
+    ))
 }

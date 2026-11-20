@@ -504,7 +504,8 @@ pub fn review_coverage_missing_tx(
                 .and_then(|s| serde_json::from_str::<Value>(s).ok())
                 .is_some_and(|v| {
                     v["sha256"] == file["current_sha256"]
-                        && (v["complete"] == true || review_lines_read(&file["review_lines"], &v["lines"]))
+                        && (v["complete"] == true
+                            || review_lines_read(&file["review_lines"], &v["lines"]))
                 });
             if !valid {
                 missing.push(
@@ -524,14 +525,14 @@ fn review_lines_read(ranges: &Value, lines: &Value) -> bool {
     };
     let read: BTreeSet<u64> = lines.iter().filter_map(Value::as_u64).collect();
     !ranges.is_empty()
-        && ranges.iter().all(|range| {
-            match (range[0].as_u64(), range[1].as_u64()) {
+        && ranges
+            .iter()
+            .all(|range| match (range[0].as_u64(), range[1].as_u64()) {
                 (Some(start), Some(end)) if start >= 1 && start <= end => {
                     (start..=end).all(|n| read.contains(&n))
                 }
                 _ => false,
-            }
-        })
+            })
 }
 /// The latest review packet the host recorded for `assignment`.
 fn review_packet_of(

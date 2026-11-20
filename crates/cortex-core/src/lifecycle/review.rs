@@ -366,7 +366,13 @@ pub fn advance_tx(db: &Transaction<'_>, task: &str) -> CoreResult<()> {
         [task],
         |r| r.get(0),
     )?;
-    if cycle >= MAX_REVIEW_CYCLES as i64 {
+    // A large sprint plan converges over more rounds: past the usual budget its
+    // review continues by itself while each round finds fewer problems than the
+    // previous one (repeated findings already stopped above), up to a hard cap.
+    let converging = plan_review
+        && cycle < super::sprint_planning::MAX_PLAN_REVIEW_CYCLES
+        && super::sprint_planning::fewer_findings_tx(db, task, &result)?;
+    if cycle >= MAX_REVIEW_CYCLES as i64 && !converging {
         domain::stop_tx(db, task, "review_cycle_limit")?;
         return Ok(());
     }

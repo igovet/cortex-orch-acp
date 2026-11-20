@@ -198,6 +198,29 @@ fn stopped_at(operation: &Value) -> Refused {
 fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|v| v.to_string()).collect()
 }
+/// The `git` executable, resolved once from this process's `PATH`. Every Git command
+/// clears its environment and sets `PATH` again; with a bare program name Rust's
+/// standard library then cannot use `posix_spawn` and forks the whole service instead.
+/// A multi-gigabyte service with dozens of threads took ~70 ms per fork, one at a time,
+/// so a task's file inspection outran its deadline. An absolute path keeps the fast
+/// spawn. When no `git` is found the bare name is kept and the spawn reports it missing.
+pub(crate) fn git_program() -> &'static std::ffi::OsStr {
+    static GIT: std::sync::OnceLock<std::ffi::OsString> = std::sync::OnceLock::new();
+    GIT.get_or_init(|| {
+        use std::os::unix::fs::PermissionsExt;
+        std::env::var_os("PATH")
+            .iter()
+            .flat_map(std::env::split_paths)
+            .filter(|dir| dir.is_absolute())
+            .map(|dir| dir.join("git"))
+            .find(|candidate| {
+                fs::metadata(candidate)
+                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            })
+            .map(std::ffi::OsString::from)
+            .unwrap_or_else(|| "git".into())
+    })
+}
 impl Git {
     pub fn new() -> Self {
         Self {
@@ -219,7 +242,7 @@ impl Git {
         input: Option<Vec<u8>>,
         limit: usize,
     ) -> Result<Option<Output>> {
-        let mut cmd = Command::new("git");
+        let mut cmd = Command::new(git_program());
         cmd.env_clear();
         for key in [
             "HOME",

@@ -97,7 +97,7 @@ struct Shadow<'a> {
 }
 impl Shadow<'_> {
     async fn run(&self, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>> {
-        let mut cmd = Command::new("git");
+        let mut cmd = Command::new(super::git::git_program());
         // No inherited Git/askpass/loader state. Repo filters are disabled for every
         // command, including hash-object, and object/index writes are private.
         cmd.env_clear();
