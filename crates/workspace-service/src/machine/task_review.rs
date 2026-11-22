@@ -939,6 +939,49 @@ mod native_acceptance_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// Owner store 2026-11-22: the final review was INCOMPLETE with its unreachable
+    /// parts disclosed as limits, the runtime verified and completed the task, and the
+    /// Automatic acceptance still held the sprint ("Independent review is not
+    /// approved"). Such a review is approved with its limits as notes; an INCOMPLETE
+    /// review without that disclosure is not.
+    #[tokio::test]
+    async fn automatic_acceptance_takes_a_review_with_disclosed_limits_as_approved() {
+        for disclosed in [true, false] {
+            let (root, runtime, draft) = completed().await;
+            let state = automatic_state(&root);
+            let mut product = sprint_product(&draft, "automatic");
+            report_checks(
+                &runtime,
+                json!([]),
+                json!([{"name":"Review could not read src/a.rs","outcome":"unverified","source":"runtime",
+                    "blocker":"The reviewer's tools could not reach src/a.rs; it is not covered by the review."}]),
+            )
+            .await;
+            with_task(&runtime, move |db, task| {
+                db.execute(
+                    "UPDATE runtime_nodes SET result_json=json_set(result_json,'$.verdict','INCOMPLETE','$.review_limit_disclosed',json(?)) WHERE task_id=? AND stage='review'",
+                    (if disclosed { "true" } else { "false" }, task),
+                )?;
+                Ok(())
+            })
+            .await;
+            let result = automatic(
+                &root,
+                "project",
+                &draft,
+                &state,
+                &mut product,
+                &mut Git::new(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["accepted"], disclosed, "{disclosed}: {result}");
+            runtime.shutdown().await;
+            drop(runtime);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     /// Owner store 2026-11-22: "Paid live check not requested by the owner for this
     /// recovery; ..." held the Automatic sprint for the owner although it is the
     /// documented no-paid convention with extra detail. It is an optional note.

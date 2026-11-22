@@ -789,7 +789,15 @@ fn evaluate_exact(
                 ),
                 Some(_) => warnings = true,
             }
-            approved = matches && matches!(result["verdict"].as_str(), Some("APPROVE"));
+            // An INCOMPLETE review whose unreachable parts the runtime disclosed as
+            // unverified limits is the review the runtime continued to verification
+            // with; its limits stay notes (never passes). Treating it as unapproved
+            // held an Automatic sprint for the owner after the task had completed
+            // (owner store 2026-11-22).
+            let disclosed =
+                result["verdict"] == "INCOMPLETE" && result["review_limit_disclosed"] == true;
+            approved =
+                matches && (matches!(result["verdict"].as_str(), Some("APPROVE")) || disclosed);
         }
         let omitted = if provision {
             withdrawn(db, task, assignment.as_deref(), &result, checks)

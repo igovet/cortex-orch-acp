@@ -429,7 +429,11 @@ A limitation the runtime itself disclosed (`source: "runtime"`: unread files, an
 earlier failed check, an owner-accepted gap) is never read as a policy restriction
 from the words of its explanation; it is a manual note that an Automatic sprint
 accepts with the result, never as passed (owner store 2026-11-22: "after repeated
-coverage refusals" matched a policy word and held the sprint for the owner).
+coverage refusals" matched a policy word and held the sprint for the owner). An
+INCOMPLETE review whose unreachable parts the runtime disclosed as limits
+(`review_limit_disclosed`) counts as the approving review for acceptance, as it did
+for the runtime's own verification; its limits stay notes. Without that disclosure an
+INCOMPLETE review is not approved.
 
 For coordinator-submitted synthesis and direct answers, structured `not_verified`
 is the sole source of the runtime's disclosure section. Items with the same blocker
