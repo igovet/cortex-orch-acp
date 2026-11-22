@@ -9,10 +9,6 @@ use cortex_engine::{
     environment::{EngineKind, LaunchSpec},
     wire,
 };
-use namespace_host::native_effects;
-// The reused sandbox source resolves the owner's tool search path through the crate root.
-#[allow(unused_imports)]
-use namespace_host::tool_path;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -74,9 +70,13 @@ impl NativeRoutes for Routes {
         };
         Ok(SessionRoute {
             launch: LaunchSpec {
-                engine: if std::fs::read_to_string(root.join("scenario.txt")).unwrap_or_default()
-                    == "compaction-claude"
-                {
+                engine: if matches!(
+                    std::fs::read_to_string(root.join("scenario.txt")).as_deref(),
+                    Ok("compaction-claude"
+                        | "outside-write"
+                        | "incoming-permission"
+                        | "command-restart-guarded")
+                ) {
                     EngineKind::Claude
                 } else {
                     EngineKind::Codex
@@ -768,7 +768,15 @@ async fn access_modes_and_startup_recovery() {
     .await
     .unwrap();
     assert_eq!(f.query("SELECT count(*) FROM runtime_events WHERE type='NATIVE_ACCESS_SWITCHED' AND json_extract(payload_json,'$.mode')='auto'"),1);
-    assert_eq!(f.query("SELECT count(*) FROM runtime_events WHERE type='NATIVE_ACCESS_MODE_CONFIRMED' AND json_extract(payload_json,'$.mode')='workspace-write'"),1);
+    assert_eq!(
+        f.query(
+            "SELECT count(*) FROM runtime_events e JOIN trusted_channels c
+        ON c.channel_id=json_extract(e.payload_json,'$.channel_id')
+        WHERE e.type='NATIVE_ACCESS_MODE_CONFIRMED' AND c.role='worker'
+        AND json_extract(e.payload_json,'$.mode')='read-only'"
+        ),
+        1
+    );
     c.send(
         4,
         "session/set_mode",
@@ -2483,6 +2491,16 @@ fn main() {
         std::process::exit(0);
     }
     if namespace_host::assert_unavailable_view() {
+        return;
+    }
+    if arg == "write-authority" {
+        rt.block_on(async {
+            outside_client_consent().await;
+            access_modes_and_startup_recovery().await;
+            permission().await;
+            stale_permission_and_eof().await;
+        });
+        println!("incoming ACP: owner consent and access mode recovery passed");
         return;
     }
     if arg == "separate-task" {

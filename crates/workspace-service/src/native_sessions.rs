@@ -721,17 +721,19 @@ impl NativeHost {
                 }
                 phase = "access_mode";
                 let c = credential.clone();
-                let (access,read_only) = receive(self.executor.read(move |db| {
+                let access = receive(self.executor.read(move |db| {
                     let i = channels::authenticate(db,&c.channel_id,c.secret(),false)?;
-                    Ok((cortex_core::access::current(db,&i.task)?,crate::native_engine_policy::read_only(&i)))
+                    cortex_core::access::current(db,&i.task)
                 }).map_err(engine_error)?).await.map_err(engine_error)?;
-                // The engine mode depends on the channel's capability, never on the
-                // access mode: no session runs in a mode that skips the engine's
-                // permission requests, and a read-only channel without a read-only
-                // or asking mode does not start.
+                // Require the observed native mode before binding or prompting;
+                // the access mode and MCP writing capability never widen Codex.
                 let mode = crate::native_engine_policy::native_mode(
-                    engine_kind, read_only, &s.config_options())?;
+                    engine_kind, &s.config_options())?;
                 e.configure(&s,"mode",mode,route.deadline).await?;
+                if engine_kind == cortex_engine::environment::EngineKind::Codex
+                    && !crate::native_engine_policy::codex_native_confirmed(&s.config_options()) {
+                    return Err(Error::Refused("restricted_mode_unavailable"));
+                }
                 phase = "bind_session";
                 let c = credential.clone();
                 let sid = s.id().to_owned();
@@ -988,6 +990,11 @@ impl SessionDriver {
             .check(true)
             .await
             .map_err(|_| CoreError::Refused("channel_authority_refused"))?;
+        if self.engine_kind == cortex_engine::environment::EngineKind::Codex
+            && !crate::native_engine_policy::codex_native_confirmed(&self.session.config_options())
+        {
+            return Err(CoreError::Refused("restricted_mode_unavailable"));
+        }
         let c = self.credential.clone();
         let (delivery, capsule) = receive(
             self.executor
@@ -1231,12 +1238,10 @@ impl SessionDriver {
             before,
         })
     }
-    /// Close a writing turn's window with its change record. Whether the engine could
-    /// change files without a receipt in this turn (`native_mutation`): codex-acp and
-    /// OpenCode can write inside their own sandbox without asking, so always; Claude
-    /// Code runs with its native shell and file tools disallowed and asks for every
-    /// other tool, so only when the runtime allowed a request in this turn other
-    /// than a Cortex gateway tool or a read.
+    /// Close a writing turn's observation window. OpenCode retains native
+    /// sandbox writes. Codex native tools cannot write; attached servers still
+    /// need conservative attribution until their own routes prove containment.
+    /// Claude retains its existing callback-based attribution.
     async fn settle_writer_turn(&self, window: Option<&WriterTurn>, ended: bool) -> CoreResult<()> {
         let Some(window) = window else {
             return Ok(());
@@ -1249,15 +1254,19 @@ impl SessionDriver {
         };
         let c = self.credential.clone();
         let (turn, since) = (window.turn.clone(), window.since);
-        let claude = self.engine_kind == cortex_engine::environment::EngineKind::Claude;
+        use cortex_engine::environment::EngineKind;
+        let engine = self.engine_kind;
+        let external = !self.external.is_empty();
         receive(self.executor.write(move |db| {
             let task: String = db.query_row(
                 "SELECT task_id FROM trusted_channels WHERE channel_id=?",
                 [&c.channel_id],
                 |r| r.get(0),
             )?;
-            let native = !claude
-                || db.query_row(
+            let native = match engine {
+                EngineKind::OpenCode => true,
+                EngineKind::Codex => external,
+                EngineKind::Claude => db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND id>?
                      AND type IN ('NATIVE_PERMISSION_REQUESTED','NATIVE_PERMISSION_AUTO_ALLOWED')
                      AND json_extract(payload_json,'$.channel_id')=?
@@ -1265,7 +1274,8 @@ impl SessionDriver {
                      AND coalesce(json_extract(payload_json,'$.kind'),'') NOT IN ('read','search','fetch','think','switch_mode'))",
                     (&task, since, &c.channel_id),
                     |r| r.get::<_, bool>(0),
-                )?;
+                )?,
+            };
             let mut payload = json!({"channel_id":c.channel_id,"turn":turn,"native_mutation":native});
             crate::native_change_set::add(&mut payload, &record);
             lifecycle::event_tx(db, &task, "NATIVE_WRITER_TURN_CHANGES", payload)?;
@@ -1923,14 +1933,10 @@ impl PermissionPolicy for CorePolicy {
                 Err(option) => return Ok(PermissionDecision::Selected(option)),
             };
             let i = self.check(true).await?;
-            let read_only = i.role != "worker"
-                || cortex_core::scheduler::policy::read_only(
-                    i.profile.as_deref().unwrap_or(""),
-                    i.stage.as_deref().unwrap_or(""),
-                );
-            // claude-agent-acp (`default`) asks for every tool it does not run itself and
-            // codex-acp (`read-only`/`workspace-write`) asks to leave its sandbox; the
-            // runtime answers both itself. OpenCode keeps the client route.
+            let codex = self.engine == cortex_engine::environment::EngineKind::Codex;
+            let read_only = codex || crate::native_engine_policy::read_only(&i);
+            // Claude's native reads follow the existing decision table. Codex
+            // may not leave its native sandbox. OpenCode keeps the client route.
             let answers = self.engine != cortex_engine::environment::EngineKind::OpenCode;
             let class =
                 |p: &std::path::Path| crate::native_engine_policy::path_class(&self.root, p);
@@ -1938,7 +1944,7 @@ impl PermissionPolicy for CorePolicy {
                 .map(std::path::PathBuf::from)
                 .filter(|h| h.is_absolute());
             let mcp_servers = self.mcp_servers.lock().unwrap().clone();
-            let verdict = permission::classify(
+            let mut verdict = permission::classify(
                 request,
                 &permission::Facts {
                     access: &access,
@@ -1954,6 +1960,14 @@ impl PermissionPolicy for CorePolicy {
                     class: &class,
                 },
             );
+            // A native Codex request may be an escalation even if its tool kind
+            // is absent or says "read". Only a channel-bound MCP call can pass.
+            if codex && verdict.rule != "channel_mcp" && verdict.action != Action::Refuse {
+                verdict = permission::Verdict {
+                    action: Action::Refuse,
+                    rule: "codex_native_read_only",
+                };
+            }
             let refuse = || match permission::reject_option(request) {
                 Some(option) if answers => PermissionDecision::Selected(option),
                 _ => PermissionDecision::Cancelled,
@@ -2297,6 +2311,7 @@ impl CorePolicy {
             let c = self.credential.clone();
             let expected = channel.clone();
             let name = name.to_owned();
+            let scoped = self.engine == cortex_engine::environment::EngineKind::Codex;
             if crate::native_project_ops::supports(&name) {
                 let i = self.identity(true).await?;
                 if !same(&i, &expected) {
@@ -2310,6 +2325,7 @@ impl CorePolicy {
                         self.permissions.clone(),
                         &name,
                         arguments,
+                        scoped,
                     )
                     .await,
                 );
@@ -2375,6 +2391,7 @@ impl CorePolicy {
                     self.commands.clone(),
                     &name,
                     arguments,
+                    scoped,
                 )
                 .await;
                 if let Err(error) = &result {
@@ -2390,6 +2407,7 @@ impl CorePolicy {
                 return result.map_err(tool_error);
             }
             if crate::native_project::supports(&name) || crate::native_sources::supports(&name) {
+                let root = self.root.clone();
                 let result = receive(
                     self.executor
                         .publication(move |store| {
@@ -2401,7 +2419,7 @@ impl CorePolicy {
                             }
                             if crate::native_project::supports(&name) {
                                 crate::native_project::execute(
-                                    store, &i, &c, &name, &arguments, batched,
+                                    store, &i, &c, &name, &arguments, batched, &root, scoped,
                                 )
                             } else {
                                 crate::native_sources::execute(store, &i, &name, &arguments)
@@ -2436,6 +2454,7 @@ impl CorePolicy {
                     self.commands.clone(),
                     &name,
                     arguments,
+                    scoped,
                 )
                 .await
                 .map_err(tool_error);

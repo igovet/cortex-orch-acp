@@ -1,6 +1,6 @@
 //! Private per-command supervisor. Only the inherited pipe can authorize launch;
 //! restart observers read its durable status; they never execute the payload.
-use crate::native_command_sandbox::{Profile, Sandbox};
+use crate::native_command_sandbox::{Profile, Sandbox, CODEX_SCRATCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -17,6 +17,27 @@ use std::{
 };
 
 pub const MODE: &str = "--native-command-supervisor";
+pub(super) const AUTHORITY_HEARTBEAT: u8 = b'+';
+const AUTHORITY_LEASE: Duration = Duration::from_secs(2);
+
+/// Probe the real command preparations from process-level integration fixtures
+/// without compiling a second copy of the authorization and sandbox modules.
+#[doc(hidden)]
+pub fn observe_command_view(root: &Path, profile: &str) -> io::Result<()> {
+    match profile {
+        "read_only" => Sandbox::prepare(root, Profile::ReadOnly, &[], &[], false)?,
+        "guarded" => Sandbox::prepare(root, Profile::Guarded, &[root.to_path_buf()], &[], false)?,
+        "development" => Sandbox::prepare(
+            root,
+            Profile::Development,
+            &[root.to_path_buf()],
+            &[],
+            false,
+        )?,
+        _ => return Err(io::Error::other("command_profile_invalid")),
+    };
+    Ok(())
+}
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Spec {
     pub root: PathBuf,
@@ -94,6 +115,33 @@ fn handshake(input: &mut impl BufRead, message: Value) -> io::Result<()> {
     }
     Ok(())
 }
+// Stop when the service disappears or stops confirming live authority.
+fn scope_alive(input: &mut io::BufReader<impl Read>, renewed: &mut Instant) -> bool {
+    if renewed.elapsed() >= AUTHORITY_LEASE {
+        return false;
+    }
+    let mut pipe = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ready = unsafe { libc::poll(&mut pipe, 1, 0) };
+    if ready < 0 || pipe.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0 {
+        return false;
+    }
+    if ready != 0 || !input.buffer().is_empty() {
+        let Ok(pending) = input.fill_buf() else {
+            return false;
+        };
+        if pending.is_empty() || pending.iter().any(|b| *b != AUTHORITY_HEARTBEAT) {
+            return false;
+        }
+        let consumed = pending.len();
+        input.consume(consumed);
+        *renewed = Instant::now();
+    }
+    true
+}
 fn drain(
     mut pipe: impl Read + std::os::fd::AsRawFd + Send + 'static,
     file: Arc<Mutex<File>>,
@@ -139,21 +187,30 @@ pub fn run() -> io::Result<()> {
         return Err(io::Error::other("command_spec_oversized"));
     }
     let spec: Spec = serde_json::from_slice(&bytes)?;
-    let profile = match spec.profile.as_str() {
-        "read_only" => Profile::ReadOnly,
-        "guarded" => Profile::Guarded,
-        "development" => Profile::Development,
-        _ => return Err(io::Error::other("command_profile_invalid")),
-    };
+    let scoped = spec.profile == CODEX_SCRATCH;
     let mut timings = std::collections::BTreeMap::new();
-    let prepared = Sandbox::prepare_authorized(
-        &spec.root,
-        profile,
-        &spec.writes,
-        &spec.protected,
-        &mut || handshake(&mut input, json!({"authorize":true})),
-        &mut timings,
-    );
+    let prepared = if scoped {
+        if !spec.writes.is_empty() || !spec.cwd.starts_with(&spec.root) {
+            return Err(io::Error::other("invalid_scoped_command_spec"));
+        }
+        handshake(&mut input, json!({"authorize":true}))?;
+        Sandbox::prepare_scoped(&spec.root, &spec.protected)
+    } else {
+        let profile = match spec.profile.as_str() {
+            "read_only" => Profile::ReadOnly,
+            "guarded" => Profile::Guarded,
+            "development" => Profile::Development,
+            _ => return Err(io::Error::other("command_profile_invalid")),
+        };
+        Sandbox::prepare_authorized(
+            &spec.root,
+            profile,
+            &spec.writes,
+            &spec.protected,
+            &mut || handshake(&mut input, json!({"authorize":true})),
+            &mut timings,
+        )
+    };
     let mut sandbox = match prepared {
         Ok(sandbox) => sandbox,
         Err(e) => {
@@ -215,6 +272,7 @@ pub fn run() -> io::Result<()> {
             );
             let deadline = Instant::now() + Duration::from_secs(spec.timeout);
             let mut group_owned = true;
+            let mut renewed = launched_at;
             loop {
                 // Keep the exited leader unreaped until group cleanup. Its PID
                 // cannot be recycled into an unrelated stop target in this gap.
@@ -240,6 +298,10 @@ pub fn run() -> io::Result<()> {
                 }
                 if spec.stop.exists() {
                     failure = Some("owner_stopped");
+                    break;
+                }
+                if scoped && !scope_alive(&mut input, &mut renewed) {
+                    failure = Some("authority_changed");
                     break;
                 }
                 if Instant::now() >= deadline {

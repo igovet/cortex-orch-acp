@@ -63,8 +63,9 @@ task's own changes.
 - it changed during a turn of a writing worker whose engine could change files
   without a receipt. The same listings bracket each such turn
   (`NATIVE_WRITER_TURN_STARTED`, `NATIVE_WRITER_TURN_CHANGES`; `NATIVE_TURN_SETTLED`
-  carries `writer`). codex-acp (`workspace-write`) and OpenCode can write inside
-  their own sandbox without asking, so every writing turn of theirs counts
+  carries `writer`). Managed codex-acp runs `read-only` with no external MCP servers attached, so its
+  turns are never attributed native effects; OpenCode can write inside its own sandbox without asking, so every
+  writing turn of OpenCode counts
   (`native_mutation: true`); Claude Code runs with its native shell and file tools
   disallowed and asks for every other tool, so its turn counts only when the
   runtime allowed a request in it other than a Cortex gateway tool or a read.

@@ -3,45 +3,16 @@
 mod hermetic;
 #[path = "../../cortex-engine/src/bin/fake-engine.rs"]
 mod peer;
-// harness = false keeps cfg(test) but strips #[test], so this reused module's unit-test helpers look unused.
-#[allow(dead_code, unused_imports)]
-#[path = "../src/native_command_sandbox.rs"]
-mod sandbox;
-// The sandbox reads the owner's tool search path from this module.
-#[allow(dead_code, unused_imports)]
-#[path = "../src/tool_path.rs"]
-mod tool_path;
-// The command backend uses only the runtime random-identity helper.
-mod native_effects {
-    pub fn identity() -> std::io::Result<String> {
-        use std::io::Read;
-        let mut bytes = [0u8; 32];
-        std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-        Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
-    }
-}
-
 fn verification_available(root: &std::path::Path) -> bool {
-    let sandbox = match sandbox::Sandbox::prepare(root, sandbox::Profile::ReadOnly, &[], &[], false)
-    {
-        Ok(s) => s,
+    match workspace_service::native_command_supervisor::observe_command_view(root, "read_only") {
+        Ok(()) => true,
         Err(e) => {
             assert!(
                 e.to_string()
-                    .starts_with("native_command_sandbox_unavailable:"),
+                    .starts_with("native_command_sandbox_unavailable:")
+                    || e.raw_os_error() == Some(libc::ENOTSUP),
                 "{e}"
             );
-            return false;
-        }
-    };
-    let mut probe = sandbox.command(&["/bin/true".into()]).unwrap();
-    match probe.status() {
-        Ok(status) => {
-            assert!(status.success());
-            true
-        }
-        Err(e) => {
-            assert_eq!(e.raw_os_error(), Some(libc::ENOTSUP));
             false
         }
     }
@@ -82,6 +53,20 @@ impl Project {
             .await
             .unwrap()
             .unwrap()
+    }
+    // Native-write attribution fixtures need an engine that still permits native writes.
+    fn native_writer_route(&self) -> SessionRoute {
+        let mut route = self.route();
+        route.launch.engine = EngineKind::OpenCode;
+        let credentials = self.0.join(".cortex-dev/opencode");
+        std::fs::create_dir(&credentials).unwrap();
+        route.launch.credential_directory = credentials;
+        route
+    }
+    fn legacy_route(&self) -> SessionRoute {
+        let mut route = self.route();
+        route.launch.engine = EngineKind::Claude;
+        route
     }
     fn route(&self) -> SessionRoute {
         let executable = std::env::current_exe().unwrap();
@@ -539,6 +524,8 @@ async fn document_tools_through_engine_and_relay() {
 async fn channel_source_project_and_commands() {
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::PermissionsExt;
+    // This journey exercises the legacy command mounts and Git context tools;
+    // managed Codex has its own no-host command fixture below.
     let p = Project::new();
     std::fs::create_dir(p.0.join("src")).unwrap();
     std::fs::write(p.0.join("src/value"), "one\ntwo\n").unwrap();
@@ -765,10 +752,10 @@ async fn channel_source_project_and_commands() {
     replacement.shutdown().await.unwrap();
     s.write(|db|{
         db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='t'",[])?;
-        db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-backend-dev','Work','[]','[\"src\"]','execution','running','a',NULL)",[])?;
+        db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-backend-dev','Work','[]','[\"src\",\".gitignore\"]','execution','running','a',NULL)",[])?;
         cortex_core::access::switch_tx(db,"t","development","fixture-development","acp_set_mode")
     }).unwrap();
-    let mut route = p.route();
+    let mut route = p.legacy_route();
     // Unlike the old fake route, credentials must not alias the entire task tree.
     let account = p.0.join("fixture-account");
     std::fs::create_dir(&account).unwrap();
@@ -1305,7 +1292,7 @@ async fn channel_source_project_and_commands() {
             SessionRole::Worker {
                 assignment: "b".into(),
             },
-            p.route(),
+            p.legacy_route(),
         )
         .await
         .unwrap();
@@ -1495,9 +1482,179 @@ async fn coordinator_tools_not_chat_and_lease() {
     drop(s);
     close(h).await;
 }
-/// sudo in a host command asks the owner through the askpass route, and a writing
-/// worker's command_run that needs the host is rerun there by the runtime. A fake
-/// `sudo` stands in for the real one; no real sudo runs and no real password exists.
+/// Exercised with real and unavailable namespaces, using the no-paid ACP peer.
+async fn managed_codex_command_authority() {
+    for mode in ["development", "guarded", "auto"] {
+        let p = Project::new();
+        let outsider = Project::new();
+        let outside_file = outsider.0.join("would-be-host-effect");
+        std::fs::create_dir(p.0.join("src")).unwrap();
+        std::fs::write(p.0.join("src/input"), "ordinary").unwrap();
+        let h = p.host().await;
+        let o = h
+            .create("t".into(), "Scoped commands".into(), "owner".into())
+            .await
+            .unwrap();
+        let store = p.store();
+        store.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='t'", [])?;
+            db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-backend-dev','Work','[]','[\"src\"]','execution','running','a',NULL)", [])?;
+            cortex_core::access::switch_tx(db, "t", mode, "fixture", "acp_set_mode")
+        }).unwrap();
+        let mut route = p.route();
+        let account = p.0.join("fixture-account");
+        std::fs::create_dir(&account).unwrap();
+        route.launch.credential_directory = account;
+        let d = h
+            .dispatch(
+                "t".into(),
+                o,
+                SessionRole::Worker {
+                    assignment: "a".into(),
+                },
+                route,
+            )
+            .await
+            .unwrap();
+
+        async fn refused(
+            d: &workspace_service::native_sessions::SessionDriver,
+            name: &str,
+            args: Value,
+            code: &str,
+        ) {
+            let prompt = format!(
+                "call:{}",
+                json!({"name":name,"arguments":args,
+                "__fixture_expect":{"/result/isError":true,"/result/structuredContent/code":code}})
+            );
+            assert_eq!(d.prompt(&prompt).await.unwrap().stop_reason, "end_turn");
+        }
+        refused(
+            &d,
+            "project_git",
+            json!({"kind":"status","request_key":"git"}),
+            "managed_codex_git_refused",
+        )
+        .await;
+        refused(
+            &d,
+            "outside_command",
+            json!({"argv":["/usr/bin/touch",outside_file],"cwd":outsider.0,"request_key":"host"}),
+            "managed_codex_host_command_refused",
+        )
+        .await;
+        refused(&d, "command_run", json!({"argv":["/usr/bin/touch",outside_file],"cwd":outsider.0,"request_key":"host-cwd"}),
+            "scoped_command_cwd_refused").await;
+        refused(
+            &d,
+            "command_run",
+            json!({"argv":["/bin/sh","-c","sudo true"],"request_key":"privilege"}),
+            "managed_codex_host_command_refused",
+        )
+        .await;
+        assert!(!outside_file.exists());
+
+        let cmd = json!({"argv":["/bin/sh","-ec",
+            "[ \"$(cat input)\" = ordinary ]; echo scratch > \"$TMPDIR/scoped-output\"; cat \"$TMPDIR/scoped-output\""],
+            "cwd":p.0.join("src"),"request_key":"scratch"});
+        let _ = d.prompt(&call("command_run", cmd.clone())).await.unwrap();
+        let read_receipt = |key: &str| -> Value {
+            store
+                .read(|db| {
+                    let raw: String = db.query_row(
+                        "SELECT result_json FROM runtime_requests WHERE request_key=?",
+                        [key],
+                        |r| r.get(0),
+                    )?;
+                    Ok(serde_json::from_str(&raw)?)
+                })
+                .unwrap()
+        };
+        let receipt = read_receipt("scratch");
+        if receipt["launched"] == false {
+            assert_eq!(receipt["failure"], "command_not_started");
+            assert_eq!(
+                receipt["settlement_evidence"],
+                "supervisor_launcher_failed_before_release"
+            );
+            assert!(receipt["rerouted_to"].is_null());
+            // An earlier service's saved trusted-prestart routing decision must
+            // still never launch for this engine, even after an exact retry.
+            store.write(|db| {
+                db.execute("UPDATE runtime_requests SET result_json=json_set(result_json,'$.rerouted_to',json(?)) WHERE request_key='scratch'",
+                    [json!({"args":{"argv":["/usr/bin/touch",outside_file],"cwd":outsider.0,
+                        "request_key":"scratch.host"},"note":{"reason":"sandbox_unavailable"}}).to_string()])?;
+                Ok(())
+            }).unwrap();
+            let _ = d.prompt(&call("command_run", cmd)).await.unwrap();
+            println!("{mode}: scratch sandbox unavailable; before-launch refusal and no host replay observed");
+        } else {
+            assert_eq!(receipt["profile"], "codex_scratch", "{receipt}");
+            assert_eq!(receipt["access_mode"], mode);
+            assert_eq!(receipt["exit_code"], 0, "{receipt}");
+            assert_eq!(receipt["output"], "scratch\n");
+            assert!(receipt["revision_digest"].is_null());
+
+            if mode == "auto" {
+                // Start under a real authority, then change its effective scope.
+                // The supervisor must stop, not retain a grant until the timeout.
+                let _ = d
+                    .prompt(&call(
+                        "command_run",
+                        json!({"argv":["/bin/sleep","30"],
+                    "timeout_seconds":25,"request_key":"old-scope"}),
+                    ))
+                    .await
+                    .unwrap();
+                assert!(!read_receipt("old-scope")["handle"].is_null());
+                store.write(|db| {
+                    db.execute("UPDATE runtime_nodes SET scope_json='[\"different\"]' WHERE assignment_ref='a'", [])?;
+                    Ok(())
+                }).unwrap();
+                tokio::time::timeout(Duration::from_secs(6), async {
+                    loop {
+                        let end = read_receipt("old-scope");
+                        if end["settled"] == true {
+                            assert!(
+                                matches!(
+                                    end["failure"].as_str(),
+                                    Some("authority_changed" | "owner_stopped")
+                                ),
+                                "{end}"
+                            );
+                            assert_eq!(end["complete"], false);
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(30)).await;
+                    }
+                })
+                .await
+                .expect("old scope did not stop the supervisor");
+            }
+            println!("{mode}: authorized scratch command and unchanged checkout observed");
+        }
+        assert!(!outside_file.exists());
+        assert!(!p.0.join("scoped-output").exists());
+        assert_eq!(
+            std::fs::read_to_string(p.0.join("src/input")).unwrap(),
+            "ordinary"
+        );
+        store.read(|db| {
+            let before_launch: i64 = db.query_row(
+                "SELECT count(*) FROM runtime_requests WHERE request_key IN ('git','host','host-cwd','privilege','scratch.host')", [], |r| r.get(0))?;
+            let host_routing: i64 = db.query_row(
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_OUTSIDE_REQUESTED'", [], |r| r.get(0))?;
+            assert_eq!((before_launch, host_routing), (0, 0));
+            Ok(())
+        }).unwrap();
+        d.shutdown().await.unwrap();
+        drop(store);
+        close(h).await;
+    }
+}
+
+/// The legacy writer's askpass and pre-launch reroute use a fake sudo, not root.
 async fn sudo_prompts_and_host_reroute() {
     use std::os::unix::fs::PermissionsExt;
     use workspace_service::native_askpass as askpass;
@@ -1572,7 +1729,7 @@ async fn sudo_prompts_and_host_reroute() {
             SessionRole::Worker {
                 assignment: "a".into(),
             },
-            p.route(),
+            p.legacy_route(),
         )
         .await
         .unwrap();
@@ -1795,7 +1952,7 @@ async fn sudo_prompts_and_host_reroute() {
             SessionRole::Worker {
                 assignment: "a".into(),
             },
-            r.route(),
+            r.legacy_route(),
         )
         .await
         .unwrap();
@@ -1851,10 +2008,10 @@ async fn sudo_prompts_and_host_reroute() {
     }
 }
 async fn access_modes_and_outside_routes() {
-    // A writing worker keeps the same asking/workspace-write mode in every access
+    // A writing worker keeps the same restricted mode in every access
     // mode: no session runs in bypassPermissions or agent-full-access.
     for (engine, floor, automatic) in [
-        (EngineKind::Codex, "workspace-write", "workspace-write"),
+        (EngineKind::Codex, "read-only", "read-only"),
         (EngineKind::Claude, "default", "default"),
         (EngineKind::OpenCode, "cortex", "cortex"),
     ] {
@@ -1905,12 +2062,14 @@ async fn access_modes_and_outside_routes() {
             // OpenCode keeps the client route outside Auto; the runtime answers
             // Claude and Codex itself: Development allows an uncontained request,
             // Guarded refuses it unless the request is provably contained.
-            let expected =
-                if mode == "auto" || engine != EngineKind::OpenCode && mode == "development" {
-                    "NATIVE_PERMISSION_DECIDED"
-                } else {
-                    "NATIVE_PERMISSION_CANCELLED"
-                };
+            let expected = if (mode == "auto"
+                || engine == EngineKind::Claude && mode == "development")
+                && engine != EngineKind::Codex
+            {
+                "NATIVE_PERMISSION_DECIDED"
+            } else {
+                "NATIVE_PERMISSION_CANCELLED"
+            };
             assert_eq!(
                 s.read(|db| Ok(db.query_row(
                     "SELECT count(*) FROM runtime_events WHERE type=?",
@@ -1921,18 +2080,19 @@ async fn access_modes_and_outside_routes() {
                 1
             );
             let path = outside.0.join("output.txt");
-            // A write outside the project asks the owner in Guarded and Development
+            let codex = engine == EngineKind::Codex;
+            // For other engines a write outside asks in Guarded and Development
             // (no owner surface here: refused) and is allowed in Auto.
             let write = json!({"path":path,"content":"first","request_key":"write"});
             checked(
                 &d,
                 "outside_write",
                 write.clone(),
-                json!({"/result/isError":mode!="auto"}),
+                json!({"/result/isError":codex || mode!="auto"}),
                 "end_turn",
             )
             .await;
-            if mode != "auto" {
+            if codex || mode != "auto" {
                 assert!(!path.exists());
             } else {
                 assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
@@ -1944,7 +2104,7 @@ async fn access_modes_and_outside_routes() {
                 &d,
                 "outside_write",
                 write,
-                json!({"/result/isError":mode!="auto"}),
+                json!({"/result/isError":codex || mode!="auto"}),
                 "end_turn",
             )
             .await;
@@ -1955,7 +2115,7 @@ async fn access_modes_and_outside_routes() {
                 &d,
                 "outside_write",
                 json!({"path":path,"content":"conflict","request_key":"write"}),
-                json!({"/result/isError":true,"/result/structuredContent/code":"request_key_conflict"}),
+                json!({"/result/isError":true,"/result/structuredContent/code":if codex {"write_outside_assignment_scope"} else {"request_key_conflict"}}),
                 "end_turn",
             )
             .await;
@@ -1964,7 +2124,7 @@ async fn access_modes_and_outside_routes() {
                 &d,
                 "outside_command",
                 command.clone(),
-                json!({"/result/isError":mode!="auto"}),
+                json!({"/result/isError":codex || mode!="auto"}),
                 "end_turn",
             )
             .await;
@@ -1972,11 +2132,11 @@ async fn access_modes_and_outside_routes() {
                 &d,
                 "outside_command",
                 command,
-                json!({"/result/isError":mode!="auto"}),
+                json!({"/result/isError":codex || mode!="auto"}),
                 "end_turn",
             )
             .await;
-            if mode == "auto" {
+            if mode == "auto" && !codex {
                 checked(&d,"outside_command",json!({"argv":["/usr/bin/head","-c","70000","/dev/zero"],"request_key":"bounded-output"}),
                     json!({"/result/structuredContent/complete":true,"/result/structuredContent/output_truncated":true,
                         "/result/structuredContent/byte_count":70000,"/result/structuredContent/exit_code":0}),"end_turn").await;
@@ -1990,11 +2150,13 @@ async fn access_modes_and_outside_routes() {
             } else {
                 assert!(!outside.0.join("count").exists());
             }
-            if mode == "development" {
-                std::fs::create_dir(outside.0.join(".cortex")).unwrap();
-                checked(&d,"outside_write",json!({"path":outside.0.join(".cortex/guarded"),"content":"no","request_key":"protected"}),
-                    json!({"/result/isError":true}),"end_turn").await;
-                assert!(!outside.0.join(".cortex/guarded").exists());
+            for store in [".cortex", ".cortex-dev"] {
+                std::fs::create_dir(outside.0.join(store)).unwrap();
+                let target = outside.0.join(store).join("db");
+                std::fs::write(&target, "fixture").unwrap();
+                checked(&d,"outside_write",json!({"path":target,"content":"no","request_key":store}),
+                    json!({"/result/isError":true,"/result/structuredContent/code":"cortex_private"}),"end_turn").await;
+                assert_eq!(std::fs::read_to_string(target).unwrap(), "fixture");
             }
             checked(
                 &d,
@@ -2603,7 +2765,7 @@ async fn desktop_permission_decisions() {
     close(h).await;
     drop(outside);
     // Cortex's own outside_write asks the owner on the same card in Development.
-    let (_p, h, s, d, outside) = bound("development", EngineKind::Codex).await;
+    let (_p, h, s, d, outside) = bound("development", EngineKind::Claude).await;
     let target = outside.0.join("written.txt");
     let owner = async {
         let item = pending(&s, &list, 0).await;
@@ -2867,16 +3029,21 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
                     ),
                     (
                         native("read", json!({"file_path":host}), Some(host.clone())),
-                        access != "guarded",
-                        match access {
-                            "auto" => "auto_outside_read",
+                        engine != EngineKind::Codex && access != "guarded",
+                        match (engine, access) {
+                            (EngineKind::Codex, _) => "codex_native_read_only",
+                            (_, "auto") => "auto_outside_read",
                             _ => "outside_read",
                         },
                     ),
                     (
                         native("read", json!({"file_path":inside}), Some(inside.clone())),
-                        true,
-                        "",
+                        engine != EngineKind::Codex,
+                        if engine == EngineKind::Codex {
+                            "codex_native_read_only"
+                        } else {
+                            ""
+                        },
                     ),
                 ] {
                     assert_eq!(
@@ -2953,9 +3120,7 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
     d.shutdown().await.unwrap();
     drop(s);
     close(h).await;
-    // A writing Codex worker runs in workspace-write in every access mode, and its
-    // escalations (an apply_patch outside the project, into credentials, Git
-    // controls or Cortex state) are answered by the runtime per the decision table.
+    // Codex writers keep the native sandbox while the gateway can write.
     for access in ["auto", "guarded", "development"] {
         let p = Project::new();
         assert!(std::process::Command::new("git")
@@ -2973,7 +3138,7 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
         let s = p.store();
         s.write(|db| {
             db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='t'", [])?;
-            db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-backend-dev','Work','[]','[\"src\"]','execution','running','a',NULL)", [])?;
+            db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-backend-dev','Work','[]','[\"src\",\"nested/leaf\"]','execution','running','a',NULL)", [])?;
             cortex_core::access::switch_tx(db, "t", access, "fixture", "acp_set_mode")
         })
         .unwrap();
@@ -2991,64 +3156,15 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
         let confirmed = s.read(|db| Ok(db.query_row(
             "SELECT json_extract(payload_json,'$.mode') FROM runtime_events WHERE type='NATIVE_ACCESS_MODE_CONFIRMED'",
             [], |r| r.get::<_, String>(0))?)).unwrap();
-        assert_eq!(confirmed, "workspace-write", "{access}");
+        assert_eq!(confirmed, "read-only", "{access}");
         let inside = p.0.join("src/a.rs");
-        for (target, outcome, rule) in [
-            (
-                inside.clone(),
-                "allow-once",
-                if access == "auto" {
-                    "auto"
-                } else if access == "development" {
-                    "native_development"
-                } else {
-                    "native_project"
-                },
-            ),
-            // Auto allows everything but Cortex private state (with a rule naming
-            // what it allowed); outside Auto the rest asks, and with no owner client
-            // connected here an ask is refused.
-            (
-                outside.0.join("b.rs"),
-                if access == "auto" {
-                    "allow-once"
-                } else {
-                    "reject"
-                },
-                if access == "auto" {
-                    "auto_outside_write"
-                } else {
-                    "outside_write"
-                },
-            ),
-            (
-                p.0.join("deploy/server.pem"),
-                if access == "auto" {
-                    "allow-once"
-                } else {
-                    "reject"
-                },
-                if access == "auto" {
-                    "auto_credential"
-                } else {
-                    "credential"
-                },
-            ),
-            (
-                p.0.join(".git/config"),
-                if access == "auto" {
-                    "allow-once"
-                } else {
-                    "reject"
-                },
-                if access == "auto" {
-                    "auto_control"
-                } else {
-                    "control_target"
-                },
-            ),
-            (p.0.join(".cortex/injected"), "reject", "cortex_private"),
-            (p.0.join(".cortex-dev/injected"), "reject", "cortex_private"),
+        for (target, rule) in [
+            (inside.clone(), "read_only"),
+            (outside.0.join("b.rs"), "read_only"),
+            (p.0.join("deploy/server.pem"), "read_only"),
+            (p.0.join(".git/config"), "read_only"),
+            (p.0.join(".cortex/injected"), "cortex_private"),
+            (outside.0.join(".cortex-dev/injected"), "cortex_private"),
         ] {
             let request = native("edit", json!({"path":target}), Some(target.clone()));
             assert_eq!(
@@ -3065,23 +3181,122 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
                     payload["outcome"]["optionId"].as_str(),
                     payload["rule"].as_str()
                 ),
-                (Some(outcome), Some(rule)),
+                (Some("reject"), Some(rule)),
                 "{access} {target:?}"
             );
-            let decider = if outcome == "allow-once" {
-                format!("mode:{access}")
-            } else if rule == "cortex_private" {
-                "runtime".into()
-            } else {
-                "no_owner_client".into()
-            };
-            assert_eq!(payload["decider"], decider, "{access} {target:?}");
+            assert_eq!(payload["decider"], "runtime", "{access} {target:?}");
         }
+        for (path, code) in [
+            ("src/a.rs", None),
+            ("src-new/a.rs", Some("write_outside_assignment_scope")),
+            ("outside.rs", Some("write_outside_assignment_scope")),
+            ("nested/leaf", Some("write_outside_assignment_scope")),
+        ] {
+            let expected = code.map_or(
+                json!({"/result/isError":false}),
+                |c| json!({"/result/isError":true,"/result/structuredContent/code":c}),
+            );
+            let args = json!({"path":path,"content":"ready","expected_sha256":"absent"});
+            assert_eq!(
+                d.prompt(&format!(
+                    "call:{}",
+                    json!({"name":"project_write","arguments":args,
+                "__fixture_expect":expected})
+                ))
+                .await
+                .unwrap()
+                .stop_reason,
+                "end_turn"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&inside).unwrap(), "ready");
+        assert!(!p.0.join("src-new").exists() && !p.0.join("outside.rs").exists());
+        assert!(!p.0.join("nested").exists(), "denied parent was created");
+        for (name, args) in [
+            ("project_mkdir", json!({"path":"out/new"})),
+            (
+                "project_edit",
+                json!({"path":"out/locked","edits":[{"old_string":"old","new_string":"new"}]}),
+            ),
+            (
+                "project_delete",
+                json!({"path":"out/locked","expected_sha256":"0".repeat(64)}),
+            ),
+        ] {
+            let payload = json!({"name":name,"arguments":args,"__fixture_expect":{
+                "/result/isError":true,"/result/structuredContent/code":"write_outside_assignment_scope"}});
+            assert_eq!(
+                d.prompt(&format!("call:{payload}"))
+                    .await
+                    .unwrap()
+                    .stop_reason,
+                "end_turn"
+            );
+        }
+        assert!(!p.0.join("out").exists());
+        let target = outside.0.join(".cortex-dev");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("fixture"), "original").unwrap();
+        std::os::unix::fs::symlink(&target, p.0.join("src/alias")).unwrap();
+        std::fs::hard_link(target.join("fixture"), p.0.join("src/hardlink")).unwrap();
+        for (path, code) in [
+            ("src/alias/would-create", "symlink_refused"),
+            ("src/hardlink", "regular_unlinked_file_required"),
+        ] {
+            let payload = json!({"name":"project_write","arguments":{
+                "path":path,"content":"no","expected_sha256":"absent"},
+                "__fixture_expect":{"/result/isError":true,"/result/structuredContent/code":code}});
+            assert_eq!(
+                d.prompt(&format!("call:{payload}"))
+                    .await
+                    .unwrap()
+                    .stop_reason,
+                "end_turn"
+            );
+        }
+        assert!(!target.join("would-create").exists());
+        assert_eq!(
+            std::fs::read_to_string(target.join("fixture")).unwrap(),
+            "original"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.0.join("src/hardlink")).unwrap(),
+            "original"
+        );
+        assert_eq!(d.prompt(&call("access_request", json!({
+            "paths":["nested"],"reason":"Create the parent for the scoped file","request_key":"grant-parent"
+        }))).await.unwrap().stop_reason, "end_turn");
+        assert_eq!(
+            d.prompt(&call(
+                "project_write",
+                json!({
+                    "path":"nested/leaf","content":"after grant","expected_sha256":"absent"
+                })
+            ))
+            .await
+            .unwrap()
+            .stop_reason,
+            "end_turn"
+        );
+        assert_eq!(
+            std::fs::read_to_string(p.0.join("nested/leaf")).unwrap(),
+            "after grant"
+        );
+        let cards = s
+            .read(|db| {
+                Ok(
+                    db.query_row("SELECT count(*) FROM pending_questions", [], |r| {
+                        r.get::<_, i64>(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(cards, 0, "{access}");
         d.shutdown().await.unwrap();
         drop(s);
         close(h).await;
     }
-    // No restricted mode offered: the read-only session does not start.
+    // No restricted mode offered: the session does not start, even for a Codex writer.
     for engine in [EngineKind::Codex, EngineKind::Claude] {
         let p = Project::new();
         std::fs::write(p.0.join("no-restricted-modes"), "").unwrap();
@@ -3091,9 +3306,14 @@ async fn read_only_channels_start_restricted_in_every_access_mode() {
             .await
             .unwrap();
         let s = p.store();
+        let (state, profile, stage) = if engine == EngineKind::Codex {
+            ("EXECUTING", "worker-backend-dev", "execution")
+        } else {
+            ("REVIEWING", "worker-code-reviewer", "review")
+        };
         s.write(|db| {
-            db.execute("UPDATE runtime_tasks SET state='REVIEWING',revision=1 WHERE task_id='t'", [])?;
-            db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-code-reviewer','Review','[]','[\"src\"]','review','running','a',NULL)", [])?;
+            db.execute("UPDATE runtime_tasks SET state=?,revision=1 WHERE task_id='t'", [state])?;
+            db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n',?,'Work','[]','[\"src\"]',?,'running','a',NULL)", [profile, stage])?;
             cortex_core::access::switch_tx(db, "t", "auto", "fixture", "acp_set_mode")
         })
         .unwrap();
@@ -4200,7 +4420,7 @@ async fn native_plan_review_verification_journey(
             SessionRole::Worker {
                 assignment: a.clone(),
             },
-            p.route(),
+            p.native_writer_route(),
         )
         .await
         .unwrap();
@@ -4542,7 +4762,7 @@ async fn plain_folder_task_runs_its_whole_lifecycle() {
             SessionRole::Worker {
                 assignment: a.clone(),
             },
-            p.route(),
+            p.native_writer_route(),
         )
         .await
         .unwrap();
@@ -5175,11 +5395,12 @@ async fn native_workspace_binding_projects_activity_and_scoped_skills() {
 
 async fn configured_external_worker_grants() {
     for (role, stage, engine, expectation) in [
-        ("worker-explorer", "execution", EngineKind::Codex, "read"),
+        ("worker-explorer", "execution", EngineKind::Claude, "read"),
+        ("worker-backend-dev", "execution", EngineKind::Codex, "none"),
         (
             "worker-backend-dev",
             "execution",
-            EngineKind::Codex,
+            EngineKind::Claude,
             "write",
         ),
         (
@@ -5303,7 +5524,12 @@ async fn configured_external_worker_grants() {
         assert!(!p.0.join("docs").exists());
         store.read(|db|{
             let withheld:i64=db.query_row("SELECT count(*) FROM runtime_events WHERE type='NATIVE_EXTERNAL_MCP_WITHHELD'",[],|r|r.get(0))?;
-            assert_eq!(withheld,0,"a not-yet-created scope withholds nothing");
+            let managed = engine == EngineKind::Codex && role != "worker-senior-consultant";
+            assert_eq!(withheld, i64::from(managed));
+            if managed {
+                let reason: String = db.query_row("SELECT json_extract(payload_json,'$.reason') FROM runtime_events WHERE type='NATIVE_EXTERNAL_MCP_WITHHELD'", [], |r| r.get(0))?;
+                assert_eq!(reason, "managed_codex_external_effects_unconfined");
+            }
             let count:i64=db.query_row("SELECT count(*) FROM runtime_requests WHERE operation='external_call'",[],|r|r.get(0))?;
             assert_eq!(count,match expectation {"write"=>2,"read" | "review-read"=>1,_=>0});
             let saved:String=db.query_row("SELECT coalesce(group_concat(result_json),'') FROM runtime_requests WHERE operation='external_call'",[],|r|r.get(0))?;
@@ -5385,7 +5611,7 @@ async fn optional_external_failures_withhold_only_that_server() {
         db.execute("INSERT INTO acp_host_sessions VALUES ('host',?,'t','{\"name\":\"cortex-native\"}','{}','[]','2026-11-17T00:00:00Z',NULL)", [&root])?;
         Ok(())
     }).unwrap();
-    let mut route = p.route();
+    let mut route = p.legacy_route();
     route.launch.args = vec!["mcp-host".into()];
     let d = h
         .dispatch(
@@ -5509,7 +5735,7 @@ async fn uncontained_external_server_runs_with_owner_authority() {
         db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-backend-dev','Work','[]',?,'execution','running','a',NULL)",[r#"["src"]"#])?;
         Ok(())
     }).unwrap();
-    let mut route = p.route();
+    let mut route = p.legacy_route();
     route.launch.args = vec!["mcp-host".into()];
     let d = h
         .dispatch(
@@ -6099,7 +6325,7 @@ async fn verification_drift_blocks_the_pass() {
             SessionRole::Worker {
                 assignment: a.clone(),
             },
-            p.route(),
+            p.native_writer_route(),
         )
         .await
         .unwrap();
@@ -6505,7 +6731,7 @@ async fn recovery_project_operations_and_structured_tool_errors() {
     let file_sha = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(b"remove me"));
     s.write(|db| {
         db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1 WHERE task_id='t'", [])?;
-        db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-backend-dev','Work','[]','[\"src\"]','execution','running','a',NULL)", [])?;
+        db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-backend-dev','Work','[]','[\"src\",\".claude\",\".gitignore\"]','execution','running','a',NULL)", [])?;
         Ok(())
     })
     .unwrap();
@@ -6830,7 +7056,7 @@ async fn recovery_project_operations_and_structured_tool_errors() {
 
     // Auto answers the deletion and replacement cards itself.
     s.write(|db| {
-        db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n2','worker-backend-dev','More work','[]','[\"src\"]','execution','running','b',NULL)", [])?;
+        db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n2','worker-backend-dev','More work','[]','[\"src\",\".claude\",\".gitignore\"]','execution','running','b',NULL)", [])?;
         cortex_core::access::switch_tx(db, "t", "auto", "fixture", "acp_set_mode")
     })
     .unwrap();
@@ -6983,6 +7209,21 @@ fn main() {
             println!("external worker grants, including Claude review discovery, passed");
             return;
         }
+        if mode == "legacy-command-context" {
+            tokio::time::timeout(
+                Duration::from_secs(70),
+                channel_source_project_and_commands(),
+            )
+            .await
+            .expect("legacy command context scenario exceeded deadline");
+            return;
+        }
+        if mode == "managed-codex-commands" {
+            tokio::time::timeout(Duration::from_secs(70), managed_codex_command_authority())
+                .await
+                .expect("managed Codex command scenario exceeded deadline");
+            return;
+        }
         if mode == "sudo-host-route" {
             tokio::time::timeout(Duration::from_secs(90), sudo_prompts_and_host_reroute())
                 .await
@@ -6994,9 +7235,13 @@ fn main() {
         if mode == "engine-modes" {
             tokio::time::timeout(Duration::from_secs(90), async {
                 claude_permission_requests_follow_runtime_policy().await;
+                println!("Claude native permissions passed");
                 owner_cards_stay_pending_and_record_the_owner().await;
+                println!("Client owner cards passed");
                 desktop_permission_decisions().await;
+                println!("Desktop consent passed");
                 read_only_channels_start_restricted_in_every_access_mode().await;
+                println!("Restricted modes and scoped Codex mutations passed");
                 access_modes_and_outside_routes().await;
             })
             .await
@@ -7016,6 +7261,7 @@ fn main() {
             reopened_synthesis_feedback().await;
             access_modes_and_outside_routes().await;
             sudo_prompts_and_host_reroute().await;
+            managed_codex_command_authority().await;
             route_effort_starts_codex_and_claude_coordinators().await;
             document_tools_through_engine_and_relay().await;
             configured_external_worker_grants().await;

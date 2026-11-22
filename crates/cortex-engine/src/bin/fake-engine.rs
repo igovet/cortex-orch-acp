@@ -977,6 +977,13 @@ pub async fn main() {
                     {
                         json!({"name":"replan_request","arguments":{"reason":"Replan before launching the already claimed sibling","request_key":"worker-replan"}})
                     } else if mode == "desktop-worker"
+                        && scenario.trim() == "command-scratch-hold"
+                        && *n == 1
+                    {
+                        json!({"name":"command_run","arguments":{"argv":["/bin/sh","-ec",
+                            "printf '%s\\n' scratch-control-ready; exec /bin/sleep 120"],
+                            "timeout_seconds":120,"request_key":"scratch-command-control"}})
+                    } else if mode == "desktop-worker"
                         && scenario.starts_with("command-restart-")
                         && *n == 1
                     {

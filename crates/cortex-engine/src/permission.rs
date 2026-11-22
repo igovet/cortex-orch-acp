@@ -340,9 +340,12 @@ fn targets(request: &Value, facts: &Facts<'_>) -> Targets {
             facts.root.join(&name)
         };
         match resolved(&path) {
-            Some(real) => out
-                .paths
-                .push((real.starts_with(&root), (facts.class)(&real))),
+            Some(real) => {
+                // Preserve private names along the declared path as well as
+                // the resolved target when a symlink changes classification.
+                let class = (facts.class)(&real).max((facts.class)(&path));
+                out.paths.push((real.starts_with(&root), class));
+            }
             None => out.unclassified = true,
         }
     }

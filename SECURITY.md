@@ -1356,28 +1356,23 @@ choice or partial submission cannot resume the worker.
 Only Guarded access and eligible configured native routes are offered. This is
 not full legacy permission, skill-proposal or client-integration parity.
 No Cortex session runs in an engine mode that skips the engine's permission
-requests, in any access mode: every Claude session (coordinator, every worker,
-reviewer and auxiliary session) runs in claude-agent-acp's `default` mode, a
-read-only channel (the coordinator, a read-only profile or a review-stage
-session) runs Codex in codex-acp's `read-only` mode, and a writing Codex worker
-runs in `workspace-write` (see [Native engine tools](#native-engine-tools)). A read-only
-session whose adapter offers no such mode does not start
-(`restricted_mode_unavailable`). claude-agent-acp asks for every tool Claude Code
-does not run on its own, so the runtime answers its permission requests itself,
-identifying tools only by the engine-declared name, kind, locations and command
-text. Cortex gateway and attached external MCP tools pass for every channel,
-because the gateway or relay re-checks the channel and operation. Native subagent
-and native question tools, and every non-Cortex tool of the consultant, are refused
-with an offered reject option (cancelled when none is offered). The runtime
-answers codex-acp's requests (its `read-only`/`workspace-write` sandbox
-escalations) the same way. Every other native request is decided by the access
-mode's [decision table](#native-engine-tools): Cortex private state is refused in
-every mode; Auto allows everything else and records it; Development allows reads
-outside the project and asks the owner for writes outside the project, credential
-and key material, Git control and engine/Cortex configuration writes and
-deletions; Guarded also asks before reads outside the project and native web
-fetches. Read-only channels keep the read/search/fetch-only native fence in every mode; a web fetch
-only reads and follows the mode's fetch rule (Guarded asks the owner).
+requests. Every managed Codex session, writing workers included, runs in
+codex-acp's `read-only` mode in every access mode. A session that cannot confirm
+the required mode does not start (`restricted_mode_unavailable`). The runtime
+refuses Codex native write and escalation requests even in Auto; authorized
+edits use the Cortex gateway. See
+[Managed Codex write authority](#managed-codex-write-authority).
+
+Every Claude session runs in claude-agent-acp's `default` mode. The runtime
+answers the requests the adapter sends using the engine-declared name, kind,
+locations and command text. Native subagent and question tools and every
+non-Cortex tool of the consultant are refused (cancelled if no reject option is
+offered). The Cortex gateway and eligible external MCP relays re-check channel
+and operation; managed Codex gets no external MCP relay. Where applicable the
+remaining native requests follow the access mode's
+[decision table](#native-engine-tools). Private state is refused in every mode;
+read-only channels keep their read/search/fetch-only rule, with Guarded asking
+before a native fetch.
 An owner card for a declared deletion (`delete`/`move` kinds or a declared `rm`)
 keeps its `Removal blocked pending confirmation: ...` title, other cards are titled
 `Owner decision: ...`; only an offered one-shot option is accepted, and without a
@@ -1410,14 +1405,14 @@ it yet, so its brief observation session still starts the owner's plugin
 servers. The launcher is written only when the engine starts; an
 install-shaped codex-acp launch whose bundled Codex cannot be located then
 refuses to start instead of running without it. Other engine state files the Python jail keeps read-only are not
-protected this way. Codex and OpenCode ask only to
-leave their own sandbox or configured rules; their requests keep the earlier
-route: forwarded to the client outside Auto, or cancelled without one. Every
-request and decision is journaled with its tool name, kind and decision rule.
-Native external MCP attachment reads only the owner-global registry, never a
-project-local executable configuration. Read-only worker grants are narrowed to
-explicit read-only tools, writers keep their explicit tool set, and consultants
-receive no server. Incoming configured names cannot override owner grants;
+protected this way. OpenCode requests not settled by the runtime's decision
+table are forwarded to the client outside Auto, or cancelled without one.
+Managed Codex requests cannot widen its native mode. Every request and decision
+is journaled with its tool name, kind and decision rule.
+For routes that admit external MCP, attachment reads only the owner-global
+registry, never a project-local executable configuration. Read-only worker
+grants are narrowed to explicit read-only tools, writers keep their explicit
+tool set, and consultants receive no server. Incoming configured names cannot override owner grants;
 unconfigured stdio entries refuse. Entries no engine is handed (no stdio command,
 such as an HTTP or SSE server, a reserved name or a repeated name) are accepted
 and ignored; their URLs, headers and environment are not stored or forwarded.
@@ -2601,14 +2596,18 @@ Codex's `shell_tool` and `view_image` features off, with subagents, plugins, hoo
 and apps, and verifies that with `codex features list` before App Server starts;
 codex-acp's thread config carries the same switches. Codex then runs commands and
 reads images only through Cortex tools, and has no native read tool. Native
-`apply_patch` stays on (Codex has no supported switch for it). A read-only channel
-runs in codex-acp's `read-only` mode (read-only sandbox, approval on request), so
-every `apply_patch` asks and is refused. A writing worker runs in `workspace-write`
-in every access mode: a sandbox whose writable root is the project, with approval
-requests (codex-acp's file-change approval with the changed paths, and its
-additional-sandbox-permission request with the requested paths) going to Cortex
-rather than to Codex's automatic reviewer as in `agent`. `agent` and
-`agent-full-access` are never selected. Codex's `unified_exec` feature stays listed
+`apply_patch` stays on (Codex has no supported switch for it). Every Codex
+session Cortex manages, whatever its role, access mode, route parameters or
+whether it is a fresh, replacement or continued session, runs in codex-acp's
+`read-only` mode (read-only sandbox, approval on request). The runtime refuses
+native permission callbacks, including any for `apply_patch`; only a
+channel-bound MCP call is eligible to pass. A session binds and receives a prompt only
+after exactly one `read-only` mode was confirmed; with no confirmation the
+session does not start and there is no writable fallback. `workspace-write`,
+`agent` and `agent-full-access` are never selected for managed Codex. A writing
+worker changes files through the Cortex file tools instead (see
+[Managed Codex write authority](#managed-codex-write-authority)). Claude and
+OpenCode mode selection is unchanged. Codex's `unified_exec` feature stays listed
 as enabled: in the installed Codex CLI 0.166.0 neither
 `-c features.unified_exec=false`, a `config.toml` entry nor `--disable unified_exec`
 changes it, and whether it offers a native exec path while `shell_tool` is off is
@@ -2659,9 +2658,9 @@ database-architect, performance-engineer, the runtime-reserved build-verificatio
 profile, the code reviewer and every review-stage session) get only the read rows;
 their native write, delete and execute requests are refused in every mode under the
 `read_only` rule. Every native request of the consultant is refused. The table
-narrows native engine tools only: a command run through `command_run` can still
-read anywhere the owner can (see
-[Attack-surface review and limits](#attack-surface-review-and-limits)).
+covers native tool requests, not brokered commands. The existing host command
+profiles retain owner-readable resources; managed Codex commands instead run
+only on their [isolated snapshot route](#managed-codex-write-authority).
 
 "Ask the owner" is a card titled `Owner decision: <role> wants to
 <read|write|delete|run|fetch> <paths> because <reason>` with only Allow once and
@@ -2692,37 +2691,112 @@ is refused. An owner-decided request also leaves a `permission_receipts` row
 `channel_mcp`) is the single event `NATIVE_PERMISSION_AUTO_ALLOWED`, committed in
 the same transaction that re-authenticates the channel, matches the bound session
 and reads the access mode; owner decisions, refusals and requests for native tools
-keep the `NATIVE_PERMISSION_REQUESTED` record and their decision event. Cortex's own `outside_write` and
-`outside_command` follow the same table and card: Cortex private state is refused,
-Auto allows and records, Guarded and Development ask (a write outside the project
-asks in Development too), with their existing path and scope checks first.
+keep the `NATIVE_PERMISSION_REQUESTED` record and their decision event. On routes
+that support them, `outside_write` and `outside_command` follow the same table
+and card after path and scope checks: Cortex private state is refused, Auto
+allows and records, and Guarded and Development ask. Managed Codex is refused
+before outside consent in every mode.
 
 **Where the table cannot be enforced.** A tool the engine runs without asking has
 no runtime decision and no receipt:
 
-| Cell | Claude (`default`) | Codex (`workspace-write`) | Codex (`read-only`) |
-| --- | --- | --- | --- |
-| Read/search inside the project | runs without asking (allowed anyway) | no native read tool | no native read tool |
-| Read/search outside the project | asks | no native read tool | no native read tool |
-| Credential read inside the project | asks through the `ask` rules | no native read tool | no native read tool |
-| Write inside the project | no native write tool | `apply_patch` writes without asking | asks; refused |
-| Write outside the project | no native write tool | asks | asks; refused |
-| Credential or Git control write inside the project | no native write tool | written without asking unless Codex's own sandbox keeps the path read-only (not verified) | asks; refused |
-| Cortex private state inside the project | read denied by deny rules | written without asking, not enforced | asks; refused |
+| Cell | Claude (`default`) | Codex (`read-only`, every managed Codex session) |
+| --- | --- | --- |
+| Read/search inside the project | runs without asking (allowed anyway) | no native read tool |
+| Read/search outside the project | asks | no native read tool |
+| Credential read inside the project | asks through the `ask` rules | no native read tool |
+| Write inside the project | no native write tool | native permission refused |
+| Write outside the project | no native write tool | native permission refused |
+| Credential or Git control write inside the project | no native write tool | native permission refused |
+| Cortex private state inside the project | read denied by deny rules | native permission refused |
 
-So for Codex writing workers an in-project `apply_patch` into `.cortex`,
-`.cortex-dev`, a credential file or a Git control file inside the writable root
-is not prevented: codex-acp offers no way to exclude a path from the writable root.
-That Claude Code asks before a read outside its working directory, honours the
-`ask` and deny rules, and that Codex asks for every write outside its writable
-root follows from the installed adapters' code and documented behavior; it has not
-been observed in a live run.
+For managed Codex no native write cell is left to the engine: the former
+`workspace-write` column, in which an in-project `apply_patch` into `.cortex`,
+`.cortex-dev`, a credential file or a Git control file was not prevented, no
+longer exists. That Claude Code asks before a read outside its working directory
+and honours the `ask` and deny rules, and that Codex refuses native writes in
+`read-only`, follows from the installed adapters' code and documented behavior
+and from fake-peer tests; no installed Codex native write attempt was run, so the
+statement is not qualified against an installed engine.
 
-**Gateway boundaries.** A writing worker's runtime-declared assignment work area
-coordinates parallel writers; it is not a gateway write boundary. The gateway
-enforces assignment/role authority, user-protected paths, private-path
-restrictions and path safety, but does not compare ordinary writes with the
-declared work area. An `access_request` reserves additional work for
+### Managed Codex write authority
+
+Owner decision: for Codex that Cortex launches, every write to the project (work
+files and `.cortex`) needs a runtime decision, and the runtime gives it
+automatically inside the task, without asking the owner for each edit. The
+guarantees below are implemented in `crates/workspace-service` and covered by
+no-paid Rust tests on disposable fixtures; none was exercised against an installed
+Codex or a paid engine.
+
+- **Actor and routes.** The strict policy follows the route's engine kind, never
+  arguments, role or access mode. A managed Codex worker changes project files
+  only through the Cortex file tools (`project_write`, `project_edit`,
+  `project_mkdir`, `project_delete`, `project_skill_link`). Brokered
+  `command_run` writes only to isolated scratch. The outside tools
+  (`outside_command`, `outside_write`) are refused before consent in every mode.
+  Live `project_git` is refused, and external MCP servers are withheld from the session
+  (`NATIVE_EXTERNAL_MCP_WITHHELD`) and rejected at the relay, because their effects
+  cannot be contained. Claude, OpenCode and the legacy route keep their existing
+  behavior.
+- **Task scope.** Each file effect re-authenticates the ready channel and checks
+  every target, including missing parent directories, against the bound checkout
+  and the assignment's *current* effective scope: declared paths plus granted
+  `access_request` expansions. A literal path covers its descendants; `*` and `?`
+  stay within one path component, `**` may span components, and brackets are
+  literal. A path outside the scope is refused before any effect, with guidance.
+  For managed Codex the assignment scope is therefore an enforced write boundary,
+  unlike the coordination-only scope of other engines. Authority is rechecked at
+  the effect, so a stale, revoked or expired grant refuses it. Owner deny-write
+  entries, rule-file protection, deletion and replacement consent, read coverage
+  and hash checks keep applying.
+- **Mode changes.** Guarded, Development and Auto never turn native write on:
+  native write stays off in all three, and a mode switch does not widen the file
+  scope; modes only change consent cards. A running managed command loses its
+  lease when the effective scope changes.
+- **Commands.** A managed Codex `command_run` gets no writable mount of the live
+  checkout, even for an assigned path, because an arbitrary process cannot keep the
+  gateway's per-operation consent, hash and path checks. It runs in bubblewrap with
+  private user, PID, network, IPC and UTS views, a read-only root, no ambient owner
+  environment, restricted system calls and a size-limited private `/tmp`, over a
+  bounded copy of the checkout at `/workspace` (at most 512 MiB, 65,536 entries and
+  depth below 64). Live inodes, linked Git metadata, named stores and markers,
+  symlinks, cross-mount aliases, multi-linked files and special files are not
+  copied. The broker retains command output; files written in scratch are not
+  copied back to the checkout. Scratch results carry no checkout revision proof.
+  Before launch the command is refused when its cwd is outside the checkout, it
+  names a privileged program (`sudo`, `pkexec`, `doas`), or confinement or continued
+  authority cannot be guaranteed (missing or unusable bubblewrap, refused user
+  namespace, oversized snapshot, staging error). A refusal never falls back to the
+  host: a retained old host-reroute decision does not authorize a managed run, and
+  a started payload is never replayed. While it runs the runtime repeats the
+  authority check, and a command is stopped when the service disappears or stops
+  confirming authority. The owner's Stop still stops one exact command with its
+  own result. Runtime verification and non-Codex command routes are unchanged. The
+  containment is only as strong as the installed bubblewrap and kernel.
+- **Logical store identity.** `.cortex`, `.cortex-dev` and the two owner/Dev
+  markers are private by name in every project, channel and linked worktree, in
+  every access mode. Native requests keep both the named and the resolved path, so
+  direct file and outside operations that name or resolve to another project's
+  store, a linked worktree's store or an alias are refused before consent, and the
+  effect re-check refuses them again. There is no raw-store or self-hosted
+  exception: in the orchestration project itself, a task that must change a live
+  store does so only through a runtime-owned, purpose-specific operation, never by
+  Codex editing a database, report or marker. The Dev (`.cortex-dev`) and release
+  (`.cortex`) stores stay separate, and the runtime's own store and report access
+  is independent of these checks.
+- **Runtime-only mutations.** Task state, reports, the SQLite index and published
+  documents change only through runtime transactions and dispatched channel tools.
+- **Not covered.** A same-user process outside the managed session is outside these
+  checks. Installed-Codex native write refusal was not run (no paid or live
+  engine); host-namespace command fixtures need user namespaces, and where they
+  are unavailable the result is unverified, not a pass.
+
+**Gateway boundaries.** For non-Codex writing workers a runtime-declared assignment
+work area coordinates parallel writers and is not a gateway write boundary: the
+gateway enforces assignment/role authority, user-protected paths, private-path
+restrictions and path safety, but does not compare their ordinary writes with the
+declared work area. For managed Codex the effective scope is enforced (see
+[Managed Codex write authority](#managed-codex-write-authority)). An `access_request` reserves additional work for
 coordination. A directory path with one trailing slash (`.next/`) is that
 directory, `[`/`]` are literal path characters, and an absolute or `..` path is
 refused as `outside_project` with guidance; generated build/test output needs no
@@ -2873,13 +2947,18 @@ unmounted. The full `/etc` tree and user home are never added by that grant. A
 read grant cannot overlay the project or unmask its private store. Native account
 MCP entries are disabled. Server-initiated sampling/elicitation is refused.
 
-Cortex gateway file writes check assignment and role authority (writing workers hold the whole-project grant), use no-follow descriptors, require complete-read or expected-content hashes, and replace files atomically. Commands run under Linux
-`bwrap`: the project is read-only by default and launch-time grants make the
-whole project writable for a writing worker; that jail grant is broader than
-the worker's runtime-declared assignment scope. Additional access requests
-update only the declared-scope writer reservations after runtime validation,
-not the OS jail. Private `.cortex` paths are masked, the project's `.codex` and
-`.claude` are ordinary project paths, and the project's `.git` is visible as described below. The restrictive command profile runs as the owner: their user and
+Gateway file writes check assignment and role authority, use no-follow
+descriptors, require complete-read or expected-content hashes for file
+replacement, and replace files atomically. In the
+[managed Codex route](#managed-codex-write-authority), the current effective
+assignment scope bounds each gateway target and commands have no writable
+checkout mount. On other routes, the ordinary writing worker instead holds a
+whole-project gateway grant, and its Linux `bwrap` commands can receive the
+whole-project jail grant. Additional access requests on those routes update
+writer reservations, not the OS jail. Private `.cortex` paths are masked, the
+project's `.codex` and `.claude` are ordinary project paths subject to path
+protections, and the project's `.git` is visible as described below. The legacy
+restrictive command profile runs as the owner: their user and
 group names resolve, their real HOME is mounted read-only (so its dotfiles and
 credentials are readable by the command), the runtime's environment is passed on
 except `CORTEX_*` and credential-like variables (token, secret, password, API key,
@@ -2942,23 +3021,28 @@ the owner. See [retention maintenance](docs/project/packaging.md#retention-maint
 <a id="access-mode-guarded-and-auto"></a>
 ### Access mode (Development, Guarded and Auto)
 
-Fresh ACP sessions durably start **Development**. A writing worker's ordinary
-`command_run` uses host-writable mounts, real HOME, real /var/tmp, owner devices,
-groups and shared network through the channel-bound host broker. Docker/Compose,
-SDK/cache state and authorized outside-project cwd need no routine permission
-card merely for crossing the project boundary. The mode decides
-the host for writing workers: Development and Auto give them the host-writable profile (a
-`docker build` check can record its builder state in `~/.docker/buildx`), and Guarded keeps
-them restricted. Read-only roles, reviewers and automatic verification always get the
-read-only profile (`read_only`), while their project stays read-only -- verification writes
-git-ignored directories in place and every other project write to a discarded overlay (refused
-without host overlay support), and a check whose project digest changes is incomplete. A mode switch
-does not stop a read-only command or a verification check. Only a host-writable (Development or
-Auto) writing-worker command is stopped by a mode switch or a denial change. Engine processes themselves are not sandboxed (see [Native engine tools](#native-engine-tools)).
+Fresh ACP sessions durably start **Development**. On routes other than managed
+Codex, a writing worker's `command_run` in Development or Auto uses the
+host-writable broker profile: real HOME and /var/tmp, owner devices and groups,
+and shared network. Those routes do not need a card merely for a supported
+outside-project cwd or ordinary SDK/cache work. Guarded uses the restricted
+profile. A mode switch or denial change stops a running host-writable
+writing-worker command. Managed Codex instead uses the
+[contained scratch route](#managed-codex-write-authority) in all three modes.
+It does not get live checkout or host write grants.
 
-This is **trusted local development, not hostile-code isolation**. Direct masks
-hide the bound task's private runtime storage and protect Git configuration,
-user-denied project paths, known existing Cortex configuration/runtime/engine
+On the existing host route, read-only roles, reviewers and automatic
+verification use read-only profiles. Automatic verification writes git-ignored
+directories in place and sends other project writes to a discarded overlay
+(refused without host overlay support); a check whose project digest changes is
+incomplete. Mode switches do not stop these read-only commands or verification
+checks. Engine processes themselves are not sandboxed as a whole
+(see [Native engine tools](#native-engine-tools)).
+
+The existing host command routes are **trusted local development, not
+hostile-code isolation**. Their direct masks hide the task's private runtime
+storage and protect Git configuration, user-denied project paths, known existing
+Cortex configuration/runtime/engine
 locations and the production Paseo home/profile. A task worktree beneath a
 protected parent keeps its own grant. These mounts do not make arbitrary owner
 code, alternate host aliases, hardlinks outside the tree, process access or Docker
@@ -2992,17 +3076,17 @@ asks the owner in Development as in Guarded and is allowed and recorded in Auto;
 target in Cortex private state is refused in every mode.
 The access mode never changes an engine session's own mode.
 
-**Guarded** remains the explicit restrictive command profile (host/HOME mostly
-read-only, writable project and tool caches) with consent for every outside
-write and outside command. **Auto** uses the Development host-writable command
-profile for writing workers and runtime auto-approval of every consent card and
-of every native permission request except one reaching Cortex private state,
-each recorded with its rule (see the [decision table](#native-engine-tools)); the
-engine session mode stays the same as in the other modes, and read-only roles and
-reviewers stay read-only. Development allows native reads outside the project and
-asks the owner for native writes outside it, credential and key material, Git
-control and engine/Cortex configuration writes and deletions; Guarded also asks
-before native reads outside the project.
+On the existing host command routes, **Guarded** uses the restrictive command
+profile (host/HOME mostly read-only, writable project and tool caches for
+writers), with consent for outside writes and commands. **Auto** uses the
+Development host-writable profile for writers on those routes and answers
+eligible consent cards automatically. Native requests still follow the
+[decision table and engine-specific refusals](#native-engine-tools).
+Development allows eligible native reads outside the project and asks for
+native writes outside it, credential and key material, Git control and
+engine/Cortex configuration writes, and deletions; Guarded also asks before
+native reads outside the project. None of these modes widens managed Codex's
+native mode, effective scope or command route.
 None of these modes lifts channel/role/epoch/revocation, owner denial, review,
 completion, native-subagent or paid-probe gates.
 
@@ -3026,22 +3110,25 @@ selection, not hostile-code isolation.
 Switching modes does not remount a process or undo outside writes, detached
 children, Docker builds, containers or volumes. Receipts retain cwd, profile and
 policy provenance; another cwd cannot close a failed check, nor can a profile change within one operation.
-An approved `outside_command` rerun may close a `command_run` failure (and vice versa)
-only at identical argv/cwd, despite their necessarily different profiles. Neither
+On routes that support outside commands, an approved `outside_command` rerun may
+close a `command_run` failure (and vice versa) only at identical argv/cwd, despite
+their necessarily different profiles. Managed Codex scratch results do not qualify
+as checkout verification and cannot be rerun on the host. Neither
 no-paid fake-launch tests nor startup smoke establishes real containment or GUI
 behavior. Paid CLI/desktop qualification still requires the owner's explicit
 mode-specific request.
 
 ### Owner's ssh-agent
 
-Every engine process and every worker `command_run` receives the owner's
+Engine processes and worker commands on the existing host routes receive the owner's
 `SSH_AUTH_SOCK` when it names a socket the owner owns
 (`orchestration.ssh_askpass.host_agent_env`). The value comes from the
 environment Cortex was started with. The rest of the credential filter still
-applies. With HOME read-only, the owner's `~/.ssh/config` and `known_hosts`
-apply unchanged, so ssh inside the sandbox behaves as in the owner's terminal.
-The agent never releases private keys, but any sandboxed process, and thus the
-model, can ask it to sign. That means it can authenticate to every host the
+applies. Managed Codex scratch commands get neither the host agent socket nor the
+owner's HOME. On a host profile with HOME read-only, the owner's `~/.ssh/config`
+and `known_hosts` apply unchanged, so ssh behaves as in the owner's terminal.
+The agent never releases private keys, but a process with access to the socket
+can ask it to sign. That means it can authenticate to every host the
 unlocked keys open, within the task's network access. Lock or remove keys from
 the agent (`ssh-add -D`, or a keyring lock) to withhold that. An agent
 configured to confirm each use (`ssh-add -c`) still asks the owner on the
@@ -3061,9 +3148,9 @@ directory, mounted read-only.
 
 ### Optional ssh password dialog
 
-This is off by default. With {\"enabled\": true} in
-`$XDG_CONFIG_HOME/cortex/ssh-askpass.json`, an engine process started after
-that point and every worker `command_run` additionally receive the owner's
+This is off by default. With {"enabled": true} in
+`$XDG_CONFIG_HOME/cortex/ssh-askpass.json`, an engine process started after that
+point and worker commands on the existing host route additionally receive the owner's
 `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR` and
 `DBUS_SESSION_BUS_ADDRESS` (each checked for shape), plus `SSH_ASKPASS` and
 `SSH_ASKPASS_REQUIRE=force`. ssh then shows its prompt in a `zenity` or
@@ -3075,14 +3162,16 @@ uses `SSH_ASKPASS` for HTTPS credential prompts. Any process in the sandbox can
 also draw windows on the owner's display, including a fake of this prompt, so
 type a password only for a connection you expect. When no display session or
 dialog program is available, nothing is added. `sudo` never works inside the
-command sandbox: bubblewrap sets no_new_privs, which setuid programs refuse. A
-writing worker's command that needs root runs on the host instead (next section).
+command sandbox: bubblewrap sets no_new_privs, which setuid programs refuse.
+Managed Codex scratch commands get no askpass environment and never reroute
+to the host.
 
 ### Owner password for sudo (askpass) and host rerouting
 
-**Rerouting.** A writing worker's `command_run` that needs the host is rerun by
-the runtime through the existing `outside_command` consent route instead of
-returning a refusal: `sudo`, `pkexec` or `doas` at a command position of the argv
+**Rerouting.** On routes other than managed Codex, an eligible writing
+worker's `command_run` that needs the host is sent through the existing
+`outside_command` consent route instead of returning a refusal:
+`sudo`, `pkexec` or `doas` at a command position of the argv
 (directly, after `env`/`timeout`-style wrappers, or in a `sh`/`bash`/`dash`/`zsh`
 script) is sent there before any sandboxed run; a sandbox that could not be prepared
 (`native_command_sandbox_unavailable`, nothing ran) and a launcher failure that the
@@ -3204,8 +3293,8 @@ same command in the same attempt
 
 ### Git and tool state in the project
 
-With a whole-project grant, git run by a writing worker through `command_run` (no Cortex engine session
-has a native shell) may update the project's own repository: the `.git`
+On routes with a whole-project jail grant (not managed Codex), Git run by a
+writing worker through `command_run` may update the project's own repository: the `.git`
 directory, or a linked worktree's own `worktrees/<name>/` plus the shared common
 directory even when that lies outside the project. Its data (objects, refs,
 logs, index, HEAD, packed-refs, locks, merge/rebase/stash state, `info/`) is
@@ -3240,9 +3329,10 @@ worktree's common directory. The redirect itself grants no real `.git` writes.
 Inherited Git configuration is preserved; explicit `git -c` can override the
 redirect but cannot change mount permissions. Scratch is not a persistent LFS
 cache: smudge, text conversion and downloads needing existing objects are
-outside this read-only diff/status support. Separately, Development/Auto writers
-with a whole-project grant (`.`, `**`, `**/*`) may update index, objects, refs,
-logs and merge/rebase/stash data in ordinary repositories and linked worktrees.
+outside this read-only diff/status support. Separately, Development/Auto
+writers on a host route with a whole-project grant (`.`, `**`, `**/*`)
+may update index, objects, refs, logs and merge/rebase/stash data in ordinary
+repositories and linked worktrees.
 Narrower grants (even `*`) leave metadata read-only. Configuration/hook/info
 overlays follow data grants; binding an existing config file read-only also
 prevents Git's lockfile+rename replacement. The real-bubblewrap regression checks
@@ -3297,8 +3387,9 @@ tool access, filesystem scope, or permission. Cortex's conditional `read_skill` 
 role-scoped guidance in the prompt and advertised tool schema; it likewise grants no access and does not
 cause runtime-side skill loading. Tool state inside the project (`.venv`, `node_modules/.cache`,
 `.pytest_cache`, `__pycache__`, `.mypy_cache`, `target/`, build caches) is
-writable because a writing worker's grant is the whole project, with no list of
-tools. Internal-only writable hardlinks remain linked. Guarded/engine launches
+writable on command routes that grant writers the whole project, with no list
+of tools. Managed Codex does not get live cache writes through commands.
+On the host routes, internal-only writable hardlinks remain linked. Guarded/engine launches
 keep external aliases read-only and demote a directory above 256 such files.
 Development/Auto writer commands instead materialize independent copies of granted
 external aliases before granting writes, so uv/pnpm environments can be recreated

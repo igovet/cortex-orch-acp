@@ -44,15 +44,21 @@ Complete report/tool coverage, production route/instruction qualification, permi
 - `crates/workspace-service/src`: the native host (`native_*`), incoming ACP host (`incoming*.rs`), configuration readers and machine tools.
 - `agent-sources/`, `skills/`, `profiles.json`: the 23 worker profiles' sources and the bundled skills, rendered by `scripts/cortex-xtask.sh profiles write` and checked by `check-generated`.
 
-Fresh ACP sessions durably initialize Development in the project store. The
-host-side MCP broker gives a writing worker's brokered `command_run` in a Development or
-Auto task host-writable mounts, with retained cwd/profile/policy receipts. Read-only roles and
-automatic verification always get the read-only host profile, so their project stays read-only
-(verification writes git-ignored directories in place and discards its other project writes). Engine
-processes keep their existing jails. This is a
-trusted-local-development boundary, not adversarial containment from Docker or
-arbitrary owner code. Legacy/missing/unreadable state stays Guarded; explicit
-client choices are preserved. See [access modes](../features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
+Fresh ACP sessions durably initialize Development in the project store. On the
+existing host routes, the command broker gives writing workers in Development or
+Auto host-writable mounts and retains cwd, profile and policy receipts. Read-only
+roles on those routes and automatic verification use the read-only host profile
+(verification writes git-ignored directories in place and discards its other
+project writes). Those host profiles are for trusted local development, not
+adversarial containment from Docker or arbitrary owner code.
+
+Cortex-managed Codex instead uses native `read-only` and scoped gateway file
+writes. Its brokered commands in any mode run over a bounded read-only checkout
+snapshot with private scratch, or the broker refuses them without host fallback.
+Runtime-owned verification is separate. See
+[managed Codex write authority](../../SECURITY.md#managed-codex-write-authority).
+Legacy, missing or unreadable access-mode state stays Guarded; explicit client
+choices are preserved. See [access modes](../features/permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
 
 Feature behavior is described in the [feature index](../features/index.md); project-wide rules are in [conventions](conventions.md), [storage](storage.md), [security](security.md) and [verification](verification.md).
 

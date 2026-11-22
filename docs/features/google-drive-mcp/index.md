@@ -55,8 +55,9 @@ command starts and exposes only the selected services. A live Cortex session
 must separately verify that the engine can use the tools before the connection
 is treated as qualified for work.
 
-Codex ACP currently does not provide deferred `tool_search`. The pinned
-command above returned **12 tools** in a local, unauthenticated stdio
+Use an eligible route for the live check: Cortex-managed Codex does not attach
+external MCP servers. See [managed Codex write authority](../../../SECURITY.md#managed-codex-write-authority).
+The pinned command above returned **12 tools** in a local, unauthenticated stdio
 `initialize` and `tools/list` check on 2026-09-21. Keep this server at no more
 than 20 advertised tools; use Workspace MCP's `--disabled-tools` filter or a
 narrower permission set if later versions exceed that budget. This check proves

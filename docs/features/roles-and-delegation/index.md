@@ -141,22 +141,23 @@ from current `tool_definitions` offers for a read-only investigator, writing
 specialist and consultant. It is independent of external MCP attachments and
 lists only relevant operation names, not copied schemas. A worker can use an
 offered `command_run` for authorized bounded reads in its actual command namespace;
-Cortex has no separate outside-read/search tool. Read-only/Guarded commands have
-private scratch at `/var/tmp`, not host data. A missing file there proves only
-command-environment visibility. For authorized host-only reads/searches, use the
-advertised `outside_command` consent route through a writing specialist with a
-bounded read-only objective, or a granted external reader. A read-only investigator
-cannot escalate to that command route; it reports the capability gap for runtime
-replanning. Neither remounting nor moving a fixture establishes the original read.
+Cortex has no separate outside-read/search tool. On the existing host routes,
+read-only and Guarded commands have private scratch at `/var/tmp`, not host data.
+Managed Codex commands have only a read-only checkout snapshot and private `/tmp`;
+a missing file in either environment proves only what the command can see. For
+an authorized host-only read, use a granted external reader or the advertised
+`outside_command` consent route on an eligible writing specialist's route, with a
+bounded read-only objective. Neither managed Codex nor read-only investigators
+can escalate to that command route. Report the capability gap when no authorized
+reader is available; remounting or moving a fixture does not establish the original read.
 `project_read` remains project-only. Role, mode, protected paths and owner
 constraints still apply. `access_request` handles a writing worker's
 assignment-local additional project work paths, not outside grants or remounts.
 It reserves write paths only, so it is served to writing workers alone: a
 read-only role or any review already reads the whole project, could never be
 granted a write, and reports a missing access as a limitation (the former runtime
-refused it there with `read_only_role`). Exceptional outside
-command/write routes belong to writing workers, never to read-only escalation
-or denial bypass.
+refused it there with `read_only_role`). Exceptional outside command and write
+routes are for eligible writing workers only, never for escalation or denial bypass.
 
 Unknown external source locations become worker discovery objectives. The
 coordinator orients with its permitted reads, then proposes a suitable investigator
@@ -292,21 +293,24 @@ retried within the bounded retry window.
 An independent reviewer is a fresh runtime assignment. Its verdict controls the
 review/fix loop, while actual command verification belongs to the runtime. Route policy is configured by the user and resolved by the runtime for each role; per-node model hints are validated recommendations, not authority.
 
-Declared scopes coordinate the agreed work areas of parallel writers; the
-runtime grants a writing worker project-wide gateway and jail write access, with
-private and user-protected paths still refused. Writers should reserve a project
-path outside their agreed work area with `access_request` before changing it; that
-request does not widen an OS jail. Writer conflicts receive bounded delayed
-runtime rechecks before a grant or denial without a user question; policy, path
-and read-only refusals are immediate runtime decisions. Only a fresh runtime
-predicate can grant access, never a user answer. The worker question contract
-reserves questions for genuine user decisions, not missing tool access. Outside-project effects use `outside_write` or
-`outside_command` and, in Guarded mode, require the user's accepted permission
-card. In Development mode `outside_write` needs no card unless it targets
-protected control-plane state, while `outside_command` still requires one. Auto mode intentionally approves them without a per-action card, including
-when no client is connected; this is the owner's selected behavior. Guarded
-requires an accepted permission-card response and fails closed on no response,
-denial, cancellation or timeout. Read-only
-roles and review stages have no project write grant. See
+Declared scopes coordinate the agreed work areas of parallel writers. For
+Cortex-managed Codex they also bound gateway writes: the runtime checks each
+target against the current effective scope (declared paths plus validated
+`access_request` grants). A grant does not enable native writes, let commands
+write the live checkout, or enable outside routes. See
+[managed Codex write authority](../../../SECURITY.md#managed-codex-write-authority).
+
+On other routes the project-wide gateway and jail grants remain subject to
+private and user-protected paths. Reserve a path outside the agreed work area
+with `access_request` before changing it; on these routes the reservation does
+not widen the OS jail. Writer conflicts receive bounded delayed runtime
+rechecks; policy, path and read-only refusals are runtime decisions. A user
+answer is not a scope grant, and worker questions are for genuine user
+decisions, not missing tool access.
+
+Where the outside routes are supported, `outside_write` and `outside_command`
+require an accepted permission card in Guarded and Development after the
+target and authority checks. Auto answers the card itself; it does not waive
+refusals. Read-only roles and review stages have no project write grant. See
 [containment](../permissions-and-containment/index.md) and
 [verification status](../../project/verification.md). Prompts grant no authority.

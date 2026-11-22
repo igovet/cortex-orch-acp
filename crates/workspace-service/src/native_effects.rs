@@ -3,7 +3,10 @@ use crate::{
     machine::files::revision,
     native_command_sandbox::{Profile, Sandbox},
 };
-use cortex_core::{lifecycle::completion::EvidenceSnapshot, CoreError, CoreResult};
+use cortex_core::{
+    lifecycle::completion::{test_fast_failure_line, EvidenceSnapshot},
+    CoreError, CoreResult,
+};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -43,16 +46,19 @@ pub(super) struct Output {
     failure: Option<&'static str>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    test_fast_failures: String,
 }
 /// How long a finished command's output may take to reach its end.
 const DRAIN: Duration = Duration::from_secs(30);
 async fn drain(
     mut stream: impl AsyncRead + Unpin,
     limit: usize,
-) -> std::io::Result<(Vec<u8>, bool)> {
+    retain_test_fast_failures: bool,
+) -> std::io::Result<(Vec<u8>, bool, String)> {
     let mut kept = Vec::new();
     let mut buffer = vec![0; 64 * 1024];
     let mut truncated = false;
+    let mut stages = TestFastFailures::default();
     loop {
         let n = stream.read(&mut buffer).await?;
         if n == 0 {
@@ -61,15 +67,60 @@ async fn drain(
         let take = n.min(limit - kept.len());
         kept.extend_from_slice(&buffer[..take]);
         truncated |= take < n;
+        if retain_test_fast_failures {
+            stages.push(&buffer[..n]);
+        }
     }
-    Ok((kept, truncated))
+    Ok((kept, truncated, stages.records))
+}
+
+/// Collect only bounded stage records while draining verifier stderr, including
+/// after the raw prefix fills. Raw output and its completeness are unchanged.
+#[derive(Default)]
+struct TestFastFailures {
+    line: Vec<u8>,
+    overlong: bool,
+    records: String,
+    count: usize,
+}
+
+impl TestFastFailures {
+    fn push(&mut self, bytes: &[u8]) {
+        for part in bytes.split_inclusive(|b| *b == b'\n') {
+            if self.count == 40 {
+                return;
+            }
+            let end = part.ends_with(b"\n");
+            let fragment = &part[..part.len() - usize::from(end)];
+            if !self.overlong {
+                if self.line.len() + fragment.len() <= 160 {
+                    self.line.extend_from_slice(fragment);
+                } else {
+                    self.overlong = true;
+                }
+            }
+            if end {
+                if !self.overlong {
+                    if let Ok(line) = std::str::from_utf8(&self.line) {
+                        if test_fast_failure_line(line) {
+                            self.records.push_str(line);
+                            self.records.push('\n');
+                            self.count += 1;
+                        }
+                    }
+                }
+                self.line.clear();
+                self.overlong = false;
+            }
+        }
+    }
 }
 async fn capture(
     cmd: Command,
     deadline: Duration,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) -> CoreResult<Output> {
-    capture_limited(cmd, deadline, cancel, OUTPUT).await
+    capture_limited(cmd, deadline, cancel, OUTPUT, false).await
 }
 /// `capture` keeping at most `limit` bytes of each stream (the rest is drained and
 /// the output marked truncated, so incomplete).
@@ -78,6 +129,7 @@ async fn capture_limited(
     deadline: Duration,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     limit: usize,
+    retain_test_fast_failures: bool,
 ) -> CoreResult<Output> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -92,8 +144,12 @@ async fn capture_limited(
         }
     })?;
     let pid = child.id().ok_or_else(refused)?;
-    let out = tokio::spawn(drain(child.stdout.take().unwrap(), limit));
-    let err = tokio::spawn(drain(child.stderr.take().unwrap(), OUTPUT.min(limit)));
+    let out = tokio::spawn(drain(child.stdout.take().unwrap(), limit, false));
+    let err = tokio::spawn(drain(
+        child.stderr.take().unwrap(),
+        OUTPUT.min(limit),
+        retain_test_fast_failures,
+    ));
     let status = tokio::select! {
         s = tokio::time::timeout(deadline, child.wait()) => match s {
             Ok(Ok(status)) => Ok(status),
@@ -138,13 +194,14 @@ async fn capture_limited(
     })
     .await;
     match drained {
-        Ok(Ok(((stdout, a), (stderr, b)))) => Ok(Output {
+        Ok(Ok(((stdout, a, _), (stderr, b, test_fast_failures)))) => Ok(Output {
             code,
             complete: code.is_some() && !a && !b,
             truncated: a || b,
             failure: failure.or((a || b).then_some("command_output_limit")),
             stdout,
             stderr,
+            test_fast_failures,
         }),
         _ => {
             out.abort();
@@ -156,6 +213,7 @@ async fn capture_limited(
                 failure: failure.or(Some("command_output_unavailable")),
                 stdout: vec![],
                 stderr: vec![],
+                test_fast_failures: String::new(),
             })
         }
     }
@@ -218,10 +276,19 @@ async fn verify_with_deadline(
     .map_err(|_| refused())?
     .map_err(|_| CoreError::Refused("native_verification_sandbox_unavailable"))?;
     let c = Command::from(sandbox.command(argv)?);
-    let result = capture(c, deadline, cancel).await;
+    let test_fast = matches!(argv, [program, action, ..]
+        if Path::new(program).file_name().and_then(|s| s.to_str()) == Some("cortex-xtask.sh")
+            && action == "test-fast");
+    let result = capture_limited(c, deadline, cancel, OUTPUT, test_fast).await;
     let receipt = match result {
-        Ok(o) => json!({"complete":o.complete,"exit_code":o.code,"output_truncated":o.truncated,
-            "failure":o.failure,"stdout":String::from_utf8_lossy(&o.stdout),"stderr":String::from_utf8_lossy(&o.stderr)}),
+        Ok(o) => {
+            let mut observation = json!({"complete":o.complete,"exit_code":o.code,"output_truncated":o.truncated,
+                "failure":o.failure,"stdout":String::from_utf8_lossy(&o.stdout),"stderr":String::from_utf8_lossy(&o.stderr)});
+            if !o.test_fast_failures.is_empty() {
+                observation["test_fast_failures"] = json!(o.test_fast_failures);
+            }
+            observation
+        }
         Err(e) => {
             json!({"complete":false,"exit_code":null,"output_truncated":false,"failure":e.code()})
         }
@@ -253,6 +320,7 @@ pub(crate) async fn git_with_limit(
         LISTING_DEADLINE,
         receiver,
         output_limit,
+        false,
     )
     .await?;
     // A listing past its byte bound is reported as such: it never stands in, cut
@@ -1905,6 +1973,52 @@ mod tests {
         assert_eq!(r["observation"]["exit_code"], 0);
         assert_eq!(r["observation"]["failure"], "command_output_limit");
     }
+    #[test]
+    fn stage_scanner_rejects_overlong_lines_and_carries_split_records() {
+        let mut stages = TestFastFailures::default();
+        stages.push(&[b'x'; 100]);
+        stages.push(&[b'x'; 100]);
+        stages.push(b"test-fast: step=1 stage=ui exit=1\n");
+        stages.push(b"test-fast: step=2 stage=remote");
+        stages.push(b" exit=124\n");
+        stages.push(b"test-fast: step=3 stage=/private/path exit=23\n");
+        assert_eq!(stages.records, "test-fast: step=2 stage=remote exit=124\n");
+    }
+
+    #[tokio::test]
+    async fn capture_retains_stage_after_both_streams_fill() {
+        let f = Fixture::new();
+        let c = command(
+            &f.0,
+            &[
+                "/bin/sh".into(),
+                "-c".into(),
+                concat!(
+                    "awk 'BEGIN {for (i=0;i<30000;i++) ",
+                    "print \"test result: ok. 35 passed; 0 failed; 0 ignored\"}'; ",
+                    "head -c 1048577 /dev/zero >&2; ",
+                    "printf '\\ntest-fast: step=28 stage=paseo-display exit=23\\n' >&2; exit 1"
+                )
+                .into(),
+            ],
+        );
+        let (_cancel, receiver) = tokio::sync::watch::channel(false);
+        let r = capture_limited(c, Duration::from_secs(10), receiver, OUTPUT, true)
+            .await
+            .unwrap();
+        assert!(r.truncated);
+        assert!(!r.complete);
+        assert_eq!(r.code, Some(1));
+        assert_eq!(r.failure, Some("command_output_limit"));
+        assert_eq!(r.stdout.len(), OUTPUT);
+        assert_eq!(r.stderr.len(), OUTPUT);
+        assert!(r.stderr.iter().all(|byte| *byte == 0));
+        assert_eq!(
+            r.test_fast_failures,
+            "test-fast: step=28 stage=paseo-display exit=23\n"
+        );
+    }
+
     #[tokio::test]
     async fn capture_distinguishes_timeout_signal_refusal_and_output_limit() {
         // Capture itself does not need a user namespace. Keep this test active

@@ -7,7 +7,7 @@
 //! Effects use no-follow directory descriptors. A durable started receipt
 //! precedes each effect, so an uncertain outcome is never repeated.
 use crate::{
-    native_project::{digest, safe, writable},
+    native_project::{digest, missing_parents, open_project_root, openat, safe, writable_target},
     native_sessions::ClientPermissions,
 };
 use cortex_core::{
@@ -116,18 +116,7 @@ fn entry(dir: &File, name: &str) -> CoreResult<Entry> {
     })
 }
 fn open_dir(dir: &File, name: &str) -> CoreResult<File> {
-    let c = cstr(name)?;
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            c.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok(unsafe { File::from_raw_fd(fd) })
+    openat(dir, name, libc::O_RDONLY | libc::O_DIRECTORY)
 }
 /// A real child directory; created when absent and `create`. Any other entry
 /// (a link, file or device) refuses with `unsafe_code`.
@@ -169,7 +158,7 @@ fn child_dir(
 fn parent_of(root: &PathBuf, path: &str) -> CoreResult<Option<(File, String)>> {
     let mut parts = path.split('/').collect::<Vec<_>>();
     let leaf = parts.pop().unwrap().to_owned();
-    let mut dir = File::open(root)?;
+    let mut dir = open_project_root(root)?;
     let mut never = false;
     for part in parts {
         match child_dir(&dir, part, false, "symlink_refused", &mut never)? {
@@ -188,18 +177,7 @@ fn file_digest(dir: &File, name: &str) -> CoreResult<String> {
         Entry::Link(_) => return refused("symlink_refused"),
         Entry::Other => return refused("regular_file_required"),
     }
-    let c = cstr(name)?;
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            c.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let mut file = unsafe { File::from_raw_fd(fd) };
+    let mut file = openat(dir, name, libc::O_RDONLY)?;
     let m = file.metadata()?;
     if !m.is_file() || std::os::unix::fs::MetadataExt::nlink(&m) != 1 {
         return refused("regular_unlinked_file_required");
@@ -218,12 +196,12 @@ enum Plan {
     Unlink,
     Unchanged(Value),
 }
-fn skills_dir(root: &PathBuf, create: bool, possible: &mut bool) -> CoreResult<Option<File>> {
-    let root = File::open(root)?;
+fn skills_dir(root: &PathBuf, missing: &[String], possible: &mut bool) -> CoreResult<Option<File>> {
+    let root = open_project_root(root)?;
     let Some((claude, _)) = child_dir(
         &root,
         ".claude",
-        create,
+        missing.iter().any(|p| p == ".claude"),
         "skill_link_parent_unsafe",
         possible,
     )?
@@ -233,14 +211,14 @@ fn skills_dir(root: &PathBuf, create: bool, possible: &mut bool) -> CoreResult<O
     Ok(child_dir(
         &claude,
         "skills",
-        create,
+        missing.iter().any(|p| p == ".claude/skills"),
         "skill_link_parent_unsafe",
         possible,
     )?
     .map(|(d, _)| d))
 }
 fn verify_source(root: &PathBuf, name: &str) -> CoreResult<()> {
-    let mut dir = File::open(root)?;
+    let mut dir = open_project_root(root)?;
     let mut never = false;
     for part in [".agents", "skills", name] {
         dir = match child_dir(&dir, part, false, "skill_source_missing", &mut never)? {
@@ -276,7 +254,7 @@ fn plan(root: &PathBuf, name: &str, args: &Value) -> CoreResult<Plan> {
             let mut never = false;
             let target = link_target(skill);
             if args["action"] == "unlink" {
-                let current = match skills_dir(root, false, &mut never)? {
+                let current = match skills_dir(root, &[], &mut never)? {
                     Some(dir) => entry(&dir, skill)?,
                     None => Entry::Absent,
                 };
@@ -287,7 +265,7 @@ fn plan(root: &PathBuf, name: &str, args: &Value) -> CoreResult<Plan> {
                 };
             }
             verify_source(root, skill)?;
-            let current = match skills_dir(root, false, &mut never)? {
+            let current = match skills_dir(root, &[], &mut never)? {
                 Some(dir) => entry(&dir, skill)?,
                 None => Entry::Absent,
             };
@@ -313,6 +291,7 @@ fn apply(
     rule: &str,
     args: &Value,
     plan: &Plan,
+    missing: &[String],
     possible: &mut bool,
 ) -> CoreResult<Value> {
     match plan {
@@ -322,13 +301,18 @@ fn apply(
             if path == "." {
                 return Ok(json!({"path":path,"created":false}));
             }
-            let mut dir = File::open(root)?;
+            let mut dir = open_project_root(root)?;
             let mut created = false;
+            let mut end = 0;
             for part in path.split('/') {
-                let (next, made) = child_dir(&dir, part, true, "gateway_path_exists", possible)?
+                end += part.len();
+                let prefix = &path[..end];
+                let create = prefix == path || missing.iter().any(|p| p == prefix);
+                let (next, made) = child_dir(&dir, part, create, "gateway_path_exists", possible)?
                     .ok_or(CoreError::Refused("gateway_path_exists"))?;
                 dir = next;
                 created = made;
+                end += 1;
             }
             Ok(json!({"path":path,"created":created}))
         }
@@ -391,7 +375,7 @@ fn apply(
         Plan::Unlink => {
             let skill = args["name"].as_str().unwrap_or_default();
             let mut never = false;
-            let dir = skills_dir(root, false, &mut never)?
+            let dir = skills_dir(root, &[], &mut never)?
                 .ok_or(CoreError::Refused("skill_link_not_managed"))?;
             let target = link_target(skill);
             if entry(&dir, skill)? != Entry::Link(target.clone()) {
@@ -408,7 +392,7 @@ fn apply(
         Plan::Link { replace } => {
             let skill = args["name"].as_str().unwrap_or_default();
             verify_source(root, skill)?;
-            let dir = skills_dir(root, true, possible)?
+            let dir = skills_dir(root, missing, possible)?
                 .ok_or(CoreError::Refused("skill_link_parent_unsafe"))?;
             let target = link_target(skill);
             let t = cstr(&target)?;
@@ -504,13 +488,15 @@ fn authorized(
     db: &rusqlite::Transaction<'_>,
     c: &Credential,
     expected: Option<&Identity>,
+    root: &std::path::Path,
     path: &str,
+    scoped: bool,
 ) -> CoreResult<Identity> {
     let i = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
     if expected.is_some_and(|e| e != &i) {
         return refused("channel_identity_changed");
     }
-    writable(db, &i, Some(path))?;
+    writable_target(db, &i, root, path, scoped)?;
     Ok(i)
 }
 fn consent_code(name: &str) -> &'static str {
@@ -527,6 +513,7 @@ pub(super) async fn execute(
     permissions: Option<Arc<dyn ClientPermissions>>,
     name: &str,
     args: Value,
+    scoped: bool,
 ) -> CoreResult<Value> {
     let name = name.to_owned();
     // A private or malformed path is refused before anything else, so a
@@ -557,13 +544,14 @@ pub(super) async fn execute(
         key.clone(),
         hash.clone(),
     );
+    let initial_root = root.clone();
     let (identity, saved, mode, session, rule) = recv(executor.publication(move |store| {
         let rule = format!(
             "/{}/",
             store.key().directory().file_name().unwrap_or_default().to_string_lossy()
         );
         store.write(|db| {
-            let i = authorized(db, &c, None, &p)?;
+            let i = authorized(db, &c, None, &initial_root, &p, scoped)?;
             let old: Option<(String, String, String)> = db.query_row(
                 "SELECT operation,digest,result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?",
                 (&i.task, &c.channel_id, &k), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
@@ -622,8 +610,9 @@ pub(super) async fn execute(
         // started receipt is committed before the effect.
         let (c, p, n, k, h, m) = (credential.clone(), path.clone(), name.clone(), key.clone(), hash.clone(), mode.clone());
         let expected = identity.clone();
+        let intent_root = root.clone();
         recv(executor.write(move |db| {
-            let i = authorized(db, &c, Some(&expected), &p)?;
+            let i = authorized(db, &c, Some(&expected), &intent_root, &p, scoped)?;
             if access::current(db, &i.task)? != m {
                 return refused("access_mode_changed");
             }
@@ -633,7 +622,27 @@ pub(super) async fn execute(
         })?)
         .await?;
         started = true;
-        let mut value = apply(&root, &rule, &args, &planned, &mut possible)?;
+        let (c, p, m, effect_root, effect_args, expected) = (
+            credential.clone(), path.clone(), mode.clone(), root.clone(), args.clone(), identity.clone(),
+        );
+        let (effect, maybe_changed) = recv(executor.write(move |db| {
+            let i = authorized(db, &c, Some(&expected), &effect_root, &p, scoped)?;
+            if access::current(db, &i.task)? != m {
+                return refused("access_mode_changed");
+            }
+            let missing = if matches!(planned, Plan::Mkdir | Plan::Link { .. }) {
+                missing_parents(&effect_root, &p, |parent| {
+                    writable_target(db, &i, &effect_root, parent, scoped)
+                })?
+            } else {
+                Vec::new()
+            };
+            let mut maybe_changed = false;
+            let value = apply(&effect_root, &rule, &effect_args, &planned, &missing, &mut maybe_changed);
+            Ok((value, maybe_changed))
+        })?).await?;
+        possible = maybe_changed;
+        let mut value = effect?;
         if name == "project_skill_link" && args["action"] == "link" {
             // Observed after the effect, outside every store transaction.
             value["git"] = git_retention(&root, args["name"].as_str().unwrap_or_default()).await;
@@ -724,6 +733,7 @@ mod tests {
                 "/.cortex/",
                 &json!({"path":p}),
                 &Plan::Mkdir,
+                &missing_parents(&root, p, |_| Ok(()))?,
                 possible,
             )
         };
@@ -775,7 +785,7 @@ mod tests {
         let args = json!({"path":"a/file","expected_sha256":sha});
         let p = plan(&root, "project_delete", &args).unwrap();
         assert_eq!(
-            apply(&root, "/.cortex/", &args, &p, &mut possible).unwrap()["deleted"],
+            apply(&root, "/.cortex/", &args, &p, &[], &mut possible).unwrap()["deleted"],
             true
         );
         assert!(!root.join("a/file").exists());
@@ -784,7 +794,7 @@ mod tests {
         let args = json!({"path":".gitignore","expected_sha256":digest(b"target/\n")});
         let p = plan(&root, "project_delete", &args).unwrap();
         assert_eq!(
-            apply(&root, "/.cortex/", &args, &p, &mut possible).unwrap()["deleted"],
+            apply(&root, "/.cortex/", &args, &p, &[], &mut possible).unwrap()["deleted"],
             false
         );
         assert_eq!(
@@ -795,7 +805,15 @@ mod tests {
         let link = json!({"action":"link","name":"s","request_key":"k"});
         let p = plan(&root, "project_skill_link", &link).unwrap();
         assert_eq!(
-            apply(&root, "", &link, &p, &mut possible).unwrap()["changed"],
+            apply(
+                &root,
+                "",
+                &link,
+                &p,
+                &[".claude".into(), ".claude/skills".into()],
+                &mut possible
+            )
+            .unwrap()["changed"],
             true
         );
         assert_eq!(
@@ -828,13 +846,13 @@ mod tests {
         let p = plan(&root, "project_skill_link", &replace).unwrap();
         assert!(matches!(p, Plan::Link { replace: Some(_) }));
         assert_eq!(
-            apply(&root, "", &replace, &p, &mut possible).unwrap()["previous"]["target"],
+            apply(&root, "", &replace, &p, &[], &mut possible).unwrap()["previous"]["target"],
             "elsewhere"
         );
         let unlink = json!({"action":"unlink","name":"s","request_key":"u"});
         let p = plan(&root, "project_skill_link", &unlink).unwrap();
         assert_eq!(
-            apply(&root, "", &unlink, &p, &mut possible).unwrap()["changed"],
+            apply(&root, "", &unlink, &p, &[], &mut possible).unwrap()["changed"],
             true
         );
         assert!(root.join(".agents/skills/s/SKILL.md").is_file());

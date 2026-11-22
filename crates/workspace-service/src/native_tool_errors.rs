@@ -65,6 +65,7 @@ fn field(code: &str) -> Option<&'static str> {
         | "invalid_edits" => "edits",
         "file_missing"
         | "symlink_refused"
+        | "project_mount_alias_refused"
         | "regular_file_required"
         | "regular_unlinked_file_required"
         | "binary_file"
@@ -77,8 +78,9 @@ fn field(code: &str) -> Option<&'static str> {
         | "outside_path_unavailable"
         | "outside_path_inside_project"
         | "outside_parent_unavailable"
+        | "write_outside_assignment_scope"
         | "rule_file_protected" => "path",
-        "invalid_cwd" | "outside_cwd_unavailable" => "cwd",
+        "invalid_cwd" | "outside_cwd_unavailable" | "scoped_command_cwd_refused" => "cwd",
         "skill_link_name_invalid" | "skill_source_missing" => "name",
         "skill_link_occupied" | "skill_link_conflict" => "replace_symlink_target",
         "skill_link_collision" | "skill_link_not_managed" | "skill_link_parent_unsafe" => "name",
@@ -103,6 +105,9 @@ fn field(code: &str) -> Option<&'static str> {
 /// A short correction for the codes a model can act on.
 fn hint(code: &str) -> &'static str {
     match code {
+        "managed_codex_host_command_refused" => "Managed Codex cannot run on the host or request privilege escalation. Use project tools or a scratch-only command.",
+        "managed_codex_git_refused" => "This Git context tool needs the live repository metadata. Use project reads or retained change evidence; managed Codex commands cannot access the host Git control plane.",
+        "scoped_command_cwd_refused" => "Use the current checkout or a directory in it. The command sees a read-only snapshot under /workspace and private scratch under /tmp.",
         "invalid_arguments" => "The arguments do not match this tool's advertised inputSchema. Read its live schema with tools_discover and send only its exact properties.",
         "request_key_conflict" | "payload_conflict" => "This request_key already identifies a different action on this channel. Use a fresh request_key for a different payload, or repeat the identical call to read its retained result.",
         "invalid_request_key" | "invalid_request" => "Supply a request_key of 1 to 128 characters.",
@@ -155,6 +160,8 @@ fn hint(code: &str) -> &'static str {
         "verification_executable_unavailable" => "The program was not found on the verification command path (the project's .venv/bin, venv/bin and node_modules/.bin, then the owner's tool search path, which already includes the existing usual per-user tool folders such as ~/.local/bin, ~/.cargo/bin and the default nvm, fnm or Volta Node). Install it project-privately without system changes or choose another executable check; ask the owner if neither is possible.",
         "invalid_verification_command" | "verification_shell_syntax" => "Supply one literal argv: no shell operators, redirections or command substitution.",
         "native_command_sandbox_unavailable" => "The command did not start: its supervisor could not prepare or confirm the sandbox before release. Nothing ran. This refusal does not authorize running on the host. Report the preparation blocker; a fresh contained attempt is appropriate only if the problem has cleared and the original receipt confirms it never launched.",
+        "project_mount_alias_refused" => "Use a path directly in the bound checkout; this path crosses a mount boundary.",
+        "write_outside_assignment_scope" => "Use a target inside the current assignment scope or request access to an additional project path before retrying. Outside paths cannot be added to the assignment.",
         "rule_file_protected" => "This is a project rule file (AGENTS.md, CLAUDE.md, .agents/, .claude/, docs/project/verification.md…). Tasks don't edit it unless the owner's task names it or the owner sends `allow-write: <path>`. Leave it unchanged and propose rule changes in your result.",
         "outside_action_not_confirmed" => "The user did not allow this to run outside the sandbox, or no one could answer the permission card. Nothing ran. Do not repeat it; report the check as not run with this blocker.",
         "native_verification_sandbox_unavailable" =>"The verification sandbox could not run the probe; this does not show that the program is missing.",

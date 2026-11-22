@@ -102,6 +102,141 @@ pub(super) fn writable(
     }
     Ok(())
 }
+/// Current working checkout, not the logical root used by the shared store.
+pub(super) fn task_root(db: &rusqlite::Connection, task: &str) -> CoreResult<std::path::PathBuf> {
+    let path: String = db.query_row(
+        "SELECT coalesce((SELECT workspace_root FROM task_workspaces WHERE task_id=t.id),
+                         project_root) FROM tasks t WHERE id=?",
+        [task],
+        |r| r.get(0),
+    )?;
+    Ok(path.into())
+}
+
+/// Effective paths for a current writer. Command callers must authenticate the
+/// ready channel in this same transaction and separately confine the OS view.
+pub(super) fn effective_write_scope(
+    db: &rusqlite::Transaction<'_>,
+    i: &Identity,
+) -> CoreResult<Vec<String>> {
+    writable(db, i, None)?;
+    let scope: String = db
+        .query_row(
+            "SELECT n.scope_json FROM runtime_nodes n JOIN runtime_tasks t
+          ON n.task_id=t.task_id AND n.revision=t.revision
+         WHERE n.task_id=? AND n.assignment_ref=? AND n.status='running'
+           AND n.result_json IS NULL AND n.stage='execution'",
+            (&i.task, &i.assignment),
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or(CoreError::Refused("stale_assignment"))?;
+    policy::effective_scope_tx(db, &i.task, i.assignment.as_deref(), &scope)
+}
+
+/// One-way containment, never the scheduler's symmetric conflict approximation.
+/// Literal paths include descendants; '*' and '?' match within a component;
+/// a whole '**' component matches zero or more components. Brackets are literal.
+pub(super) fn scope_covers(scope: &str, path: &str) -> bool {
+    if scope == "." {
+        return true;
+    }
+    if scope.starts_with('/') || scope.split('/').any(|p| matches!(p, "" | "." | "..")) {
+        return false;
+    }
+    if !scope.contains(['*', '?']) {
+        return Path::new(path).starts_with(scope);
+    }
+    let parts: Vec<_> = path.split('/').collect();
+    let mut reachable = vec![false; parts.len() + 1];
+    reachable[0] = true;
+    for pattern in scope.split('/') {
+        if pattern == "**" {
+            for n in 0..parts.len() {
+                reachable[n + 1] |= reachable[n];
+            }
+        } else {
+            for n in (0..parts.len()).rev() {
+                reachable[n + 1] = reachable[n] && segment_matches(pattern, parts[n]);
+            }
+            reachable[0] = false;
+        }
+    }
+    reachable[parts.len()]
+}
+
+fn segment_matches(pattern: &str, segment: &str) -> bool {
+    let chars: Vec<_> = segment.chars().collect();
+    let mut reachable = vec![false; chars.len() + 1];
+    reachable[0] = true;
+    for ch in pattern.chars() {
+        if ch == '*' {
+            for n in 0..chars.len() {
+                reachable[n + 1] |= reachable[n];
+            }
+        } else {
+            for n in (0..chars.len()).rev() {
+                reachable[n + 1] = reachable[n] && (ch == '?' || ch == chars[n]);
+            }
+            reachable[0] = false;
+        }
+    }
+    reachable[chars.len()]
+}
+
+/// Check the target against the writer's current policy. This does not
+/// replace descriptor-relative, no-follow traversal for the effect.
+pub(super) fn writable_target(
+    db: &rusqlite::Transaction<'_>,
+    i: &Identity,
+    root: &Path,
+    path: &str,
+    scoped: bool,
+) -> CoreResult<()> {
+    writable(db, i, Some(path))?;
+    if crate::native_engine_policy::project_private(&root.join(path)) {
+        return Err(CoreError::Refused("private_or_invalid_path"));
+    }
+    if scoped {
+        if task_root(db, &i.task)? != root {
+            return Err(CoreError::Refused("project_context_conflict"));
+        }
+        if !effective_write_scope(db, i)?
+            .iter()
+            .any(|s| scope_covers(s, path))
+        {
+            return Err(CoreError::Refused("write_outside_assignment_scope"));
+        }
+    }
+    Ok(())
+}
+
+/// Authorize every missing parent before the first mkdir. The returned names
+/// are the only prefixes the effect may create.
+pub(super) fn missing_parents(
+    root: &Path,
+    path: &str,
+    mut check: impl FnMut(&str) -> CoreResult<()>,
+) -> CoreResult<Vec<String>> {
+    let mut missing = Vec::new();
+    for (end, _) in path.match_indices('/') {
+        let prefix = &path[..end];
+        match root.join(prefix).symlink_metadata() {
+            Ok(m) if m.is_dir() => {}
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(CoreError::Refused("symlink_refused"))
+            }
+            Ok(_) => return Err(CoreError::Refused("gateway_path_exists")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                check(prefix)?;
+                missing.push(prefix.to_owned());
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(missing)
+}
+
 fn authorize(
     db: &rusqlite::Transaction<'_>,
     i: &Identity,
@@ -114,41 +249,94 @@ fn authorize(
     }
     writable(db, i, path)
 }
-fn openat(folder: &File, name: &str, flags: i32) -> CoreResult<File> {
+// A bind mount can alias another project or store without a symlink.
+pub(super) fn openat(folder: &File, name: &str, flags: i32) -> CoreResult<File> {
     let name = std::ffi::CString::new(name).map_err(|_| CoreError::Refused("invalid_path"))?;
+    let mut how: libc::open_how = unsafe { std::mem::zeroed() };
+    // RESOLVE_NO_SYMLINKS rejects every component, including the leaf. Adding
+    // O_NOFOLLOW here can turn a symlink to a directory into ENOTDIR.
+    // openat2 rejects O_NONBLOCK with O_PATH; an O_PATH descriptor never opens
+    // a special file for I/O. Ordinary I/O opens remain nonblocking.
+    let nonblock = if flags & libc::O_PATH == 0 {
+        libc::O_NONBLOCK
+    } else {
+        0
+    };
+    how.flags = (flags | libc::O_CLOEXEC | nonblock) as u64;
+    if flags & libc::O_CREAT != 0 {
+        how.mode = 0o644;
+    }
+    how.resolve = libc::RESOLVE_NO_XDEV | libc::RESOLVE_NO_SYMLINKS | libc::RESOLVE_BENEATH;
     let fd = unsafe {
-        libc::openat(
+        libc::syscall(
+            libc::SYS_openat2,
             folder.as_raw_fd(),
             name.as_ptr(),
-            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-            0o644,
+            &how,
+            size_of::<libc::open_how>(),
         )
     };
     if fd < 0 {
-        return Err(std::io::Error::last_os_error().into());
+        let error = std::io::Error::last_os_error();
+        return Err(match error.raw_os_error() {
+            Some(libc::ELOOP) => CoreError::Refused("symlink_refused"),
+            Some(libc::EXDEV) => CoreError::Refused("project_mount_alias_refused"),
+            Some(libc::ENOSYS | libc::EINVAL) => {
+                CoreError::Refused("project_traversal_unavailable")
+            }
+            _ => error.into(),
+        });
     }
-    Ok(unsafe { File::from_raw_fd(fd) })
+    Ok(unsafe { File::from_raw_fd(fd as i32) })
 }
-fn parent(root: &Path, path: &str, create: bool) -> CoreResult<(File, String)> {
+fn parent(root: &Path, path: &str) -> CoreResult<(File, String)> {
+    parent_for_effect(root, path, &[])
+}
+
+fn parent_for_effect(root: &Path, path: &str, missing: &[String]) -> CoreResult<(File, String)> {
     safe(path)?;
     if path == "." {
         return Err(CoreError::Refused("regular_file_required"));
     }
-    let mut parts = path.split('/').collect::<Vec<_>>();
-    let name = parts.pop().unwrap().to_owned();
-    let mut folder = File::open(root)?;
-    for part in parts {
-        if create {
-            let c = std::ffi::CString::new(part).unwrap();
-            let rc = unsafe { libc::mkdirat(folder.as_raw_fd(), c.as_ptr(), 0o755) };
-            if rc < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
+    let (prefix, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let mut folder = open_project_root(root)?;
+    let mut end = 0;
+    for part in prefix.split('/').filter(|p| !p.is_empty()) {
+        end += part.len();
+        let opened = openat(&folder, part, libc::O_RDONLY | libc::O_DIRECTORY);
+        folder = match opened {
+            Err(CoreError::Io(e))
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && missing.iter().any(|p| p == &prefix[..end]) =>
             {
-                return Err(std::io::Error::last_os_error().into());
+                let c = std::ffi::CString::new(part).unwrap();
+                let rc = unsafe { libc::mkdirat(folder.as_raw_fd(), c.as_ptr(), 0o755) };
+                if rc < 0
+                    && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
+                {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                openat(&folder, part, libc::O_RDONLY | libc::O_DIRECTORY)?
             }
-        }
-        folder = openat(&folder, part, libc::O_RDONLY | libc::O_DIRECTORY)?;
+            other => other?,
+        };
+        end += 1;
     }
-    Ok((folder, name))
+    Ok((folder, name.to_owned()))
+}
+
+pub(super) fn open_project_root(root: &Path) -> CoreResult<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if root.canonicalize()? != root {
+        return Err(CoreError::Refused("project_context_conflict"));
+    }
+    let folder = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(root)?;
+    // Test the confinement primitive on this very descriptor before any
+    // mutation, including a mkdir whose name does not exist yet.
+    openat(&folder, ".", libc::O_RDONLY | libc::O_DIRECTORY)
 }
 fn bytes(folder: &File, name: &str) -> CoreResult<Option<(Vec<u8>, u32)>> {
     let file = match openat(folder, name, libc::O_RDONLY) {
@@ -170,7 +358,7 @@ fn bytes(folder: &File, name: &str) -> CoreResult<Option<(Vec<u8>, u32)>> {
 /// `None` when there are no such bytes to read: missing, a symlink, a directory,
 /// a hard-linked or unreadable entry.
 pub(super) fn current_sha256(root: &Path, path: &str) -> Option<String> {
-    let (folder, name) = parent(root, path, false).ok()?;
+    let (folder, name) = parent(root, path).ok()?;
     let (b, _) = bytes(&folder, &name).ok()??;
     Some(digest(&b))
 }
@@ -271,9 +459,19 @@ fn read(
     args: &Value,
     batched: bool,
 ) -> CoreResult<Value> {
+    read_at(store, i, c, args, batched, store.key().root())
+}
+
+fn read_at(
+    store: &Store,
+    i: &Identity,
+    c: &Credential,
+    args: &Value,
+    batched: bool,
+    root: &Path,
+) -> CoreResult<Value> {
     let path = text(args, "path")?;
     safe(path)?;
-    let root = store.key().root();
     let at = root.join(path);
     // Descriptor traversal is used for files; never read through a directory alias.
     let mut current = root.to_path_buf();
@@ -306,7 +504,7 @@ fn read(
         let held = if path == "." {
             File::open(root)?
         } else {
-            let (folder, name) = parent(root, path, false)?;
+            let (folder, name) = parent(root, path)?;
             openat(&folder, &name, libc::O_RDONLY | libc::O_DIRECTORY)?
         };
         let mut entries = fs::read_dir(format!("/proc/self/fd/{}", held.as_raw_fd()))?
@@ -327,7 +525,7 @@ fn read(
             json!({"path":path,"entries":selected,"total_entries":total,"next_offset":if start-1+selected.len()<total{json!(start+selected.len())}else{Value::Null}}),
         ));
     }
-    let (folder, name) = parent(root, path, false)?;
+    let (folder, name) = parent(root, path)?;
     let (b, _) = bytes(&folder, &name)?.ok_or(CoreError::Refused("file_missing"))?;
     let hash = digest(&b);
     let mut meta = json!({"path":path,"sha256":hash,"size_bytes":b.len()});
@@ -516,7 +714,14 @@ fn reconcile_file(
     if after.len() != 64 || intent["reply"]["structuredContent"]["sha256"] != after {
         return Ok(None);
     }
-    let observed = match parent(store.key().root(), path, false) {
+    let workspace = intent["workspace"].as_str().map(Path::new);
+    if let Some(workspace) = workspace {
+        let current = store.read(|db| task_root(db, task))?;
+        if workspace != current {
+            return Ok(None);
+        }
+    }
+    let observed = match parent(workspace.unwrap_or_else(|| store.key().root()), path) {
         Ok((folder, name)) => match bytes(&folder, &name) {
             Ok(b) => b.map(|(b, _)| digest(&b)).unwrap_or("absent".into()),
             Err(_) => return Ok(None),
@@ -547,6 +752,98 @@ fn reconcile_file(
     })?;
     Ok(Some(settled))
 }
+#[cfg(test)]
+mod effective_scope_tests {
+    use super::*;
+    use cortex_core::{lifecycle::TaskMachine, OpenMode, ProjectKey, StoreChannel};
+
+    #[test]
+    fn scope_matching_never_uses_a_symmetric_overlap_as_a_grant() {
+        for (scope, path, allowed) in [
+            (".", "src/lib.rs", true),
+            ("**/*", "src", true),
+            ("src", "src/lib.rs", true),
+            ("src/lib.rs", "src", false),
+            ("src", "src2/lib.rs", false),
+            ("src/**", "src", true),
+            ("src/**", "src/deep/lib.rs", true),
+            ("src/**/test?.rs", "src/deep/test1.rs", true),
+            ("src/*.rs", "src/deep/lib.rs", false),
+            ("src/*.rs", "src/lib.rs", true),
+            ("routes/[slug]", "routes/[slug]/page.rs", true),
+            ("routes/[slug]", "routes/s/page.rs", false),
+            ("../src", "src/lib.rs", false),
+        ] {
+            assert_eq!(scope_covers(scope, path), allowed, "{scope:?} {path:?}");
+        }
+    }
+
+    #[test]
+    fn grants_require_a_live_current_assignment_and_do_not_override_denials() {
+        let root = std::env::temp_dir().join(format!(
+            "project-authority-{}",
+            crate::native_effects::identity().unwrap()
+        ));
+        fs::create_dir(&root).unwrap();
+        let store = Store::open(
+            ProjectKey::new(&root, StoreChannel::Dev).unwrap(),
+            OpenMode::Initialize,
+        )
+        .unwrap();
+        let owner = TaskMachine::new(&store)
+            .create("t", "Scoped work", "owner")
+            .unwrap();
+        let c = store.write(|db| {
+            db.execute("UPDATE runtime_tasks SET state='EXECUTING',revision=1", [])?;
+            db.execute("INSERT INTO runtime_nodes VALUES ('t',1,'n','worker-backend-dev','Work','[]','[\"src/**\"]','execution','running','a',NULL)", [])?;
+            let c = channels::issue_tx(db, "t", &owner, channels::Principal::Worker { assignment: "a" })?;
+            channels::bind_session_tx(db, &c, "engine")?;
+            Ok(c)
+        }).unwrap();
+        let i = store
+            .read(|db| channels::authenticate(db, &c.channel_id, c.secret(), true))
+            .unwrap();
+        let check = |path: &str| {
+            store
+                .write(|db| {
+                    authorize(db, &i, &c, None)?;
+                    writable_target(db, &i, &root, path, true)
+                })
+                .err()
+                .map(|e| e.code())
+        };
+        assert_eq!(check("src/a.rs"), None);
+        assert_eq!(check("other/a.rs"), Some("write_outside_assignment_scope"));
+        store
+            .write(|db| {
+                policy::request_access_tx(db, "t", &c.channel_id, "expand", &["other".into()])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(check("other/a.rs"), None);
+        assert_eq!(
+            check(".cortex-dev/cortex.sqlite3"),
+            Some("private_or_invalid_path")
+        );
+        assert_eq!(check("AGENTS.md"), Some("rule_file_protected"));
+        store.write(|db| {
+            lifecycle::event_tx(db, "t", "USER_STEERING",
+                json!({"text":"deny-write: other","deny_write":["other"],"request":"owner-denial"}))?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(check("other/a.rs"), Some("write_denied"));
+        store
+            .write(|db| {
+                db.execute("UPDATE runtime_tasks SET revision=2", [])?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(check("src/a.rs"), Some("channel_authority_refused"));
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
 #[cfg(test)]
 mod precondition_tests {
     use super::*;
@@ -1098,6 +1395,7 @@ pub(super) fn recover_files(store: &Store) -> CoreResult<()> {
     }
     Ok(())
 }
+#[allow(clippy::too_many_arguments)]
 pub(super) fn execute(
     store: &Store,
     i: &Identity,
@@ -1105,12 +1403,17 @@ pub(super) fn execute(
     name: &str,
     args: &Value,
     batched: bool,
+    root: &Path,
+    scoped: bool,
 ) -> CoreResult<Value> {
     if name == "project_read" {
+        if scoped {
+            return read_at(store, i, c, args, batched, root);
+        }
         return read(store, i, c, args, batched);
     }
     let mut failed_field: Option<String> = None;
-    let result = execute_inner(store, i, c, name, args, &mut failed_field);
+    let result = execute_inner(store, i, c, name, args, &mut failed_field, root, scoped);
     let error_reply = |code| match &failed_field {
         Some(field) => crate::native_tool_errors::reply_at(code, field),
         None => file_error(code),
@@ -1151,6 +1454,7 @@ pub(super) fn execute(
         other => other,
     }
 }
+#[allow(clippy::too_many_arguments)]
 fn execute_inner(
     store: &Store,
     i: &Identity,
@@ -1158,6 +1462,8 @@ fn execute_inner(
     name: &str,
     args: &Value,
     failed_field: &mut Option<String>,
+    root: &Path,
+    scoped: bool,
 ) -> CoreResult<Value> {
     if name == "command_status" {
         return crate::native_command_handles::status(
@@ -1196,7 +1502,11 @@ fn execute_inner(
     }
     let path = text(args, "path")?;
     safe(path)?;
-    store.write(|db| authorize(db, i, c, Some(path)))?;
+    let root_path = if scoped { root } else { store.key().root() };
+    store.write(|db| {
+        authorize(db, i, c, None)?;
+        writable_target(db, i, root_path, path, scoped)
+    })?;
     let hash = digest(&serde_json::to_vec(&json!([name, args]))?);
     let key = args["request_key"]
         .as_str()
@@ -1217,20 +1527,16 @@ fn execute_inner(
         };
         return Ok(v["reply"].clone());
     }
-    let (folder, file) = match parent(store.key().root(), path, false) {
-        Ok(p) => p,
+    let old = match parent(root_path, path) {
+        Ok((folder, file)) => bytes(&folder, &file)?,
         Err(CoreError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             if name != "project_write" {
                 return Err(CoreError::Refused("file_missing"));
             }
-            if text(args, "expected_sha256")? != "absent" {
-                return Err(CoreError::Refused("gateway_write_conflict"));
-            }
-            parent(store.key().root(), path, true)?
+            None
         }
         Err(e) => return Err(e),
     };
-    let old = bytes(&folder, &file)?;
     let old_hash = old
         .as_ref()
         .map(|(b, _)| digest(b))
@@ -1337,7 +1643,11 @@ fn execute_inner(
     // Bind both hashes and the acknowledgement before replacement. Recovery
     // observes bytes only; it never re-executes the edit or grants read coverage.
     store.write(|db| {
-        authorize(db, i, c, Some(path))?;
+        authorize(db, i, c, None)?;
+        writable_target(db, i, root_path, path, scoped)?;
+        missing_parents(root_path, path, |parent| {
+            writable_target(db, i, root_path, parent, scoped)
+        })?;
         db.execute(
             "INSERT INTO runtime_requests VALUES (?,?,?,?,?,?)",
             (
@@ -1346,66 +1656,76 @@ fn execute_inner(
                 &c.channel_id,
                 name,
                 &hash,
-                json!({"complete":false,"path":path,"before_sha256":old_hash,"after_sha256":new_hash,"reply":v}).to_string(),
+                json!({"complete":false,"path":path,"workspace":scoped.then_some(root_path),"before_sha256":old_hash,"after_sha256":new_hash,"reply":v}).to_string(),
             ),
         )?;
         Ok(())
     })?;
-    let temp = format!(".cortex-edit-{}", &crate::native_effects::identity()?[..16]);
-    let mut f = openat(
-        &folder,
-        &temp,
-        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-    )?;
-    let effect = (|| -> CoreResult<()> {
-        f.write_all(next.as_bytes())?;
-        f.set_permissions(fs::Permissions::from_mode(
-            old.as_ref().map_or(0o644, |(_, m)| *m),
-        ))?;
-        f.sync_all()?;
-        store.write(|db| authorize(db, i, c, Some(path)))?;
-        if bytes(&folder, &file)?
-            .as_ref()
-            .map(|(b, _)| digest(b))
-            .unwrap_or("absent".into())
-            != old_hash
-        {
-            return Err(CoreError::Refused("gateway_stale_read"));
-        }
-        let src = std::ffi::CString::new(temp.as_str()).unwrap();
-        let dest = std::ffi::CString::new(file).unwrap();
-        let rc = unsafe {
-            if old.is_none() {
-                libc::renameat2(
-                    folder.as_raw_fd(),
-                    src.as_ptr(),
-                    folder.as_raw_fd(),
-                    dest.as_ptr(),
-                    libc::RENAME_NOREPLACE,
-                )
-            } else {
-                libc::renameat(
-                    folder.as_raw_fd(),
-                    src.as_ptr(),
-                    folder.as_raw_fd(),
-                    dest.as_ptr(),
-                )
+    store.write(|db| {
+        authorize(db, i, c, None)?;
+        writable_target(db, i, root_path, path, scoped)?;
+        let missing = missing_parents(root_path, path, |parent| {
+            writable_target(db, i, root_path, parent, scoped)
+        })?;
+        let (folder, file) = parent_for_effect(root_path, path, &missing)?;
+        let temp = format!(".cortex-edit-{}", &crate::native_effects::identity()?[..16]);
+        let mut f = openat(
+            &folder,
+            &temp,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )?;
+        let effect = (|| -> CoreResult<()> {
+            f.write_all(next.as_bytes())?;
+            f.set_permissions(fs::Permissions::from_mode(
+                old.as_ref().map_or(0o644, |(_, m)| *m),
+            ))?;
+            f.sync_all()?;
+            if bytes(&folder, &file)?
+                .as_ref()
+                .map(|(b, _)| digest(b))
+                .unwrap_or("absent".into())
+                != old_hash
+            {
+                return Err(CoreError::Refused("gateway_stale_read"));
             }
+            // The transaction fences state changes, but expiry is wall-clock.
+            // Recheck immediately after fsync, before publishing the replacement.
+            authorize(db, i, c, None)?;
+            let src = std::ffi::CString::new(temp.as_str()).unwrap();
+            let dest = std::ffi::CString::new(file).unwrap();
+            let rc = unsafe {
+                if old.is_none() {
+                    libc::renameat2(
+                        folder.as_raw_fd(),
+                        src.as_ptr(),
+                        folder.as_raw_fd(),
+                        dest.as_ptr(),
+                        libc::RENAME_NOREPLACE,
+                    )
+                } else {
+                    libc::renameat(
+                        folder.as_raw_fd(),
+                        src.as_ptr(),
+                        folder.as_raw_fd(),
+                        dest.as_ptr(),
+                    )
+                }
+            };
+            if rc < 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            folder.sync_all()?;
+            Ok(())
+        })();
+        unsafe {
+            libc::unlinkat(
+                folder.as_raw_fd(),
+                std::ffi::CString::new(temp).unwrap().as_ptr(),
+                0,
+            )
         };
-        if rc < 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        folder.sync_all()?;
-        Ok(())
-    })();
-    unsafe {
-        libc::unlinkat(
-            folder.as_raw_fd(),
-            std::ffi::CString::new(temp).unwrap().as_ptr(),
-            0,
-        )
-    };
-    effect?;
+        effect
+    })?;
     save_coverage(
         store,
         i,
@@ -1604,7 +1924,7 @@ pub(crate) fn add_review_lines(root: &Path, base: Option<&str>, packet: &mut Val
         let Some(path) = file["path"].as_str().map(str::to_owned) else {
             continue;
         };
-        let current = parent(root, &path, false)
+        let current = parent(root, &path)
             .ok()
             .and_then(|(folder, name)| bytes(&folder, &name).ok().flatten())
             .map(|(b, _)| b)

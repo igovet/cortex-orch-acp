@@ -38,28 +38,33 @@ fn offers(options: &Value, value: &str) -> bool {
     })
 }
 
+pub(crate) const CODEX_NATIVE_MODE: &str = "read-only";
+
+pub(crate) fn codex_native_confirmed(options: &Value) -> bool {
+    let Some(options) = options.as_array() else {
+        return false;
+    };
+    let mut mode = options.iter().filter(|o| o["id"] == "mode");
+    mode.next()
+        .is_some_and(|o| o["currentValue"] == CODEX_NATIVE_MODE)
+        && mode.next().is_none()
+}
+
 /// The engine permission mode of a session, independent of the access mode:
 ///
 /// - claude-agent-acp: `default`, the mode in which every tool Claude Code does
 ///   not auto-approve reaches the runtime as `session/request_permission`.
-/// - codex-acp: `read-only` (read-only sandbox, approval on request) for a
-///   read-only channel; `workspace-write` (project-writable sandbox, approval on
-///   request answered by the runtime, unlike `agent`, whose escalations go to
-///   Codex's own automatic reviewer) for a writing worker.
+/// - codex-acp: `read-only` for every Cortex-managed channel. Only the
+///   authenticated Cortex gateway can grant a writing worker a project effect.
 /// - OpenCode: `cortex`, whose permissions ask for every tool.
 ///
 /// A mode the engine does not offer refuses the start with
 /// `restricted_mode_unavailable`; no wider mode is substituted.
-pub(crate) fn native_mode(
-    engine: EngineKind,
-    read_only: bool,
-    options: &Value,
-) -> Result<&'static str, Error> {
-    let mode = match (engine, read_only) {
-        (EngineKind::Claude, _) => "default",
-        (EngineKind::Codex, true) => "read-only",
-        (EngineKind::Codex, false) => "workspace-write",
-        (EngineKind::OpenCode, _) => "cortex",
+pub(crate) fn native_mode(engine: EngineKind, options: &Value) -> Result<&'static str, Error> {
+    let mode = match engine {
+        EngineKind::Claude => "default",
+        EngineKind::Codex => CODEX_NATIVE_MODE,
+        EngineKind::OpenCode => "cortex",
     };
     if offers(options, mode) {
         Ok(mode)
@@ -211,6 +216,24 @@ const HOME_CREDENTIALS: &[&str] = &[
     ".claude/.credentials.json",
     ".claude.json",
 ];
+const PRIVATE_PROJECT_NAMES: &[&str] = &[
+    ".cortex",
+    ".cortex-dev",
+    ".cortex-dev-owner.json",
+    ".cortex-workspace-dev.json",
+];
+
+/// All project stores and owner markers, not just the current checkout or channel.
+/// This also protects the names before an entry exists or while Git metadata is
+/// unavailable. Call with both the named and resolved paths if following aliases.
+pub(crate) fn project_private(path: &Path) -> bool {
+    path.components().any(|part| {
+        PRIVATE_PROJECT_NAMES
+            .iter()
+            .any(|name| part.as_os_str() == *name)
+    })
+}
+
 /// The class of a resolved absolute path a native request names
 /// ([`permission::PathClass`]): Cortex private state (the project's `.cortex`,
 /// `.cortex-dev` and dev owner files, the service state directory); credential
@@ -219,6 +242,9 @@ const HOME_CREDENTIALS: &[&str] = &[
 /// engine/Cortex configuration (every other runtime-protected target); else
 /// ordinary.
 pub(crate) fn path_class(root: &Path, path: &Path) -> PathClass {
+    if project_private(path) {
+        return PathClass::Private;
+    }
     let env: std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> =
         std::env::vars_os().collect();
     let var = |k: &str| {
@@ -233,15 +259,10 @@ pub(crate) fn path_class(root: &Path, path: &Path) -> PathClass {
     let logical = cortex_core::ProjectKey::new(root, cortex_core::StoreChannel::Release)
         .map(|k| k.root().to_path_buf())
         .unwrap_or_else(|_| root.to_path_buf());
-    let mut private: Vec<PathBuf> = [
-        ".cortex",
-        ".cortex-dev",
-        ".cortex-dev-owner.json",
-        ".cortex-workspace-dev.json",
-    ]
-    .iter()
-    .flat_map(|n| [logical.join(n), root.join(n)])
-    .collect();
+    let mut private: Vec<PathBuf> = PRIVATE_PROJECT_NAMES
+        .iter()
+        .flat_map(|n| [logical.join(n), root.join(n)])
+        .collect();
     if let Some(state) =
         var("XDG_STATE_HOME").or_else(|| home.as_ref().map(|h| h.join(".local/state")))
     {
@@ -292,38 +313,29 @@ mod tests {
             "read-only",
             "plan",
         ]);
-        for engine in [EngineKind::Claude, EngineKind::Codex, EngineKind::OpenCode] {
-            for read_only in [false, true] {
-                let mode = native_mode(engine, read_only, &all).unwrap();
-                assert!(!["bypassPermissions", "agent-full-access", "acceptEdits"].contains(&mode));
-            }
+        for (engine, expected) in [
+            (EngineKind::Claude, "default"),
+            (EngineKind::Codex, "read-only"),
+            (EngineKind::OpenCode, "cortex"),
+        ] {
+            assert_eq!(native_mode(engine, &all).unwrap(), expected);
         }
-        assert_eq!(
-            native_mode(EngineKind::Codex, true, &all).unwrap(),
-            "read-only"
-        );
-        assert_eq!(
-            native_mode(EngineKind::Codex, false, &all).unwrap(),
-            "workspace-write"
-        );
-        // `agent` hands escalations to Codex's own reviewer; it is never a substitute.
-        let agent_only = modes(&["agent", "read-only", "default"]);
-        assert!(native_mode(EngineKind::Codex, false, &agent_only).is_err());
-        assert_eq!(
-            native_mode(EngineKind::Claude, true, &all).unwrap(),
-            "default"
-        );
     }
 
     #[test]
     fn a_missing_restricted_mode_refuses_instead_of_widening() {
-        let wide = modes(&["agent", "agent-full-access", "bypassPermissions"]);
+        let wide = modes(&[
+            "workspace-write",
+            "agent",
+            "agent-full-access",
+            "bypassPermissions",
+        ]);
         assert!(matches!(
-            native_mode(EngineKind::Codex, true, &wide),
+            native_mode(EngineKind::Codex, &wide),
             Err(Error::Refused("restricted_mode_unavailable"))
         ));
         assert!(matches!(
-            native_mode(EngineKind::Claude, false, &wide),
+            native_mode(EngineKind::Claude, &wide),
             Err(Error::Refused("restricted_mode_unavailable"))
         ));
         // Grouped codex-acp mode lists are searched too.
@@ -331,9 +343,82 @@ mod tests {
             {"group":"sandbox-modes","options":[{"value":"read-only"},{"value":"agent"}]},
             {"group":"permission-profiles","options":[{"value":"permission-profile:x"}]}]}]);
         assert_eq!(
-            native_mode(EngineKind::Codex, true, &grouped).unwrap(),
+            native_mode(EngineKind::Codex, &grouped).unwrap(),
             "read-only"
         );
+    }
+
+    #[test]
+    fn read_only_confirmation_requires_one_exact_mode() {
+        let read_only = json!({"id":"mode","currentValue":"read-only"});
+        assert!(codex_native_confirmed(&json!([read_only])));
+        assert!(!codex_native_confirmed(&json!([read_only, read_only])));
+        assert!(!codex_native_confirmed(
+            &json!([{"id":"mode","currentValue":"workspace-write"}])
+        ));
+        assert!(!codex_native_confirmed(&json!([])));
+    }
+
+    #[test]
+    fn another_project_and_its_linked_worktree_have_private_store_names() {
+        use cortex_core::{ProjectKey, StoreChannel};
+        use std::process::Command;
+        let base = std::env::temp_dir().join(format!(
+            "private-stores-{}",
+            crate::native_effects::identity().unwrap()
+        ));
+        let current = base.join("current");
+        let foreign = base.join("foreign");
+        let linked = base.join("linked");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::create_dir_all(&foreign).unwrap();
+        let git = |args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(&foreign)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "fixture",
+            "--allow-empty",
+        ]);
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            linked.to_str().unwrap(),
+        ]);
+        for channel in [StoreChannel::Release, StoreChannel::Dev] {
+            let key = ProjectKey::new(&linked, channel).unwrap();
+            assert_eq!(key.root(), &foreign);
+            assert_eq!(path_class(&current, &key.database()), PathClass::Private);
+            assert_eq!(
+                path_class(&current, &linked.join(channel.directory()).join("absent")),
+                PathClass::Private
+            );
+        }
+        for root in [&foreign, &linked] {
+            for marker in [".cortex-dev-owner.json", ".cortex-workspace-dev.json"] {
+                assert_eq!(path_class(&current, &root.join(marker)), PathClass::Private);
+            }
+            assert_eq!(
+                path_class(&current, &root.join("src/file")),
+                PathClass::Ordinary
+            );
+        }
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

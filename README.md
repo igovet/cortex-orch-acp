@@ -165,14 +165,17 @@ project-file and Git tools now retain channel-local read coverage and full comma
 output. Brokered worker commands and runtime verification now launch bubblewrap
 from Rust: private read-only process views, private literal /var/tmp scratch and
 read-only metadata protection use mounts, not Landlock alone. Protected children
-remain overlaid after writable parent grants. Writing roles receive project-wide
-command grants independently of reservations; Development/Auto permit outside cwd.
+remain overlaid after writable parent grants. On the existing host routes, writing
+roles receive project-wide command grants independently of reservations;
+Development and Auto permit eligible outside working directories. Cortex-managed
+Codex instead gets a read-only checkout snapshot with private scratch, or the
+command is refused. See [managed Codex write authority](SECURITY.md#managed-codex-write-authority).
 Verification can write existing Git-ignored directories and discard other project
 writes through a probed disk overlay. Review baselines record the current Git
 commit when one exists. Ignored build outputs have a separate metadata check;
 if it cannot finish, review still runs and can use a complete list of changed
-project files. Whole-project writers can update Git data
-while configuration/hooks/pointers stay guarded. Guarded HOME tool state,
+project files. Writers on the existing host routes can update Git data while
+configuration, hooks and pointers stay guarded. Guarded HOME tool state,
 read-only relocated caches, SSH config/opt-in askpass, hardlink detachment and
 expanded owner denials use the Rust command backend. Main source/text reads
 are not subject to the image-size cap; oversized catalogues/schemas retain whole
@@ -207,7 +210,11 @@ check is refused naming the check, its receipt and the gap that keeps it open.
 Inline shell scripts verify only as `umask`/`export`/`cd`/`set` setup followed by
 one simple check command; other inline-shell status-flow analysis remains
 unfinished.
-Engine containment, unconfigured client stdio servers, Python's worker-card presentation
+Codex that Cortex launches is always native `read-only`: its writes go through the
+runtime gateway, authorized automatically inside the task's current scope, and its
+commands run over a private scratch copy with no writable checkout; see
+[SECURITY.md](SECURITY.md#managed-codex-write-authority) (no installed-Codex
+qualification yet). Engine containment otherwise, unconfigured client stdio servers, Python's worker-card presentation
 and automatic engine-permission policy, and confirmed `/cortex-clear` deletion remain
 unfinished. See [native incoming ACP](docs/project/native-incoming-acp.md)
 for the supported surface and no-paid checks. Do not switch existing client

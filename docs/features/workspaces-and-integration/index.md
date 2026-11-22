@@ -40,35 +40,41 @@ shutdown and stay quarantined when exit cannot be confirmed; a leader exit alone
 does not release a group with active children. See
 [cleanup boundaries](../failures-and-cancellation/index.md#terminal-resource-cleanup).
 
-All project operations by Cortex MCP tools use the authenticated runtime gateway.
-Native-tool disabling is engine-specific, not a uniform guarantee: Claude's native
-`Bash`/`Read`/`Edit`/`Write`/`Grep`/`Glob`/`NotebookEdit` are refused through
-`disallowedTools` (see [claude-engine](../claude-engine/index.md)), so its project
-reads and writes stay fully observable through the gateway. Codex disables native
-`shell_tool`, but native `apply_patch` remains available, and the installed Codex
-CLI exposes no supported switch to turn off `unified_exec` either; both stay native actions, visible
-only through partial ACP tool-call events rather than the gateway (see
-[codex-engine](../codex-engine/index.md)'s current runtime gateway policy).
-Coordinator, consultant and review roles are read-only; other
-workers may write only within their assigned scopes. File replacement checks an
-expected hash or absence and rejects private paths, symlinks and hardlinks.
-Direct private/Git/denied-path overlays are not a guarantee against arbitrary host
-code, outside aliases or Docker. A project digest does not cover outside resources.
-Writing-worker commands in Development and Auto use host-writable mounts through the
-broker; Guarded keeps them restricted. Read-only and reviewer commands and automatic
-verification use the read-only host profile in every mode. Their project is read-only, except
-that an automatic verification check may write the project's git-ignored directories in place,
-and its other project writes (a tracked file a tool regenerates) go to a private overlay
-discarded when the check ends (refused where the host cannot overlay). Command environments filter Cortex/credential variables but
-use owner toolchains, validated SSH-agent access and shared network. `command_run`
-defaults to 1800 seconds (30 minutes; `timeout_seconds` sets more); outside commands
-default to 600 seconds. On a timeout, stop or authority loss the command and every
-process it started are stopped, including a child in its own process group (Playwright's
-detached `webServer` once kept its port after a timed-out run). A command's stdin is
-`/dev/null`: a killed Node child once left the shared MCP-server stdin non-blocking and
-every later Cortex call of that worker failed with "Transport closed" (2026-10-22). Declared scope is coordination, not the writing worker's whole-project
-OS grant. See [access modes and limitations](../permissions-and-containment/index.md#access-mode-development-guarded-and-auto). Ambiguous effects retain
-an unresolved receipt and cannot be replayed as though nothing happened.
+Cortex MCP project operations use the authenticated runtime gateway. Coordinator,
+consultant and review roles have no project write grant. Native tool restrictions
+are engine-specific, not an OS sandbox for the engine process. See the
+[Claude](../claude-engine/index.md) and [Codex](../codex-engine/index.md) policies.
+
+For Cortex-managed Codex, every session uses native `read-only` in all access
+modes. A writing worker changes project files through the gateway, which checks
+each target (including missing parents) against the assignment's current
+effective scope and applies the existing integrity and path protections. Ordinary
+authorized edits do not need a permission card. `command_run` uses a read-only
+checkout snapshot and private scratch or refuses before the payload can run;
+it cannot write even assigned paths in the live checkout and never reroutes to
+the host. The outside tools, live `project_git` and external MCP are unavailable
+on this route. See [managed Codex write authority](../../../SECURITY.md#managed-codex-write-authority).
+
+On other routes, declared scope coordinates writers rather than limiting the
+ordinary whole-project gateway grant or OS jail. Their writing-worker commands
+in Development and Auto use host-writable mounts through the broker; Guarded
+keeps them restricted. Direct private/Git/denied-path masks are not a guarantee
+against arbitrary host code, outside aliases or Docker. A project digest does
+not cover outside resources. The command environment filters Cortex and
+credential variables but retains owner toolchains, validated SSH-agent access
+and shared network on these routes. See
+[access modes and limitations](../permissions-and-containment/index.md#access-mode-development-guarded-and-auto).
+
+Read-only and reviewer commands and automatic verification on the existing
+host route use the read-only host profile in every mode. Automatic verification
+may write the project's git-ignored directories in place; other project writes
+go to a discarded overlay (verification refuses if the host cannot provide it).
+`command_run` defaults to 1800 seconds (30 minutes; `timeout_seconds` can
+set more); outside commands, where supported, default to 600 seconds. On
+timeout, stop or authority loss the runtime stops the command and its children,
+including detached process groups. Command stdin is `/dev/null`, not the
+shared MCP-server input. Ambiguous effects retain an unresolved receipt and
+cannot be replayed as though nothing happened.
 
 External editors can still change project files. Review binds the complete observed
 project digest from dispatch to verdict, verification and completion. Drift blocks
@@ -90,9 +96,10 @@ logical byte budgets are unchanged; warm and cold captures produce identical
 digests for the same tree. Nothing is persisted and no acceptance gate is
 skipped.
 
-Fixed read-only Git status/diff commands provide retained review context, with
-external diff, text conversion, hooks and fsmonitor disabled. The diff includes
-pre-existing edits and is not an authorship claim. Model commands cannot read `.git`.
+Where live `project_git` is supported, its fixed read-only status and diff
+commands provide retained context with external diff, text conversion, hooks and
+fsmonitor disabled. The diff includes pre-existing edits and is not an authorship
+claim. Managed Codex cannot use live `project_git`; its command snapshot omits `.git`.
 
 # Snapshot workspaces, candidates and integration
 

@@ -269,69 +269,7 @@ impl Sandbox {
         {
             return Err(error());
         }
-        // Deny network, process inspection/control, alternative filesystem IO and
-        // namespace/mount control. Trusted local checks, not hostile-code isolation.
-        const DENIED: &[libc::c_long] = &[
-            libc::SYS_socket,
-            libc::SYS_socketpair,
-            libc::SYS_ptrace,
-            libc::SYS_process_vm_readv,
-            libc::SYS_process_vm_writev,
-            libc::SYS_kill,
-            libc::SYS_tkill,
-            libc::SYS_tgkill,
-            libc::SYS_setsid,
-            libc::SYS_setpgid,
-            libc::SYS_pidfd_open,
-            libc::SYS_pidfd_send_signal,
-            libc::SYS_open_by_handle_at,
-            libc::SYS_name_to_handle_at,
-            libc::SYS_mount,
-            libc::SYS_umount2,
-            libc::SYS_unshare,
-            libc::SYS_setns,
-            libc::SYS_bpf,
-            libc::SYS_perf_event_open,
-            libc::SYS_io_uring_setup,
-        ];
-        // Fixed-size stack BPF program; deny wrong architectures before matching
-        // syscall numbers (including x32's alternate syscall-number namespace).
-        #[cfg(target_arch = "x86_64")]
-        const ARCH: u32 = 0xc000003e;
-        #[cfg(target_arch = "aarch64")]
-        const ARCH: u32 = 0xc00000b7;
-        let mut filters = [libc::sock_filter {
-            code: 0,
-            jt: 0,
-            jf: 0,
-            k: 0,
-        }; 64];
-        let mut n = 0;
-        macro_rules! push {
-            ($code:expr,$jt:expr,$jf:expr,$k:expr) => {{
-                filters[n] = libc::sock_filter {
-                    code: $code,
-                    jt: $jt,
-                    jf: $jf,
-                    k: $k,
-                };
-                n += 1;
-            }};
-        }
-        push!(0x20, 0, 0, 4);
-        push!(0x15, 1, 0, ARCH);
-        push!(0x06, 0, 0, 0x80000000);
-        push!(0x20, 0, 0, 0);
-        push!(0x35, 0, 1, 0x40000000);
-        push!(0x06, 0, 0, 0x80000000);
-        for syscall in DENIED {
-            if self.network && (*syscall == libc::SYS_socket || *syscall == libc::SYS_socketpair) {
-                continue;
-            }
-            push!(0x15, 0, 1, *syscall as u32);
-            push!(0x06, 0, 0, 0x00050000 | libc::EPERM as u32);
-        }
-        push!(0x06, 0, 0, 0x7fff0000);
+        let (mut filters, n) = syscall_filter(self.network);
         let program = libc::sock_fprog {
             len: n as u16,
             filter: filters.as_mut_ptr(),
@@ -341,4 +279,75 @@ impl Sandbox {
         }
         Ok(())
     }
+}
+
+// Fixed-size stack program, also loaded by bubblewrap after namespace setup.
+pub(super) fn syscall_filter(network: bool) -> ([libc::sock_filter; 64], usize) {
+    // Deny network, process inspection/control, alternative filesystem IO and
+    // namespace/mount control. Trusted local checks, not hostile-code isolation.
+    const DENIED: &[libc::c_long] = &[
+        libc::SYS_socket,
+        libc::SYS_socketpair,
+        libc::SYS_ptrace,
+        libc::SYS_process_vm_readv,
+        libc::SYS_process_vm_writev,
+        libc::SYS_kill,
+        libc::SYS_tkill,
+        libc::SYS_tgkill,
+        libc::SYS_setsid,
+        libc::SYS_setpgid,
+        libc::SYS_pidfd_open,
+        libc::SYS_pidfd_send_signal,
+        libc::SYS_open_by_handle_at,
+        libc::SYS_name_to_handle_at,
+        libc::SYS_mount,
+        libc::SYS_umount2,
+        libc::SYS_unshare,
+        libc::SYS_setns,
+        libc::SYS_bpf,
+        libc::SYS_perf_event_open,
+        libc::SYS_io_uring_setup,
+        libc::SYS_keyctl,
+        libc::SYS_add_key,
+        libc::SYS_request_key,
+    ];
+    // Fixed-size stack BPF program; deny wrong architectures before matching
+    // syscall numbers (including x32's alternate syscall-number namespace).
+    #[cfg(target_arch = "x86_64")]
+    const ARCH: u32 = 0xc000003e;
+    #[cfg(target_arch = "aarch64")]
+    const ARCH: u32 = 0xc00000b7;
+    let mut filters = [libc::sock_filter {
+        code: 0,
+        jt: 0,
+        jf: 0,
+        k: 0,
+    }; 64];
+    let mut n = 0;
+    macro_rules! push {
+        ($code:expr,$jt:expr,$jf:expr,$k:expr) => {{
+            filters[n] = libc::sock_filter {
+                code: $code,
+                jt: $jt,
+                jf: $jf,
+                k: $k,
+            };
+            n += 1;
+        }};
+    }
+    push!(0x20, 0, 0, 4);
+    push!(0x15, 1, 0, ARCH);
+    push!(0x06, 0, 0, 0x80000000);
+    push!(0x20, 0, 0, 0);
+    push!(0x35, 0, 1, 0x40000000);
+    push!(0x06, 0, 0, 0x80000000);
+    for syscall in DENIED {
+        if network && (*syscall == libc::SYS_socket || *syscall == libc::SYS_socketpair) {
+            continue;
+        }
+        push!(0x15, 0, 1, *syscall as u32);
+        push!(0x06, 0, 0, 0x00050000 | libc::EPERM as u32);
+    }
+    push!(0x06, 0, 0, 0x7fff0000);
+    (filters, n)
 }

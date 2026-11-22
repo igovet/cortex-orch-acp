@@ -831,7 +831,8 @@ format change or user-wide setting rewrite is involved.
 Every engine session confirms its observed mode after the model switch. The
 mode follows the channel's capability, never the access mode: Claude always runs
 in `default`; Codex runs a read-only channel (coordinator, read-only profile or
-review-stage session) in `read-only` and a writing worker in `workspace-write`; OpenCode runs
+review-stage session) in `read-only` and a writing worker in `read-only` too (its writes go through the
+runtime gateway, see [SECURITY.md](../../SECURITY.md#managed-codex-write-authority)); OpenCode runs
 in `cortex`. No session gets `bypassPermissions` or `agent-full-access`. An
 unoffered mode refuses startup with `restricted_mode_unavailable`, an unconfirmed
 one refuses startup too, and both settle the owned process. Every Claude session

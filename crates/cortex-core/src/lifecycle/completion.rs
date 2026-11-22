@@ -2069,7 +2069,8 @@ pub fn verification_diagnostics(
         }
         let output: Option<String> = db
             .query_row(
-                "SELECT coalesce(json_extract(result_json,'$.observation.stdout'),'')||char(10)||
+                "SELECT coalesce(json_extract(result_json,'$.observation.test_fast_failures'),'')||char(10)||
+                        coalesce(json_extract(result_json,'$.observation.stdout'),'')||char(10)||
                         coalesce(json_extract(result_json,'$.observation.stderr'),'')
                  FROM runtime_requests WHERE task_id=? AND actor='native-verifier-output'
                  AND operation='native_command_output' AND json_extract(result_json,'$.tool_call_ref')=? LIMIT 1",
@@ -2087,6 +2088,28 @@ pub fn verification_diagnostics(
 }
 const DIAGNOSTIC_LINES: usize = 40;
 const DIAGNOSTIC_CHARS: usize = 4000;
+
+/// Recognize a bounded test-fast stage and exit record.
+pub fn test_fast_failure_line(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("test-fast: step=") else {
+        return false;
+    };
+    let Some((index, rest)) = rest.split_once(" stage=") else {
+        return false;
+    };
+    let Some((stage, code)) = rest.split_once(" exit=") else {
+        return false;
+    };
+    index.parse::<usize>().is_ok_and(|n| n > 0)
+        && code.parse::<u8>().is_ok_and(|n| n > 0)
+        && (stage == "[unlabelled]"
+            || (!stage.is_empty()
+                && stage.len() <= 80
+                && stage
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')))
+}
+
 /// The lines of a command's output that say what failed (see
 /// [`verification_diagnostics`]); empty when nothing matches.
 pub fn failure_excerpt(text: &str) -> String {
@@ -2108,8 +2131,19 @@ pub fn failure_excerpt(text: &str) -> String {
         "timed out",
     ];
     let lines: Vec<&str> = text.lines().collect();
-    let mut keep = std::collections::BTreeSet::new();
+    let mut stages = Vec::new();
+    let mut seen_stages = BTreeSet::new();
+    let mut keep = BTreeSet::new();
     for (i, line) in lines.iter().enumerate() {
+        if test_fast_failure_line(line) {
+            if seen_stages.insert(*line) {
+                stages.push(i);
+            }
+            continue;
+        }
+        if line.starts_with("test result: ok.") {
+            continue;
+        }
         let failing_step =
             line.starts_with("Step ") && line.contains(": exit=") && !line.contains(": exit=0,");
         if failing_step || marks.iter().any(|m| line.contains(m)) {
@@ -2123,7 +2157,7 @@ pub fn failure_excerpt(text: &str) -> String {
         }
     }
     let mut excerpt = String::new();
-    for i in keep.into_iter().take(DIAGNOSTIC_LINES) {
+    for i in stages.into_iter().chain(keep).take(DIAGNOSTIC_LINES) {
         let line: String = lines[i].chars().take(300).collect();
         if excerpt.chars().count() + line.chars().count() + 1 > DIAGNOSTIC_CHARS {
             break;
@@ -2133,6 +2167,83 @@ pub fn failure_excerpt(text: &str) -> String {
     }
     excerpt
 }
+#[cfg(test)]
+mod failure_excerpt_tests {
+    use super::*;
+
+    #[test]
+    fn late_stage_failure_survives_excerpt_limits() {
+        let marker = "test-fast: step=28 stage=paseo-display exit=23";
+        let timeout = "test-fast: step=29 stage=remote exit=124";
+        let output = format!(
+            "{}{}test-fast: step=27 stage=ui exit=0\n\
+             test-fast: step=28 stage=/private/path exit=23\n\
+             {marker}\n{timeout}\n{marker}\n",
+            "test result: ok. 35 passed; 0 failed; 0 ignored\n".repeat(100),
+            format!("error: {}\n", "é".repeat(400)).repeat(100),
+        );
+        let excerpt = failure_excerpt(&output);
+        assert!(excerpt.starts_with(&format!("{marker}\n{timeout}\nerror: ")));
+        // Two stage records plus twelve 300-character error lines fit in 4,000 characters.
+        assert_eq!(excerpt.lines().count(), 14);
+        assert_eq!(excerpt.lines().nth(2).unwrap().chars().count(), 300);
+        assert!(excerpt.chars().count() <= DIAGNOSTIC_CHARS);
+        assert!(!excerpt.contains("0 failed"));
+        assert!(!excerpt.contains("/private/path"));
+        assert!(!excerpt.contains("exit=0"));
+    }
+
+    #[test]
+    fn verification_uses_stage_records_from_its_exact_receipt() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE runtime_requests(task_id, actor, operation, result_json)")
+            .unwrap();
+        let marker = "test-fast: step=28 stage=paseo-display exit=23";
+        let observation = json!({
+            "tool_call_ref": "exact-receipt",
+            "observation": {
+                "stdout": "test result: ok. 35 passed; 0 failed\n".repeat(100),
+                "stderr": "error: synthetic context\n",
+                "test_fast_failures": format!("{marker}\n")
+            }
+        });
+        db.execute(
+            "INSERT INTO runtime_requests VALUES ('task', 'native-verifier-output', 'native_command_output', ?)",
+            [observation.to_string()],
+        )
+        .unwrap();
+        let checks = [json!({
+            "argv": ["scripts/cortex-xtask.sh", "test-fast"],
+            "complete": false,
+            "exit_code": 1,
+            "failure": "command_output_limit",
+            "receipt_ref": "exact-receipt"
+        })];
+        let diagnostics = verification_diagnostics(&db, "task", &checks).unwrap();
+        assert_eq!(diagnostics[0]["exit_code"], 1);
+        assert_eq!(diagnostics[0]["failure"], "command_output_limit");
+        assert_eq!(
+            diagnostics[0]["excerpt"],
+            format!("{marker}\nerror: synthetic context\n")
+        );
+        assert!(verification_diagnostics(&db, "other-task", &checks)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn passing_summaries_do_not_mask_a_legacy_failure() {
+        let output = format!(
+            "{}test result: FAILED. 0 passed; 1 failed\nStep 2: exit=101, 2.0s\n",
+            "test result: ok. 2 passed; 0 failed\n".repeat(100),
+        );
+        assert_eq!(
+            failure_excerpt(&output),
+            "test result: FAILED. 0 passed; 1 failed\nStep 2: exit=101, 2.0s\n"
+        );
+    }
+}
+
 fn verification_failure_key(
     db: &Transaction<'_>,
     task: &str,

@@ -862,6 +862,26 @@ async fn mark_rerouted(
     })?)
     .await
 }
+pub(super) fn scoped_authority(
+    db: &rusqlite::Transaction<'_>,
+    i: &Identity,
+    root: &std::path::Path,
+) -> CoreResult<Vec<String>> {
+    if crate::native_project::task_root(db, &i.task)? != root {
+        return Err(CoreError::Refused("project_context_conflict"));
+    }
+    let assignment = i
+        .assignment
+        .as_deref()
+        .ok_or(CoreError::Refused("worker_required"))?;
+    waits::check_mutation_tx(db, &i.task, assignment)?;
+    if crate::native_engine_policy::read_only(i) {
+        Ok(Vec::new())
+    } else {
+        crate::native_project::effective_write_scope(db, i)
+    }
+}
+
 pub(super) async fn execute(
     executor: Arc<StoreExecutor>,
     credential: Credential,
@@ -871,6 +891,7 @@ pub(super) async fn execute(
     running: Running,
     name: &str,
     args: Value,
+    scoped: bool,
 ) -> CoreResult<Value> {
     let name = name.to_owned();
     let c = credential.clone();
@@ -878,8 +899,12 @@ pub(super) async fn execute(
     let n = name.clone();
     let hash = digest(&serde_json::to_vec(&json!([name, args]))?);
     let h = hash.clone();
+    let root_for_auth = root.clone();
     let (i,mode,scopes,saved,output_dir)=recv(executor.publication(move|store|{
         let i=store.read(|db|channels::authenticate(db,&c.channel_id,c.secret(),true))?;
+        if scoped && n == "project_git" {
+            return Err(CoreError::Refused("managed_codex_git_refused"));
+        }
         let mode=store.read(|db|access::current(db,&i.task))?;
         let saved:Option<(String,String,String)>=store.read(|db|Ok(db.query_row("SELECT operation,digest,result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?",
             (&i.task,&c.channel_id,a["request_key"].as_str()),|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?))?;
@@ -892,6 +917,9 @@ pub(super) async fn execute(
         let scopes=store.write(|db|{
             if n=="command_run" {if i.role!="worker"||i.profile.as_deref()==Some("worker-senior-consultant"){return Err(CoreError::Refused("worker_required"));}
                 if let Some(a)=i.assignment.as_deref(){waits::check_mutation_tx(db,&i.task,a)?;}
+            }
+            if scoped {
+                return scoped_authority(db, &i, &root_for_auth);
             }
             let raw:Option<String>=db.query_row("SELECT scope_json FROM runtime_nodes WHERE task_id=? AND assignment_ref=?",(&i.task,&i.assignment),|r|r.get(0)).optional()?;
             let scopes=policy::effective_scope_tx(db,&i.task,i.assignment.as_deref(),raw.as_deref().unwrap_or("[]"))?;
@@ -907,7 +935,8 @@ pub(super) async fn execute(
     })?).await?;
     if let Some(v) = saved {
         // Old output-driven annotations must not resume a host effect after upgrade.
-        if eligible_prestart_receipt(&v)
+        if !scoped
+            && eligible_prestart_receipt(&v)
             && v["rerouted_to"]["note"]["reason"] == "sandbox_unavailable"
             && v["rerouted_to"]["args"].is_object()
         {
@@ -1026,6 +1055,8 @@ pub(super) async fn execute(
         if cwd != root {
             safe(relative.to_str().ok_or(CoreError::Refused("invalid_cwd"))?)?;
         }
+    } else if scoped {
+        return Err(CoreError::Refused("scoped_command_cwd_refused"));
     } else if mode == "guarded"
         || crate::native_access::protected(&cwd)
         || crate::native_command_sandbox::policy::protected_target(&root, &cwd)
@@ -1038,6 +1069,9 @@ pub(super) async fn execute(
     // A writing worker's sudo, pkexec or doas cannot work in the sandbox: the runtime
     // runs it on the host at once. Read-only roles are never rerouted (they stay in
     // their read-only sandbox, where the privileged program fails).
+    if scoped && privileged(&argv) {
+        return Err(CoreError::Refused("managed_codex_host_command_refused"));
+    }
     if name == "command_run" && !readonly && privileged(&argv) {
         let (outside, note) = reroute_request(&args, &argv, &cwd, "privilege", None)?;
         return reroute(
@@ -1093,7 +1127,9 @@ pub(super) async fn execute(
     let id = format!("lo_{}", &crate::native_effects::identity()?[..12]);
     let file = format!("{id}.bin");
     let out = create_command_output(&output_dir, &file)?;
-    let profile = if name == "project_git" {
+    let profile = if scoped {
+        crate::native_command_sandbox::CODEX_SCRATCH
+    } else if name == "project_git" {
         "git_context"
     } else if readonly {
         "read_only"
@@ -1102,11 +1138,12 @@ pub(super) async fn execute(
     } else {
         "development"
     };
-    // Reservations coordinate writers; they are not the project's write boundary.
-    // The scope still names the run's own work for a check's work-set binding.
-    let checks_work =
-        name == "command_run" && !cortex_core::lifecycle::completion::trivial_command(&argv);
-    let writes = if !readonly && name != "project_git" {
+    // Managed commands have no checkout write grant. The scratch snapshot
+    // cannot establish the same evidence as a real-checkout verification.
+    let checks_work = !scoped
+        && name == "command_run"
+        && !cortex_core::lifecycle::completion::trivial_command(&argv);
+    let writes = if !scoped && !readonly && name != "project_git" {
         vec![root.clone()]
     } else {
         Vec::new()
@@ -1121,6 +1158,12 @@ pub(super) async fn execute(
     let mode_copy = mode.clone();
     let denied_copy = denied.clone();
     let expected = i.clone();
+    let command_authority = scoped.then(|| crate::native_command_handles::ScopedAuthority {
+        identity: i.clone(),
+        root: root.clone(),
+        scopes: scopes.clone(),
+    });
+    let start_authority = command_authority.clone();
     let _flight = Flight::new(&reference);
     let work_set = recv(executor.write(move |db| {
         let i = expected;
@@ -1131,7 +1174,9 @@ pub(super) async fn execute(
         {
             return Err(CoreError::Refused("channel_or_access_changed"));
         }
-        if n == "command_run" && !readonly {
+        if let Some(authority) = &start_authority {
+            authority.check(db, &current)?;
+        } else if n == "command_run" && !readonly {
             writable(db, &i, None)?;
         }
         db.execute(
@@ -1195,6 +1240,7 @@ pub(super) async fn execute(
             reference.clone(),
             args,
             profile.to_owned(),
+            command_authority,
         )
         .await;
         if let (Ok(_), Some(set), Some(start)) = (&reply, work_set, start) {
@@ -1215,7 +1261,8 @@ pub(super) async fn execute(
         // Never inspect a command reply's output or exit status for routing.
         // The private supervisor handshake and a durably settled receipt must
         // both prove a launcher failure before the payload could run.
-        if readonly
+        if scoped
+            || readonly
             || !matches!(
                 reply,
                 Err(CoreError::Refused("native_command_sandbox_unavailable"))

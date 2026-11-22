@@ -82,6 +82,9 @@ fn target(root: &Path, args: &Value, write: bool) -> CoreResult<PathBuf> {
         .unwrap_or_else(|| root.to_str().unwrap()),
     );
     absolute(&p)?;
+    if crate::native_engine_policy::project_private(&p) {
+        return Err(CoreError::Refused("cortex_private"));
+    }
     let mut at = PathBuf::from("/");
     for part in p.components().skip(1) {
         at.push(part.as_os_str());
@@ -106,6 +109,7 @@ fn target(root: &Path, args: &Value, write: bool) -> CoreResult<PathBuf> {
     }
     Ok(p)
 }
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute(
     executor: Arc<StoreExecutor>,
     credential: Credential,
@@ -115,6 +119,7 @@ pub(super) async fn execute(
     running: crate::native_commands::Running,
     name: &str,
     args: Value,
+    scoped: bool,
 ) -> CoreResult<Value> {
     execute_as(
         executor,
@@ -126,6 +131,7 @@ pub(super) async fn execute(
         name,
         args,
         None,
+        scoped,
     )
     .await
 }
@@ -153,6 +159,7 @@ pub(super) async fn execute_rerouted(
         "outside_command",
         args,
         Some(note),
+        false,
     )
     .await
 }
@@ -167,6 +174,7 @@ async fn execute_as(
     name: &str,
     args: Value,
     rerouted: Option<Value>,
+    scoped: bool,
 ) -> CoreResult<Value> {
     let write = name == "outside_write";
     let path = target(&root, &args, write)?;
@@ -182,6 +190,15 @@ async fn execute_as(
     let n = name.clone();
     let (mode,incoming,saved,who)=recv(executor.write(move|db|{
         let i=writer(db,&c)?;
+        // Assignment scope grants project-relative targets only. No mode or
+        // outside consent can widen it for a managed Codex channel.
+        if scoped {
+            return Err(CoreError::Refused(if write {
+                "write_outside_assignment_scope"
+            } else {
+                "managed_codex_host_command_refused"
+            }));
+        }
         let who=i.profile.clone().unwrap_or_else(||i.role.clone());
         let old:Option<(String,String,String)>=db.query_row("SELECT operation,digest,result_json FROM runtime_requests WHERE task_id=? AND actor=? AND request_key=?",
             (&i.task,&c.channel_id,&k),|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
@@ -291,9 +308,15 @@ async fn execute_as(
                 .as_bytes()
                 .to_vec();
             let args = args.clone();
-            tokio::task::spawn_blocking(move || atomic_write(&root, &args, &data))
-                .await
-                .map_err(|_| CoreError::Refused("outside_outcome_unknown"))?
+            let c = credential.clone();
+            let expected = mode.clone();
+            recv(executor.write(move |db| {
+                let i = writer(db, &c)?;
+                if access::current(db, &i.task)? != expected {
+                    return Err(CoreError::Refused("access_mode_changed"));
+                }
+                atomic_write(&root, &args, &data)
+            })?).await
         } else {
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
             let pending = crate::native_commands::outside_capture(
@@ -340,6 +363,11 @@ fn atomic_write(root: &Path, args: &Value, data: &[u8]) -> CoreResult<Value> {
         os::fd::{AsRawFd, FromRawFd},
     };
     let p = target(root, args, true)?;
+    if crate::native_engine_policy::path_class(root, &p)
+        == cortex_engine::permission::PathClass::Private
+    {
+        return Err(CoreError::Refused("cortex_private"));
+    }
     let mut folder = File::open("/")?;
     let parent = p
         .parent()

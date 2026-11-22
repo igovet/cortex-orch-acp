@@ -305,6 +305,13 @@ impl Registry {
             {
                 continue;
             }
+            if engine == EngineKind::Codex {
+                withheld.push(Withheld {
+                    server: server.name.clone(),
+                    reason: "managed_codex_external_effects_unconfined",
+                });
+                continue;
+            }
             let mut grants = server.grants();
             if grants.narrow(channel).is_err() {
                 continue;
@@ -553,6 +560,9 @@ impl ExternalCore for CorePort {
     ) -> cortex_engine::FutureResult<'a, Channel> {
         Box::pin(async move {
             self.credentials(c)?;
+            if self.engine == EngineKind::Codex {
+                return Err(Error::Forbidden);
+            }
             let credential = self.credential.clone();
             let i = self
                 .executor

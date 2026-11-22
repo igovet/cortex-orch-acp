@@ -390,7 +390,23 @@ pub fn run(root: &Path, options: &Options) -> Res<i32> {
             index + 1,
             tick.elapsed().as_secs_f64()
         );
-        failed |= code != 0;
+        if code != 0 {
+            // Keep this machine-readable record on its own line, even after a
+            // child that did not end its stderr output with a newline.
+            let stage = if !step.name.is_empty()
+                && step.name.len() <= 80
+                && step
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            {
+                &step.name
+            } else {
+                "[unlabelled]"
+            };
+            eprintln!("\ntest-fast: step={} stage={stage} exit={code}", index + 1);
+            failed = true;
+        }
     }
     println!(
         "Ran {} steps in {:.2}s",

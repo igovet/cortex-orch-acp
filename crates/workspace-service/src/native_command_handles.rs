@@ -276,6 +276,28 @@ fn stop(dir: &std::path::Path, h: &Value) -> CoreResult<()> {
     }
     Ok(())
 }
+#[derive(Clone)]
+pub(super) struct ScopedAuthority {
+    pub identity: Identity,
+    pub root: PathBuf,
+    pub scopes: Vec<String>,
+}
+
+impl ScopedAuthority {
+    pub(super) fn check(
+        &self,
+        db: &rusqlite::Transaction<'_>,
+        current: &Identity,
+    ) -> CoreResult<()> {
+        if current != &self.identity
+            || native_commands::scoped_authority(db, current, &self.root)? != self.scopes
+        {
+            return Err(CoreError::Refused("channel_or_access_changed"));
+        }
+        Ok(())
+    }
+}
+
 async fn authorize(
     ex: &StoreExecutor,
     c: &Credential,
@@ -284,18 +306,22 @@ async fn authorize(
     readonly: bool,
     reference: &str,
     preparation: bool,
+    scoped: Option<&ScopedAuthority>,
 ) -> CoreResult<()> {
     let c = c.clone();
     let mode = mode.to_owned();
     let denied = denied.to_vec();
     let r = reference.to_owned();
+    let scoped = scoped.cloned();
     recv(ex.write(move |db| {
         let i = channels::authenticate(db, &c.channel_id, c.secret(), true)?;
         if access::current(db, &i.task)? != mode || native_commands::denials(db, &i.task)? != denied
         {
             return Err(CoreError::Refused("access_changed"));
         }
-        if !readonly {
+        if let Some(authority) = &scoped {
+            authority.check(db, &i)?;
+        } else if !readonly {
             crate::native_project::writable(db, &i, None)?;
         }
         if preparation {
@@ -371,7 +397,7 @@ fn settle(
         // Which deliverable paths changed while it ran (`native_change_set`). A run
         // settled without its listings (recovered after a restart) has no record
         // unless it was read-only.
-        let changes=changes.clone().unwrap_or_else(|| if h["profile"]=="read_only" {crate::native_change_set::unchanged("read_only")}
+        let changes=changes.clone().unwrap_or_else(|| if h["profile"]=="read_only" || h["profile"]==crate::native_command_sandbox::CODEX_SCRATCH {crate::native_change_set::unchanged("read_only")}
             else {crate::native_change_set::incomplete("settled_without_listing")});
         crate::native_change_set::add(&mut observation,&changes);
         lifecycle::event_tx(db,task,"NATIVE_COMMAND_FINISHED",json!({"receipt":{
@@ -421,6 +447,7 @@ pub(super) async fn execute(
     reference: String,
     args: Value,
     profile: String,
+    scoped: Option<ScopedAuthority>,
 ) -> CoreResult<Value> {
     let status_file = format!("{id}.status");
     let stopping = format!("{id}.stop");
@@ -457,9 +484,11 @@ pub(super) async fn execute(
     // The dirty-path listing for the change record runs beside the digest; a
     // read-only command cannot change deliverable files and lists nothing.
     let (before, listed) = tokio::join!(
-        native_commands::check_digest(root.clone(), &argv),
         async {
-            if readonly {
+            if scoped.is_some() { None } else { native_commands::check_digest(root.clone(), &argv).await }
+        },
+        async {
+            if readonly || scoped.is_some() {
                 None
             } else {
                 Some(crate::native_change_set::snapshot(root.clone()).await)
@@ -530,6 +559,7 @@ pub(super) async fn execute(
             readonly,
             &reference,
             v["authorize"] == true,
+            scoped.as_ref(),
         )
         .await
         .inspect_err(|e| cause = Some(store_cause(e)))?;
@@ -548,7 +578,18 @@ pub(super) async fn execute(
             let committing = std::time::Instant::now();
             let mut stages = timings.clone();
             stages.insert("authorize_commit_ms".into(), json!(authorizing));
+            let launch_authority = scoped.clone();
+            let launch_credential = c.clone();
+            let launch_mode = mode.clone();
+            let launch_denied = denied.clone();
             recv(ex.write(move|db|{
+                if let Some(authority) = &launch_authority {
+                    let current = channels::authenticate(db, &launch_credential.channel_id, launch_credential.secret(), true)?;
+                    if access::current(db, &current.task)? != launch_mode || native_commands::denials(db, &current.task)? != launch_denied {
+                        return Err(CoreError::Refused("access_changed"));
+                    }
+                    authority.check(db, &current)?;
+                }
                 // A receipt the runtime already settled (its call was lost) never launches.
                 let bound = db.execute("UPDATE runtime_requests SET result_json=json_set(result_json,'$.handle',json(?))
                     WHERE task_id=? AND actor=? AND request_key=? AND operation='command_run'
@@ -572,11 +613,11 @@ pub(super) async fn execute(
         }
         input.write_all(b"go\n").await?;
     }
-    drop(input);
-    Ok::<_, CoreError>((before, listed, child, messages, h))
+    let authority_pipe = scoped.is_some().then_some(input);
+    Ok::<_, CoreError>((before, listed, child, messages, h, authority_pipe))
     }
     .await;
-    let (before, listed, mut child, _messages, h) = match launched {
+    let (before, listed, mut child, _messages, h, authority_pipe) = match launched {
         Ok(launched) => {
             unreleased.ex = None;
             launched
@@ -640,6 +681,7 @@ pub(super) async fn execute(
     let diagnostic_channel = c.clone();
     let diagnostic_key = args["request_key"].as_str().unwrap().to_owned();
     let monitor = tokio::spawn(async move {
+        let mut authority_pipe = authority_pipe;
         let mut phase = "process_observation";
         let result = async {
             let status = loop {
@@ -647,19 +689,60 @@ pub(super) async fn execute(
                 if status["state"] == "finished" {
                     break status;
                 }
-                if *cancelled.borrow()
-                    || authorize(&ex, &c, &mode, &denied, readonly, &reference, false)
-                        .await
-                        .is_err()
-                {
-                    stop(&dir, &h)?;
+                let owner_stopped = *cancelled.borrow();
+                let authorization = authorize(
+                    &ex,
+                    &c,
+                    &mode,
+                    &denied,
+                    readonly,
+                    &reference,
+                    false,
+                    scoped.as_ref(),
+                );
+                let valid = if owner_stopped {
+                    false
+                } else if scoped.is_some() {
+                    matches!(
+                        tokio::time::timeout(Duration::from_secs(1), authorization).await,
+                        Ok(Ok(()))
+                    )
+                } else {
+                    authorization.await.is_ok()
+                };
+                let renewed = if let Some(pipe) = authority_pipe.as_mut().filter(|_| valid) {
+                    matches!(
+                        tokio::time::timeout(
+                            Duration::from_millis(200),
+                            pipe.write_all(&[supervisor::AUTHORITY_HEARTBEAT])
+                        )
+                        .await,
+                        Ok(Ok(()))
+                    )
+                } else {
+                    scoped.is_none()
+                };
+                if !valid || !renewed {
+                    // EOF is a fail-closed stop even if retaining a stop marker
+                    // fails. A stuck monitor also stops renewing the lease.
+                    if owner_stopped || scoped.is_none() {
+                        stop(&dir, &h)?;
+                    }
+                    authority_pipe.take();
                 }
                 tokio::select! { _=tokio::time::sleep(Duration::from_millis(50))=>{},
                 _=cancelled.changed()=>{} }
             };
             phase = "settlement";
-            let (after, changes) =
-                tokio::join!(native_commands::check_digest(root.clone(), &argv), async {
+            let (after, changes) = tokio::join!(
+                async {
+                    if scoped.is_some() {
+                        None
+                    } else {
+                        native_commands::check_digest(root.clone(), &argv).await
+                    }
+                },
+                async {
                     match &listed {
                         None => crate::native_change_set::unchanged("read_only"),
                         Some(before) => crate::native_change_set::record(
@@ -667,7 +750,8 @@ pub(super) async fn execute(
                             &crate::native_change_set::snapshot(root.clone()).await,
                         ),
                     }
-                });
+                }
+            );
             let revision = if before == after { after } else { None };
             let actor = c.channel_id;
             let task = i.task;
@@ -679,8 +763,9 @@ pub(super) async fn execute(
             .await
         }
         .await;
-        // A child handle is only reaped here; its independent supervisor is not
-        // killed on service death. A lost observer cannot invent a command result.
+        drop(authority_pipe);
+        // Legacy supervisors survive service death for observation. Scoped
+        // ones stop without the live lease. Neither may invent a result.
         let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
         if result.is_ok() {
             done.send_replace(true);

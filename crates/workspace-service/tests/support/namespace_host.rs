@@ -1,11 +1,5 @@
 //! Capability-aware alternate assertions for positive-only integration journeys.
 //! The required container run must execute the real journeys, never this branch.
-#[path = "../../src/native_command_sandbox.rs"]
-mod sandbox;
-// The sandbox reads the owner's tool search path from this module.
-#[allow(dead_code, unused_imports)]
-#[path = "../../src/tool_path.rs"]
-pub mod tool_path;
 pub mod native_effects {
     pub fn identity() -> std::io::Result<String> {
         use std::io::Read;
@@ -47,15 +41,9 @@ pub fn assert_unavailable_view() -> bool {
     ));
     std::fs::create_dir(&root).unwrap();
     std::fs::write(root.join("source"), "unchanged").unwrap();
-    for profile in [
-        sandbox::Profile::ReadOnly,
-        sandbox::Profile::Guarded,
-        sandbox::Profile::Development,
-    ] {
-        let e = match sandbox::Sandbox::prepare(&root, profile, &[root.clone()], &[], false) {
-            Err(e) => e,
-            Ok(_) => panic!("unavailable view accepted a payload-capable sandbox"),
-        };
+    for profile in ["read_only", "guarded", "development"] {
+        let e = workspace_service::native_command_supervisor::observe_command_view(&root, profile)
+            .expect_err("unavailable view accepted a payload-capable sandbox");
         assert!(
             e.to_string()
                 .starts_with("native_command_sandbox_unavailable:"),
@@ -68,7 +56,7 @@ pub fn assert_unavailable_view() -> bool {
     );
     std::fs::remove_dir_all(root).unwrap();
     println!(
-        "namespace-restricted host: all three production command profiles asserted fail-closed; positive integration journeys require the disposable container run"
+        "namespace-restricted host: three legacy command profiles asserted fail-closed; positive integration journeys require the disposable container run"
     );
     true
 }

@@ -1,11 +1,35 @@
 //! The owner's controls over running work, each on a task of its own so one refusal cannot hide the next: stopping a command, a
-//! message to one worker, and stopping one worker. The peer's scenarios (`command-restart-1`, `guidance`, `stop-siblings`)
+//! message to one worker, and stopping one worker. The peer's scenarios (`command-scratch-hold`, `guidance`, `stop-siblings`)
 //! provide the running work; every action is the owner's own input on the page.
 
 use super::journey::*;
-use crate::installed::util::*;
+use crate::installed::{native, util::*};
 use crate::json::Res;
+use std::fs::File;
+use std::io::{self, Read};
 use std::path::Path;
+
+fn scratch_ready(output: impl Read) -> io::Result<bool> {
+    const MARKER: &[u8] = b"scratch-control-ready\n";
+    let mut bytes = Vec::new();
+    output
+        .take(MARKER.len() as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(bytes == MARKER)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scratch_ready;
+
+    #[test]
+    fn scratch_control_requires_exact_ready_output() {
+        assert!(!scratch_ready(&b""[..]).unwrap());
+        assert!(!scratch_ready(&b"scratch-control-ready"[..]).unwrap());
+        assert!(!scratch_ready(&b"scratch-control-ready\nextra"[..]).unwrap());
+        assert!(scratch_ready(&b"scratch-control-ready\n"[..]).unwrap());
+    }
+}
 
 impl J {
     /// Writes the scenario, saves a draft with this title and starts it. Returns the task's route.
@@ -37,11 +61,38 @@ impl J {
     }
 
     pub fn worker_controls(&mut self, project: &Path) -> Res<String> {
-        // A command a worker is running through the Cortex gateway: its own marker proves it is alive, and the page must offer to stop it.
+        // A bound supervisor is not proof that its payload started. Read the
+        // fixture's retained output before offering it a Stop click; after the
+        // click, still require cancellation and output on that same request.
         let command_url =
-            self.start_task(project, "Exercise worker controls", "command-restart-1")?;
-        self.wait("real_worker_command_running", 90, |_| {
-            Ok(project.join("command-entered").exists())
+            self.start_task(project, "Exercise worker controls", "command-scratch-hold")?;
+        self.wait("scratch_payload_ready", 90, |j| {
+            let db = j.channel.store_db(project);
+            let row = native::query(&db, "SELECT task_id,json_extract(result_json,'$.handle.output')
+                FROM runtime_requests WHERE operation='command_run'
+                AND request_key='scratch-command-control' AND task_id=(SELECT task_id FROM runtime_tasks ORDER BY rowid DESC LIMIT 1)
+                AND json_extract(result_json,'$.handle.profile')='codex_scratch'
+                AND json_extract(result_json,'$.handle.reference')=json_extract(result_json,'$.tool_call_ref')
+                AND json_extract(result_json,'$.settled') IS NOT 1")?;
+            if row.is_empty() {
+                return Ok(false);
+            }
+            let (task, output) = row.split_once('|').ok_or("scratch_payload_handle_invalid")?;
+            let plain_name = |name: &str| {
+                !name.is_empty()
+                    && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+                    && !name.contains("..")
+                    && name != "."
+            };
+            if !plain_name(task) || !plain_name(output) {
+                return Err("scratch_payload_handle_invalid".into());
+            }
+            let file = db.with_file_name(task).join(".native-output").join(output);
+            match File::open(file) {
+                Ok(file) => scratch_ready(file).map_err(|e| format!("scratch_payload_read:{}", e.kind())),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(e) => Err(format!("scratch_payload_open:{}", e.kind())),
+            }
         })?;
         self.open_worker(&command_url, "Working")?;
         let started = self.store_count(project, "SELECT count(*) FROM runtime_events WHERE type='NATIVE_COMMAND_STARTED' AND task_id=(SELECT task_id FROM runtime_tasks ORDER BY rowid DESC LIMIT 1)")?;
@@ -58,6 +109,13 @@ impl J {
                 30,
                 "return document.querySelector('dialog[open]') ? '' : 'yes';",
             )?;
+            self.wait("scratch_payload_stopped", 30, |j| {
+                Ok(j.store_count(project, "SELECT count(*) FROM runtime_requests WHERE operation='command_run'
+                    AND request_key='scratch-command-control' AND task_id=(SELECT task_id FROM runtime_tasks ORDER BY rowid DESC LIMIT 1)
+                    AND json_extract(result_json,'$.profile')='codex_scratch' AND json_extract(result_json,'$.settled')=1
+                    AND json_extract(result_json,'$.failure')='owner_stopped'
+                    AND trim(json_extract(result_json,'$.output'),char(10))='scratch-control-ready'")? == 1)
+            })?;
             self.step(
                 "command_stop",
                 vec![(
@@ -67,16 +125,15 @@ impl J {
             );
         } else {
             let words = self.js("return (document.querySelector('.livepane .stream')?.textContent ?? '').replace(/\\s+/g, ' ').trim().slice(0, 160);")?;
-            self.fail("worker_command_stop_not_offered", vec![("running_native_command_events", n(started)), ("command_marker", b(project.join("command-entered").exists())), ("page_words", s(words)), ("note", s("a native gateway command is running but the worker page lists no command activity and no Stop command control"))]);
+            self.fail("worker_command_stop_not_offered", vec![("running_native_command_events", n(started)), ("page_words", s(words)), ("note", s("a native gateway command is running but the worker page lists no command activity and no Stop command control"))]);
         }
-        // The owner takes the task back; the held command is fixture-owned and ends with the service.
+        // The owner takes the task back after stopping its command.
         self.go(&command_url)?;
         self.wait_found_task("command_task_stop_button", 15, "Stop")?;
         self.click_task("Stop")?;
         self.wait("command_task_paused", 60, |j| {
             Ok(j.has_task("Resume") && j.task_state(project)?.as_deref() == Some("PAUSED"))
         })?;
-        write(&project.join("command-release"), "release")?;
         self.step("worker_command_task_paused", vec![]);
 
         // Guidance for one worker: the message goes to that attempt only and the same worker session observes it.

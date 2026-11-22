@@ -3,8 +3,11 @@
 //! No unsandboxed or Landlock-only fallback. This is not hostile-code isolation.
 #[path = "native_command_policy.rs"]
 pub(crate) mod policy;
+#[path = "native_command_scoped.rs"]
+mod scoped;
 #[path = "native_command_ssh.rs"]
 mod ssh;
+pub(crate) const CODEX_SCRATCH: &str = "codex_scratch";
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -31,6 +34,7 @@ pub(crate) struct Sandbox {
     guard: Option<policy::GitGuard>,
     overlay: bool,
     ssh_environment: BTreeMap<OsString, OsString>,
+    scoped_root: Option<PathBuf>,
 }
 
 fn unavailable(reason: &str) -> io::Error {
@@ -38,6 +42,15 @@ fn unavailable(reason: &str) -> io::Error {
 }
 
 impl Sandbox {
+    pub(crate) fn prepare_scoped(root: &Path, protected: &[PathBuf]) -> io::Result<Self> {
+        let binary = ["/usr/bin/bwrap", "/bin/bwrap"]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|p| p.is_file())
+            .ok_or_else(|| unavailable("bubblewrap_missing"))?;
+        Self::scoped(binary, root, protected)
+    }
+
     pub(crate) fn prepare(
         root: &Path,
         profile: Profile,
@@ -202,6 +215,7 @@ impl Sandbox {
             guard: None,
             overlay: false,
             ssh_environment: BTreeMap::new(),
+            scoped_root: None,
         };
         fs::create_dir(s.scratch.join("var-tmp"))?;
         s.args.push("--die-with-parent".into());
@@ -536,6 +550,16 @@ impl Sandbox {
         // bwrap accepts only one --chdir. Replace the prepared root for an
         // explicitly selected cwd rather than appending a second option.
         if let Some(cwd) = cwd {
+            let mapped;
+            let cwd = if let Some(root) = &self.scoped_root {
+                let relative = cwd
+                    .strip_prefix(root)
+                    .map_err(|_| unavailable("outside_cwd"))?;
+                mapped = Path::new("/workspace").join(relative);
+                &mapped
+            } else {
+                cwd
+            };
             command
                 .args(&self.args[..self.args.len() - 2])
                 .arg("--chdir")
@@ -545,7 +569,12 @@ impl Sandbox {
         }
         command.env_clear().stdin(Stdio::null());
         use std::os::{fd::AsRawFd, unix::process::CommandExt};
-        let pins = self.pins.clone();
+        let mut pins = self.pins.clone();
+        if self.scoped_root.is_some() {
+            let filter = fs::File::open(self.scratch.join("seccomp"))?;
+            command.arg("--seccomp").arg(filter.as_raw_fd().to_string());
+            pins.push(std::sync::Arc::new(filter));
+        }
         unsafe {
             command.pre_exec(move || {
                 for file in &pins {

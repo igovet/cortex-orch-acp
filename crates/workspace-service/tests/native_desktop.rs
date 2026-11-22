@@ -11,9 +11,6 @@ mod peer;
 mod service_regressions;
 use cortex_core::{lifecycle::TaskMachine, CoreResult, OpenMode, Store};
 use cortex_engine::environment::{EngineKind, LaunchSpec as EngineLaunch};
-use namespace_host::native_effects;
-#[allow(unused_imports)]
-use namespace_host::tool_path;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
@@ -62,7 +59,10 @@ impl NativeRoutes for Routes {
         let other = role != "orchestrator" && root.join("worker-route.txt").exists();
         Ok(SessionRoute {
             launch: EngineLaunch {
-                engine: if other {
+                engine: if other
+                    || (role != "orchestrator"
+                        && matches!(scenario.trim(), "pending-result" | "pending-end-turn"))
+                {
                     EngineKind::Claude
                 } else {
                     EngineKind::Codex
@@ -3111,7 +3111,15 @@ async fn binary_journey(scenario: &str) {
         std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
     };
-    let mut record = json!({"id":"cn_fixture","engine":"codex-acp","provider":"fixture","endpoint":null,
+    // The restart-durability fixture deliberately requires a live-checkout
+    // marker and a supervisor that survives service loss. Only the legacy
+    // command path still supports that; managed Codex has its own lease test.
+    let engine = if scenario.starts_with("command-restart-") {
+        "claude-agent-acp"
+    } else {
+        "codex-acp"
+    };
+    let mut record = json!({"id":"cn_fixture","engine":engine,"provider":"fixture","endpoint":null,
         "launch_command":["fixture-engine"],"auth_mode":"native_account","qualified":true,"state":"configured",
         "credential_ref":{"kind":"engine_native_dir","path":f.0.join("home"),"owned":false},"max_concurrent_sessions":4});
     record["approved_fingerprint"] = json!(hash(
@@ -3128,11 +3136,11 @@ async fn binary_journey(scenario: &str) {
     );
     write(
         config.join("cortex/routing.json"),
-        json!({"model_policy_version":2,"enabled":{"codex-acp":["fixture-model"]},
-        "models":{"codex-acp":{"auto":["fixture-model"],"tiers":{"fixture-model":["light","standard","deep"]}}},
-        "pin":{"*":"codex-acp/fixture-model"}}),
+        json!({"model_policy_version":2,"enabled":{(engine):["fixture-model"]},
+        "models":{(engine):{"auto":["fixture-model"],"tiers":{"fixture-model":["light","standard","deep"]}}},
+        "pin":{"*":format!("{engine}/fixture-model")}}),
     );
-    let mut route = json!({"engine":"codex-acp","connection_id":"cn_fixture","model":"fixture-model","supported_parameters":[]});
+    let mut route = json!({"engine":engine,"connection_id":"cn_fixture","model":"fixture-model","supported_parameters":[]});
     route["id"] = json!(format!("xr_{}", &hash(&route)[..24]));
     write(
         catalog.join("cs_fixture.json"),
@@ -3269,6 +3277,70 @@ async fn binary_journey(scenario: &str) {
     )
     .await;
     let store = f.store();
+    if scenario == "command-scratch-hold" {
+        restart_signal(&store,"SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE operation='command_run' AND request_key='scratch-command-control' AND json_extract(result_json,'$.handle.profile')='codex_scratch')").await;
+        let receipt = || {
+            store.read(|db| {
+            let raw: String = db.query_row("SELECT result_json FROM runtime_requests WHERE operation='command_run' AND request_key='scratch-command-control'", [], |r| r.get(0))?;
+            Ok(serde_json::from_str::<Value>(&raw)?)
+        }).unwrap()
+        };
+        let started = receipt();
+        let handle = &started["handle"];
+        let reference = handle["reference"].as_str().unwrap();
+        let (task, execution): (String, String) = store
+            .read(|db| {
+                Ok(db.query_row(
+                    "SELECT q.task_id,e.execution_id FROM runtime_requests q
+                JOIN workspace_executions e ON e.runtime_task_id=q.task_id
+                WHERE q.operation='command_run' AND q.request_key='scratch-command-control'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        let output = store
+            .key()
+            .directory()
+            .join(task)
+            .join(".native-output")
+            .join(handle["output"].as_str().unwrap());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while std::fs::read_to_string(&output).as_deref().ok()
+                != Some("scratch-control-ready\n")
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            let current = receipt();
+            panic!(
+                "held scratch payload not observed: settled={}; failure={}; output file bytes={:?}",
+                current["settled"],
+                current["failure"],
+                std::fs::metadata(&output).map(|m| m.len())
+            );
+        });
+        rpc(
+            &socket,
+            "executions.control",
+            json!({"projectId":id,"executionId":execution,
+            "requestId":"stop-managed-scratch","action":"command_stop","toolCallRef":reference,
+            "reason":"Stop the managed scratch command"}),
+        )
+        .await;
+        restart_signal(&store,"SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE operation='command_run' AND request_key='scratch-command-control' AND json_extract(result_json,'$.settled')=1)").await;
+        let stopped = receipt();
+        assert_eq!(stopped["tool_call_ref"], reference);
+        assert_eq!(stopped["failure"], "owner_stopped");
+        assert_eq!(stopped["output"], "scratch-control-ready\n");
+        assert!(!f.0.join("project/command-entered").exists());
+        child.kill().await.unwrap();
+        let _ = child.wait().await;
+        println!("managed scratch payload started and stopped through the owner command control");
+        return;
+    }
     if scenario.starts_with("command-restart-") {
         restart_signal(&store,"SELECT EXISTS(SELECT 1 FROM runtime_requests WHERE operation='command_run' AND json_type(result_json,'$.handle')='object')").await;
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -3362,6 +3434,10 @@ async fn binary_journey(scenario: &str) {
                 refused["error"]["message"],
                 "native_command_outcome_unknown"
             );
+            // The command was not stoppable by the runtime after losing its
+            // supervisor. Release the disposable payload before shutdown; this
+            // does not turn the earlier unknown result into execution evidence.
+            std::fs::write(f.0.join("project/command-release"), "release").unwrap();
         } else {
             if scenario == "command-restart-stop" {
                 let execution: String = store
@@ -4051,6 +4127,12 @@ fn main() {
         if mode == "legacy-recovery-probe" {
             for stage in 0..7 { checkpoint_recovery(stage, true).await; }
             println!("Legacy-owned checkpoints: planning, execution, review, verification and owner-question recovery passed");
+            return;
+        }
+        if mode == "managed-command-stop" {
+            tokio::time::timeout(Duration::from_secs(40), binary_journey("command-scratch-hold"))
+                .await
+                .expect("managed command stop exceeded deadline");
             return;
         }
         if mode == "command-restart-probe" {

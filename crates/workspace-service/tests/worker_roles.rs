@@ -14,8 +14,6 @@ mod hermetic;
 #[allow(dead_code, unused_imports)]
 #[path = "support/namespace_host.rs"]
 mod namespace_host;
-#[allow(unused_imports)]
-use namespace_host::{native_effects, tool_path};
 
 use cortex_core::{ownership::OwnerEpoch, OpenMode, ProjectKey, Store, StoreChannel, TaskState};
 use cortex_engine::environment::{EngineKind, LaunchSpec};
@@ -56,22 +54,6 @@ const PLANNED: [&str; 20] = [
     "security-auditor",
     "technical-writer",
     "ux-designer",
-];
-/// Profiles that never write (`scheduler::policy::read_only`), stated here
-/// independently so the mode check does not reuse the code under test.
-const READ_ONLY: [&str; 12] = [
-    "worker-architect",
-    "worker-ux-designer",
-    "worker-code-reviewer",
-    "worker-senior-consultant",
-    "senior-consultant",
-    "worker-explorer",
-    "worker-planner",
-    "worker-security-auditor",
-    "worker-accessibility-auditor",
-    "worker-database-architect",
-    "worker-performance-engineer",
-    "worker-build-verification",
 ];
 const PROJECT_SKILL: &str =
     "---\nname: topic-research\ndescription: Research a topic.\n---\n# Topic research fixture\n";
@@ -289,6 +271,8 @@ impl Project {
             std::fs::DirBuilder::new().mode(0o700).create(dir).unwrap();
         }
         std::fs::create_dir_all(root.join("src")).unwrap();
+        // The workers may create their assigned area/<node>, but not its parent.
+        std::fs::create_dir(root.join("area")).unwrap();
         std::fs::write(root.join("src/lib.rs"), "pub fn fixture() -> u8 { 1 }\n").unwrap();
         std::fs::write(root.join("README.md"), "# Fixture project\n").unwrap();
         std::fs::create_dir_all(root.join(".agents/skills/topic-research")).unwrap();
@@ -654,13 +638,11 @@ async fn battery(
         );
     }
     ledger.check(role, "turn ends", first.stop == "end_turn", &first.stop);
-    // The engine mode follows the channel's capability: a read-only profile or a
-    // review-stage session is never in a mode that writes or skips the engine's
-    // permission requests; no session runs in bypass/full access.
-    let read_only = w.stage == "review" || READ_ONLY.contains(&w.role.as_str());
-    let mode = match (engine, read_only) {
-        (EngineKind::Codex, true) => "read-only",
-        (EngineKind::Codex, false) => "workspace-write",
+    // Every managed Codex session uses native read-only mode, even when the
+    // worker can write through the Cortex file tools. The other fixture peers
+    // report their default mode.
+    let mode = match engine {
+        EngineKind::Codex => "read-only",
         _ => "default",
     };
     ledger.check(
@@ -1070,12 +1052,13 @@ async fn battery(
             ),
         );
     }
+    let managed_codex = engine == EngineKind::Codex;
     if served("project_git") {
         push(
             &mut calls,
             &mut steps,
             "project_git status",
-            true,
+            !managed_codex,
             call(
                 "project_git",
                 json!({"kind":"status","request_key":format!("status-{}",w.node)}),
@@ -1085,7 +1068,7 @@ async fn battery(
             &mut calls,
             &mut steps,
             "project_git diff",
-            true,
+            !managed_codex,
             call(
                 "project_git",
                 json!({"kind":"diff","request_key":format!("diff-{}",w.node)}),
@@ -1199,6 +1182,36 @@ async fn battery(
                     classify(reply).is_ok() && batch["complete"] == true && batch["exit_code"] == 0,
                     compact(reply),
                 );
+                if managed_codex && served("read_large_output") {
+                    large_output = batch["large_output_id"].as_str().map(str::to_owned);
+                    ledger.check(
+                        role,
+                        "command_run retains output for reread",
+                        large_output.is_some(),
+                        compact(batch),
+                    );
+                }
+            }
+            continue;
+        }
+        if step.starts_with("project_git ") {
+            if *want_ok {
+                ledger.check(
+                    role,
+                    step,
+                    classify(reply).is_ok() && batch["complete"] == true && batch["exit_code"] == 0,
+                    compact(reply),
+                );
+                if large_output.is_none() {
+                    large_output = batch["large_output_id"].as_str().map(str::to_owned);
+                }
+            } else {
+                ledger.check(
+                    role,
+                    step,
+                    precise_error(reply).as_deref() == Ok("managed_codex_git_refused"),
+                    compact(reply),
+                );
             }
             continue;
         }
@@ -1234,9 +1247,6 @@ async fn battery(
                 Ok(result) => {
                     ledger.check(role, step, true, "");
                     let sc = &result["structuredContent"];
-                    if step.starts_with("project_git") && large_output.is_none() {
-                        large_output = sc["large_output_id"].as_str().map(str::to_owned);
-                    }
                     if step == "create_draft role template" {
                         draft = sc["draft_id"].as_str().map(str::to_owned);
                     }
@@ -1288,12 +1298,12 @@ async fn battery(
     match &large_output {
         Some(id) if served("read_large_output") => {
             calls.push(call("read_large_output", json!({"large_output_id":id})));
-            steps.push("read_large_output project_git output");
+            steps.push("read_large_output command output");
         }
         _ => ledger.not_run(
             role,
             "read_large_output",
-            "project_git returned no large_output_id or the tool is not served",
+            "no command output id was returned or the tool is not served",
         ),
     }
     for id in &batch_deferred {
@@ -1322,17 +1332,39 @@ async fn battery(
             "list_sources returned no source_ref for this task",
         ),
     }
-    let own = format!("area/{}/out.txt", w.node);
-    if write_role && w.scope.iter().any(|s| own.starts_with(s.as_str())) {
+    let area = format!("area/{}", w.node);
+    let own = format!("{area}/out.txt");
+    let dir = format!("{area}/dir");
+    let outside = format!("{area}-outside");
+    if write_role {
+        ledger.check(
+            role,
+            "writer fixture has the exact area scope",
+            w.scope.as_slice() == [area.as_str()],
+            format!("{:?}", w.scope),
+        );
         calls.push(call("project_read", json!({"path":own})));
         steps.push("project_read missing in-scope file");
         calls.push(call("project_write", json!({"path":own,"content":"fixture output\n","expected_sha256":"absent","request_key":format!("write-{}",w.node)})));
         steps.push("project_write in scope");
         calls.push(call(
             "project_mkdir",
-            json!({"path":format!("area/{}/dir",w.node),"request_key":format!("mkdir-{}",w.node)}),
+            json!({"path":dir,"request_key":format!("mkdir-{}",w.node)}),
         ));
         steps.push("project_mkdir in scope");
+        if managed_codex {
+            // A sibling sharing the raw string prefix is not a descendant.
+            calls.push(call(
+                "project_write",
+                json!({"path":format!("{outside}/out.txt"),"content":"x","expected_sha256":"absent","request_key":format!("outside-write-{}",w.node)}),
+            ));
+            steps.push("project_write outside scope");
+            calls.push(call(
+                "project_mkdir",
+                json!({"path":format!("{outside}/dir"),"request_key":format!("outside-mkdir-{}",w.node)}),
+            ));
+            steps.push("project_mkdir outside scope");
+        }
     }
     // Reviewer: every changed file and every reviewed node's report.
     for (path, _) in reviewed.iter().filter(|(p, _)| !p.starts_with("r_")) {
@@ -1346,19 +1378,48 @@ async fn battery(
     if !calls.is_empty() {
         let second = turn(&d, &home, &calls).await;
         for (n, step) in steps.iter().enumerate() {
-            match second.replies.get(n).map(classify) {
-                Some(Ok(_)) => ledger.check(role, step, true, ""),
-                Some(Err(e)) => ledger.check(role, step, false, e),
-                None => ledger.check(role, step, false, format!("no reply ({})", second.stop)),
+            let Some(reply) = second.replies.get(n) else {
+                ledger.check(role, step, false, format!("no reply ({})", second.stop));
+                continue;
             };
+            if step.ends_with("outside scope") {
+                ledger.check(
+                    role,
+                    step,
+                    precise_error(reply).as_deref() == Ok("write_outside_assignment_scope"),
+                    compact(reply),
+                );
+            } else {
+                match classify(reply) {
+                    Ok(_) => ledger.check(role, step, true, ""),
+                    Err(e) => ledger.check(role, step, false, e),
+                };
+            }
         }
-        if write_role && steps.contains(&"project_write in scope") {
+        if write_role {
             ledger.check(
                 role,
                 "in-scope file written",
-                p.root.join(&own).is_file(),
+                std::fs::read(p.root.join(&own)).is_ok_and(|b| b == b"fixture output\n"),
                 &own,
             );
+            ledger.check(
+                role,
+                "in-scope directory created",
+                p.root.join(&dir).is_dir(),
+                &dir,
+            );
+            if managed_codex {
+                ledger.check(
+                    role,
+                    "out-of-scope parent was not created",
+                    p.root
+                        .join(&outside)
+                        .symlink_metadata()
+                        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
+                    &outside,
+                );
+            }
         }
     }
 
@@ -1876,6 +1937,25 @@ fn objective_for(role: &str) -> String {
     format!("Fixture objective for {role}: observe the project and report.")
 }
 
+fn review_observation(p: &Project, task: &str, step: &Value) -> String {
+    let (waived, verified): (bool, bool) = p
+        .store()
+        .read(|db| {
+            Ok(db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?1
+                    AND type='REVIEW_NOT_REQUIRED' AND json_extract(payload_json,'$.reason')='no_project_changes'),
+                    EXISTS(SELECT 1 FROM runtime_events WHERE task_id=?1 AND type='VERIFICATION_PASSED')",
+                [task],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .unwrap();
+    format!(
+        "{} (no-project-changes waiver={waived}, verification passed={verified})",
+        compact(&step["state"])
+    )
+}
+
 /// All 20 plannable specialists behind one explorer predecessor, then the
 /// mandatory reviewer over every node with APPROVE.
 async fn all_planned_roles(ledger: &mut Ledger) {
@@ -1983,7 +2063,7 @@ async fn all_planned_roles(ledger: &mut Ledger) {
         "runtime",
         "all work done -> REVIEWING",
         step["state"] == "REVIEWING",
-        compact(&step["state"]),
+        review_observation(&p, task, &step),
     );
     if step["state"] == "REVIEWING" {
         let mut reviewed: Vec<(String, String)> = reports.clone();
@@ -2066,7 +2146,12 @@ async fn single_review(ledger: &mut Ledger, verdict: &str, engine: EngineKind) {
     let step = h.advance(task.into(), o.clone()).await.unwrap();
     let role = format!("worker-code-reviewer@{verdict}");
     if step["state"] != "REVIEWING" {
-        ledger.check(&role, "reached review", false, compact(&step["state"]));
+        ledger.check(
+            &role,
+            "reached review",
+            false,
+            review_observation(&p, task, &step),
+        );
         close(h).await;
         return;
     }
@@ -2330,7 +2415,7 @@ async fn structure_bound(ledger: &mut Ledger) {
         .unwrap();
     let args = json!({"report":"# Bare report\n\nNo template sections.\n","summary":"Bare.","checks":[],"request_key":"bare"});
     // A change to review: without one the runtime skips the review stage.
-    turn(
+    let write = turn(
         &d,
         &home,
         &[call(
@@ -2340,6 +2425,15 @@ async fn structure_bound(ledger: &mut Ledger) {
         )],
     )
     .await;
+    let reply = write.replies.first().unwrap_or(&Value::Null);
+    ledger.check(
+        role,
+        "review fixture recorded a project change",
+        classify(reply).is_ok()
+            && reply["result"]["structuredContent"]["outcome"] == "written"
+            && p.root.join("area/work/out.txt").is_file(),
+        compact(reply),
+    );
     let mut replies = Vec::new();
     for _ in 0..3 {
         let t = turn(&d, &home, &[call("result_submit", args.clone())]).await;
@@ -2404,7 +2498,7 @@ async fn structure_bound(ledger: &mut Ledger) {
         }),
         format!(
             "{} {}",
-            compact(&review["state"]),
+            review_observation(&p, task, &review),
             compact(&review["assignments"])
         ),
     );
