@@ -69,6 +69,8 @@ const ACTIONS: Record<string, { kind: ToolPresentationKind; icon: ToolPresentati
   scope_request: { kind: "governance", icon: "Scale", action: "Request access" },
   escalation_request: { kind: "governance", icon: "Scale", action: "Request consultation" },
   task_get_context: { kind: "read", icon: "FileText", action: "Read task context" },
+  sprint_task_result: { kind: "read", icon: "FileText", action: "Read sprint task result" },
+  sprint_graph: { kind: "read", icon: "FileText", action: "Read sprint graph" },
   plan_submit: { kind: "edit", icon: "FilePenLine", action: "Submit plan" },
   sprint_plan_submit: { kind: "edit", icon: "FilePenLine", action: "Submit sprint plan" },
   synthesis_submit: { kind: "edit", icon: "FilePenLine", action: "Submit synthesis" },

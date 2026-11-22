@@ -117,7 +117,7 @@ export type MergeState = MergeSeed & {
 };
 export type AutomaticContinuation = {
   policy: "automatic_continuation"; continuationCount: number; lastContinuationReason: string | null;
-  pause: { eventId: string; kind: "external_blocker" | "continuation_cap" | "outcome_unknown" | "owner_blocker"; reason: string } | null;
+  pause: { eventId: string; kind: "external_blocker" | "continuation_cap" | "outcome_unknown" | "owner_blocker" | "obstacle" | "infrastructure"; reason: string } | null;
   /** What the attempts counted against the current budget went to: each stop reason with how often, most frequent first. */
   spentOn?: { reason: string; count: number }[];
   /** An item the reviewer reported it cannot reach with its tools in at least two dead-end reviews, the newest still naming it. */

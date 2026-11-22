@@ -38,7 +38,7 @@ describe("task mapping", () => {
     const recovery = wireTask({ phase:"recovery", runtimeState:"RECOVERING", executionState:"recovering", waitReason:"automatic_continuation_pending" });
     const automaticContinuation = { policy:"automatic_continuation", continuationCount:2, lastContinuationReason:"Verification did not pass", pause:null };
     expect(mapTask({...recovery, automaticContinuation}, ctx)).toMatchObject({ status:"working", automaticContinuation });
-    for (const kind of ["external_blocker", "continuation_cap", "outcome_unknown"]) {
+    for (const kind of ["external_blocker", "continuation_cap", "outcome_unknown", "obstacle", "infrastructure"]) {
       const pause = { eventId:"evt", kind, reason:"Recorded pause" };
       expect(mapTask({...recovery, phase:"paused", executionState:"paused", waitReason:pause.reason,
         automaticContinuation:{...automaticContinuation, pause}}, ctx))

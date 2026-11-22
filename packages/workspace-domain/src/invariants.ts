@@ -103,7 +103,8 @@ export function isAutomaticContinuation(value: unknown): value is AutomaticConti
     || !(value.lastContinuationReason === null || recordedText(value.lastContinuationReason))) return false;
   const pause = value.pause;
   return pause === null || (record(pause) && recordedText(pause.eventId) && recordedText(pause.reason)
-    && (pause.kind === "external_blocker" || pause.kind === "continuation_cap" || pause.kind === "outcome_unknown" || pause.kind === "owner_blocker"));
+    && (pause.kind === "external_blocker" || pause.kind === "continuation_cap" || pause.kind === "outcome_unknown" || pause.kind === "owner_blocker"
+      || pause.kind === "obstacle" || pause.kind === "infrastructure"));
 }
 const HOLD_ACTORS: readonly HoldActor[] = ["runtime", "agent", "owner"];
 export const OWNER_HOLD_ACTIONS: readonly OwnerHoldAction[] = ["allow_finish", "accept_result", "allow_repair", "allow_retries", "confirm_and_continue", "resume_task", "retry",
