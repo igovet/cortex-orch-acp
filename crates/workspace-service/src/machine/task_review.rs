@@ -939,6 +939,42 @@ mod native_acceptance_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// Owner store 2026-11-22: "Paid live check not requested by the owner for this
+    /// recovery; ..." held the Automatic sprint for the owner although it is the
+    /// documented no-paid convention with extra detail. It is an optional note.
+    #[tokio::test]
+    async fn automatic_acceptance_takes_an_unrequested_paid_check_with_detail_as_a_note() {
+        for blocker in [
+            "Paid live check not requested by the owner for this recovery; remote effects are outside assignment scope.",
+            "Платная живая проверка не запрошена владельцем.",
+        ] {
+            let (root, runtime, draft) = completed().await;
+            let state = automatic_state(&root);
+            let mut product = sprint_product(&draft, "automatic");
+            report_checks(
+                &runtime,
+                json!([{"name":"New paid desktop and remote GitHub qualification","outcome":"not_run",
+                    "evidence_strength":"none","blocker":blocker}]),
+                json!([]),
+            )
+            .await;
+            let result = automatic(
+                &root,
+                "project",
+                &draft,
+                &state,
+                &mut product,
+                &mut Git::new(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["accepted"], true, "{blocker}: {result}");
+            runtime.shutdown().await;
+            drop(runtime);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     /// Owner store 2026-11-22: a completed task whose review disclosed unread files
     /// ("... after repeated coverage refusals ...") held the Automatic sprint for the
     /// owner because "refus" read as a policy restriction. A limitation the runtime

@@ -400,12 +400,23 @@ fn optional_paid_observation(check: &Value, expected: &[Value]) -> bool {
     check["outcome"] == "not_run"
         && check["tool_call_ref"].is_null()
         && (command.is_null() || (paid_command(command) && !expected.contains(command)))
-        && check["blocker"].as_str().is_some_and(|reason| {
-            reason
-                .trim()
-                .trim_end_matches('.')
-                .eq_ignore_ascii_case("paid live check not requested by the owner")
+        && check["blocker"].as_str().is_some_and(unrequested_paid)
+}
+/// The documented blocker of a paid live check the owner did not request, in English
+/// or Russian, optionally followed by more detail ("... for this recovery; ..."):
+/// on 2026-11-22 an added clause turned the convention into an owner hold.
+fn unrequested_paid(reason: &str) -> bool {
+    let reason = reason.trim().to_lowercase();
+    [
+        "paid live check not requested by the owner",
+        "платная живая проверка не запрошена владельцем",
+    ]
+    .iter()
+    .any(|phrase| {
+        reason.strip_prefix(phrase).is_some_and(|rest| {
+            rest.is_empty() || rest.starts_with(['.', ';', ',', ':', ' ', '(', '—', '-'])
         })
+    })
 }
 fn paid_command(value: &Value) -> bool {
     value.as_array().is_some_and(|a| {

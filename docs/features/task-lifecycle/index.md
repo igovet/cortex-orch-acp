@@ -408,7 +408,10 @@ must name the concrete condition that prevented the check; "not run", "out of sc
 or "not requested" alone is insufficient. A documented policy requiring an
 explicit owner request can be a concrete blocker when the missing request is
 named (for example, "paid live check not requested by the owner", or its
-equivalent written in the task's selected chat language).
+equivalent written in the task's selected chat language). An Automatic sprint takes
+a not-run check outside the verification plan whose blocker starts with that phrase
+(or the Russian "платная живая проверка не запрошена владельцем"), optionally
+followed by more detail, as an informational note rather than an owner hold.
 
 Workspace result facts expose current skipped checks individually in `result.checks`
 with outcome `not_run` and the recorded reason in `detail`; technical or policy
