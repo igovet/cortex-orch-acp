@@ -1142,11 +1142,13 @@ mod resume_tests {
             "0"
         );
         // Recovery is idempotent: a later restart records nothing new for the attempt.
+        // Only the legacy attempt is counted: the relaunched coordinator's own attempt
+        // may end before the restart and be settled by it (a flaky count of 2).
         runtime.recover_fixture().await.unwrap();
         assert_eq!(
             sql(
                 &runtime,
-                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_PROCESS_SETTLED'"
+                "SELECT count(*) FROM runtime_events WHERE type='NATIVE_PROCESS_SETTLED' AND instr(payload_json,'legacy')>0"
             )
             .await,
             "1"
