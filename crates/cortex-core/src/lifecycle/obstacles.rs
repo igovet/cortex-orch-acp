@@ -80,6 +80,11 @@ pub struct Signals {
     pub texts: Vec<String>,
     /// Failed command receipts of the attempt (nonzero exit), newest first.
     pub outputs: Vec<Output>,
+    /// Whether the attempt actually tried something that was refused or failed: a
+    /// failed command or a refused permission or outside request on its channels.
+    /// `None` when unknown (review items); `Some(false)` makes a `missing_access`
+    /// dead end without any refusal a technical failure the next attempt corrects.
+    pub attempted: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -687,6 +692,21 @@ pub fn classify(s: &Signals) -> Classification {
         .or_else(|| {
             (kind == "missing_access").then(|| ("blocker_missing_access", service(&detail, &[])))
         });
+    // A worker that only read its tool descriptions and declared access missing
+    // never met a refusal: that is not an owner obstacle. The next attempt is told
+    // to try the action and report the exact refusal (owner store 2026-11-23: a
+    // render was parked on "no route" without one command being run).
+    if matches!(access, Some(("blocker_missing_access", _)))
+        && s.attempted == Some(false)
+        && !contains_any(&detail, &ACCESS_PHRASES)
+        && !has_status(&detail, |c| c == 401 || c == 403)
+    {
+        return Classification::new(
+            TECHNICAL,
+            "blocker_missing_access_unattempted",
+            summary("Access was reported missing, but nothing was tried and refused. Run the needed command or tool first (command_run, or outside_command for the host) and report missing access only with the exact refusal or error it returned"),
+        );
+    }
     if let Some((rule, service)) = access {
         let why = match service.as_str() {
             "github" => {
@@ -808,6 +828,19 @@ pub fn node_signals(db: &Connection, task: &str, assignment: &str) -> CoreResult
             break;
         }
     }
+    // A refusal the runtime recorded for the attempt's channels counts as a try.
+    let refused: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_events e JOIN trusted_channels c
+           ON c.channel_id=json_extract(e.payload_json,'$.channel_id')
+         JOIN delegation_provisioning p ON p.attempt_id=c.attempt_id AND p.task_id=e.task_id
+         WHERE e.task_id=? AND p.idempotency_key=? AND (
+           (e.type='NATIVE_OUTSIDE_SETTLED' AND json_extract(e.payload_json,'$.allowed') IS NOT 1)
+           OR (e.type='NATIVE_PERMISSION_DECIDED' AND coalesce(json_extract(e.payload_json,'$.outcome.optionId'),'') NOT LIKE 'allow%')
+           OR e.type IN ('NATIVE_COMMAND_REFUSED','EXTERNAL_TOOL_REFUSED')))",
+        (task, assignment),
+        |r| r.get(0),
+    )?;
+    s.attempted = Some(!s.outputs.is_empty() || refused);
     Ok(s)
 }
 

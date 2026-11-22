@@ -4,6 +4,10 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+- Fixed: a worker can no longer park a task on "access missing" without trying. A `missing_access` dead end with no failed command, no refused request and no quoted login or permission error is a technical failure, and the next attempt is told to run the action and report the exact refusal.
+
+- Fixed: the app shows a task paused by an obstacle or an infrastructure wait as paused instead of "Task state not confirmed" with sending disabled; it also names the `sprint_task_result` and `sprint_graph` tools.
+
 - Changed back (owner decision): Codex workers work like Claude and OpenCode again. The strict managed-Codex policy is removed: writing workers run in `workspace-write`, get attached external MCP servers, `outside_command`/`outside_write` (Auto confirms itself), live `project_git` and the same `command_run` as other engines; edits no longer have to go through the Cortex file tools. Shared hardening (private store names, syscall filter) stays.
 
 - Fixed: a later review round no longer re-reads the whole change set. A changed file an earlier completed review of the same task read at exactly its current bytes counts as read and is marked `reviewed_before` in the packet, so a fix round reads only what changed since; previously every round re-required every unchanged file and large tasks hit the review cycle limit.

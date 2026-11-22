@@ -21,7 +21,28 @@ fn signals(kind: Option<&str>, detail: &str, argv: &[&str], output: &str) -> obs
                 text: output.into(),
             }]
         },
+        attempted: None,
     }
+}
+
+/// A worker that ran nothing and met no refusal cannot park its work on "no
+/// access": the claim is a technical failure the next attempt corrects by trying
+/// (owner store 2026-11-23). A quoted login error or a real refusal still counts.
+#[test]
+fn an_untried_access_claim_is_technical_but_a_real_refusal_is_access() {
+    let claim = "No authorized execution-and-writeback route to the GPU host is available to this worker";
+    let mut s = signals(Some("missing_access"), claim, &[], "");
+    s.attempted = Some(false);
+    let found = obstacles::classify(&s);
+    assert_eq!((found.class, found.rule), ("technical", "blocker_missing_access_unattempted"), "{found:?}");
+    assert!(found.detail.contains("nothing was tried"), "{found:?}");
+    s.attempted = Some(true);
+    assert_eq!(obstacles::classify(&s).class, "access");
+    s.attempted = None;
+    assert_eq!(obstacles::classify(&s).class, "access");
+    let mut quoted = signals(Some("missing_access"), "gh says: not logged into any GitHub hosts", &[], "");
+    quoted.attempted = Some(false);
+    assert_eq!(obstacles::classify(&quoted).class, "access");
 }
 
 #[test]
