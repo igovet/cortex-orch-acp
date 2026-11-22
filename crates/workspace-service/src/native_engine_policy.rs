@@ -38,15 +38,15 @@ fn offers(options: &Value, value: &str) -> bool {
     })
 }
 
-pub(crate) const CODEX_NATIVE_MODE: &str = "read-only";
-
-pub(crate) fn codex_native_confirmed(options: &Value) -> bool {
+/// Whether a codex-acp session reports exactly one `mode` option whose current
+/// value is the `expected` mode the runtime configured.
+pub(crate) fn codex_native_confirmed(options: &Value, expected: &str) -> bool {
     let Some(options) = options.as_array() else {
         return false;
     };
     let mut mode = options.iter().filter(|o| o["id"] == "mode");
     mode.next()
-        .is_some_and(|o| o["currentValue"] == CODEX_NATIVE_MODE)
+        .is_some_and(|o| o["currentValue"] == expected)
         && mode.next().is_none()
 }
 
@@ -54,17 +54,24 @@ pub(crate) fn codex_native_confirmed(options: &Value) -> bool {
 ///
 /// - claude-agent-acp: `default`, the mode in which every tool Claude Code does
 ///   not auto-approve reaches the runtime as `session/request_permission`.
-/// - codex-acp: `read-only` for every Cortex-managed channel. Only the
-///   authenticated Cortex gateway can grant a writing worker a project effect.
+/// - codex-acp: `read-only` (read-only sandbox, approval on request) for a
+///   read-only channel; `workspace-write` (project-writable sandbox, approval on
+///   request answered by the runtime, unlike `agent`, whose escalations go to
+///   Codex's own automatic reviewer) for a writing worker.
 /// - OpenCode: `cortex`, whose permissions ask for every tool.
 ///
 /// A mode the engine does not offer refuses the start with
 /// `restricted_mode_unavailable`; no wider mode is substituted.
-pub(crate) fn native_mode(engine: EngineKind, options: &Value) -> Result<&'static str, Error> {
-    let mode = match engine {
-        EngineKind::Claude => "default",
-        EngineKind::Codex => CODEX_NATIVE_MODE,
-        EngineKind::OpenCode => "cortex",
+pub(crate) fn native_mode(
+    engine: EngineKind,
+    read_only: bool,
+    options: &Value,
+) -> Result<&'static str, Error> {
+    let mode = match (engine, read_only) {
+        (EngineKind::Claude, _) => "default",
+        (EngineKind::Codex, true) => "read-only",
+        (EngineKind::Codex, false) => "workspace-write",
+        (EngineKind::OpenCode, _) => "cortex",
     };
     if offers(options, mode) {
         Ok(mode)
@@ -313,29 +320,29 @@ mod tests {
             "read-only",
             "plan",
         ]);
-        for (engine, expected) in [
-            (EngineKind::Claude, "default"),
-            (EngineKind::Codex, "read-only"),
-            (EngineKind::OpenCode, "cortex"),
+        for (engine, read_only, expected) in [
+            (EngineKind::Claude, false, "default"),
+            (EngineKind::Claude, true, "default"),
+            (EngineKind::Codex, true, "read-only"),
+            (EngineKind::Codex, false, "workspace-write"),
+            (EngineKind::OpenCode, false, "cortex"),
         ] {
-            assert_eq!(native_mode(engine, &all).unwrap(), expected);
+            assert_eq!(native_mode(engine, read_only, &all).unwrap(), expected);
         }
+        // `agent` hands escalations to Codex's own reviewer; it is never a substitute.
+        let agent_only = modes(&["agent", "read-only", "default"]);
+        assert!(native_mode(EngineKind::Codex, false, &agent_only).is_err());
     }
 
     #[test]
     fn a_missing_restricted_mode_refuses_instead_of_widening() {
-        let wide = modes(&[
-            "workspace-write",
-            "agent",
-            "agent-full-access",
-            "bypassPermissions",
-        ]);
+        let wide = modes(&["agent", "agent-full-access", "bypassPermissions"]);
         assert!(matches!(
-            native_mode(EngineKind::Codex, &wide),
+            native_mode(EngineKind::Codex, true, &wide),
             Err(Error::Refused("restricted_mode_unavailable"))
         ));
         assert!(matches!(
-            native_mode(EngineKind::Claude, &wide),
+            native_mode(EngineKind::Claude, false, &wide),
             Err(Error::Refused("restricted_mode_unavailable"))
         ));
         // Grouped codex-acp mode lists are searched too.
@@ -343,7 +350,7 @@ mod tests {
             {"group":"sandbox-modes","options":[{"value":"read-only"},{"value":"agent"}]},
             {"group":"permission-profiles","options":[{"value":"permission-profile:x"}]}]}]);
         assert_eq!(
-            native_mode(EngineKind::Codex, &grouped).unwrap(),
+            native_mode(EngineKind::Codex, true, &grouped).unwrap(),
             "read-only"
         );
     }
@@ -351,12 +358,17 @@ mod tests {
     #[test]
     fn read_only_confirmation_requires_one_exact_mode() {
         let read_only = json!({"id":"mode","currentValue":"read-only"});
-        assert!(codex_native_confirmed(&json!([read_only])));
-        assert!(!codex_native_confirmed(&json!([read_only, read_only])));
+        assert!(codex_native_confirmed(&json!([read_only]), "read-only"));
+        assert!(!codex_native_confirmed(&json!([read_only, read_only]), "read-only"));
         assert!(!codex_native_confirmed(
-            &json!([{"id":"mode","currentValue":"workspace-write"}])
+            &json!([{"id":"mode","currentValue":"workspace-write"}]),
+            "read-only"
         ));
-        assert!(!codex_native_confirmed(&json!([])));
+        assert!(codex_native_confirmed(
+            &json!([{"id":"mode","currentValue":"workspace-write"}]),
+            "workspace-write"
+        ));
+        assert!(!codex_native_confirmed(&json!([]), "read-only"));
     }
 
     #[test]

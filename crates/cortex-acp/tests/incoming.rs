@@ -773,7 +773,7 @@ async fn access_modes_and_startup_recovery() {
             "SELECT count(*) FROM runtime_events e JOIN trusted_channels c
         ON c.channel_id=json_extract(e.payload_json,'$.channel_id')
         WHERE e.type='NATIVE_ACCESS_MODE_CONFIRMED' AND c.role='worker'
-        AND json_extract(e.payload_json,'$.mode')='read-only'"
+        AND json_extract(e.payload_json,'$.mode')='workspace-write'"
         ),
         1
     );

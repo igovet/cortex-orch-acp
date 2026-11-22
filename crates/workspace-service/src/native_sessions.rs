@@ -721,17 +721,19 @@ impl NativeHost {
                 }
                 phase = "access_mode";
                 let c = credential.clone();
-                let access = receive(self.executor.read(move |db| {
+                let (access,read_only) = receive(self.executor.read(move |db| {
                     let i = channels::authenticate(db,&c.channel_id,c.secret(),false)?;
-                    cortex_core::access::current(db,&i.task)
+                    Ok((cortex_core::access::current(db,&i.task)?,crate::native_engine_policy::read_only(&i)))
                 }).map_err(engine_error)?).await.map_err(engine_error)?;
-                // Require the observed native mode before binding or prompting;
-                // the access mode and MCP writing capability never widen Codex.
+                // The engine mode depends on the channel's capability, never on the
+                // access mode: no session runs in a mode that skips the engine's
+                // permission requests. Codex follows the same routes as the other
+                // engines (owner decision 2026-11-22).
                 let mode = crate::native_engine_policy::native_mode(
-                    engine_kind, &s.config_options())?;
+                    engine_kind, read_only, &s.config_options())?;
                 e.configure(&s,"mode",mode,route.deadline).await?;
                 if engine_kind == cortex_engine::environment::EngineKind::Codex
-                    && !crate::native_engine_policy::codex_native_confirmed(&s.config_options()) {
+                    && !crate::native_engine_policy::codex_native_confirmed(&s.config_options(), mode) {
                     return Err(Error::Refused("restricted_mode_unavailable"));
                 }
                 phase = "bind_session";
@@ -990,11 +992,6 @@ impl SessionDriver {
             .check(true)
             .await
             .map_err(|_| CoreError::Refused("channel_authority_refused"))?;
-        if self.engine_kind == cortex_engine::environment::EngineKind::Codex
-            && !crate::native_engine_policy::codex_native_confirmed(&self.session.config_options())
-        {
-            return Err(CoreError::Refused("restricted_mode_unavailable"));
-        }
         let c = self.credential.clone();
         let (delivery, capsule) = receive(
             self.executor
@@ -1256,7 +1253,6 @@ impl SessionDriver {
         let (turn, since) = (window.turn.clone(), window.since);
         use cortex_engine::environment::EngineKind;
         let engine = self.engine_kind;
-        let external = !self.external.is_empty();
         receive(self.executor.write(move |db| {
             let task: String = db.query_row(
                 "SELECT task_id FROM trusted_channels WHERE channel_id=?",
@@ -1265,7 +1261,7 @@ impl SessionDriver {
             )?;
             let native = match engine {
                 EngineKind::OpenCode => true,
-                EngineKind::Codex => external,
+                EngineKind::Codex => true,
                 EngineKind::Claude => db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM runtime_events WHERE task_id=? AND id>?
                      AND type IN ('NATIVE_PERMISSION_REQUESTED','NATIVE_PERMISSION_AUTO_ALLOWED')
@@ -1933,10 +1929,10 @@ impl PermissionPolicy for CorePolicy {
                 Err(option) => return Ok(PermissionDecision::Selected(option)),
             };
             let i = self.check(true).await?;
-            let codex = self.engine == cortex_engine::environment::EngineKind::Codex;
-            let read_only = codex || crate::native_engine_policy::read_only(&i);
-            // Claude's native reads follow the existing decision table. Codex
-            // may not leave its native sandbox. OpenCode keeps the client route.
+            let read_only = crate::native_engine_policy::read_only(&i);
+            // claude-agent-acp (`default`) asks for every tool it does not run itself and
+            // codex-acp (`read-only`/`workspace-write`) asks to leave its sandbox; the
+            // runtime answers both itself. OpenCode keeps the client route.
             let answers = self.engine != cortex_engine::environment::EngineKind::OpenCode;
             let class =
                 |p: &std::path::Path| crate::native_engine_policy::path_class(&self.root, p);
@@ -1944,7 +1940,7 @@ impl PermissionPolicy for CorePolicy {
                 .map(std::path::PathBuf::from)
                 .filter(|h| h.is_absolute());
             let mcp_servers = self.mcp_servers.lock().unwrap().clone();
-            let mut verdict = permission::classify(
+            let verdict = permission::classify(
                 request,
                 &permission::Facts {
                     access: &access,
@@ -1960,14 +1956,6 @@ impl PermissionPolicy for CorePolicy {
                     class: &class,
                 },
             );
-            // A native Codex request may be an escalation even if its tool kind
-            // is absent or says "read". Only a channel-bound MCP call can pass.
-            if codex && verdict.rule != "channel_mcp" && verdict.action != Action::Refuse {
-                verdict = permission::Verdict {
-                    action: Action::Refuse,
-                    rule: "codex_native_read_only",
-                };
-            }
             let refuse = || match permission::reject_option(request) {
                 Some(option) if answers => PermissionDecision::Selected(option),
                 _ => PermissionDecision::Cancelled,
@@ -2311,7 +2299,9 @@ impl CorePolicy {
             let c = self.credential.clone();
             let expected = channel.clone();
             let name = name.to_owned();
-            let scoped = self.engine == cortex_engine::environment::EngineKind::Codex;
+            // Codex uses the same effect routes as the other engines (owner
+            // decision 2026-11-22); the strict scoped route is not used.
+            let scoped = false;
             if crate::native_project_ops::supports(&name) {
                 let i = self.identity(true).await?;
                 if !same(&i, &expected) {

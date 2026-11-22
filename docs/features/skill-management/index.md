@@ -44,23 +44,9 @@ Inspect existing project skills before creating or replacing one. A name collisi
 
 ## Guarded Claude link and project scope
 
-After writing and checking `.agents/skills/<name>/SKILL.md`, use the advertised
-`project_skill_link` operation rather than a generic file, directory or command
-tool. It verifies the skill is a real project directory with a regular
-`SKILL.md` and creates only the exact relative link above. It refuses files and
-directories at the destination. Replacing a different symlink requires the
-exact observed target and the normal replacement consent (Auto answers it
-itself). Report failures or uncertainty without claiming Claude exposure.
+After writing and checking `.agents/skills/<name>/SKILL.md`, use the advertised `project_skill_link` operation rather than creating the link with a generic file, directory, or command tool. The operation verifies that the skill is a real project directory with a regular `SKILL.md`, and creates only the exact relative link above. It refuses files and directories at the destination. A different existing symlink requires the exact observed target and user confirmation before replacement; failures or uncertain outcomes must be reported without claiming Claude exposure.
 
-The operation requires a writing assignment. For Cortex-managed Codex, the
-current effective scope must cover the destination `.claude/skills/<name>` and
-any parent directories that the operation must create. Writing the source
-skill uses its own separate path checks. On other routes the whole-project
-gateway grant remains; declared scope coordinates writers. On either route,
-reserve additional paths with `access_request` before changing them. Neither
-the user command nor a path reservation overrides private-path, rule-file or
-owner protections. Do not work around a refusal.
-See [managed Codex write authority](../../../SECURITY.md#managed-codex-write-authority).
+The operation requires a writing assignment, but no particular declared scope: writing workers receive whole-project write authority for coordination, subject to private-path (`.cortex`, `.git`) restrictions and user-protected paths. The declared scope is the agreed work area, not an enforced gateway boundary. The user command does not itself grant writing authority. If a path outside the agreed work area needs to be changed, reserve it with `access_request`; if the assignment lacks writing authority, use the runtime's structured planning path. Do not work around a refusal.
 
 ## Proposed skills from repeated work
 

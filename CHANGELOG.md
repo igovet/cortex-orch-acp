@@ -4,6 +4,8 @@ Entries record changes as they were made. Files, commands and tests they name th
 
 ## 1.0.6 (unreleased)
 
+- Changed back (owner decision): Codex workers work like Claude and OpenCode again. The strict managed-Codex policy is removed: writing workers run in `workspace-write`, get attached external MCP servers, `outside_command`/`outside_write` (Auto confirms itself), live `project_git` and the same `command_run` as other engines; edits no longer have to go through the Cortex file tools. Shared hardening (private store names, syscall filter) stays.
+
 - Fixed: a later review round no longer re-reads the whole change set. A changed file an earlier completed review of the same task read at exactly its current bytes counts as read and is marked `reviewed_before` in the packet, so a fix round reads only what changed since; previously every round re-required every unchanged file and large tasks hit the review cycle limit.
 
 - Fixed: an ordinary **Git → Commit…** that lands exactly the accepted files and bytes of an accepted project-folder result no longer marks that result stale. The same accepted version stays current and Finish (Merge…/Create PR…) stays available. Extra or changed files, a partial commit or an amend still make the result stale.

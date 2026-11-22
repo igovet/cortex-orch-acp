@@ -234,17 +234,24 @@ The native Codex launcher and codex-acp's thread config disable native
 shell/view-image tools, agents, hooks, plugins, apps and native question tools
 through supported config, verified with `codex features list` before App Server
 starts. Native `apply_patch` remains available; Codex has no supported switch for
-it. Cortex does not sandbox the entire Codex process. It requires codex-acp's
-native `read-only` mode for every managed Codex session, regardless of role and
-access mode. If the adapter does not offer or confirm that mode, the runtime
-refuses the session (`restricted_mode_unavailable`), with no writable fallback.
-The runtime refuses native permission requests, including those for
-`apply_patch`; only channel-bound MCP requests are eligible to pass. Writing
-workers edit through Cortex file tools, authorized against their current effective
-scope. Brokered commands can write only in contained scratch, not the live
-checkout; `outside_command`, `outside_write`, live `project_git` and external
-MCP servers are unavailable. See [Managed
-Codex write authority](../permissions-and-containment/index.md#managed-codex-write-authority).
+it. The Codex process is not sandboxed by Cortex. Cortex selects the session mode
+by the channel's capability, never by the access mode, and never selects
+`agent-full-access`: a read-only channel (the coordinator, a read-only profile or a
+review-stage session) runs in `read-only` (read-only sandbox, approval on request;
+its approval requests reach the runtime, which refuses every one that is not a
+contained read or search), and its start is refused with
+`restricted_mode_unavailable` when the adapter does not offer that mode; a writing
+worker runs in `workspace-write` (sandbox rooted at the project, approvals sent to
+Cortex rather than to Codex's automatic reviewer as in `agent`, which is never
+selected): `apply_patch` edits inside the project without asking, and every
+escalation is answered by the runtime by the access mode's decision table (see
+[native engines](../permissions-and-containment/index.md#native-engines)): an edit
+outside the project, into credential or key material or into Git control and
+engine/Cortex configuration asks the owner in Guarded and Development and is
+allowed and recorded in Auto; one into Cortex private state is refused in every
+mode. codex-acp offers no way to exclude a path from the writable root, so an
+in-project `apply_patch` into `.cortex`, `.cortex-dev`, a credential file or a Git
+control file is not prevented.
 Codex has no native read tool here, so the read
 rows of the table do not arise. Codex's
 `unified_exec` feature stays listed as enabled, but the launcher's `shell_tool`
@@ -320,9 +327,9 @@ the `shell_tool` feature. What is and is not established:
 
 The wrapper verifies installed shapes and checks that account MCP servers are
 disabled for this child before starting App Server. Unsupported versions or changed
-patch sites fail closed. The earlier installed-wrapper observations above used
-a loopback fake provider. They do not qualify the current managed-mode policy
-against an installed Codex, or exercise a paid model or rendered client UI. See
+patch sites fail closed. The installed no-paid dispatch test observes a successful
+MCP call and rejection of a forced native patch. It uses a local fake provider,
+so it does not qualify a real paid model or client UI. See
 [containment](../permissions-and-containment/index.md).
 
 Settings > Connections > Download engine installs the manifest-pinned codex-acp into Cortex's owned engine root and needs no install record (see [engine install records](../../configuration.md#engine-install-records)). The former Python API for recording an install made by another route (for
@@ -596,32 +603,31 @@ content from a model report.
 
 ## MCP bridge
 
-Managed Codex sessions receive only Cortex's authenticated MCP server.
-The runtime withholds matching external servers, including registry entries
-that select `codex-acp`, and rejects external MCP calls on that route.
-See [current runtime gateway policy](#current-runtime-gateway-policy).
-
-For eligible non-Codex routes, additional stdio servers can come from the
-Cortex-owned registry (`$XDG_CONFIG_HOME/cortex/mcp-servers.json`) and, where
-supported, the ACP client's `session/new` `mcpServers` list. Paseo sends an
-empty list, so the registry is the portable configuration path. The runtime
-resolves the effective list on `session/new` and again on `session/load`.
+`build_mcp_servers` always puts Cortex's authenticated
+server first. Additional stdio servers come from the Cortex-owned registry
+(`$XDG_CONFIG_HOME/cortex/mcp-servers.json`) and, when supplied, the ACP client's
+`session/new` `mcpServers` list. Paseo currently sends an empty list, so the
+registry is the portable configuration path for tools such as
+`codebase-memory-mcp`. The effective list is loaded on `session/new` and again
+for `session/load`, then passed to the coordinator and worker engine sessions.
 An owner-registry server may set `"roles": ["coordinator"]` or
-`"roles": ["worker"]` (or both); omitting `roles` retains visibility for both.
-Cortex validates this field and removes it from the ACP session request. The
-optional `engines` array matches the verified route's engine and is likewise
-not sent on the ACP wire. These filters narrow eligibility; they cannot
-override the managed Codex rule. For example, a browser MCP server intended
-only for Claude workers uses `"roles": ["worker"], "engines": ["claude-agent-acp"]`.
-The session log records only the selected server names and count, bounded to
-64 names with an explicit truncation flag; it does not claim to have observed
-those servers' tools. This controls server visibility, not individual tools
-within a server. Where client forwarding is supported, the global registry
-wins on duplicate names. Registry files are owner-only; their environment
-values are never persisted in the project store or diagnostics. A
-project-local registry is intentionally ignored. Qualifying a configured
-external server requires observing it start and serve a call on an eligible
-route, not a managed Codex run.
+`"roles": ["worker"]` (or both) to expose it only to those engine sessions.
+Omitting `roles` retains visibility for both. Cortex validates this field and
+removes it before the ACP `session/new` request. The optional `engines` array
+can select `"codex-acp"` and/or `"claude-agent-acp"`; it is matched against
+the verified route connection's engine and likewise never sent on the ACP
+wire. For example, a browser MCP server intended only for Claude workers uses
+`"roles": ["worker"], "engines": ["claude-agent-acp"]`.
+The session log records only
+the selected server names and count, bounded to 64 names with an explicit
+truncation flag; it does not claim to have observed those servers' tools.
+This controls server visibility, not individual tools within a server.
+Zed's forwarded entries remain supported as explicit session-scoped additions;
+the global registry wins on duplicate names. Registry files are owner-only and
+their environment values are never persisted in the project store or
+diagnostics. A project-local registry is intentionally ignored. A live
+Codex/Claude run is still required to qualify that each configured server is
+actually started and used by the pinned engine.
 
 Inherited Codex account MCP entries are a separate source from these explicit
 session servers. The Cortex-owned child launcher invokes the verified CLI with
@@ -669,24 +675,22 @@ layer, and the owner's `config.toml` merges back in underneath, so every
 owner-configured server started in Cortex sessions although the launcher had
 turned it off (observed offline with the bundled codex-acp 2.6.0 and Codex
 0.166.0, fake owner servers, a fake API key and no network). A session started
-through the launcher therefore sends no ACP `mcpServers`. For managed Codex,
-the service hands only the authenticated Cortex channel's secret-free relay
-entry to the launcher in `CORTEX_CODEX_MCP_SERVERS`; external server relays are
-not included. The launcher defines the relay as an inline
-`-c mcp_servers.<name>={command,args,env}` layer, checks with
-`codex mcp list --json` that every owner server is off and the relay is on,
-removes the variable and executes App Server. A relay with the same name as an
-owner-configured server (whose other fields would merge into it) or a malformed
-hand-over refuses the launch. A managed Codex launch without the launcher
-(a custom command) still receives the Cortex channel relay via ACP, not
-external server relays. For launcher-backed sessions, codex-acp does not
-report MCP startup failures for the relay because it did not request it;
-App Server starts it at `thread/start`. The plan-limits read
-(`account/rateLimits/read`) starts its App Server with the same feature
+through the launcher therefore sends no ACP `mcpServers`. The service hands the
+session's secret-free relay entries (the Cortex channel and each contained
+external server) to the launcher in `CORTEX_CODEX_MCP_SERVERS`; the launcher
+defines each relay as one inline `-c mcp_servers.<name>={command,args,env}`
+layer, checks with `codex mcp list --json` that every owner server is off and
+every relay is on, removes the variable and executes App Server. A relay with
+the same name as an owner-configured server (whose other fields would merge
+into it) or a malformed hand-over refuses the launch. A Codex launch without
+the launcher (a custom command) still receives its relays as ACP servers.
+Codex-acp then reports no MCP startup failures for the relays, because it did
+not request them; App Server still starts them at `thread/start`. The plan-limits
+read (`account/rateLimits/read`) starts its App Server with the same feature
 layers, so plugin marketplaces with a remote source are no longer synced
 (`git ls-remote`) on every limits read.
 
-The accepted owner registry shape for eligible routes is:
+The accepted owner registry shape is:
 
 ```json
 {
