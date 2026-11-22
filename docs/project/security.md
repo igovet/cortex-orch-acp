@@ -189,7 +189,7 @@ assignment scope before each effect, runs commands over a private scratch copy w
 no writable live checkout and refuses what it cannot contain. Live `.cortex` and
 `.cortex-dev` stores and their markers are private by name across projects,
 channels and linked worktrees, and only runtime-owned operations mutate them. Claude
-and OpenCode are unchanged. The rule and its limits are in
+and OpenCode are unchanged. Codex's `unified_exec` flag cannot be turned off, but with the launcher's flags the local CLI's tool inventory declares no `exec_command` or `write_stdin`; this is an offline observation, not live proof, and a custom launch command is outside it (see [Codex shell tool inventory](../features/codex-engine/index.md#codex-shell-tool-inventory-and-unified_exec)). The rule and its limits are in
 [SECURITY.md](../../SECURITY.md#managed-codex-write-authority); it was verified with
 no-paid tests, not against an installed Codex.
 

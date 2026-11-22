@@ -133,8 +133,11 @@ unavailable or partial, never as zero.
 **Engine limits.** Claude's native Bash, Read, Edit, Write, Grep, Glob and
 NotebookEdit tools are disabled by configuration;
 this page does not re-verify live compliance. The Codex CLI version examined in the
-observability audit cannot disable `unified_exec`,
-so Codex native `exec` reads appear only as ACP-reported events, and Codex
+observability audit cannot disable the `unified_exec` flag; with the launcher's
+flags its local tool inventory omits `exec_command` and `write_stdin` (see
+[Codex shell tool inventory](../codex-engine/index.md#codex-shell-tool-inventory-and-unified_exec)).
+Any Codex native `exec` row that does appear is an ACP-reported display event, not a
+runtime receipt, and Codex
 `apply_patch` edits have no runtime receipt. Codex read and edit figures are
 therefore partial and must be labelled so. ACP v1 has no per-inference boundary:
 model steps between tool calls are estimated from gaps between tool calls and are

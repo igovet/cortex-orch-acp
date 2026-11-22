@@ -461,6 +461,9 @@ pub fn run(args: Vec<OsString>) -> i32 {
     let _ = command.exec();
     1
 }
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod tool_inventory;
+
 #[cfg(test)]
 mod tests {
     use super::trust_override;

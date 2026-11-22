@@ -247,12 +247,76 @@ MCP servers are unavailable. See [Managed
 Codex write authority](../permissions-and-containment/index.md#managed-codex-write-authority).
 Codex has no native read tool here, so the read
 rows of the table do not arise. Codex's
-`unified_exec` feature stays listed as enabled: in Codex CLI 0.166.0 neither
-`-c features.unified_exec=false`, a `config.toml` entry nor `--disable
-unified_exec` changes it, and whether it offers an exec path while `shell_tool` is
-off has not been observed in a live run. Authenticated Cortex MCP operations
+`unified_exec` feature stays listed as enabled, but the launcher's `shell_tool`
+switch keeps both native shell tool declarations out of the local CLI inventory; see
+[Codex shell tool inventory and `unified_exec`](#codex-shell-tool-inventory-and-unified_exec).
+Authenticated Cortex MCP operations
 provide scoped project access. Account configuration and credentials remain in the
 production native account.
+
+### Codex shell tool inventory and `unified_exec`
+
+Codex's native command path is two model-visible tools: `exec_command` (start a
+command in a PTY) and `write_stdin` (continue a running session). Both belong to
+the `shell_tool` feature. What is and is not established:
+
+- **Feature flag.** In Codex CLI 0.166.0 `codex features list` keeps
+  `unified_exec` as `true` whether it is disabled by
+  `-c features.unified_exec=false`, a `config.toml` entry or `--disable
+  unified_exec`. The launcher therefore does not list it among the features it
+  verifies as off (`native_codex_runtime.rs`); adding it would make every launch
+  fail on the listing. The listed flag is not the exposure: the tool
+  declarations are.
+- **Local CLI inventory.** With the launcher's own process flags (`BASE` plus the
+  `trust_override` layer, which include `features.shell_tool=false`), `codex debug
+  prompt-input` renders a model-visible inventory with neither `exec_command` nor
+  `write_stdin`. With only `-c features.shell_tool=true` added, the inventory gains
+  exactly those two declarations. This is an observation of the installed CLI
+  renderer, not proof for every connection.
+- **Offline regression.** `codex_launcher_offline_tool_inventory`
+  (`crates/workspace-service/src/native_codex_runtime/tool_inventory.rs`) asserts
+  both facts. It is `#[ignore]`d by default and compiled only on Linux x86-64, so
+  the default suite needs no Codex binary. An explicit run needs a trusted, locally
+  installed Codex CLI 0.166.0 at an absolute `CORTEX_TEST_CODEX_CLI` path, Linux
+  seccomp, the pinned Rust toolchain and GNU `timeout`:
+
+  ```bash
+  umask 022; CORTEX_TEST_CODEX_CLI=/absolute/path/to/codex \
+    timeout --kill-after=5 300 ~/.cargo/bin/cargo test --locked --offline \
+    -p workspace-service --lib codex_launcher_offline_tool_inventory -- --ignored --nocapture
+  ```
+
+  Each child runs with a cleared environment, private mode-0700 scratch (HOME,
+  CODEX_HOME, XDG, temp, project), no MCP servers, and seccomp denying socket,
+  connect and io_uring setup. No login, credential, network, model turn, live
+  session or tool invocation is used; the test only reads the inventory. The
+  **positive control** (the `shell_tool=true` run) separates hidden tools from a
+  broken parser: it must show exactly the baseline plus both declarations. Empty,
+  truncated, duplicate or unsupported-shape output, a non-zero exit, a timeout or
+  another CLI version fails an explicitly selected run rather than passing it. The
+  default `native_codex_runtime` unit tests cover malformed-inventory rejection and
+  the agreement of process and thread settings.
+- **Process vs thread controls.** The launcher flags apply to the Codex process;
+  codex-acp's `thread/start` config carries the same switches (`CODEX_CONFIG`
+  must match `CODEX_DISABLED_FEATURES`). The test covers the process flags only,
+  not the thread config, and Codex may omit deferred nested tools from the
+  description, so absence is strong evidence but not conclusive.
+- **Custom argv exception.** A managed Codex launch through a custom command
+  bypasses the pinned launcher and its flags, so the inventory observation does
+  not apply to it. Short-text sessions (titles, commit and pull request texts) are
+  stricter: they refuse a Codex route without the launcher, answer every
+  permission request with reject and discard the answer on any tool call.
+- **Brokered commands vs native rows.** Commands the model runs through Cortex
+  tools are authorized by the runtime and leave broker receipts. A native Codex
+  command, if one ever started or continued, would reach Cortex only as an ACP
+  tool-call update (display) or a permission request. Native permission callbacks
+  that are not channel-bound MCP calls are refused, but that covers only requests
+  the engine sends; an action it performs without one is unobservable. A timeline
+  row for a native command is therefore display only: neither an authorization nor
+  a receipt of execution.
+- **Not observed.** A live managed session's real tool inventory, the start and
+  continuation behavior of either tool, and the rendered timeline. No paid live
+  check was requested.
 
 The wrapper verifies installed shapes and checks that account MCP servers are
 disabled for this child before starting App Server. Unsupported versions or changed

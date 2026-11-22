@@ -88,8 +88,10 @@ edits go through `project_write`, `project_edit`, `project_mkdir`,
 automatically against the assignment's current effective scope (declared paths
 plus granted `access_request` expansions) before every effect. See
 [Managed Codex write authority](#managed-codex-write-authority). Codex's `unified_exec` feature stays listed as enabled: no supported
-switch of Codex CLI 0.166.0 changes it, and whether it offers an exec path while
-`shell_tool` is off is not established without a live check.
+switch of Codex CLI 0.166.0 changes it. With the launcher's flags the local CLI's
+model-visible inventory declares neither `exec_command` nor `write_stdin`; that
+does not cover a custom launch command or a live session. See [Codex shell tool
+inventory and `unified_exec`](../codex-engine/index.md#codex-shell-tool-inventory-and-unified_exec).
 
 **Runtime answers.** Cortex tools and eligible attached MCP relays re-check the
 channel and operation. Managed Codex gets no external relay. Native subagent

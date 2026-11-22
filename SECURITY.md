@@ -2610,8 +2610,14 @@ worker changes files through the Cortex file tools instead (see
 OpenCode mode selection is unchanged. Codex's `unified_exec` feature stays listed
 as enabled: in the installed Codex CLI 0.166.0 neither
 `-c features.unified_exec=false`, a `config.toml` entry nor `--disable unified_exec`
-changes it, and whether it offers a native exec path while `shell_tool` is off is
-not established without a live check.
+changes it. With the launcher's flags that CLI's local model-visible tool inventory
+declares neither `exec_command` (start) nor `write_stdin` (continue); an ignored,
+opt-in offline test with a `shell_tool=true` positive control checks this. It does
+not cover a custom launch command, the thread config, a live session or the
+timeline, which are unobserved. A native command row in the timeline is display
+only, not an authorization or an execution receipt; only Cortex tool calls leave
+broker receipts. Details: [Codex shell tool inventory and
+`unified_exec`](docs/features/codex-engine/index.md#codex-shell-tool-inventory-and-unified_exec).
 
 **OpenCode** sessions run in the `cortex` mode, whose permissions ask for every
 tool (see [OpenCode](#opencode-optional-engine)).

@@ -268,12 +268,13 @@ consultant profile disallows native file/search/edit tools, and Codex's own
 `shell_tool`/`view_image` features are likewise forced off for every Cortex-
 launched Codex session, including the consultant's (the runtime's
 per-process launcher and session-config patch; verified against the installed
-Codex CLI 0.154.0's `features list`). Codex native `apply_patch` has no
-supported off switch and a separate `unified_exec` feature was found to have
-no supported off switch either (neither `-c features.unified_exec=false` nor
-`--disable unified_exec` had any effect against that same installed binary);
-whether either still offers Codex a residual native read path within its
-read-only engine jail is not established without a live qualification check.
+Codex CLI 0.154.0's `features list`; later pages re-observed 0.166.0). Codex native `apply_patch` has no
+supported off switch and the separate `unified_exec` flag has none either
+(neither `-c features.unified_exec=false` nor `--disable unified_exec` changed it).
+With the launcher's flags the local 0.166.0 CLI inventory declares neither
+`exec_command` nor `write_stdin` ([details](../codex-engine/index.md#codex-shell-tool-inventory-and-unified_exec));
+whether `apply_patch` or a custom launch command offers a residual native path
+within the read-only engine jail is not established without a live qualification check.
 Therefore the packet/report-only rule is the Cortex tool and prompt boundary,
 not a claim that every engine is technically unable to inspect source.
 

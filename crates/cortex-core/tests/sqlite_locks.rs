@@ -1,26 +1,31 @@
 mod support;
 use cortex_core::{OpenMode, Store};
 use std::{
-    os::unix::fs::{DirBuilderExt, MetadataExt},
-    path::Path,
+    fs::File,
+    os::{fd::AsRawFd, unix::fs::DirBuilderExt},
 };
 use support::*;
 
-/// POSIX record locks this process holds on `path`, read from `/proc/locks`
-/// without opening `path` (closing any descriptor of it would drop them).
-fn held_locks(path: &Path) -> usize {
-    let ino = std::fs::metadata(path).unwrap().ino().to_string();
-    let pid = std::process::id().to_string();
-    std::fs::read_to_string("/proc/locks")
-        .unwrap()
-        .lines()
-        .filter(|line| {
-            let f: Vec<_> = line.split_whitespace().collect();
-            f.get(1) == Some(&"POSIX")
-                && f.get(4) == Some(&pid.as_str())
-                && f.get(5).and_then(|d| d.rsplit(':').next()) == Some(ino.as_str())
-        })
-        .count()
+/// Query this file directly: the global `/proc/locks` listing can miss records
+/// when other locks change during a read. Unlike F_GETLK, F_OFD_GETLK reports
+/// this process's POSIX locks too, without acquiring a lock.
+fn has_shared_lock(database: &File) -> bool {
+    let mut probe = libc::flock {
+        l_type: libc::F_WRLCK as _,
+        l_whence: libc::SEEK_SET as _,
+        l_start: 0,
+        l_len: 0,
+        l_pid: 0,
+    };
+    // SAFETY: the descriptor is live and probe is a writable flock.
+    let result = unsafe { libc::fcntl(database.as_raw_fd(), libc::F_OFD_GETLK, &mut probe) };
+    assert_eq!(
+        result,
+        0,
+        "F_OFD_GETLK: {}",
+        std::io::Error::last_os_error()
+    );
+    i32::from(probe.l_type) == libc::F_RDLCK && probe.l_pid == std::process::id() as libc::pid_t
 }
 
 fn tasks(store: &Store) -> i64 {
@@ -35,21 +40,29 @@ fn tasks(store: &Store) -> i64 {
 #[test]
 fn opening_an_existing_store_keeps_the_locks_of_live_connections() {
     let p = Project::new();
+    // Drop the probe descriptor after SQLite, even if an assertion panics:
+    // closing it first would itself release SQLite's POSIX locks.
+    let database;
     let live = p.open();
     tasks(&live);
-    let database = p.key().database();
+    database = File::open(p.key().database()).unwrap();
     assert!(
-        held_locks(&database) > 0,
+        has_shared_lock(&database),
         "an idle WAL connection holds its shared lock"
     );
     for mode in [OpenMode::Initialize, OpenMode::RuntimeValidate] {
         drop(Store::open(p.key(), mode).unwrap());
         assert!(
-            held_locks(&database) > 0,
+            has_shared_lock(&database),
             "{mode:?} open released live locks"
         );
     }
     assert_eq!(tasks(&live), 0);
+    drop(live);
+    assert!(
+        !has_shared_lock(&database),
+        "the last close releases the lock"
+    );
 }
 
 #[test]

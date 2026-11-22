@@ -230,12 +230,12 @@ verified private adapter's session-config patch both set them, verified
 against the installed Codex CLI 0.154.0's `features list`), but native
 `apply_patch` remains Codex's own file-edit tool with no supported off switch,
 so the generic native-tool caveat (local workspace aid, never a report or a
-result) still applies to it. A separate `unified_exec` feature was found to
-have no supported off switch either (neither `-c features.unified_exec=false`
-nor `--disable unified_exec` changed its reported `true` state against the
-installed binary); whether it still offers Codex a residual native exec/read
-path once `shell_tool` is off is not established without a live qualification
-check. This changes prompt construction, not tool authority, sandbox
+result) still applies to it. A separate `unified_exec` feature has no supported
+off switch either (neither `-c features.unified_exec=false` nor `--disable
+unified_exec` changes its reported `true` state), but with the launcher's flags
+the local CLI inventory (0.166.0) declares neither `exec_command` nor
+`write_stdin`; a custom launch command and live sessions are not covered (see
+[Codex shell tool inventory](../codex-engine/index.md#codex-shell-tool-inventory-and-unified_exec)). This changes prompt construction, not tool authority, sandbox
 permissions or routing. The consultant's prohibition on using remaining
 native tools appears only where those tools remain enabled. Consultant route
 selection follows normal policy; the same `apply_patch`/`unified_exec`
